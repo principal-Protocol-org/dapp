@@ -28,7 +28,9 @@ const BIG = 1_000_000n * UNIT
 const ALL = Object.keys(ACTION_META) as ActionId[]
 const TRADES: ActionId[] = ["buy_pt", "sell_pt", "buy_yt", "sell_yt"]
 const ADDS: ActionId[] = ["add_liquidity", "add_liquidity_sy"]
-const SENSITIVE = ALL.filter((a) => ACTION_META[a].slippageSensitive)
+/** R22b: actions that move PT / YT to or from the account need its per-asset grant. */
+const NEEDS_PT: ActionId[] = ["mint", "buy_pt", "buy_yt", "sell_pt", "add_liquidity", "add_liquidity_sy", "remove_liquidity"]
+const NEEDS_YT: ActionId[] = ["mint", "buy_yt", "sell_yt"]
 const except = (...out: ActionId[]) => ALL.filter((a) => !out.includes(a))
 
 const live = <T,>(value: T): Live<T> => ({ status: "live", value, ledger: 500 })
@@ -487,22 +489,22 @@ const MATRIX: Row[] = [
     blocks: ALL,
   },
   {
-    rule: "permPt not ok blocks the writes that credit PT: mint, buy_pt, remove_liquidity",
+    rule: "permPt not ok blocks every action that moves PT to or from the account (R22b)",
     mutate: item("perm_pt", { status: "missing", message: "PT is not allowed yet.", fix: "onboarding" }),
     code: "compliance",
     message: /PT is not allowed/,
     fix: "onboarding",
-    blocks: ["mint", "buy_pt", "remove_liquidity"],
-    allows: except("mint", "buy_pt", "remove_liquidity"),
+    blocks: NEEDS_PT,
+    allows: except(...NEEDS_PT),
   },
   {
-    rule: "permYt not ok blocks the writes that credit YT: mint, buy_yt",
+    rule: "permYt not ok blocks every action that moves YT to or from the account (R22b)",
     mutate: item("perm_yt", { status: "missing", message: "YT is not allowed yet.", fix: "onboarding" }),
     code: "compliance",
     message: /YT is not allowed/,
     fix: "onboarding",
-    blocks: ["mint", "buy_yt"],
-    allows: except("mint", "buy_yt"),
+    blocks: NEEDS_YT,
+    allows: except(...NEEDS_YT),
   },
   {
     rule: "an unavailable compliance item blocks as unavailable",
@@ -512,11 +514,11 @@ const MATRIX: Row[] = [
     blocks: ALL,
   },
   {
-    rule: "an unavailable perm_pt item blocks only the PT-crediting writes",
+    rule: "an unavailable perm_pt item blocks only the actions that need the PT grant",
     mutate: item("perm_pt", { status: "unavailable", message: "PT permissioning could not be checked right now." }),
     code: "unavailable",
-    blocks: ["mint", "buy_pt", "remove_liquidity"],
-    allows: except("mint", "buy_pt", "remove_liquidity"),
+    blocks: NEEDS_PT,
+    allows: except(...NEEDS_PT),
   },
   {
     rule: "compliance that has not been evaluated blocks every write",
@@ -534,8 +536,8 @@ const MATRIX: Row[] = [
     },
     code: "unavailable",
     message: /YT permissioning/,
-    blocks: ["mint", "buy_yt"],
-    allows: except("mint", "buy_yt"),
+    blocks: NEEDS_YT,
+    allows: except(...NEEDS_YT),
   },
 
   // §5 "Circuit breaker" (amounts are 10 tokens).
@@ -659,14 +661,26 @@ const MATRIX: Row[] = [
     blocks: ALL,
   },
   {
-    rule: "a missing simulation blocks every slippage-sensitive write",
+    // R28: claim and redeem too; the PrincipalManager pause and archived data are only known from
+    // a simulation.
+    rule: "a missing simulation blocks every action, claim_yield and redeem included",
     mutate: (c) => {
       c.simulation = undefined
     },
     code: "quote",
     message: /Waiting for an exact quote/,
-    blocks: SENSITIVE,
-    allows: ["claim_yield", "redeem"],
+    blocks: ALL,
+  },
+  {
+    // The switch over failure kinds is exhaustive at compile time; at runtime a kind added later
+    // still refuses.
+    rule: "a simulation failure of an unknown kind blocks",
+    mutate: (c) => {
+      c.simulation = { ok: false, kind: "budget_exceeded" } as unknown as SimulationOutcome
+    },
+    code: "quote",
+    message: /does not recognize \(budget_exceeded\)/,
+    blocks: ALL,
   },
   {
     rule: "a failed simulation blocks with its contract error code",

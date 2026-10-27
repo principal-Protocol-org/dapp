@@ -12,7 +12,7 @@
  * references are to `principal` `origin/feat/tranche-1-mvp` (ABI pin `6cf257a`).
  */
 import type { AccountState } from "./account-state"
-import { ACTION_META, type ActionId, type ActionInput } from "./actions"
+import type { ActionId, ActionInput } from "./actions"
 import type { ComplianceItem } from "./compliance"
 import { formatAmount } from "./format"
 import type { MarketState } from "./market-state"
@@ -89,9 +89,23 @@ const MANAGER_PAUSABLE = new Set<ActionId>(["mint", "buy_yt", "sell_yt", "recomb
 const DEPOSIT_CAPPED = new Set<ActionId>(["deposit", "mint"])
 /** R22: compliance items every write needs (all protocol writes are SAC- and Permissioning-gated). */
 const EVERY_WRITE_ITEMS: readonly ComplianceItem["id"][] = ["account", "trustline", "authorized", "permissioning"]
-/** R22: writes that credit PT / YT to the account need the per-asset grant. */
-const CREDITS_PT = new Set<ActionId>(["mint", "buy_pt", "remove_liquidity"])
-const CREDITS_YT = new Set<ActionId>(["mint", "buy_yt"])
+/**
+ * R22b: actions that move PT / YT to or from the account need its per-asset grant. PT/YT `mint`
+ * and `transfer` check `is_allowed_for_asset` on the recipient and the sender (pt_token:189-195,
+ * :427; yt_token:282-285). Buy YT mints PT and sells it (router:347, market_pool:329); sell PT,
+ * two-sided add (market_pool:446) and sell YT (:363) send PT/YT; the zap can refund PT
+ * (:499-502). Recombine and redeem only burn, with no per-asset check.
+ */
+const NEEDS_PT_GRANT = new Set<ActionId>([
+  "mint",
+  "buy_pt",
+  "buy_yt",
+  "sell_pt",
+  "add_liquidity",
+  "add_liquidity_sy",
+  "remove_liquidity",
+])
+const NEEDS_YT_GRANT = new Set<ActionId>(["mint", "buy_yt", "sell_yt"])
 
 const ITEM_LABEL: Record<ComplianceItem["id"], string> = {
   account: "account",
@@ -395,8 +409,8 @@ function complianceGate(input: ActionInput, ctx: GateContext, g: Gates): void {
     return
   }
   const ids = [...EVERY_WRITE_ITEMS]
-  if (CREDITS_PT.has(input.action)) ids.push("perm_pt")
-  if (CREDITS_YT.has(input.action)) ids.push("perm_yt")
+  if (NEEDS_PT_GRANT.has(input.action)) ids.push("perm_pt")
+  if (NEEDS_YT_GRANT.has(input.action)) ids.push("perm_yt")
   for (const id of ids) {
     const found = items.find((i) => i.id === id)
     if (!found) {
@@ -505,12 +519,14 @@ function claimGate(input: ActionInput, ctx: GateContext, acc: AccountState, g: G
   }
 }
 
+/**
+ * R28: every action needs an ok simulation, claim and redeem included: the PrincipalManager pause
+ * and archived entries are only known from one.
+ */
 function simulationGate(input: ActionInput, ctx: GateContext, g: Gates): void {
   const s = ctx.simulation
   if (s === undefined) {
-    if (ACTION_META[input.action].slippageSensitive) {
-      g.block("quote", "Waiting for an exact quote: this transaction has not been simulated yet. Signing turns on once the simulation returns.")
-    }
+    g.block("quote", "Waiting for an exact quote: this transaction has not been simulated yet. Signing turns on once the simulation returns.")
     return
   }
   if (s.ok) return
@@ -528,6 +544,14 @@ function simulationGate(input: ActionInput, ctx: GateContext, g: Gates): void {
     case "rpc_error":
       g.block("quote", `The simulation could not run (${s.message}), so there is no exact quote. Try again in a moment.`)
       return
+    default: {
+      // A new failure kind fails typecheck here and still refuses at runtime.
+      const unknown: never = s
+      g.block(
+        "quote",
+        `The simulation failed in a way this app does not recognize (${String((unknown as { kind?: unknown }).kind)}), so there is no exact quote. Try again in a moment.`,
+      )
+    }
   }
 }
 
