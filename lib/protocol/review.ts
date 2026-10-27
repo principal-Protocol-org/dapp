@@ -10,7 +10,7 @@
  * RPC is untrusted (R29): whatever it prepares or simulates is checked against what was built
  * locally before it is shown for signing — same call, same time bounds, no foreign authorization, a
  * fee that is explained and below `MAX_TX_FEE_STROOPS`, and a restore footprint limited to the
- * market's own contracts.
+ * market's own contracts and the Wasm code its manifest pins (R29b).
  *
  * Ported from `dapp-old/src/lib/transactions.ts` (the prepared review only: the preview and local
  * XDR modes are dropped), `buildPreparedInvokeTransaction` from `dapp-old/src/lib/stellar.ts` (R14)
@@ -20,7 +20,6 @@ import {
   Account,
   Address,
   BASE_FEE,
-  Contract,
   Operation,
   SorobanDataBuilder,
   TransactionBuilder,
@@ -29,6 +28,7 @@ import {
   type xdr,
 } from "@stellar/stellar-sdk"
 import { ACTION_META, invocationFor, type ActionId, type ActionInput, type GuardValues } from "./actions"
+import { bytesToHex } from "./bytes"
 import { formatAmount } from "./format"
 import { parseOutput, type ActionOutput } from "./guards"
 import { hashLike } from "./hash"
@@ -38,8 +38,10 @@ import {
   buildInvocationEnvelope,
   createRpcServer,
   pollTransactionStatus,
+  SubmissionRejectedError,
   simulateInvocation,
   submitSignedTransaction,
+  transactionEnvelopeHash,
   type ContractInvocation,
 } from "./stellar"
 import type { Manifest, Market } from "./types"
@@ -91,7 +93,6 @@ export type ReviewRpcServer = SimulateServer &
   SubmitServer &
   PollServer & {
     prepareTransaction(transaction: Transaction): Promise<Transaction>
-    getLedgerEntries(...keys: xdr.LedgerKey[]): Promise<{ entries: { val: xdr.LedgerEntryData }[] }>
   }
 
 /** A prepared `restoreFootprint` transaction: shown with its fee, and expiring like a review. */
@@ -389,8 +390,12 @@ type SubmittedTransaction = {
 /**
  * Signs `unsignedXdr` with the wallet, refuses anything but exactly that transaction signed by
  * `source`, submits it and polls for the result. Used by `executeReview` and `executeRestore`, which
- * apply the 60 s rule first. Once RPC has returned a hash it is never lost: a failure to read the
- * result is reported, not thrown.
+ * apply the 60 s rule first.
+ *
+ * The hash is computed locally from the signed envelope before submitting, and that hash is the one
+ * polled and reported (R30): it is never lost, and never taken from RPC. Only a refusal (status
+ * ERROR, or TRY_AGAIN_LATER) throws, since the transaction was then not accepted. A failed or
+ * ambiguous send is polled, because the transaction may have landed.
  */
 async function signAndSubmit(p: {
   unsignedXdr: string
@@ -408,36 +413,48 @@ async function signAndSubmit(p: {
     networkPassphrase: manifest.networkPassphrase,
     expectedSigner: p.source,
   })
+  const hash = transactionEnvelopeHash(signedXdr, manifest.networkPassphrase)
 
-  const submitted = await submitSignedTransaction({
-    rpcUrl: manifest.rpcUrl,
-    networkPassphrase: manifest.networkPassphrase,
-    signedXdr,
-    server,
-  })
-  if (submitted.status === "TRY_AGAIN_LATER") {
-    throw new Error(
-      "The network is busy and did not accept the transaction. Nothing was submitted; review it again in a moment.",
-    )
+  let sendError: string | undefined
+  try {
+    const submitted = await submitSignedTransaction({
+      rpcUrl: manifest.rpcUrl,
+      networkPassphrase: manifest.networkPassphrase,
+      signedXdr,
+      server,
+    })
+    if (submitted.status === "TRY_AGAIN_LATER") {
+      throw new SubmissionRejectedError(
+        "The network is busy and did not accept the transaction. Nothing was submitted; review it again in a moment.",
+      )
+    }
+  } catch (error) {
+    if (error instanceof SubmissionRejectedError) throw error
+    sendError = errorText(error)
   }
 
-  // PENDING (queued) and DUPLICATE (already queued) are both polled.
+  // PENDING (queued), DUPLICATE (already queued), and a failed or ambiguous send are all polled.
+  const lookItUp = "Look it up by its hash before trying again."
   let polled: Awaited<ReturnType<typeof pollTransactionStatus>>
   try {
-    polled = await pollTransactionStatus({ rpcUrl: manifest.rpcUrl, hash: submitted.hash, server })
+    polled = await pollTransactionStatus({ rpcUrl: manifest.rpcUrl, hash, server })
   } catch (error) {
-    return {
-      hash: submitted.hash,
-      status: "NOT_FOUND",
-      pollError: `The transaction was submitted, but its status could not be read (${errorText(error)}). Look it up by its hash before trying again.`,
-    }
+    const sent = sendError ? `Sending the transaction failed (${sendError}), and` : "The transaction was submitted, but"
+    return { hash, status: "NOT_FOUND", pollError: `${sent} its status could not be read (${errorText(error)}). ${lookItUp}` }
   }
   if (polled.status === "SUCCESS") {
     return polled.decodeError
-      ? { hash: submitted.hash, status: "SUCCESS", decodeError: polled.decodeError }
-      : { hash: submitted.hash, status: "SUCCESS", returnValue: polled.returnValue }
+      ? { hash, status: "SUCCESS", decodeError: polled.decodeError }
+      : { hash, status: "SUCCESS", returnValue: polled.returnValue }
   }
-  return { hash: submitted.hash, status: polled.status === "FAILED" ? "FAILED" : "NOT_FOUND" }
+  if (polled.status === "FAILED") return { hash, status: "FAILED" }
+  return sendError
+    ? {
+        hash,
+        status: "NOT_FOUND",
+        pollError: `Sending the transaction failed (${sendError}), and the network does not show it yet. ${lookItUp}`,
+      }
+    : { hash, status: "NOT_FOUND" }
 }
 
 /**
@@ -485,70 +502,52 @@ export async function executeReview(p: {
   }
 }
 
-/** The contracts a restore may touch: those of every market `invocation` belongs to, plus shared ones. */
-function restorableContracts(manifest: Manifest, invocation: ContractInvocation): Set<string> {
+/**
+ * What a restore may touch: the contracts of every market `invocation` belongs to, plus the shared
+ * ones, and the Wasm hashes (lower-case hex) those markets' manifests pin, if any (R29b).
+ */
+function restoreScope(manifest: Manifest, invocation: ContractInvocation): { contracts: Set<string>; wasmHashes?: Set<string> } {
   const markets = manifest.markets.filter((m) => Object.values(m.contracts).includes(invocation.contractId))
   if (markets.length === 0) {
     throw new Error("This call is not to a contract of this network's markets, so no restore is offered.")
   }
-  return new Set([
+  const contracts = new Set([
     ...markets.flatMap((m) => [...Object.values(m.contracts), m.underlying.sac]),
     manifest.shared.riskControl,
     manifest.shared.permissioning,
   ])
-}
-
-/** Wasm hashes (hex) of the given contracts' instances, as RPC reports them. */
-async function wasmHashesOf(server: ReviewRpcServer, contracts: string[]): Promise<Set<string>> {
-  const { entries } = await server.getLedgerEntries(...contracts.map((id) => new Contract(id).getFootprint()))
-  const hashes = new Set<string>()
-  for (const { val } of entries) {
-    if (val.type !== "contractData" || !contracts.includes(Address.fromScAddress(val.contractData.contract).toString())) continue
-    const instance = val.contractData.val
-    if (instance.type !== "scvContractInstance") continue
-    const executable = instance.instance.executable
-    if (executable.type === "contractExecutableWasm") hashes.add(executable.wasmHash.toString())
-  }
-  return hashes
+  const pinned = markets.flatMap((m) => (m.wasmHashes ? Object.values(m.wasmHashes) : []))
+  return pinned.length > 0 ? { contracts, wasmHashes: new Set(pinned.map((h) => h.toLowerCase())) } : { contracts }
 }
 
 /**
- * R29: a restore footprint is read-write only, and every key belongs to the market: contract data
- * (instances included) of its manifest contracts, or the Wasm code one of those instances runs.
+ * R29/R29b: a restore footprint is read-write only, and every key belongs to the market: contract
+ * data (instances included) of its manifest contracts, or Wasm code whose hash the manifest pins.
+ * Hashes are compared as exact bytes (hex of the key's bytes); RPC is never asked which code is ours.
  */
-async function assertRestorable(
-  server: ReviewRpcServer,
-  footprint: SorobanDataBuilder,
-  allowed: Set<string>,
-): Promise<void> {
-  const refuse = (cause: string): never => {
-    throw new Error(`${cause} Refusing to restore it; try again or use another RPC.`)
+function assertRestorable(footprint: SorobanDataBuilder, scope: { contracts: Set<string>; wasmHashes?: Set<string> }): void {
+  const refuse = (cause: string, fix = "try again or use another RPC"): never => {
+    throw new Error(`${cause} Refusing to restore it; ${fix}.`)
   }
   if (footprint.getReadOnly().length > 0) refuse("The restore asked for includes read-only entries.")
   const keys = footprint.getReadWrite()
   if (keys.length === 0) refuse("The restore asked for names no ledger entry.")
 
-  const codeHashes: string[] = []
   for (const key of keys) {
     if (key.type === "contractData") {
       const contract = Address.fromScAddress(key.contractData.contract).toString()
-      if (!allowed.has(contract)) refuse(`The restore asked for includes data of a contract outside this market (${contract}).`)
+      if (!scope.contracts.has(contract)) refuse(`The restore asked for includes data of a contract outside this market (${contract}).`)
     } else if (key.type === "contractCode") {
-      codeHashes.push(key.contractCode.hash.toString())
+      if (!scope.wasmHashes) {
+        throw new Error("Restore needs contract code the manifest does not pin; ask the operator.")
+      }
+      const hash = bytesToHex(key.contractCode.hash.toBytes())
+      if (!scope.wasmHashes.has(hash)) {
+        refuse(`The restore asked for includes contract code the manifest does not pin (${hash}).`, "ask the operator, or use another RPC")
+      }
     } else {
       refuse(`The restore asked for includes a ${key.type} entry, which is not contract data.`)
     }
-  }
-  if (codeHashes.length === 0) return
-
-  let referenced: Set<string>
-  try {
-    referenced = await wasmHashesOf(server, [...allowed])
-  } catch (error) {
-    return refuse(`The contract code to restore could not be matched to this market (${errorText(error)}).`)
-  }
-  for (const hash of codeHashes) {
-    if (!referenced.has(hash)) refuse("The restore asked for includes contract code that no contract of this market runs.")
   }
 }
 
@@ -565,7 +564,7 @@ export async function prepareRestore(p: {
   rpc?: ReviewRpcServer
 }): Promise<RestoreReview> {
   const { manifest, source } = p
-  const allowed = restorableContracts(manifest, p.invocation)
+  const scope = restoreScope(manifest, p.invocation)
   const server = p.rpc ?? createRpcServer(manifest.rpcUrl)
   const sequence = (await server.getAccount(source)).sequenceNumber()
   const simulation = await server.simulateTransaction(
@@ -581,7 +580,7 @@ export async function prepareRestore(p: {
   assertFeeCapped(BigInt(BASE_FEE) + resourceFee, "The restore")
   // A copy: the checked footprint is the one that is signed.
   const sorobanData = new SorobanDataBuilder(transactionData.build()).setResourceFee(resourceFee.toString())
-  await assertRestorable(server, sorobanData, allowed)
+  assertRestorable(sorobanData, scope)
 
   // build() adds the resource fee to `fee`, so `fee` is the inclusion fee alone.
   const restore = new TransactionBuilder(new Account(source, sequence), {

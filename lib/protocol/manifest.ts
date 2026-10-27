@@ -25,6 +25,8 @@ const marketSchema = z.object({
     pool: contractId,
     recoveryEscrow: contractId,
   }),
+  /** Optional (spec §1): the Wasm hash (hex) each contract runs, by contract name. The only trust anchor for restoring contract code (R29b). */
+  wasmHashes: z.record(z.string().min(1), z.string().regex(/^[0-9a-fA-F]{64}$/, "Expected a 32-byte Wasm hash in hex")).optional(),
 })
 
 export const manifestSchema = z.object({
