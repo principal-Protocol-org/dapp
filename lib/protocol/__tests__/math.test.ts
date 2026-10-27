@@ -2,6 +2,7 @@
 import { describe, expect, it } from "vitest";
 import {
   BPS,
+  YEAR_SECONDS,
   FEE_RATE_SCALE,
   INDEX_SCALE,
   SCALE,
@@ -17,6 +18,7 @@ describe("math", () => {
     expect(INDEX_SCALE).toBe(1_000_000_000_000n);
     expect(FEE_RATE_SCALE).toBe(1_000_000_000_000n);
     expect(BPS).toBe(10_000n);
+    expect(YEAR_SECONDS).toBe(31_536_000n);
   });
 
   it("ceilDiv rounds up", () => {
