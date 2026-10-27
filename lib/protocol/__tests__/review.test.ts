@@ -1,10 +1,12 @@
 // @vitest-environment node
 import {
   Account,
+  Address,
   BASE_FEE,
   Contract,
   Keypair,
   SorobanDataBuilder,
+  StrKey,
   Transaction,
   TransactionBuilder,
   nativeToScVal,
@@ -19,12 +21,13 @@ import { hashLike } from "../hash"
 import { parseManifest } from "../manifest"
 import { createRpcServer } from "../stellar"
 import {
+  MAX_TX_FEE_STROOPS,
   REVIEW_TTL_MS,
+  executeRestore,
   executeReview,
   isExpired,
   prepareRestore,
   prepareReview,
-  signAndSubmit,
   type Review,
   type ReviewRpcServer,
 } from "../review"
@@ -40,6 +43,8 @@ const RESOURCE_FEE = 12_345n
 const PREPARED_FEE = (BigInt(BASE_FEE) + RESOURCE_FEE).toString()
 const DEADLINE = 1_900_000_000n
 const HASH = "abc123"
+/** A valid contract address that is no contract of the manifest. */
+const FOREIGN = StrKey.encodeContract(new Uint8Array(32).fill(5))
 
 const input = (action: ActionId, extra: Partial<ActionInput> = {}): ActionInput => ({
   action,
@@ -53,16 +58,58 @@ const input = (action: ActionId, extra: Partial<ActionInput> = {}): ActionInput 
 
 const i128 = (value: bigint) => nativeToScVal(value, { type: "i128" })
 
-function simulationSuccess(retval: xdr.ScVal = i128(1n)) {
+function simulationSuccess(
+  opts: { retval?: xdr.ScVal; auth?: xdr.SorobanAuthorizationEntry[]; resourceFee?: bigint } = {},
+) {
+  const resourceFee = (opts.resourceFee ?? RESOURCE_FEE).toString()
   return {
     id: "1",
     _parsed: true,
     latestLedger: 90,
     events: [],
-    minResourceFee: RESOURCE_FEE.toString(),
-    transactionData: new SorobanDataBuilder().setResourceFee(RESOURCE_FEE.toString()),
-    result: { auth: [], retval },
+    minResourceFee: resourceFee,
+    transactionData: new SorobanDataBuilder().setResourceFee(resourceFee),
+    result: { auth: opts.auth ?? [], retval: opts.retval ?? i128(1n) },
   } as unknown as rpc.Api.SimulateTransactionSuccessResponse
+}
+
+/** A source-account authorization whose root invocation is `args` (what simulation records). */
+function authFor(args: xdr.InvokeContractArgs): xdr.SorobanAuthorizationEntry {
+  return new xdr.SorobanAuthorizationEntry({
+    credentials: xdr.SorobanCredentials.sorobanCredentialsSourceAccount(),
+    rootInvocation: new xdr.SorobanAuthorizedInvocation({
+      function: xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeContractFn(args),
+      subInvocations: [],
+    }),
+  })
+}
+
+function callOf(tx: Transaction): xdr.InvokeContractArgs {
+  const op = tx.operations[0]
+  if (op.type !== "invokeHostFunction" || op.func.type !== "hostFunctionTypeInvokeContract") throw new Error("not a call")
+  return op.func.invokeContract
+}
+
+/** Prepares like the SDK: the user's own authorization for the call, and the resource fee. */
+function assemble(tx: Transaction, opts: Parameters<typeof simulationSuccess>[0] = {}): Transaction {
+  return rpc.assembleTransaction(tx, simulationSuccess({ auth: [authFor(callOf(tx))], ...opts })).build()
+}
+
+/** Wasm hash every market contract instance runs in the fake ledger. */
+const MARKET_WASM = new Uint8Array(32).fill(3)
+
+function instanceEntry(contractId: string, wasm: Uint8Array): xdr.LedgerEntryData {
+  return xdr.LedgerEntryData.contractData(
+    new xdr.ContractDataEntry({
+      ext: xdr.ExtensionPoint.v0(),
+      contract: new Address(contractId).toScAddress(),
+      key: xdr.ScVal.scvLedgerKeyContractInstance(),
+      durability: xdr.ContractDataDurability.persistent,
+      val: xdr.ScVal.scvContractInstance(
+        new xdr.ScContractInstance({ executable: xdr.ContractExecutable.contractExecutableWasm(wasm), storage: null }),
+      ),
+    }),
+  )
 }
 
 type Calls = { getAccount: string[]; prepared: Transaction[]; sent: Transaction[]; polled: string[] }
@@ -81,7 +128,16 @@ function fakeRpc(overrides: Partial<ReviewRpcServer> = {}): ReviewRpcServer & { 
     },
     async prepareTransaction(tx) {
       calls.prepared.push(tx)
-      return rpc.assembleTransaction(tx, simulationSuccess()).build()
+      return assemble(tx)
+    },
+    async getLedgerEntries(...keys) {
+      return {
+        entries: keys.flatMap((key) =>
+          key.type === "contractData"
+            ? [{ val: instanceEntry(Address.fromScAddress(key.contractData.contract).toString(), MARKET_WASM) }]
+            : [],
+        ),
+      }
     },
     async sendTransaction(tx) {
       calls.sent.push(tx)
@@ -115,11 +171,7 @@ function signWith(keypair = wallet) {
 }
 
 function invokedArgs(unsignedXdr: string): unknown[] {
-  const op = new Transaction(unsignedXdr, passphrase).operations[0]
-  if (op.type !== "invokeHostFunction" || op.func.type !== "hostFunctionTypeInvokeContract") {
-    throw new Error("not a contract call")
-  }
-  return op.func.invokeContract.args.map((arg) => scValToNative(arg))
+  return callOf(new Transaction(unsignedXdr, passphrase)).args.map((arg) => scValToNative(arg))
 }
 
 async function review(action: ActionId, extra: Partial<ActionInput> = {}, server = fakeRpc()): Promise<Review> {
@@ -146,6 +198,9 @@ describe("prepareReview", () => {
     expect(prepared.source).toBe(SOURCE)
     expect(prepared.sequence).toBe("42")
     expect(prepared.operations).toHaveLength(1)
+    const op = prepared.operations[0]
+    expect(op.type === "invokeHostFunction" && op.auth?.length).toBe(1)
+    expect(prepared.timeBounds).toEqual(server.calls.prepared[0].timeBounds)
     expect(prepared.fee).toBe(PREPARED_FEE)
     expect(r.fee).toBe(PREPARED_FEE)
     expect(r.unsignedXdrHash).toMatch(/^sha256:[a-f0-9]{64}$/)
@@ -227,10 +282,67 @@ describe("prepareReview", () => {
           .addOperation(new Contract(market.contracts.router).call("claim_yield"))
           .setTimeout(300)
           .build()
-        return rpc.assembleTransaction(other, simulationSuccess()).build()
+        return assemble(other)
       },
     })
     await expect(review("mint", {}, server)).rejects.toThrow("not the transaction that was requested")
+  })
+
+  describe("treats what RPC prepares as untrusted (R29)", () => {
+    const preparedBy = (prepare: (tx: Transaction) => Transaction) => review("mint", {}, fakeRpc({ prepareTransaction: async (tx) => prepare(tx) }))
+
+    it("refuses changed time bounds", async () => {
+      await expect(
+        preparedBy((tx) => assemble(TransactionBuilder.cloneFrom(tx, { timebounds: { minTime: 0, maxTime: 4_102_444_800 } }).build())),
+      ).rejects.toThrow("RPC changed the time bounds")
+    })
+
+    it("refuses a fee above the 10 XLM cap", async () => {
+      expect(MAX_TX_FEE_STROOPS).toBe(100_000_000n)
+      await expect(preparedBy((tx) => assemble(tx, { resourceFee: MAX_TX_FEE_STROOPS }))).rejects.toThrow(
+        "asks for a network fee of 10.00001 XLM, above the 10 XLM this app signs",
+      )
+    })
+
+    it("accepts a fee at the cap and shows it exactly", async () => {
+      const r = await preparedBy((tx) => assemble(tx, { resourceFee: MAX_TX_FEE_STROOPS - BigInt(BASE_FEE) }))
+      expect(r.fee).toBe(MAX_TX_FEE_STROOPS.toString())
+      expect(r.summary.fees[0]).toBe("Network fee: up to 10 XLM")
+    })
+
+    it("refuses a fee the resource fee does not explain", async () => {
+      // Same call and resource fee, but the inclusion fee was raised from 100 to 5000 stroops.
+      await expect(preparedBy((tx) => assemble(TransactionBuilder.cloneFrom(tx, { fee: "5000" }).build()))).rejects.toThrow(
+        "is more than the base fee plus the resource fee it declares",
+      )
+    })
+
+    it("refuses a foreign authorization entry", async () => {
+      const transfer = new xdr.InvokeContractArgs({
+        contractAddress: new Address(market.underlying.sac).toScAddress(),
+        functionName: "transfer",
+        args: [],
+      })
+      await expect(preparedBy((tx) => assemble(tx, { auth: [authFor(transfer)] }))).rejects.toThrow(
+        "RPC added an authorization for something other than this call",
+      )
+      // Alongside the genuine one, too.
+      await expect(preparedBy((tx) => assemble(tx, { auth: [authFor(callOf(tx)), authFor(transfer)] }))).rejects.toThrow(
+        "RPC added an authorization for something other than this call",
+      )
+    })
+
+    it("refuses an authorization for the same function with other arguments", async () => {
+      const other = (tx: Transaction) =>
+        new xdr.InvokeContractArgs({
+          contractAddress: callOf(tx).contractAddress,
+          functionName: callOf(tx).functionName,
+          args: [...callOf(tx).args.slice(0, -1), xdr.ScVal.scvU64(1n)],
+        })
+      await expect(preparedBy((tx) => assemble(tx, { auth: [authFor(other(tx))] }))).rejects.toThrow(
+        "RPC added an authorization for something other than this call",
+      )
+    })
   })
 
   describe("summary", () => {
@@ -469,9 +581,20 @@ describe("executeReview", () => {
 
 describe("prepareRestore", () => {
   const RESTORE_FEE = 777n
+  const { router, pool, manager } = market.contracts
+  const instance = (id: string) => new Contract(id).getFootprint()
+  const code = (hash: Uint8Array) => xdr.LedgerKey.contractCode(new xdr.LedgerKeyContractCode({ hash }))
 
-  function restoreSimulation() {
-    const transactionData = new SorobanDataBuilder().setResourceFee(RESTORE_FEE.toString()).build().toXdr("base64")
+  function restoreSimulation(
+    footprint: { readWrite?: xdr.LedgerKey[]; readOnly?: xdr.LedgerKey[] } = {},
+    fee: bigint | string = RESTORE_FEE,
+  ) {
+    const transactionData = new SorobanDataBuilder()
+      .setResourceFee(RESTORE_FEE.toString())
+      .setReadWrite(footprint.readWrite ?? [instance(router), instance(pool)])
+      .setReadOnly(footprint.readOnly ?? [])
+      .build()
+      .toXdr("base64")
     return rpc.parseRawSimulation({
       id: "1",
       latestLedger: 90,
@@ -479,9 +602,12 @@ describe("prepareRestore", () => {
       minResourceFee: "50",
       transactionData,
       results: [{ auth: [], xdr: i128(1n).toXdr("base64") }],
-      restorePreamble: { minResourceFee: RESTORE_FEE.toString(), transactionData },
+      restorePreamble: { minResourceFee: fee.toString(), transactionData },
     })
   }
+  const invocation = () => invocationFor(manifest, input("buy_pt"))
+  const restoreWith = (simulation: ReturnType<typeof restoreSimulation>, extra: Partial<ReviewRpcServer> = {}) =>
+    prepareRestore({ manifest, source: SOURCE, invocation: invocation(), rpc: fakeRpc({ simulateTransaction: async () => simulation, ...extra }) })
 
   it("restore-required yields a restore transaction", async () => {
     const simulated: Transaction[] = []
@@ -491,8 +617,8 @@ describe("prepareRestore", () => {
         return restoreSimulation()
       },
     })
-    const invocation = invocationFor(manifest, input("buy_pt"))
-    const restore = await prepareRestore({ manifest, source: SOURCE, invocation, rpc: server })
+    const before = Date.now()
+    const restore = await prepareRestore({ manifest, source: SOURCE, invocation: invocation(), rpc: server })
 
     // The archived entries are found by simulating the action itself, as the user.
     expect(simulated).toHaveLength(1)
@@ -503,36 +629,130 @@ describe("prepareRestore", () => {
     expect(tx.operations[0].type).toBe("restoreFootprint")
     expect(tx.source).toBe(SOURCE)
     expect(tx.sequence).toBe("42")
-    expect(tx.fee).toBe((BigInt(BASE_FEE) + RESTORE_FEE).toString())
+    const fee = (BigInt(BASE_FEE) + RESTORE_FEE).toString()
+    expect(tx.fee).toBe(fee)
+    // R29: the fee is returned so it is shown before signing, and the restore expires like a review.
+    expect(restore.fee).toBe(fee)
+    expect(restore.source).toBe(SOURCE)
     expect(restore.unsignedXdrHash).toBe(hashLike(restore.unsignedXdr))
+    expect(restore.preparedAtMs).toBeGreaterThanOrEqual(before)
+    expect(restore.expiresAtMs - restore.preparedAtMs).toBe(REVIEW_TTL_MS)
   })
 
   it("refuses when nothing needs restoring", async () => {
-    const invocation = invocationFor(manifest, input("buy_pt"))
-    await expect(prepareRestore({ manifest, source: SOURCE, invocation, rpc: fakeRpc() })).rejects.toThrow(
+    await expect(prepareRestore({ manifest, source: SOURCE, invocation: invocation(), rpc: fakeRpc() })).rejects.toThrow(
       "No contract data needs restoring",
     )
   })
 
-  it("signs and submits the restore through the same checks", async () => {
-    const server = fakeRpc({
+  describe("treats the restore preamble as untrusted (R29)", () => {
+    it("accepts the market's data, shared contracts, the SAC and the code its instances run", async () => {
+      const keys = [
+        instance(manager),
+        instance(manifest.shared.riskControl),
+        instance(manifest.shared.permissioning),
+        instance(market.underlying.sac),
+        code(MARKET_WASM),
+      ]
+      const restore = await restoreWith(restoreSimulation({ readWrite: keys }))
+      const tx = new Transaction(restore.unsignedXdr, passphrase)
+      expect(tx.operations[0].type).toBe("restoreFootprint")
+    })
+
+    it("refuses a restore fee above the 10 XLM cap", async () => {
+      await expect(restoreWith(restoreSimulation({}, MAX_TX_FEE_STROOPS))).rejects.toThrow(
+        "The restore asks for a network fee of 10.00001 XLM, above the 10 XLM this app signs",
+      )
+      await expect(restoreWith(restoreSimulation({}, "-1"))).rejects.toThrow("no valid restore fee")
+    })
+
+    it("refuses a footprint key of a contract outside the market", async () => {
+      await expect(restoreWith(restoreSimulation({ readWrite: [instance(router), instance(FOREIGN)] }))).rejects.toThrow(
+        `data of a contract outside this market (${FOREIGN})`,
+      )
+    })
+
+    it("refuses a non-contract ledger key", async () => {
+      const account = xdr.LedgerKey.account(new xdr.LedgerKeyAccount({ accountId: Keypair.random().xdrAccountId() }))
+      await expect(restoreWith(restoreSimulation({ readWrite: [account] }))).rejects.toThrow("includes a account entry")
+    })
+
+    it("refuses contract code no market instance runs", async () => {
+      await expect(restoreWith(restoreSimulation({ readWrite: [code(new Uint8Array(32).fill(9))] }))).rejects.toThrow(
+        "contract code that no contract of this market runs",
+      )
+      // Fails closed when the instances cannot be read.
+      const down = { getLedgerEntries: async () => Promise.reject(new Error("rate limited")) }
+      await expect(restoreWith(restoreSimulation({ readWrite: [code(MARKET_WASM)] }), down)).rejects.toThrow(
+        "could not be matched to this market (rate limited)",
+      )
+    })
+
+    it("refuses a read-only entry", async () => {
+      await expect(restoreWith(restoreSimulation({ readWrite: [instance(router)], readOnly: [instance(pool)] }))).rejects.toThrow(
+        "includes read-only entries",
+      )
+    })
+
+    it("refuses an empty footprint and a call outside the manifest", async () => {
+      await expect(restoreWith(restoreSimulation({ readWrite: [] }))).rejects.toThrow("names no ledger entry")
+      const outside = { ...invocation(), contractId: FOREIGN }
+      await expect(prepareRestore({ manifest, source: SOURCE, invocation: outside, rpc: noIo })).rejects.toThrow(
+        "not to a contract of this network's markets",
+      )
+    })
+  })
+})
+
+describe("executeRestore", () => {
+  const restoreServer = () =>
+    fakeRpc({
       async simulateTransaction() {
-        return restoreSimulation()
+        const transactionData = new SorobanDataBuilder()
+          .setReadWrite([new Contract(market.contracts.router).getFootprint()])
+          .build()
+          .toXdr("base64")
+        return rpc.parseRawSimulation({
+          id: "1",
+          latestLedger: 90,
+          events: [],
+          minResourceFee: "50",
+          transactionData,
+          results: [{ auth: [], xdr: i128(1n).toXdr("base64") }],
+          restorePreamble: { minResourceFee: "777", transactionData },
+        })
       },
       async getTransaction() {
         return { status: "SUCCESS" }
       },
     })
-    const invocation = invocationFor(manifest, input("buy_pt"))
-    const restore = await prepareRestore({ manifest, source: SOURCE, invocation, rpc: server })
+  const prepare = (server: ReviewRpcServer) =>
+    prepareRestore({ manifest, source: SOURCE, invocation: invocationFor(manifest, input("buy_pt")), rpc: server })
 
-    await expect(
-      signAndSubmit({ unsignedXdr: restore.unsignedXdr, manifest, source: SOURCE, sign: signWith(Keypair.random()), rpc: server }),
-    ).rejects.toThrow("not signed by the connected wallet account")
+  it("signs and submits the restore through the same checks", async () => {
+    const server = restoreServer()
+    const restore = await prepare(server)
+
+    await expect(executeRestore({ restore, manifest, sign: signWith(Keypair.random()), rpc: server })).rejects.toThrow(
+      "not signed by the connected wallet account",
+    )
     expect(server.calls.sent).toEqual([])
 
-    const result = await signAndSubmit({ unsignedXdr: restore.unsignedXdr, manifest, source: SOURCE, sign: signWith(), rpc: server })
-    expect(result).toMatchObject({ hash: HASH, status: "SUCCESS" })
+    const sign = signWith()
+    const result = await executeRestore({ restore, manifest, sign, rpc: server })
+    expect(sign.seen).toEqual([[restore.unsignedXdr, passphrase, SOURCE]])
+    expect(result).toEqual({ hash: HASH, status: "SUCCESS" })
     expect(server.calls.sent[0].operations[0].type).toBe("restoreFootprint")
+  })
+
+  it("refuses an expired restore", async () => {
+    const server = restoreServer()
+    const restore = await prepare(server)
+    const sign = signWith()
+    await expect(
+      executeRestore({ restore, manifest, sign, rpc: server, nowMs: restore.preparedAtMs + REVIEW_TTL_MS }),
+    ).rejects.toThrow("This restore was prepared over a minute ago")
+    expect(sign.seen).toEqual([])
+    expect(server.calls.sent).toEqual([])
   })
 })

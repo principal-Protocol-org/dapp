@@ -5,7 +5,12 @@
  * simulation, footprint, auth) and describes it in plain words. `executeReview` refuses a review
  * older than 60 s, has the wallet sign it, checks the wallet signed exactly that transaction, then
  * submits, polls and decodes the result. `prepareRestore` builds the `restoreFootprint`
- * transaction an archived-entry simulation asks for.
+ * transaction an archived-entry simulation asks for; `executeRestore` signs it under the same rules.
+ *
+ * RPC is untrusted (R29): whatever it prepares or simulates is checked against what was built
+ * locally before it is shown for signing — same call, same time bounds, no foreign authorization, a
+ * fee that is explained and below `MAX_TX_FEE_STROOPS`, and a restore footprint limited to the
+ * market's own contracts.
  *
  * Ported from `dapp-old/src/lib/transactions.ts` (the prepared review only: the preview and local
  * XDR modes are dropped), `buildPreparedInvokeTransaction` from `dapp-old/src/lib/stellar.ts` (R14)
@@ -13,12 +18,15 @@
  */
 import {
   Account,
+  Address,
   BASE_FEE,
+  Contract,
   Operation,
   SorobanDataBuilder,
   TransactionBuilder,
   rpc,
   type Transaction,
+  type xdr,
 } from "@stellar/stellar-sdk"
 import { ACTION_META, invocationFor, type ActionId, type ActionInput, type GuardValues } from "./actions"
 import { formatAmount } from "./format"
@@ -38,6 +46,9 @@ import type { Manifest, Market } from "./types"
 
 /** A prepared review expires 60 s after preparation (shared context). */
 export const REVIEW_TTL_MS = 60_000
+
+/** The most this app ever asks the user to sign as a network fee: 10 XLM, in stroops (R29). */
+export const MAX_TX_FEE_STROOPS = 100_000_000n
 
 /** Transaction validity window (time bounds), as dapp-old used for its 300 s deadline default. */
 const TX_TIMEOUT_SECONDS = 300
@@ -78,7 +89,21 @@ type PollServer = NonNullable<Parameters<typeof pollTransactionStatus>[0]["serve
 /** The RPC calls this module makes; `createRpcServer` satisfies it, tests inject a fake. */
 export type ReviewRpcServer = SimulateServer &
   SubmitServer &
-  PollServer & { prepareTransaction(transaction: Transaction): Promise<Transaction> }
+  PollServer & {
+    prepareTransaction(transaction: Transaction): Promise<Transaction>
+    getLedgerEntries(...keys: xdr.LedgerKey[]): Promise<{ entries: { val: xdr.LedgerEntryData }[] }>
+  }
+
+/** A prepared `restoreFootprint` transaction: shown with its fee, and expiring like a review. */
+export type RestoreReview = {
+  source: string
+  unsignedXdr: string
+  unsignedXdrHash: string
+  /** Total fee of the restore transaction, in stroops. */
+  fee: string
+  preparedAtMs: number
+  expiresAtMs: number
+}
 
 /** `WalletAdapter.sign` (Task 11): signs the XDR and returns the signed XDR. */
 export type SignTransaction = (unsignedXdr: string, networkPassphrase: string, expectedSigner: string) => Promise<string>
@@ -128,18 +153,46 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-function hostFunctionXdr(transaction: Transaction): string | undefined {
+function invokedContractArgs(transaction: Transaction): xdr.InvokeContractArgs | undefined {
   const [operation] = transaction.operations
-  return operation?.type === "invokeHostFunction" ? operation.func.toXdr("base64") : undefined
+  if (operation?.type !== "invokeHostFunction" || operation.func.type !== "hostFunctionTypeInvokeContract") return undefined
+  return operation.func.invokeContract
 }
 
-/** RPC adds footprint, auth and fees; it must not change who calls what, or at which sequence. */
+function xlm(stroops: bigint): string {
+  return `${formatAmount(stroops, XLM_DECIMALS, XLM_DECIMALS)} XLM`
+}
+
+/** The resource fee the transaction's Soroban data declares (0 without Soroban data). */
+function sorobanResourceFee(transaction: Transaction): bigint {
+  const envelope = transaction.toEnvelope()
+  if (envelope.type !== "envelopeTypeTx") return 0n
+  const ext = envelope.value.tx.ext
+  return ext.type === "sorobanData" ? ext.sorobanData.resourceFee : 0n
+}
+
+/** R29: refuse a fee above the hard cap. */
+function assertFeeCapped(fee: bigint, what: string): void {
+  if (fee > MAX_TX_FEE_STROOPS) {
+    throw new Error(
+      `${what} asks for a network fee of ${xlm(fee)}, above the ${xlm(MAX_TX_FEE_STROOPS)} this app signs. Refusing it; try again later or use another RPC.`,
+    )
+  }
+}
+
+/**
+ * RPC is untrusted (R29). It may add footprint, resources, auth and the resource fee; it must not
+ * change who calls what, at which sequence and in which time window, add an authorization for
+ * anything but this call, or charge a fee it does not explain.
+ */
 function assertPreparedMatches(built: Transaction, prepared: Transaction): void {
-  const expected = hostFunctionXdr(built)
+  const expected = invokedContractArgs(built)
+  const call = invokedContractArgs(prepared)
   const same =
     expected !== undefined &&
+    call !== undefined &&
     prepared.operations.length === 1 &&
-    hostFunctionXdr(prepared) === expected &&
+    call.toXdr("base64") === expected.toXdr("base64") &&
     prepared.source === built.source &&
     prepared.sequence === built.sequence &&
     prepared.networkPassphrase === built.networkPassphrase
@@ -147,6 +200,35 @@ function assertPreparedMatches(built: Transaction, prepared: Transaction): void 
     throw new Error(
       "RPC returned a prepared transaction that is not the transaction that was requested. Refusing to review it; try again or use another RPC.",
     )
+  }
+
+  const window = (tx: Transaction) => (tx.timeBounds ? `${tx.timeBounds.minTime}-${tx.timeBounds.maxTime}` : "none")
+  if (window(prepared) !== window(built)) {
+    throw new Error(
+      "RPC changed the time bounds of the transaction it prepared. Refusing to review it; try again or use another RPC.",
+    )
+  }
+
+  const fee = BigInt(prepared.fee)
+  assertFeeCapped(fee, "The prepared transaction")
+  const explained = BigInt(built.fee) + sorobanResourceFee(prepared)
+  if (fee > explained) {
+    throw new Error(
+      `The prepared fee (${xlm(fee)}) is more than the base fee plus the resource fee it declares (${xlm(explained)}). Refusing it; try again or use another RPC.`,
+    )
+  }
+
+  // Every authorization must be for this exact call: same contract, function and arguments.
+  const operation = prepared.operations[0]
+  const auth = operation.type === "invokeHostFunction" ? (operation.auth ?? []) : []
+  const expectedXdr = expected.toXdr("base64")
+  for (const entry of auth) {
+    const fn = entry.rootInvocation.function
+    if (fn.type !== "sorobanAuthorizedFunctionTypeContractFn" || fn.contractFn.toXdr("base64") !== expectedXdr) {
+      throw new Error(
+        "RPC added an authorization for something other than this call. Refusing to review it; try again or use another RPC.",
+      )
+    }
   }
 }
 
@@ -237,7 +319,8 @@ function summarize(market: Market, input: ActionInput, fee: string): Review["sum
       break
   }
 
-  const fees = [`Network fee: up to ${formatAmount(BigInt(fee), XLM_DECIMALS, XLM_DECIMALS)} XLM`, ...protocolFees]
+  // The exact fee field being signed; the network may charge less, never more.
+  const fees = [`Network fee: up to ${xlm(BigInt(fee))}`, ...protocolFees]
   return ACTION_META[input.action].hasDeadline
     ? { give, getAtLeast, fees, deadline: Number(input.deadline) }
     : { give, getAtLeast, fees }
@@ -295,7 +378,7 @@ export function isExpired(review: Pick<Review, "preparedAtMs">, nowMs: number): 
   return nowMs - review.preparedAtMs >= REVIEW_TTL_MS
 }
 
-export type SubmittedTransaction = {
+type SubmittedTransaction = {
   hash: string
   status: TxStatus
   returnValue?: unknown
@@ -305,10 +388,11 @@ export type SubmittedTransaction = {
 
 /**
  * Signs `unsignedXdr` with the wallet, refuses anything but exactly that transaction signed by
- * `source`, submits it and polls for the result. Used by `executeReview`, and for a restore.
- * Once RPC has returned a hash it is never lost: a failure to read the result is reported, not thrown.
+ * `source`, submits it and polls for the result. Used by `executeReview` and `executeRestore`, which
+ * apply the 60 s rule first. Once RPC has returned a hash it is never lost: a failure to read the
+ * result is reported, not thrown.
  */
-export async function signAndSubmit(p: {
+async function signAndSubmit(p: {
   unsignedXdr: string
   manifest: Manifest
   source: string
@@ -401,18 +485,87 @@ export async function executeReview(p: {
   }
 }
 
+/** The contracts a restore may touch: those of every market `invocation` belongs to, plus shared ones. */
+function restorableContracts(manifest: Manifest, invocation: ContractInvocation): Set<string> {
+  const markets = manifest.markets.filter((m) => Object.values(m.contracts).includes(invocation.contractId))
+  if (markets.length === 0) {
+    throw new Error("This call is not to a contract of this network's markets, so no restore is offered.")
+  }
+  return new Set([
+    ...markets.flatMap((m) => [...Object.values(m.contracts), m.underlying.sac]),
+    manifest.shared.riskControl,
+    manifest.shared.permissioning,
+  ])
+}
+
+/** Wasm hashes (hex) of the given contracts' instances, as RPC reports them. */
+async function wasmHashesOf(server: ReviewRpcServer, contracts: string[]): Promise<Set<string>> {
+  const { entries } = await server.getLedgerEntries(...contracts.map((id) => new Contract(id).getFootprint()))
+  const hashes = new Set<string>()
+  for (const { val } of entries) {
+    if (val.type !== "contractData" || !contracts.includes(Address.fromScAddress(val.contractData.contract).toString())) continue
+    const instance = val.contractData.val
+    if (instance.type !== "scvContractInstance") continue
+    const executable = instance.instance.executable
+    if (executable.type === "contractExecutableWasm") hashes.add(executable.wasmHash.toString())
+  }
+  return hashes
+}
+
+/**
+ * R29: a restore footprint is read-write only, and every key belongs to the market: contract data
+ * (instances included) of its manifest contracts, or the Wasm code one of those instances runs.
+ */
+async function assertRestorable(
+  server: ReviewRpcServer,
+  footprint: SorobanDataBuilder,
+  allowed: Set<string>,
+): Promise<void> {
+  const refuse = (cause: string): never => {
+    throw new Error(`${cause} Refusing to restore it; try again or use another RPC.`)
+  }
+  if (footprint.getReadOnly().length > 0) refuse("The restore asked for includes read-only entries.")
+  const keys = footprint.getReadWrite()
+  if (keys.length === 0) refuse("The restore asked for names no ledger entry.")
+
+  const codeHashes: string[] = []
+  for (const key of keys) {
+    if (key.type === "contractData") {
+      const contract = Address.fromScAddress(key.contractData.contract).toString()
+      if (!allowed.has(contract)) refuse(`The restore asked for includes data of a contract outside this market (${contract}).`)
+    } else if (key.type === "contractCode") {
+      codeHashes.push(key.contractCode.hash.toString())
+    } else {
+      refuse(`The restore asked for includes a ${key.type} entry, which is not contract data.`)
+    }
+  }
+  if (codeHashes.length === 0) return
+
+  let referenced: Set<string>
+  try {
+    referenced = await wasmHashesOf(server, [...allowed])
+  } catch (error) {
+    return refuse(`The contract code to restore could not be matched to this market (${errorText(error)}).`)
+  }
+  for (const hash of codeHashes) {
+    if (!referenced.has(hash)) refuse("The restore asked for includes contract code that no contract of this market runs.")
+  }
+}
+
 /**
  * Builds the restore transaction an archived-entry simulation asks for: the action is simulated as
  * `source`, and the simulation's `restorePreamble` (footprint and fee) becomes one
- * `restoreFootprint` operation, at the account's fresh sequence.
+ * `restoreFootprint` operation, at the account's fresh sequence. The footprint and fee are checked
+ * (R29) and the fee is returned so it is shown before signing; it expires like a review.
  */
 export async function prepareRestore(p: {
   manifest: Manifest
   source: string
   invocation: ContractInvocation
   rpc?: ReviewRpcServer
-}): Promise<{ unsignedXdr: string; unsignedXdrHash: string }> {
+}): Promise<RestoreReview> {
   const { manifest, source } = p
+  const allowed = restorableContracts(manifest, p.invocation)
   const server = p.rpc ?? createRpcServer(manifest.rpcUrl)
   const sequence = (await server.getAccount(source)).sequenceNumber()
   const simulation = await server.simulateTransaction(
@@ -423,16 +576,52 @@ export async function prepareRestore(p: {
   }
 
   const { transactionData, minResourceFee } = simulation.restorePreamble
+  const resourceFee = /^\d+$/.test(minResourceFee) ? BigInt(minResourceFee) : undefined
+  if (resourceFee === undefined) throw new Error("RPC returned no valid restore fee. Refusing to restore; try again.")
+  assertFeeCapped(BigInt(BASE_FEE) + resourceFee, "The restore")
+  // A copy: the checked footprint is the one that is signed.
+  const sorobanData = new SorobanDataBuilder(transactionData.build()).setResourceFee(resourceFee.toString())
+  await assertRestorable(server, sorobanData, allowed)
+
   // build() adds the resource fee to `fee`, so `fee` is the inclusion fee alone.
-  const sorobanData = new SorobanDataBuilder(transactionData.build()).setResourceFee(minResourceFee).build()
   const restore = new TransactionBuilder(new Account(source, sequence), {
     fee: BASE_FEE,
     networkPassphrase: manifest.networkPassphrase,
   })
-    .setSorobanData(sorobanData)
+    .setSorobanData(sorobanData.build())
     .addOperation(Operation.restoreFootprint({}))
     .setTimeout(TX_TIMEOUT_SECONDS)
     .build()
   const unsignedXdr = restore.toXDR()
-  return { unsignedXdr, unsignedXdrHash: hashLike(unsignedXdr) }
+  const preparedAtMs = Date.now()
+  return {
+    source,
+    unsignedXdr,
+    unsignedXdrHash: hashLike(unsignedXdr),
+    fee: restore.fee,
+    preparedAtMs,
+    expiresAtMs: preparedAtMs + REVIEW_TTL_MS,
+  }
+}
+
+/** Signs and submits a prepared restore under the same rules as a review: 60 s, exact transaction. */
+export async function executeRestore(p: {
+  restore: RestoreReview
+  manifest: Manifest
+  sign: SignTransaction
+  rpc?: ReviewRpcServer
+  nowMs?: number
+}): Promise<TxResult> {
+  const { restore } = p
+  if (isExpired(restore, p.nowMs ?? Date.now())) {
+    throw new Error("This restore was prepared over a minute ago. Prepare it again before signing.")
+  }
+  const sent = await signAndSubmit({
+    unsignedXdr: restore.unsignedXdr,
+    manifest: p.manifest,
+    source: restore.source,
+    sign: p.sign,
+    rpc: p.rpc,
+  })
+  return sent.pollError ? { hash: sent.hash, status: sent.status, pollError: sent.pollError } : { hash: sent.hash, status: sent.status }
 }
