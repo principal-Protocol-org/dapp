@@ -3,6 +3,7 @@ import {
   BASE_FEE,
   Contract,
   Keypair,
+  StrKey,
   Transaction,
   TransactionBuilder,
   nativeToScVal,
@@ -53,7 +54,8 @@ type SubmitRpcServer = {
 };
 
 type PollRpcServer = {
-  getTransaction(hash: string): Promise<{ status: string; resultXdr?: string; resultMetaXdr?: string; returnValue?: xdr.ScVal }>;
+  // Only the fields read below, so the SDK's rpc.Server (parsed XDR objects) satisfies it.
+  getTransaction(hash: string): Promise<{ status: string; returnValue?: xdr.ScVal }>;
 };
 
 export type SubmitTransactionResult = {
@@ -66,6 +68,8 @@ export type PolledTransactionResult = {
   status: string;
   attempts: number;
   returnValue?: unknown;
+  /** Set when a SUCCESS return value could not be decoded; hash and status are still reported. */
+  decodeError?: string;
 };
 
 export function createRpcServer(rpcUrl: string) {
@@ -261,7 +265,14 @@ export async function pollTransactionStatus(params: {
     const result = await server.getTransaction(params.hash);
     if (result.status !== "NOT_FOUND") {
       const found: PolledTransactionResult = { hash: params.hash, status: result.status, attempts: attempt };
-      if (result.status === "SUCCESS" && result.returnValue) found.returnValue = scValToNative(result.returnValue);
+      if (result.status === "SUCCESS" && result.returnValue) {
+        // The transaction is on-chain: a value that cannot be decoded must not lose its hash or status.
+        try {
+          found.returnValue = scValToNative(result.returnValue);
+        } catch (error) {
+          found.decodeError = `The return value could not be decoded: ${error instanceof Error ? error.message : String(error)}`;
+        }
+      }
       return found;
     }
     if (attempt < attempts) await wait(intervalMs);
@@ -283,9 +294,30 @@ export type SimulationOutcome =
 
 const CONTRACT_ERROR = /Error\(Contract, #(\d+)\)/;
 
+/**
+ * The contract that raised `Error(Contract, #code)`, read from the simulation's diagnostic events
+ * (R25): the first `error` event carrying that exact error and a contract id. The host records the
+ * error in the frame that raised it first, then echoes it ("contract call failed") in every frame it
+ * unwinds through, so the first match is the raiser. Events with another code (an earlier caught
+ * failure) or no contract id (the top-level frame) are skipped. Undefined when none matches.
+ */
+function contractErrorSource(events: readonly xdr.DiagnosticEvent[] | undefined, code: number): string | undefined {
+  try {
+    for (const { event } of events ?? []) {
+      if (event.type.name !== "diagnostic" || event.contractId === null) continue;
+      const [topic, error] = event.body.value.topics;
+      if (topic?.type !== "scvSymbol" || topic.value !== "error") continue;
+      if (error?.type !== "scvError" || error.error.type !== "sceContract" || error.error.contractCode !== code) continue;
+      return StrKey.encodeContract(event.contractId.toBytes());
+    }
+  } catch {
+    // An event of unexpected shape: fall back to the invoked contract.
+  }
+  return undefined;
+}
+
 // Simulates a write as the user (never prepareTransaction). The contractId on a contract_error is the
-// invoked contract; diagnostic events are not inspected, so an error raised by a nested contract is
-// still attributed to the invoked one.
+// contract that raised it (see contractErrorSource), or the invoked contract if no event names one.
 export async function simulateInvocation(params: {
   rpcUrl: string;
   networkPassphrase: string;
@@ -309,11 +341,12 @@ export async function simulateInvocation(params: {
     if (rpc.Api.isSimulationError(simulation)) {
       const match = CONTRACT_ERROR.exec(simulation.error);
       if (match) {
+        const code = Number(match[1]);
         return {
           ok: false,
           kind: "contract_error",
-          contractId: params.invocation.contractId,
-          code: Number(match[1]),
+          contractId: contractErrorSource(simulation.events, code) ?? params.invocation.contractId,
+          code,
           message: simulation.error,
         };
       }

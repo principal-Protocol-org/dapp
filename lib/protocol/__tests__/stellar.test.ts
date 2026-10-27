@@ -1,5 +1,5 @@
 // @vitest-environment node
-import { Keypair, Transaction, nativeToScVal, rpc } from "@stellar/stellar-sdk";
+import { Keypair, StrKey, Transaction, nativeToScVal, rpc, xdr } from "@stellar/stellar-sdk";
 import { describe, expect, it } from "vitest";
 import testnetJson from "@/config/manifests/testnet.json";
 import { parseManifest } from "../manifest";
@@ -443,6 +443,77 @@ describe("simulateInvocation", () => {
     });
   });
 
+  describe("attributes a contract error to the contract that raised it (R25)", () => {
+    const { router, manager, pool } = testnetMarket.contracts;
+    const contractBytes = (id: string) => xdr.ScVal.scvBytes(StrKey.decodeContract(id));
+    const errorTopics = (code: number) => [xdr.ScVal.scvSymbol("error"), xdr.ScVal.scvError(xdr.ScError.sceContract(code))];
+    const message = (text: string) => xdr.ScVal.scvString(text);
+    // One diagnostic event as RPC sends it: base64 XDR, decoded by the SDK's parseRawSimulation.
+    function diagnostic(contractId: string | null, topics: xdr.ScVal[], data: xdr.ScVal): string {
+      return new xdr.DiagnosticEvent({
+        inSuccessfulContractCall: false,
+        event: new xdr.ContractEvent({
+          ext: xdr.ExtensionPoint.v0(),
+          contractId: contractId ? new xdr.ContractId(StrKey.decodeContract(contractId)) : null,
+          type: xdr.ContractEventType.diagnostic,
+          body: xdr.ContractEventBody.v0(new xdr.ContractEventV0({ topics, data })),
+        }),
+      }).toXdr("base64");
+    }
+    const failedSimulation = (code: number, events: string[]) =>
+      rpc.parseRawSimulation({
+        id: "1",
+        latestLedger: 90,
+        events,
+        error: `HostError: Error(Contract, #${code})\n\nEvent log (newest first): ...`,
+      } as rpc.Api.RawSimulateTransactionResponse);
+    const fnCall = (caller: string | null, callee: string, fn: string) =>
+      diagnostic(caller, [xdr.ScVal.scvSymbol("fn_call"), contractBytes(callee), xdr.ScVal.scvSymbol(fn)], xdr.ScVal.scvVec([]));
+
+    it("nested failure: Router invoked, PrincipalManager raised #9 -> the manager", async () => {
+      const out = await run(() =>
+        failedSimulation(9, [
+          fnCall(null, router, "swap_sy_for_yt"),
+          fnCall(router, manager, "mint"),
+          diagnostic(manager, errorTopics(9), message("failing with contract error")),
+          diagnostic(router, errorTopics(9), message("contract call failed")),
+          diagnostic(null, errorTopics(9), message("contract call failed")),
+        ]),
+      );
+      expect(out).toMatchObject({ ok: false, kind: "contract_error", contractId: manager, code: 9 });
+    });
+
+    it("an error the invoked contract raised itself stays on the invoked contract", async () => {
+      const out = await run(() =>
+        failedSimulation(9, [
+          fnCall(null, router, "swap_sy_for_yt"),
+          diagnostic(router, errorTopics(9), message("failing with contract error")),
+          diagnostic(null, errorTopics(9), message("contract call failed")),
+        ]),
+      );
+      expect(out).toMatchObject({ kind: "contract_error", contractId: router, code: 9 });
+    });
+
+    it("skips error events with another code or without a contract id", async () => {
+      const out = await run(() =>
+        failedSimulation(3, [
+          // A caught failure earlier in the call (another code) is not the error that failed it.
+          diagnostic(manager, errorTopics(9), message("failing with contract error")),
+          diagnostic(null, errorTopics(3), message("contract call failed")),
+          diagnostic(pool, errorTopics(3), message("failing with contract error")),
+        ]),
+      );
+      expect(out).toMatchObject({ kind: "contract_error", contractId: pool, code: 3 });
+    });
+
+    it("falls back to the invoked contract when no error event names the raiser", async () => {
+      const out = await run(() =>
+        failedSimulation(9, [diagnostic(null, errorTopics(9), message("contract call failed"))]),
+      );
+      expect(out).toMatchObject({ kind: "contract_error", contractId: router, code: 9 });
+    });
+  });
+
   it("maps other simulation errors and thrown failures to rpc_error", async () => {
     const trapped = await run(() => ({ id: "1", _parsed: true, latestLedger: 1, events: [], error: "trapped" }));
     expect(trapped).toEqual({ ok: false, kind: "rpc_error", message: "trapped" });
@@ -490,6 +561,24 @@ describe("pollTransactionStatus return value", () => {
     });
     expect(result.returnValue).toBe(42n);
     expect(result.status).toBe("SUCCESS");
+  });
+
+  it("keeps the hash and status when the return value cannot be decoded", async () => {
+    const result = await pollTransactionStatus({
+      rpcUrl: testnetMarket.rpcUrl,
+      hash: "abc123",
+      attempts: 1,
+      wait: async () => undefined,
+      server: {
+        async getTransaction() {
+          // A corrupt value: decoding it throws.
+          return { status: "SUCCESS", returnValue: { type: "scvMap", map: [null], value: [null] } as unknown as xdr.ScVal };
+        },
+      },
+    });
+    expect(result).toMatchObject({ hash: "abc123", status: "SUCCESS", attempts: 1 });
+    expect(result.returnValue).toBeUndefined();
+    expect(result.decodeError).toMatch(/could not be decoded/);
   });
 });
 
