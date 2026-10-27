@@ -1,0 +1,538 @@
+// @vitest-environment node
+import {
+  Account,
+  BASE_FEE,
+  Contract,
+  Keypair,
+  SorobanDataBuilder,
+  Transaction,
+  TransactionBuilder,
+  nativeToScVal,
+  rpc,
+  scValToNative,
+  xdr,
+} from "@stellar/stellar-sdk"
+import { describe, expect, it } from "vitest"
+import testnetJson from "@/config/manifests/testnet.json"
+import { ACTION_META, invocationFor, type ActionId, type ActionInput, type GuardValues } from "../actions"
+import { hashLike } from "../hash"
+import { parseManifest } from "../manifest"
+import { createRpcServer } from "../stellar"
+import {
+  REVIEW_TTL_MS,
+  executeReview,
+  isExpired,
+  prepareRestore,
+  prepareReview,
+  signAndSubmit,
+  type Review,
+  type ReviewRpcServer,
+} from "../review"
+
+const manifest = parseManifest(structuredClone(testnetJson))
+const market = manifest.markets[0]
+const passphrase = manifest.networkPassphrase
+const wallet = Keypair.random()
+const SOURCE = wallet.publicKey()
+const SEQUENCE = "41"
+const RESOURCE_FEE = 12_345n
+/** `assembleTransaction` keeps the 100-stroop inclusion fee and adds the resource fee. */
+const PREPARED_FEE = (BigInt(BASE_FEE) + RESOURCE_FEE).toString()
+const DEADLINE = 1_900_000_000n
+const HASH = "abc123"
+
+const input = (action: ActionId, extra: Partial<ActionInput> = {}): ActionInput => ({
+  action,
+  marketId: market.marketId,
+  source: SOURCE,
+  amount: 10_0000000n,
+  guards: { minOut: 9_4525001n },
+  deadline: DEADLINE,
+  ...extra,
+})
+
+const i128 = (value: bigint) => nativeToScVal(value, { type: "i128" })
+
+function simulationSuccess(retval: xdr.ScVal = i128(1n)) {
+  return {
+    id: "1",
+    _parsed: true,
+    latestLedger: 90,
+    events: [],
+    minResourceFee: RESOURCE_FEE.toString(),
+    transactionData: new SorobanDataBuilder().setResourceFee(RESOURCE_FEE.toString()),
+    result: { auth: [], retval },
+  } as unknown as rpc.Api.SimulateTransactionSuccessResponse
+}
+
+type Calls = { getAccount: string[]; prepared: Transaction[]; sent: Transaction[]; polled: string[] }
+
+/** An RPC that prepares like the SDK (`assembleTransaction`), accepts submissions and confirms them. */
+function fakeRpc(overrides: Partial<ReviewRpcServer> = {}): ReviewRpcServer & { calls: Calls } {
+  const calls: Calls = { getAccount: [], prepared: [], sent: [], polled: [] }
+  return {
+    calls,
+    async getAccount(address) {
+      calls.getAccount.push(address)
+      return new Account(address, SEQUENCE)
+    },
+    async simulateTransaction() {
+      return simulationSuccess()
+    },
+    async prepareTransaction(tx) {
+      calls.prepared.push(tx)
+      return rpc.assembleTransaction(tx, simulationSuccess()).build()
+    },
+    async sendTransaction(tx) {
+      calls.sent.push(tx)
+      return { status: "PENDING", hash: HASH }
+    },
+    async getTransaction(hash) {
+      calls.polled.push(hash)
+      return { status: "SUCCESS", returnValue: i128(9_5000000n) }
+    },
+    ...overrides,
+  }
+}
+
+/** An RPC that fails the test if anything is called. */
+const noIo: ReviewRpcServer = new Proxy({} as ReviewRpcServer, {
+  get: (_target, name) => () => {
+    throw new Error(`RPC ${String(name)} must not be called`)
+  },
+})
+
+/** Freighter stand-in: signs exactly what it is given with `keypair`. */
+function signWith(keypair = wallet) {
+  const seen: [string, string, string][] = []
+  const sign = async (unsignedXdr: string, networkPassphrase: string, expectedSigner: string) => {
+    seen.push([unsignedXdr, networkPassphrase, expectedSigner])
+    const tx = new Transaction(unsignedXdr, networkPassphrase)
+    tx.sign(keypair)
+    return tx.toXDR()
+  }
+  return Object.assign(sign, { seen })
+}
+
+function invokedArgs(unsignedXdr: string): unknown[] {
+  const op = new Transaction(unsignedXdr, passphrase).operations[0]
+  if (op.type !== "invokeHostFunction" || op.func.type !== "hostFunctionTypeInvokeContract") {
+    throw new Error("not a contract call")
+  }
+  return op.func.invokeContract.args.map((arg) => scValToNative(arg))
+}
+
+async function review(action: ActionId, extra: Partial<ActionInput> = {}, server = fakeRpc()): Promise<Review> {
+  return prepareReview({ manifest, input: input(action, extra), rpc: server })
+}
+
+describe("prepareReview", () => {
+  it("accepts the SDK's RPC server (compile-time check)", () => {
+    const real: ReviewRpcServer = createRpcServer(manifest.rpcUrl)
+    expect(typeof real.prepareTransaction).toBe("function")
+  })
+
+  it("prepares the exact transaction through RPC and reviews what RPC prepared", async () => {
+    const server = fakeRpc()
+    const before = Date.now()
+    const r = await review("mint", {}, server)
+
+    expect(server.calls.getAccount).toEqual([SOURCE])
+    expect(server.calls.prepared).toHaveLength(1)
+    expect(server.calls.prepared[0].source).toBe(SOURCE)
+    expect(server.calls.prepared[0].sequence).toBe("42")
+
+    const prepared = new Transaction(r.unsignedXdr, passphrase)
+    expect(prepared.source).toBe(SOURCE)
+    expect(prepared.sequence).toBe("42")
+    expect(prepared.operations).toHaveLength(1)
+    expect(prepared.fee).toBe(PREPARED_FEE)
+    expect(r.fee).toBe(PREPARED_FEE)
+    expect(r.unsignedXdrHash).toMatch(/^sha256:[a-f0-9]{64}$/)
+    expect(r.unsignedXdrHash).toBe(hashLike(r.unsignedXdr))
+    expect(r.invocation).toEqual(invocationFor(manifest, input("mint")))
+    expect(r.input).toEqual(input("mint"))
+    expect(r.callTree).toEqual(["Router.wrap_and_mint", "SYWrapper.deposit", "PrincipalManager.mint"])
+    expect(r.preparedAtMs).toBeGreaterThanOrEqual(before)
+    expect(r.expiresAtMs - r.preparedAtMs).toBe(REVIEW_TTL_MS)
+    expect(REVIEW_TTL_MS).toBe(60_000)
+  })
+
+  it("signs the quoted floor, not a zero (ported from dapp-old)", async () => {
+    const r = await review("buy_pt", { guards: { minOut: 9_452_500n } })
+    // swap_sy_for_pt(from, pool, sy_in, min_pt_out, deadline)
+    expect(invokedArgs(r.unsignedXdr)).toEqual([SOURCE, market.contracts.pool, 10_0000000n, 9_452_500n, DEADLINE])
+  })
+
+  it("names the call tree of every action, starting with the invoked function", async () => {
+    for (const action of Object.keys(ACTION_META) as ActionId[]) {
+      const guards: GuardValues = { minOut: 1n, minOut2: 1n, maxNetCost: 1n }
+      const r = await review(action, { guards, secondaryAmount: 1n })
+      const { contractId, functionName } = r.invocation
+      const contract = contractId === market.contracts.sy ? "SYWrapper" : "Router"
+      expect(r.callTree[0]).toBe(`${contract}.${functionName}`)
+    }
+  })
+
+  describe("never prepares a zero floor (R5)", () => {
+    const refuses = (action: ActionId, guards: GuardValues) =>
+      expect(prepareReview({ manifest, input: input(action, { guards }), rpc: noIo })).rejects.toThrow("zero floor")
+
+    it("min_out of a single-floor action", async () => {
+      await refuses("buy_pt", { minOut: 0n })
+      await refuses("deposit", { minOut: 0n })
+      await refuses("sell_pt", { minOut: -1n })
+    })
+    it("a missing min_out", async () => {
+      await refuses("withdraw", {})
+    })
+    it("min_sy_out of remove_liquidity", async () => {
+      await refuses("remove_liquidity", { minOut: 5n, minOut2: 0n })
+      await refuses("remove_liquidity", { minOut: 0n, minOut2: 5n })
+    })
+    it("max_net_cost of buy_yt", async () => {
+      await refuses("buy_yt", { minOut: 5n, maxNetCost: 0n })
+      await refuses("buy_yt", { minOut: 5n })
+    })
+    it("min_yt_out of buy_yt", async () => {
+      await refuses("buy_yt", { minOut: 0n, maxNetCost: 5n })
+    })
+    it("claim and redeem carry no floor and are prepared", async () => {
+      await expect(review("claim_yield", { guards: {}, amount: 0n })).resolves.toMatchObject({ fee: PREPARED_FEE })
+      await expect(review("redeem", { guards: {}, secondaryAmount: 0n })).resolves.toMatchObject({ fee: PREPARED_FEE })
+    })
+  })
+
+  it("refuses an unknown market before any RPC call", async () => {
+    await expect(prepareReview({ manifest, input: input("buy_pt", { marketId: "nope" }), rpc: noIo })).rejects.toThrow(
+      'Unknown market "nope"',
+    )
+  })
+
+  it("explains a preparation failure in plain words", async () => {
+    const server = fakeRpc({
+      async prepareTransaction() {
+        throw new Error("HostError: Error(Contract, #9)")
+      },
+    })
+    await expect(review("mint", {}, server)).rejects.toThrow(
+      /could not be prepared \(HostError: Error\(Contract, #9\)\)\. Nothing was signed/,
+    )
+  })
+
+  it("refuses a prepared transaction that calls something else", async () => {
+    const server = fakeRpc({
+      async prepareTransaction(tx) {
+        const other = new TransactionBuilder(new Account(tx.source, "41"), { fee: BASE_FEE, networkPassphrase: passphrase })
+          .addOperation(new Contract(market.contracts.router).call("claim_yield"))
+          .setTimeout(300)
+          .build()
+        return rpc.assembleTransaction(other, simulationSuccess()).build()
+      },
+    })
+    await expect(review("mint", {}, server)).rejects.toThrow("not the transaction that was requested")
+  })
+
+  describe("summary", () => {
+    it("summary shows the floor values", async () => {
+      const r = await review("buy_pt")
+      // 7 decimals: the exact floor being signed, not a rounded one.
+      expect(r.summary.getAtLeast).toEqual(["9.4525001 PT"])
+      expect(r.summary.give).toEqual(["10 SY"])
+      expect(r.summary.fees[0]).toBe("Network fee: up to 0.0012445 XLM")
+      expect(r.summary.deadline).toBe(Number(DEADLINE))
+    })
+
+    it("names the token on each side, with every signed floor", async () => {
+      const g = { minOut: 1_2345678n, minOut2: 2_0000001n, maxNetCost: 3_5000000n }
+      const lines = async (action: ActionId, extra: Partial<ActionInput> = {}) => {
+        const { give, getAtLeast } = (await review(action, { guards: g, ...extra })).summary
+        return { give, getAtLeast }
+      }
+      expect(await lines("deposit")).toEqual({ give: ["10 STA"], getAtLeast: ["1.2345678 SY"] })
+      expect(await lines("withdraw")).toEqual({ give: ["10 SY"], getAtLeast: ["1.2345678 STA"] })
+      expect(await lines("mint")).toEqual({
+        give: ["10 STA"],
+        getAtLeast: ["1.2345678 PT, and the same amount of YT"],
+      })
+      expect(await lines("sell_pt")).toEqual({ give: ["10 PT"], getAtLeast: ["1.2345678 SY"] })
+      expect(await lines("buy_yt")).toEqual({
+        give: ["10 SY, of which at most 3.5 SY is spent: the rest comes back to you"],
+        getAtLeast: ["1.2345678 YT"],
+      })
+      // max_net_cost >= sy_in: the Router guarantees no SY back (min_sy_back = 0).
+      expect((await lines("buy_yt", { guards: { ...g, maxNetCost: 10_0000000n } })).give).toEqual([
+        "10 SY, all of which may be spent: no SY is guaranteed back",
+      ])
+      expect(await lines("sell_yt")).toEqual({ give: ["10 YT"], getAtLeast: ["1.2345678 SY"] })
+      expect(await lines("add_liquidity", { secondaryAmount: 4_0000000n })).toEqual({
+        give: ["10 PT", "4 SY"],
+        getAtLeast: ["1.2345678 LP"],
+      })
+      expect(await lines("add_liquidity_sy")).toEqual({ give: ["10 SY"], getAtLeast: ["1.2345678 LP"] })
+      expect(await lines("remove_liquidity")).toEqual({ give: ["10 LP"], getAtLeast: ["1.2345678 PT", "2.0000001 SY"] })
+      expect(await lines("recombine")).toEqual({ give: ["10 PT", "10 YT"], getAtLeast: ["1.2345678 SY"] })
+    })
+
+    it("says plainly when no minimum is enforced", async () => {
+      const claim = (await review("claim_yield", { guards: {}, amount: 0n })).summary
+      expect(claim.give).toEqual([])
+      expect(claim.getAtLeast).toEqual(["Your pending yield, paid in STA. This call sets no minimum."])
+      const redeem = (await review("redeem", { guards: {}, secondaryAmount: 2_0000000n })).summary
+      expect(redeem.give).toEqual(["10 PT", "2 YT"])
+      expect(redeem.getAtLeast).toEqual([
+        "STA at the settlement rate. The rate is fixed at settlement, so this call sets no minimum.",
+      ])
+      const ptOnly = (await review("redeem", { guards: {}, secondaryAmount: 0n })).summary
+      expect(ptOnly.give).toEqual(["10 PT"])
+    })
+
+    it("lists the protocol fee the action pays, after the network fee", async () => {
+      const fees = async (action: ActionId) => (await review(action, { guards: { minOut: 1n, minOut2: 1n, maxNetCost: 1n } })).summary.fees
+      expect(await fees("deposit")).toEqual(["Network fee: up to 0.0012445 XLM"])
+      expect((await fees("mint"))[1]).toMatch(/^Tokenization fee:/)
+      expect((await fees("buy_pt"))[1]).toMatch(/^Swap fee:/)
+      expect(await fees("buy_yt")).toHaveLength(3)
+      expect((await fees("claim_yield"))[1]).toMatch(/^YT fee:/)
+    })
+
+    it("has a deadline only when the call enforces one", async () => {
+      expect((await review("deposit")).summary.deadline).toBeUndefined()
+      expect((await review("claim_yield", { guards: {} })).summary.deadline).toBeUndefined()
+      expect((await review("withdraw")).summary.deadline).toBe(Number(DEADLINE))
+    })
+  })
+})
+
+describe("isExpired", () => {
+  const at = (preparedAtMs: number) => ({ preparedAtMs, expiresAtMs: preparedAtMs + REVIEW_TTL_MS }) as Review
+
+  it("expires 60 s after preparation", () => {
+    expect(isExpired(at(1_000), 1_000)).toBe(false)
+    expect(isExpired(at(1_000), 1_000 + 59_999)).toBe(false)
+    expect(isExpired(at(1_000), 1_000 + 60_000)).toBe(true)
+  })
+
+  it("fails closed on a clock that went backwards or is not a number", () => {
+    expect(isExpired(at(1_000), 999)).toBe(true)
+    expect(isExpired(at(1_000), Number.NaN)).toBe(true)
+  })
+})
+
+describe("executeReview", () => {
+  it("signs, checks, submits and polls the reviewed transaction (ported signAndSubmit)", async () => {
+    const server = fakeRpc()
+    const r = await review("buy_pt", {}, server)
+    const sign = signWith()
+
+    const result = await executeReview({ review: r, manifest, sign, rpc: server, nowMs: r.preparedAtMs + 1_000 })
+
+    expect(sign.seen).toEqual([[r.unsignedXdr, passphrase, SOURCE]])
+    expect(server.calls.sent).toHaveLength(1)
+    expect(server.calls.sent[0].hash()).toEqual(new Transaction(r.unsignedXdr, passphrase).hash())
+    expect(server.calls.polled).toEqual([HASH])
+    expect(result).toEqual({ hash: HASH, status: "SUCCESS", output: { kind: "amount", value: 9_5000000n } })
+  })
+
+  it("refuses an expired review", async () => {
+    const server = fakeRpc()
+    const r = await review("buy_pt", {}, server)
+    const sign = signWith()
+
+    await expect(
+      executeReview({ review: r, manifest, sign, rpc: server, nowMs: r.preparedAtMs + REVIEW_TTL_MS }),
+    ).rejects.toThrow("This review is over a minute old")
+    expect(sign.seen).toEqual([])
+    expect(server.calls.sent).toEqual([])
+  })
+
+  it("refuses when the signed hash differs", async () => {
+    const server = fakeRpc()
+    const r = await review("buy_pt", {}, server)
+    // The wallet signs another transaction (another call, at another sequence) with the right key.
+    const swapped = async () => {
+      const other = new TransactionBuilder(new Account(SOURCE, "99"), { fee: BASE_FEE, networkPassphrase: passphrase })
+        .addOperation(new Contract(market.contracts.router).call("claim_yield"))
+        .setTimeout(300)
+        .build()
+      other.sign(wallet)
+      return other.toXDR()
+    }
+
+    await expect(executeReview({ review: r, manifest, sign: swapped, rpc: server })).rejects.toThrow(
+      "does not match the reviewed unsigned transaction",
+    )
+    expect(server.calls.sent).toEqual([])
+  })
+
+  it("refuses a signature from another account", async () => {
+    const server = fakeRpc()
+    const r = await review("buy_pt", {}, server)
+    await expect(executeReview({ review: r, manifest, sign: signWith(Keypair.random()), rpc: server })).rejects.toThrow(
+      "not signed by the connected wallet account",
+    )
+    expect(server.calls.sent).toEqual([])
+  })
+
+  it("decodes the output on success", async () => {
+    const server = fakeRpc({
+      async getTransaction() {
+        return {
+          status: "SUCCESS",
+          returnValue: nativeToScVal({ pt_minted: 9_9000000n, yt_minted: 9_9000000n, fee_shares: 1000n }),
+        }
+      },
+    })
+    const r = await review("mint", {}, server)
+    const result = await executeReview({ review: r, manifest, sign: signWith(), rpc: server })
+    expect(result.status).toBe("SUCCESS")
+    expect(result.output).toEqual({ kind: "mint", pt_minted: 9_9000000n, yt_minted: 9_9000000n, fee_shares: 1000n })
+    if (result.output?.kind !== "mint") throw new Error("expected a mint output")
+    expect(result.output.pt_minted).toBe(9_9000000n)
+  })
+
+  it("keeps the hash and status when the return value cannot be decoded", async () => {
+    const server = fakeRpc({
+      async getTransaction() {
+        return { status: "SUCCESS", returnValue: { type: "scvMap", map: [null], value: [null] } as unknown as xdr.ScVal }
+      },
+    })
+    const r = await review("mint", {}, server)
+    const result = await executeReview({ review: r, manifest, sign: signWith(), rpc: server })
+    expect(result).toMatchObject({ hash: HASH, status: "SUCCESS", output: undefined })
+    expect(result.decodeError).toMatch(/could not be decoded/)
+  })
+
+  it("keeps the hash and status when the return value has the wrong shape", async () => {
+    // mint returns a MintResult; an i128 is not one.
+    const r = await review("mint")
+    const result = await executeReview({ review: r, manifest, sign: signWith(), rpc: fakeRpc() })
+    expect(result).toMatchObject({ hash: HASH, status: "SUCCESS", output: undefined })
+    expect(result.decodeError).toMatch(/Unexpected simulation result for mint/)
+  })
+
+  it("keeps the hash and status when a success returns no value", async () => {
+    const server = fakeRpc({
+      async getTransaction() {
+        return { status: "SUCCESS" }
+      },
+    })
+    const result = await executeReview({ review: await review("mint", {}, server), manifest, sign: signWith(), rpc: server })
+    expect(result).toMatchObject({ hash: HASH, status: "SUCCESS", output: undefined })
+    expect(result.decodeError).toMatch(/returned no value/)
+  })
+
+  it("reports a failed transaction without an output", async () => {
+    const server = fakeRpc({
+      async getTransaction() {
+        return { status: "FAILED" }
+      },
+    })
+    const result = await executeReview({ review: await review("buy_pt", {}, server), manifest, sign: signWith(), rpc: server })
+    expect(result).toEqual({ hash: HASH, status: "FAILED" })
+  })
+
+  it("keeps the hash when polling fails after submission", async () => {
+    const server = fakeRpc({
+      async getTransaction() {
+        throw new Error("rate limited")
+      },
+    })
+    const result = await executeReview({ review: await review("buy_pt", {}, server), manifest, sign: signWith(), rpc: server })
+    expect(result).toMatchObject({ hash: HASH, status: "NOT_FOUND" })
+    expect(result.pollError).toMatch(/rate limited/)
+  })
+
+  it("polls a duplicate submission", async () => {
+    const server = fakeRpc({
+      async sendTransaction() {
+        return { status: "DUPLICATE", hash: HASH }
+      },
+    })
+    const result = await executeReview({ review: await review("buy_pt", {}, server), manifest, sign: signWith(), rpc: server })
+    expect(result.status).toBe("SUCCESS")
+    expect(server.calls.polled).toEqual([HASH])
+  })
+
+  it("refuses a submission the network did not accept", async () => {
+    const server = fakeRpc({
+      async sendTransaction() {
+        return { status: "TRY_AGAIN_LATER", hash: HASH }
+      },
+    })
+    await expect(
+      executeReview({ review: await review("buy_pt", {}, server), manifest, sign: signWith(), rpc: server }),
+    ).rejects.toThrow("The network is busy and did not accept the transaction")
+    expect(server.calls.polled).toEqual([])
+  })
+})
+
+describe("prepareRestore", () => {
+  const RESTORE_FEE = 777n
+
+  function restoreSimulation() {
+    const transactionData = new SorobanDataBuilder().setResourceFee(RESTORE_FEE.toString()).build().toXdr("base64")
+    return rpc.parseRawSimulation({
+      id: "1",
+      latestLedger: 90,
+      events: [],
+      minResourceFee: "50",
+      transactionData,
+      results: [{ auth: [], xdr: i128(1n).toXdr("base64") }],
+      restorePreamble: { minResourceFee: RESTORE_FEE.toString(), transactionData },
+    })
+  }
+
+  it("restore-required yields a restore transaction", async () => {
+    const simulated: Transaction[] = []
+    const server = fakeRpc({
+      async simulateTransaction(tx) {
+        simulated.push(tx)
+        return restoreSimulation()
+      },
+    })
+    const invocation = invocationFor(manifest, input("buy_pt"))
+    const restore = await prepareRestore({ manifest, source: SOURCE, invocation, rpc: server })
+
+    // The archived entries are found by simulating the action itself, as the user.
+    expect(simulated).toHaveLength(1)
+    expect(simulated[0].source).toBe(SOURCE)
+
+    const tx = new Transaction(restore.unsignedXdr, passphrase)
+    expect(tx.operations).toHaveLength(1)
+    expect(tx.operations[0].type).toBe("restoreFootprint")
+    expect(tx.source).toBe(SOURCE)
+    expect(tx.sequence).toBe("42")
+    expect(tx.fee).toBe((BigInt(BASE_FEE) + RESTORE_FEE).toString())
+    expect(restore.unsignedXdrHash).toBe(hashLike(restore.unsignedXdr))
+  })
+
+  it("refuses when nothing needs restoring", async () => {
+    const invocation = invocationFor(manifest, input("buy_pt"))
+    await expect(prepareRestore({ manifest, source: SOURCE, invocation, rpc: fakeRpc() })).rejects.toThrow(
+      "No contract data needs restoring",
+    )
+  })
+
+  it("signs and submits the restore through the same checks", async () => {
+    const server = fakeRpc({
+      async simulateTransaction() {
+        return restoreSimulation()
+      },
+      async getTransaction() {
+        return { status: "SUCCESS" }
+      },
+    })
+    const invocation = invocationFor(manifest, input("buy_pt"))
+    const restore = await prepareRestore({ manifest, source: SOURCE, invocation, rpc: server })
+
+    await expect(
+      signAndSubmit({ unsignedXdr: restore.unsignedXdr, manifest, source: SOURCE, sign: signWith(Keypair.random()), rpc: server }),
+    ).rejects.toThrow("not signed by the connected wallet account")
+    expect(server.calls.sent).toEqual([])
+
+    const result = await signAndSubmit({ unsignedXdr: restore.unsignedXdr, manifest, source: SOURCE, sign: signWith(), rpc: server })
+    expect(result).toMatchObject({ hash: HASH, status: "SUCCESS" })
+    expect(server.calls.sent[0].operations[0].type).toBe("restoreFootprint")
+  })
+})
