@@ -5,6 +5,7 @@ import {
   BASE_FEE,
   Contract,
   Keypair,
+  Operation,
   SorobanDataBuilder,
   StrKey,
   Transaction,
@@ -19,7 +20,7 @@ import testnetJson from "@/config/manifests/testnet.json"
 import { ACTION_META, invocationFor, type ActionId, type ActionInput, type GuardValues } from "../actions"
 import { hashLike } from "../hash"
 import { parseManifest } from "../manifest"
-import { createRpcServer, transactionEnvelopeHash } from "../stellar"
+import { SubmissionRejectedError, createRpcServer, transactionEnvelopeHash } from "../stellar"
 import {
   MAX_TX_FEE_STROOPS,
   REVIEW_TTL_MS,
@@ -28,6 +29,7 @@ import {
   isExpired,
   prepareRestore,
   prepareReview,
+  type RestoreReview,
   type Review,
   type ReviewRpcServer,
 } from "../review"
@@ -568,6 +570,129 @@ describe("executeReview", () => {
     expect(server.calls.polled).toEqual([])
   })
 
+  describe("re-checks the review it is handed, before signing (R31)", () => {
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    async function refusedBeforeSigning(r: Review, server: ReturnType<typeof fakeRpc>, message: string, nowMs?: number) {
+      const sign = signWith()
+      await expect(executeReview({ review: r, manifest, sign, rpc: server, nowMs })).rejects.toThrow(message)
+      expect(sign.seen).toEqual([])
+      expect(server.calls.sent).toEqual([])
+    }
+    const changed = (detail: string) => `This review was changed after it was prepared (${detail}). Prepare it again before signing.`
+
+    it("refuses a review whose floor was changed to 0", async () => {
+      const server = fakeRpc()
+      const r = await review("buy_pt", {}, server)
+      r.input.guards.minOut = 0n
+      await refusedBeforeSigning(r, server, "zero floor")
+    })
+
+    it("refuses a review whose call was changed", async () => {
+      const server = fakeRpc()
+      const r = await review("buy_pt", {}, server)
+      r.invocation.args[2] = { type: "i128", value: 1n }
+      await refusedBeforeSigning(r, server, changed("the call it describes"))
+
+      // Input and description changed together: the transaction no longer makes that call.
+      const r2 = await review("buy_pt", {}, server)
+      r2.input.amount = 1n
+      r2.invocation = invocationFor(manifest, r2.input)
+      await refusedBeforeSigning(r2, server, changed("its transaction does not make the reviewed call"))
+    })
+
+    it("refuses a swapped XDR", async () => {
+      const server = fakeRpc()
+      const r = await review("buy_pt", {}, server)
+      const other = await review("buy_pt", { amount: 5_0000000n }, server)
+      r.unsignedXdr = other.unsignedXdr
+      r.unsignedXdrHash = other.unsignedXdrHash
+      await refusedBeforeSigning(r, server, changed("its transaction does not make the reviewed call"))
+    })
+
+    it("refuses an XDR for the same call that prepareReview did not issue for this review", async () => {
+      vi.useFakeTimers({ toFake: ["Date"] })
+      const server = fakeRpc()
+      const r = await review("buy_pt", {}, server)
+      vi.setSystemTime(Date.now() + 5_000)
+      // Same call, source and fee; other time bounds.
+      const twin = await review("buy_pt", {}, server)
+      expect(twin.unsignedXdr).not.toBe(r.unsignedXdr)
+      r.unsignedXdr = twin.unsignedXdr
+      r.unsignedXdrHash = twin.unsignedXdrHash
+      await refusedBeforeSigning(r, server, changed("its transaction is not the one that was prepared"))
+    })
+
+    it("refuses a changed hash or fee field", async () => {
+      const server = fakeRpc()
+      const r = await review("buy_pt", {}, server)
+      r.unsignedXdrHash = hashLike("something else")
+      await refusedBeforeSigning(r, server, changed("its transaction is not the one that was prepared"))
+
+      const r2 = await review("buy_pt", {}, server)
+      r2.fee = BASE_FEE
+      await refusedBeforeSigning(r2, server, changed("its fee"))
+    })
+
+    it("refuses an object prepareReview did not return", async () => {
+      const server = fakeRpc()
+      const r = await review("buy_pt", {}, server)
+      await refusedBeforeSigning({ ...r }, server, "This review was not prepared by this app. Prepare it again before signing.")
+    })
+
+    it("does not trust a self-reported preparation time or nowMs", async () => {
+      vi.useFakeTimers({ toFake: ["Date"] })
+      const server = fakeRpc()
+      const r = await review("buy_pt", {}, server)
+      const issuedAt = r.preparedAtMs
+      vi.setSystemTime(issuedAt + REVIEW_TTL_MS)
+
+      r.preparedAtMs = Date.now()
+      r.expiresAtMs = Date.now() + REVIEW_TTL_MS
+      await refusedBeforeSigning(r, server, changed("its preparation time"))
+
+      r.preparedAtMs = issuedAt
+      // nowMs cannot hold time back: the system clock says the review has expired.
+      await refusedBeforeSigning(r, server, "This review is over a minute old", issuedAt + 1)
+    })
+
+    it("re-checks expiry once the wallet has signed, and then submits nothing", async () => {
+      vi.useFakeTimers({ toFake: ["Date"] })
+      const server = fakeRpc()
+      const r = await review("buy_pt", {}, server)
+      const slowWallet = async (unsignedXdr: string, networkPassphrase: string) => {
+        vi.setSystemTime(Date.now() + REVIEW_TTL_MS) // the user took a minute to approve
+        return signWith()(unsignedXdr, networkPassphrase, SOURCE)
+      }
+      await expect(executeReview({ review: r, manifest, sign: slowWallet, rpc: server })).rejects.toThrow(
+        "This review is over a minute old",
+      )
+      expect(server.calls.sent).toEqual([])
+    })
+
+    it("an ERROR or TRY_AGAIN_LATER rejection carries the locally computed hash", async () => {
+      const rejectedWith = async (response: Awaited<ReturnType<ReviewRpcServer["sendTransaction"]>>) => {
+        const server = fakeRpc({ sendTransaction: async () => response })
+        const r = await review("buy_pt", {}, server)
+        const error = await executeReview({ review: r, manifest, sign: signWith(), rpc: server }).catch((e: unknown) => e)
+        expect(error).toBeInstanceOf(SubmissionRejectedError)
+        expect((error as SubmissionRejectedError).hash).toBe(hashOf(r.unsignedXdr))
+        expect(server.calls.polled).toEqual([])
+      }
+      await rejectedWith({
+        status: "ERROR",
+        errorResult: new xdr.TransactionResult({
+          feeCharged: 100n,
+          result: xdr.TransactionResultResult.txBadSeq(),
+          ext: xdr.TransactionResultExt.v0(),
+        }),
+      })
+      await rejectedWith({ status: "TRY_AGAIN_LATER", hash: HASH })
+    })
+  })
+
   describe("never loses the hash of a transaction that may have landed (R30)", () => {
     afterEach(() => {
       vi.useRealTimers()
@@ -834,5 +959,68 @@ describe("executeRestore", () => {
     ).rejects.toThrow("This restore was prepared over a minute ago")
     expect(sign.seen).toEqual([])
     expect(server.calls.sent).toEqual([])
+  })
+
+  describe("re-checks the restore it is handed, before signing (R31)", () => {
+    async function refusedBeforeSigning(restore: RestoreReview, server: ReturnType<typeof fakeRpc>, message: string) {
+      const sign = signWith()
+      await expect(executeRestore({ restore, manifest, sign, rpc: server })).rejects.toThrow(message)
+      expect(sign.seen).toEqual([])
+      expect(server.calls.sent).toEqual([])
+    }
+    const changed = (detail: string) => `This restore was changed after it was prepared (${detail}). Prepare it again before signing.`
+
+    it("refuses a hand-built RestoreReview carrying an invoke XDR", async () => {
+      const server = restoreServer()
+      const r = await review("buy_pt", { guards: { minOut: 1n } }, server)
+      const handBuilt: RestoreReview = {
+        source: SOURCE,
+        unsignedXdr: r.unsignedXdr,
+        unsignedXdrHash: r.unsignedXdrHash,
+        fee: r.fee,
+        preparedAtMs: Date.now(),
+        expiresAtMs: Date.now() + REVIEW_TTL_MS,
+      }
+      await refusedBeforeSigning(handBuilt, server, "This restore was not prepared by this app. Prepare it again before signing.")
+    })
+
+    it("refuses an issued restore whose XDR was swapped for an invoke", async () => {
+      const server = restoreServer()
+      const restore = await prepare(server)
+      const r = await review("buy_pt", { guards: { minOut: 1n } }, server)
+      restore.unsignedXdr = r.unsignedXdr
+      restore.unsignedXdrHash = r.unsignedXdrHash
+      restore.fee = r.fee
+      await refusedBeforeSigning(restore, server, changed("its transaction is not a single restoreFootprint"))
+    })
+
+    it("refuses a restore whose source, fee or hash changed", async () => {
+      const server = restoreServer()
+      const bySource = await prepare(server)
+      bySource.source = Keypair.random().publicKey()
+      await refusedBeforeSigning(bySource, server, changed("its transaction has another source account"))
+
+      const byFee = await prepare(server)
+      byFee.fee = BASE_FEE
+      await refusedBeforeSigning(byFee, server, changed("its fee"))
+
+      const byHash = await prepare(server)
+      byHash.unsignedXdrHash = hashLike("something else")
+      await refusedBeforeSigning(byHash, server, changed("its transaction is not the one that was prepared"))
+    })
+
+    it("refuses a restore transaction with a fee above the cap", async () => {
+      const server = restoreServer()
+      const restore = await prepare(server)
+      const costly = new TransactionBuilder(new Account(SOURCE, SEQUENCE), { fee: "200000000", networkPassphrase: passphrase })
+        .setSorobanData(new SorobanDataBuilder().build())
+        .addOperation(Operation.restoreFootprint({}))
+        .setTimeout(300)
+        .build()
+      restore.unsignedXdr = costly.toXDR()
+      restore.unsignedXdrHash = hashLike(restore.unsignedXdr)
+      restore.fee = costly.fee
+      await refusedBeforeSigning(restore, server, "The restore asks for a network fee of 20 XLM, above the 10 XLM this app signs")
+    })
   })
 })

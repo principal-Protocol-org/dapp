@@ -22,9 +22,9 @@ import {
   BASE_FEE,
   Operation,
   SorobanDataBuilder,
+  Transaction,
   TransactionBuilder,
   rpc,
-  type Transaction,
   type xdr,
 } from "@stellar/stellar-sdk"
 import { ACTION_META, invocationFor, type ActionId, type ActionInput, type GuardValues } from "./actions"
@@ -48,6 +48,14 @@ import type { Manifest, Market } from "./types"
 
 /** A prepared review expires 60 s after preparation (shared context). */
 export const REVIEW_TTL_MS = 60_000
+
+/**
+ * R31: what `prepareReview` and `prepareRestore` issued, keyed by the very object they returned.
+ * `executeReview` and `executeRestore` refuse any other object, and read the preparation time and
+ * the XDR hash from here, never from the object they are handed.
+ */
+type Issued = { preparedAtMs: number; unsignedXdrHash: string }
+const issued = new WeakMap<object, Issued>()
 
 /** The most this app ever asks the user to sign as a network fee: 10 XLM, in stroops (R29). */
 export const MAX_TX_FEE_STROOPS = 100_000_000n
@@ -219,17 +227,96 @@ function assertPreparedMatches(built: Transaction, prepared: Transaction): void 
     )
   }
 
-  // Every authorization must be for this exact call: same contract, function and arguments.
-  const operation = prepared.operations[0]
-  const auth = operation.type === "invokeHostFunction" ? (operation.auth ?? []) : []
-  const expectedXdr = expected.toXdr("base64")
-  for (const entry of auth) {
+  if (!authorizesOnly(prepared, expected.toXdr("base64"))) {
+    throw new Error(
+      "RPC added an authorization for something other than this call. Refusing to review it; try again or use another RPC.",
+    )
+  }
+}
+
+/** Every authorization in the transaction is for exactly this call: same contract, function and arguments. */
+function authorizesOnly(transaction: Transaction, callXdr: string): boolean {
+  const [operation] = transaction.operations
+  const auth = operation?.type === "invokeHostFunction" ? (operation.auth ?? []) : []
+  return auth.every((entry) => {
     const fn = entry.rootInvocation.function
-    if (fn.type !== "sorobanAuthorizedFunctionTypeContractFn" || fn.contractFn.toXdr("base64") !== expectedXdr) {
-      throw new Error(
-        "RPC added an authorization for something other than this call. Refusing to review it; try again or use another RPC.",
-      )
-    }
+    return fn.type === "sorobanAuthorizedFunctionTypeContractFn" && fn.contractFn.toXdr("base64") === callXdr
+  })
+}
+
+function decodeTransaction(unsignedXdr: string, networkPassphrase: string): Transaction | undefined {
+  try {
+    return new Transaction(unsignedXdr, networkPassphrase)
+  } catch {
+    return undefined
+  }
+}
+
+/** The `InvokeContractArgs` XDR of `invocation`, as the transaction carries it; undefined if it cannot be built. */
+function callXdrOf(manifest: Manifest, source: string, invocation: ContractInvocation): string | undefined {
+  try {
+    const envelope = buildInvocationEnvelope({ source, sequence: "0", networkPassphrase: manifest.networkPassphrase, invocation })
+    return invokedContractArgs(envelope)?.toXdr("base64")
+  } catch {
+    return undefined
+  }
+}
+
+/** The issuance record of an object `prepare*` returned; refuses anything else (R31). */
+function issuance(subject: object, preparedAtMs: number, what: "review" | "restore"): Issued {
+  const record = issued.get(subject)
+  if (!record) throw new Error(`This ${what} was not prepared by this app. Prepare it again before signing.`)
+  if (record.preparedAtMs !== preparedAtMs) throw changedSince(what, "its preparation time")
+  return record
+}
+
+function changedSince(what: "review" | "restore", detail: string): Error {
+  return new Error(`This ${what} was changed after it was prepared (${detail}). Prepare it again before signing.`)
+}
+
+/** The caller's clock cannot hold time back: the later of `nowMs` and the system clock. */
+function currentTime(nowMs: number | undefined): number {
+  return Math.max(nowMs ?? Number.NEGATIVE_INFINITY, Date.now())
+}
+
+/**
+ * R31: re-checks, right before signing, that the review still describes exactly the transaction
+ * `prepareReview` issued: no zero floor (R5), the XDR makes the call `input` maps to, from
+ * `input.source`, with no foreign authorization, at the reviewed fee (within the cap), and its hash
+ * is both the reviewed one and the issued one.
+ */
+function assertReviewIntact(review: Review, manifest: Manifest, record: Issued): void {
+  assertNoZeroFloor(review.input)
+  const expected = callXdrOf(manifest, review.input.source, invocationFor(manifest, review.input))
+  if (expected === undefined || callXdrOf(manifest, review.input.source, review.invocation) !== expected) {
+    throw changedSince("review", "the call it describes")
+  }
+  const tx = decodeTransaction(review.unsignedXdr, manifest.networkPassphrase)
+  if (!tx || tx.operations.length !== 1 || invokedContractArgs(tx)?.toXdr("base64") !== expected) {
+    throw changedSince("review", "its transaction does not make the reviewed call")
+  }
+  if (tx.source !== review.input.source) throw changedSince("review", "its transaction has another source account")
+  assertFeeCapped(BigInt(tx.fee), "The transaction to sign")
+  if (tx.fee !== review.fee) throw changedSince("review", "its fee")
+  if (!authorizesOnly(tx, expected)) throw changedSince("review", "its transaction authorizes another call")
+  const hash = hashLike(review.unsignedXdr)
+  if (hash !== review.unsignedXdrHash || hash !== record.unsignedXdrHash) {
+    throw changedSince("review", "its transaction is not the one that was prepared")
+  }
+}
+
+/** R31: the restore is still exactly the single `restoreFootprint` transaction `prepareRestore` issued. */
+function assertRestoreIntact(restore: RestoreReview, manifest: Manifest, record: Issued): void {
+  const tx = decodeTransaction(restore.unsignedXdr, manifest.networkPassphrase)
+  if (!tx || tx.operations.length !== 1 || tx.operations[0].type !== "restoreFootprint") {
+    throw changedSince("restore", "its transaction is not a single restoreFootprint")
+  }
+  if (tx.source !== restore.source) throw changedSince("restore", "its transaction has another source account")
+  assertFeeCapped(BigInt(tx.fee), "The restore")
+  if (tx.fee !== restore.fee) throw changedSince("restore", "its fee")
+  const hash = hashLike(restore.unsignedXdr)
+  if (hash !== restore.unsignedXdrHash || hash !== record.unsignedXdrHash) {
+    throw changedSince("restore", "its transaction is not the one that was prepared")
   }
 }
 
@@ -360,7 +447,7 @@ export async function prepareReview(p: { manifest: Manifest; input: ActionInput;
 
   const unsignedXdr = prepared.toXDR()
   const preparedAtMs = Date.now()
-  return {
+  const review: Review = {
     input,
     invocation,
     unsignedXdr,
@@ -371,6 +458,8 @@ export async function prepareReview(p: { manifest: Manifest; input: ActionInput;
     summary: summarize(market, input, prepared.fee),
     callTree: CALL_TREES[input.action],
   }
+  issued.set(review, { preparedAtMs, unsignedXdrHash: review.unsignedXdrHash })
+  return review
 }
 
 /** True once 60 s have passed since preparation. A clock that went backwards, or NaN, also expires it. */
@@ -403,10 +492,13 @@ async function signAndSubmit(p: {
   source: string
   sign: SignTransaction
   rpc?: ReviewRpcServer
+  /** Runs once the wallet has signed, before anything is submitted: it may refuse (R31: expiry). */
+  afterSign: () => void
 }): Promise<SubmittedTransaction> {
   const { manifest } = p
   const server = p.rpc ?? createRpcServer(manifest.rpcUrl)
   const signedXdr = await p.sign(p.unsignedXdr, manifest.networkPassphrase, p.source)
+  p.afterSign()
   assertSignedTransactionMatchesReview({
     unsignedXdr: p.unsignedXdr,
     signedXdr,
@@ -426,6 +518,7 @@ async function signAndSubmit(p: {
     if (submitted.status === "TRY_AGAIN_LATER") {
       throw new SubmissionRejectedError(
         "The network is busy and did not accept the transaction. Nothing was submitted; review it again in a moment.",
+        hash,
       )
     }
   } catch (error) {
@@ -461,6 +554,10 @@ async function signAndSubmit(p: {
  * Executes a prepared review: refuses it once expired, then signs, checks, submits, polls and
  * decodes. After SUCCESS a return value that cannot be read gives `output: undefined` and a
  * `decodeError`, never a throw: the hash and status of an on-chain transaction are not lost.
+ *
+ * R31: only a review `prepareReview` returned is executed, its expiry counts from the issued time,
+ * it is re-checked in full before signing (`assertReviewIntact`), and expiry is checked again once
+ * the wallet has signed, before submitting.
  */
 export async function executeReview(p: {
   review: Review
@@ -470,11 +567,16 @@ export async function executeReview(p: {
   nowMs?: number
 }): Promise<TxResult> {
   const { review } = p
-  if (isExpired(review, p.nowMs ?? Date.now())) {
-    throw new Error(
-      "This review is over a minute old. Prepare it again to re-check the live conditions before signing.",
-    )
+  const record = issuance(review, review.preparedAtMs, "review")
+  const fresh = () => {
+    if (isExpired(record, currentTime(p.nowMs))) {
+      throw new Error(
+        "This review is over a minute old. Prepare it again to re-check the live conditions before signing.",
+      )
+    }
   }
+  fresh()
+  assertReviewIntact(review, p.manifest, record)
 
   const sent = await signAndSubmit({
     unsignedXdr: review.unsignedXdr,
@@ -482,6 +584,7 @@ export async function executeReview(p: {
     source: review.input.source,
     sign: p.sign,
     rpc: p.rpc,
+    afterSign: fresh,
   })
   if (sent.status !== "SUCCESS") {
     return sent.pollError ? { hash: sent.hash, status: sent.status, pollError: sent.pollError } : { hash: sent.hash, status: sent.status }
@@ -593,7 +696,7 @@ export async function prepareRestore(p: {
     .build()
   const unsignedXdr = restore.toXDR()
   const preparedAtMs = Date.now()
-  return {
+  const prepared: RestoreReview = {
     source,
     unsignedXdr,
     unsignedXdrHash: hashLike(unsignedXdr),
@@ -601,9 +704,15 @@ export async function prepareRestore(p: {
     preparedAtMs,
     expiresAtMs: preparedAtMs + REVIEW_TTL_MS,
   }
+  issued.set(prepared, { preparedAtMs, unsignedXdrHash: prepared.unsignedXdrHash })
+  return prepared
 }
 
-/** Signs and submits a prepared restore under the same rules as a review: 60 s, exact transaction. */
+/**
+ * Signs and submits a prepared restore under the same rules as a review (R31): only a restore
+ * `prepareRestore` returned, 60 s from the issued time (checked again after signing), and still
+ * exactly the single `restoreFootprint` transaction it issued, from `source`, at its fee.
+ */
 export async function executeRestore(p: {
   restore: RestoreReview
   manifest: Manifest
@@ -612,15 +721,22 @@ export async function executeRestore(p: {
   nowMs?: number
 }): Promise<TxResult> {
   const { restore } = p
-  if (isExpired(restore, p.nowMs ?? Date.now())) {
-    throw new Error("This restore was prepared over a minute ago. Prepare it again before signing.")
+  const record = issuance(restore, restore.preparedAtMs, "restore")
+  const fresh = () => {
+    if (isExpired(record, currentTime(p.nowMs))) {
+      throw new Error("This restore was prepared over a minute ago. Prepare it again before signing.")
+    }
   }
+  fresh()
+  assertRestoreIntact(restore, p.manifest, record)
+
   const sent = await signAndSubmit({
     unsignedXdr: restore.unsignedXdr,
     manifest: p.manifest,
     source: restore.source,
     sign: p.sign,
     rpc: p.rpc,
+    afterSign: fresh,
   })
   return sent.pollError ? { hash: sent.hash, status: sent.status, pollError: sent.pollError } : { hash: sent.hash, status: sent.status }
 }

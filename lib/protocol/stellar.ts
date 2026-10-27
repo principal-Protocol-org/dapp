@@ -221,7 +221,15 @@ export async function simulateContractRead<T = unknown>(params: {
 }
 
 /** The network refused the submission (status ERROR): the transaction was not accepted. */
-export class SubmissionRejectedError extends Error {}
+export class SubmissionRejectedError extends Error {
+  /** Hash of the refused transaction, computed locally from its envelope (R31). */
+  readonly hash?: string;
+  constructor(message: string, hash?: string) {
+    super(message);
+    this.name = "SubmissionRejectedError";
+    this.hash = hash;
+  }
+}
 
 const TX_RESULT_REASONS: Partial<Record<string, string>> = {
   txTooLate: "it reached the network after its time window closed; prepare it again",
@@ -289,6 +297,7 @@ export async function submitSignedTransaction(params: {
         : "";
     throw new SubmissionRejectedError(
       `Soroban submission failed: the network rejected the transaction${detail}. Nothing was executed.`,
+      bytesToHex(transaction.hash()),
     );
   }
 
