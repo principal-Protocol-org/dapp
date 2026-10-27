@@ -12,6 +12,7 @@ const manifest = parseManifest(testnetJson)
 const market = manifest.markets[0]
 const c = market.contracts
 const sac = market.underlying.sac
+const VERIFIER = market.contracts.router
 const ACCOUNT = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF"
 
 type Calls = { key: string; args: ScArg[] }[]
@@ -69,7 +70,7 @@ const trusted = (authorized: boolean | undefined): Live<HorizonAccount | null> =
 describe("fetchAccountState", () => {
   it("ports the balance reads: SEP-41 balance, SYWrapper balance_of, pool lp_balance", async () => {
     const calls: Calls = []
-    const s = await fetchAccountState(fakeReader(healthy(), calls), horizonWith(trusted(true)), manifest, market.marketId, ACCOUNT)
+    const s = await fetchAccountState(fakeReader(healthy(), calls), horizonWith(trusted(true)), manifest, market.marketId, ACCOUNT, "sac")
     expect(s.underlying).toMatchObject({ status: "live", value: 1n })
     expect(s.sy).toMatchObject({ value: 2n })
     expect(s.pt).toMatchObject({ value: 3n })
@@ -91,7 +92,7 @@ describe("fetchAccountState", () => {
 
   it("checks per-asset permissioning for the PT and the YT token addresses", async () => {
     const calls: Calls = []
-    await fetchAccountState(fakeReader(healthy(), calls), horizonWith(trusted(true)), manifest, market.marketId, ACCOUNT)
+    await fetchAccountState(fakeReader(healthy(), calls), horizonWith(trusted(true)), manifest, market.marketId, ACCOUNT, "sac")
     const perAsset = calls.filter((x) => x.key.endsWith(".is_allowed_for_asset")).map((x) => x.args[1])
     expect(perAsset).toEqual(
       expect.arrayContaining([
@@ -104,14 +105,14 @@ describe("fetchAccountState", () => {
   it("unavailable read is Live unavailable not zero", async () => {
     const table = healthy()
     table[`${c.pt}.balance`] = new Error("rpc down")
-    const s = await fetchAccountState(fakeReader(table), horizonWith(trusted(true)), manifest, market.marketId, ACCOUNT)
+    const s = await fetchAccountState(fakeReader(table), horizonWith(trusted(true)), manifest, market.marketId, ACCOUNT, "sac")
     expect(s.pt).toEqual({ status: "unavailable", error: "rpc down" })
     expect(s.underlying.status).toBe("live")
   })
 
   it("trustline none vs unauthorized vs authorized", async () => {
     const run = (a: Live<HorizonAccount | null>) =>
-      fetchAccountState(fakeReader(healthy()), horizonWith(a), manifest, market.marketId, ACCOUNT)
+      fetchAccountState(fakeReader(healthy()), horizonWith(a), manifest, market.marketId, ACCOUNT, "sac")
     const none = await run({ status: "live", ledger: 1, value: { balances: [{ asset_type: "native", balance: "1" }] } })
     expect(none.trustline).toMatchObject({ status: "live", value: "none" })
     expect(none.accountExists).toMatchObject({ value: true })
@@ -134,12 +135,13 @@ describe("fetchAccountState", () => {
       manifest,
       market.marketId,
       ACCOUNT,
+      "sac",
     )
     expect(s.trustline).toMatchObject({ value: "none" })
   })
 
   it("a 404 account does not exist and has no trustline", async () => {
-    const s = await fetchAccountState(fakeReader(healthy()), horizonWith({ status: "live", ledger: 1, value: null }), manifest, market.marketId, ACCOUNT)
+    const s = await fetchAccountState(fakeReader(healthy()), horizonWith({ status: "live", ledger: 1, value: null }), manifest, market.marketId, ACCOUNT, "sac")
     expect(s.accountExists).toMatchObject({ status: "live", value: false })
     expect(s.trustline).toMatchObject({ status: "live", value: "none" })
   })
@@ -151,27 +153,28 @@ describe("fetchAccountState", () => {
       manifest,
       market.marketId,
       ACCOUNT,
+      "sac",
     )
     expect(s.accountExists).toEqual({ status: "unavailable", error: "horizon 503" })
     expect(s.trustline).toEqual({ status: "unavailable", error: "horizon 503" })
   })
 
   it("a trustline entry without is_authorized is unavailable, not authorized", async () => {
-    const s = await fetchAccountState(fakeReader(healthy()), horizonWith(trusted(undefined)), manifest, market.marketId, ACCOUNT)
+    const s = await fetchAccountState(fakeReader(healthy()), horizonWith(trusted(undefined)), manifest, market.marketId, ACCOUNT, "sac")
     expect(s.trustline.status).toBe("unavailable")
   })
 
   it("SAC authorized() trapping with a contract error means not authorized", async () => {
     const table = healthy()
     table[`${sac}.authorized`] = new Error("HostError: Error(Contract, #12)\n trustline entry is missing")
-    const s = await fetchAccountState(fakeReader(table), horizonWith(trusted(true)), manifest, market.marketId, ACCOUNT)
+    const s = await fetchAccountState(fakeReader(table), horizonWith(trusted(true)), manifest, market.marketId, ACCOUNT, "sac")
     expect(s.sacAuthorized).toMatchObject({ status: "live", value: false })
   })
 
   it("SAC authorized() failing for any other reason is unavailable", async () => {
     const table = healthy()
     table[`${sac}.authorized`] = new Error("Request failed with status code 429")
-    const s = await fetchAccountState(fakeReader(table), horizonWith(trusted(true)), manifest, market.marketId, ACCOUNT)
+    const s = await fetchAccountState(fakeReader(table), horizonWith(trusted(true)), manifest, market.marketId, ACCOUNT, "sac")
     expect(s.sacAuthorized.status).toBe("unavailable")
   })
 
@@ -180,31 +183,52 @@ describe("fetchAccountState", () => {
     const table = healthy()
     delete table[`${sac}.authorized`]
     table[`${sac}.is_frozen`] = false
-    table[`${sac}.identity_verifier`] = "CVERIFIER"
-    table["CVERIFIER.verify_identity"] = undefined
+    table[`${sac}.identity_verifier`] = VERIFIER
+    table[`${VERIFIER}.verify_identity`] = undefined
     const s = await fetchAccountState(fakeReader(table, calls), horizonWith(trusted(true)), manifest, market.marketId, ACCOUNT, "sep57")
     expect(s.sep57).toEqual({
       frozen: { status: "live", value: false, ledger: 9 },
       identityVerified: { status: "live", value: true, ledger: 9 },
     })
     expect(calls.some((x) => x.key === `${sac}.authorized`)).toBe(false)
-    expect(calls.find((x) => x.key === "CVERIFIER.verify_identity")?.args).toEqual([{ type: "address", value: ACCOUNT }])
+    expect(calls.find((x) => x.key === `${VERIFIER}.verify_identity`)?.args).toEqual([{ type: "address", value: ACCOUNT }])
   })
 
   it("sep57 identity: a contract revert is not verified, a transport failure is unavailable", async () => {
     const mk = (err: Error) => {
       const table = healthy()
       table[`${sac}.is_frozen`] = false
-      table[`${sac}.identity_verifier`] = "CVERIFIER"
-      table["CVERIFIER.verify_identity"] = err
+      table[`${sac}.identity_verifier`] = VERIFIER
+      table[`${VERIFIER}.verify_identity`] = err
       return fetchAccountState(fakeReader(table), horizonWith(trusted(true)), manifest, market.marketId, ACCOUNT, "sep57")
     }
     expect((await mk(new Error("HostError: Error(Contract, #4)"))).sep57?.identityVerified).toMatchObject({ status: "live", value: false })
     expect((await mk(new Error("timeout of 20000ms exceeded"))).sep57?.identityVerified.status).toBe("unavailable")
   })
 
+  it("archival and storage failures on authorized() are unavailable, not false", async () => {
+    for (const msg of [
+      "Contract read requires restoring archived ledger entries before it can be queried.",
+      "HostError: Error(Storage, MissingValue)",
+      "HostError: Error(Budget, ExceededLimit)",
+    ]) {
+      const table = healthy()
+      table[`${sac}.authorized`] = new Error(msg)
+      const s = await fetchAccountState(fakeReader(table), horizonWith(trusted(true)), manifest, market.marketId, ACCOUNT, "sac")
+      expect(s.sacAuthorized.status).toBe("unavailable")
+    }
+  })
+
+  it("an unknown kind (null) reads neither authorized nor the sep57 views", async () => {
+    const calls: Calls = []
+    const s = await fetchAccountState(fakeReader(healthy(), calls), horizonWith(trusted(true)), manifest, market.marketId, ACCOUNT, null)
+    expect(s.sacAuthorized.status).toBe("unavailable")
+    expect(s.sep57).toBeNull()
+    expect(calls.some((x) => x.key.endsWith(".authorized") || x.key.endsWith(".is_frozen"))).toBe(false)
+  })
+
   it("sac kind has no sep57 reads", async () => {
-    const s = await fetchAccountState(fakeReader(healthy()), horizonWith(trusted(true)), manifest, market.marketId, ACCOUNT)
+    const s = await fetchAccountState(fakeReader(healthy()), horizonWith(trusted(true)), manifest, market.marketId, ACCOUNT, "sac")
     expect(s.sep57).toBeNull()
   })
 })

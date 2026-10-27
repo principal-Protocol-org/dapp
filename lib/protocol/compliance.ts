@@ -1,6 +1,6 @@
 import type { AccountState, ComplianceKind } from "./account-state"
 import type { Horizon } from "./horizon"
-import { isContractError, liveValue, readLive } from "./reader"
+import { isContractError, liveValue, readLive, toAddress, unavailable } from "./reader"
 import type { Live, Market } from "./types"
 import type { ContractReader } from "./reader"
 
@@ -26,18 +26,24 @@ export type ComplianceItem = {
 }
 
 /**
- * The kind is detected as the `compliance` library does: a contract that answers SAC `admin()` is
- * a SAC, anything else is SEP-57. A transport or rate-limit failure is not an answer, so it stays
- * unavailable instead of being guessed as SEP-57.
+ * Positive evidence only. `sac`: `admin()` returns a valid address. `sep57`: `admin()` fails with a
+ * contract-level trap AND `identity_verifier()` returns a valid address. Anything else (archived
+ * entries, storage or budget errors, transport failures) is unavailable, never a guessed kind.
  */
 export async function fetchMarketCompliance(
   horizon: Horizon,
   reader: ContractReader,
   market: Market,
 ): Promise<Live<MarketCompliance>> {
-  const admin = await readLive<unknown, string>(reader, { contractId: market.underlying.sac, functionName: "admin" }, String)
+  const token = market.underlying.sac
+  const admin = await readLive<unknown, string>(reader, { contractId: token, functionName: "admin" }, toAddress)
   if (admin.status === "unavailable") {
-    return isContractError(admin.error) ? liveValue({ kind: "sep57", administrator: null }, 0) : admin
+    if (!isContractError(admin.error)) return admin
+    const verifier = await readLive<unknown, string>(reader, { contractId: token, functionName: "identity_verifier" }, toAddress)
+    if (verifier.status === "unavailable") {
+      return unavailable(`Could not tell whether the underlying is a SAC or a SEP-57 token: ${admin.error}`)
+    }
+    return liveValue({ kind: "sep57", administrator: null }, verifier.ledger)
   }
   const flags = await horizon.fetchIssuerFlags(market.underlying.issuer)
   if (flags.status === "unavailable") return flags
@@ -51,15 +57,31 @@ function unavailableItem(id: ComplianceItem["id"], what: string, input: { status
   return { id, status: "unavailable", message: `${what} could not be checked right now (${input.error}).` }
 }
 
-export function evaluateAccountCompliance(acc: AccountState, kind: ComplianceKind): ComplianceItem[] {
+/**
+ * `kind` is null when the market's compliance read is unavailable; `kindError` is then its cause.
+ * The trustline and authorization items are unavailable (not guessed) in that case.
+ */
+export function evaluateAccountCompliance(
+  acc: AccountState,
+  kind: ComplianceKind | null,
+  kindError = "compliance model unknown",
+): ComplianceItem[] {
   return [
     accountItem(acc),
-    trustlineItem(acc, kind),
-    authorizedItem(acc, kind),
+    kind === null ? unknownKindItem("trustline", kindError) : trustlineItem(acc, kind),
+    kind === null ? unknownKindItem("authorized", kindError) : authorizedItem(acc, kind),
     permissionItem("permissioning", acc.permAllowed, "Principal permissioning", "your account"),
     permissionItem("perm_pt", acc.permPt, "PT permissioning", "PT"),
     permissionItem("perm_yt", acc.permYt, "YT permissioning", "YT"),
   ]
+}
+
+function unknownKindItem(id: ComplianceItem["id"], cause: string): ComplianceItem {
+  return {
+    id,
+    status: "unavailable",
+    message: `This check depends on the underlying asset's compliance model, which could not be determined (${cause}).`,
+  }
 }
 
 function accountItem(acc: AccountState): ComplianceItem {
