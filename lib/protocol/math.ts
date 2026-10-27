@@ -4,7 +4,7 @@ export const INDEX_SCALE = 1_000_000_000_000n; // YT index
 export const FEE_RATE_SCALE = 1_000_000_000_000n; // swap_fee_rate
 export const BPS = 10_000n; // basis points
 
-const SECONDS_PER_YEAR = 31_536_000; // 365 days
+export const YEAR_SECONDS = 31_536_000n; // 365 days
 
 export function ceilDiv(a: bigint, b: bigint): bigint {
   return (a + b - 1n) / b;
@@ -32,6 +32,7 @@ export function aprToApy(aprScaled: bigint, secondsToMaturity: bigint): number {
   const apr = Number(aprScaled) / Number(SCALE);
   const seconds = Number(secondsToMaturity);
   if (seconds <= 0) return apr;
-  const periods = SECONDS_PER_YEAR / seconds;
-  return Math.pow(1 + (apr * seconds) / SECONDS_PER_YEAR, periods) - 1;
+  const year = Number(YEAR_SECONDS);
+  const periods = year / seconds;
+  return Math.pow(1 + (apr * seconds) / year, periods) - 1;
 }
