@@ -916,6 +916,15 @@ describe("unavailable read blocks", () => {
       expect(gates("claim_yield", set)).toEqual([])
     })
 
+    it("buy_yt does not read the exchange rate while both breaker limits are 0", () => {
+      const set = m((x) => {
+        x.cb.limit = live(0n)
+        x.cb.assetLimit = live(0n)
+        x.exchangeRate = down()
+      })
+      expect(gates("buy_yt", set)).toEqual([])
+    })
+
     it("the per-asset volume is not read while its limit is 0", () => {
       expect(gates("deposit", m((x) => (x.cb.assetVolume = down())))).toEqual([])
     })
