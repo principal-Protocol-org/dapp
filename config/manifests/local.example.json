@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "network": "local",
+  "networkPassphrase": "Standalone Network ; February 2017",
+  "rpcUrl": "http://localhost:8000/rpc",
+  "horizonUrl": "http://localhost:8000",
+  "friendbotUrl": "http://localhost:8000/friendbot",
+  "generatedAt": "2026-01-01T00:00:00Z",
+  "sourceCommit": "local-example",
+  "shared": {
+    "riskControl": "CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526",
+    "permissioning": "CABAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAFNSZ"
+  },
+  "markets": [
+    {
+      "marketId": "local-example",
+      "displayName": "Local example market",
+      "underlying": {
+        "code": "STA",
+        "issuer": "GABQGAYDAMBQGAYDAMBQGAYDAMBQGAYDAMBQGAYDAMBQGAYDAMBQHGPC",
+        "sac": "CACAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAINCW",
+        "decimals": 7
+      },
+      "maturity": 2000000000,
+      "contracts": {
+        "router": "CAFAUCQKBIFAUCQKBIFAUCQKBIFAUCQKBIFAUCQKBIFAUCQKBIFAUTSM",
+        "oracle": "CAFQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQX4KO",
+        "sy": "CAGAYDAMBQGAYDAMBQGAYDAMBQGAYDAMBQGAYDAMBQGAYDAMBQGAZTCD",
+        "pt": "CAGQ2DINBUGQ2DINBUGQ2DINBUGQ2DINBUGQ2DINBUGQ2DINBUGQ242B",
+        "yt": "CAHA4DQOBYHA4DQOBYHA4DQOBYHA4DQOBYHA4DQOBYHA4DQOBYHA5MSG",
+        "config": "CAHQ6DYPB4HQ6DYPB4HQ6DYPB4HQ6DYPB4HQ6DYPB4HQ6DYPB4HQ6DKE",
+        "manager": "CAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAODX",
+        "pool": "CAIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRDB3V",
+        "recoveryEscrow": "CAJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBERTS"
+      }
+    }
+  ]
+}

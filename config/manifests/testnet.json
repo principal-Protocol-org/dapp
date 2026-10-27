@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "network": "testnet",
+  "networkPassphrase": "Test SDF Network ; September 2015",
+  "rpcUrl": "https://soroban-testnet.stellar.org",
+  "horizonUrl": "https://horizon-testnet.stellar.org",
+  "friendbotUrl": "https://friendbot.stellar.org",
+  "generatedAt": "2026-10-04T00:00:00Z",
+  "sourceCommit": "6cf257afb588c63d694f2262d8b289d4809be8ee",
+  "shared": {
+    "riskControl": "CCQKY4S4TC5G3LZIT37I5IBSSDVEZIIVPZSMCJVSOTASGKC6XKTZKLYR",
+    "permissioning": "CDX64AORDY5FMDPQH633WIMNH5NBABW34UIXEDIS5E3IFWU7QFQ6YMCF"
+  },
+  "markets": [
+    {
+      "marketId": "sta-2026-10-03",
+      "displayName": "STA · matured 3 Oct 2026",
+      "underlying": {
+        "code": "STA",
+        "issuer": "GCWFJKLE45TMVZS42TMIYKAORKGBWE74753YPOSCC5ESJR2G2UMBXBDB",
+        "sac": "CCOUVA654JH2V6B7LNTKHJP5DF3QA553RS2IIWXSGPDFH2N3QILIVU5L",
+        "decimals": 7
+      },
+      "maturity": 1791056747,
+      "contracts": {
+        "router": "CARTAP66PCU6GJJ4MGWATZM54YIT4RF7WNTPCA2KHMQD6W23NNU7KC2U",
+        "oracle": "CAW53CGHBDS3DS6JJ7NOWSTCJCKNN663FEEN3WOYWJKMDOFAALZIXCRI",
+        "sy": "CDKKMKVBNJKNQ5O2ENX5UORUDNBPGA2QV72SWIWOCHSIJ52IBJEJJEQT",
+        "pt": "CCOC5N37SVJ7OVG5ZM2U4SO4BOCAXWEOI7235U6333X2H7Q3WYM3QMRD",
+        "yt": "CAULNVSPNAQWKVV2YKIPQC2NUGPVMJ7SS2PPVKFCKCLUN2AE5QLFELHD",
+        "config": "CBKWPYFGNISVQSDLSQCDJIOMXODZTJ22UV7J7HHZRCBYEWM6AQXMEQOI",
+        "manager": "CDVVB6OKHQ7YV772VFZ4C3GQOHX34JPYIMC4AT353IGMUECYOWILAV27",
+        "pool": "CANAIVIXZXGCQCCXX5KKEF567O5RZ3GDFFKQJOZPYSAZWIJBEIHRIIPR",
+        "recoveryEscrow": "CD23JCOPNIT26KAEVQI3EKEAUZ7RS2M5IDW7MTDZ6B7O3OAGOWU5ANBG"
+      }
+    }
+  ]
+}

@@ -3,13 +3,13 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
+    "dev": "node scripts/ensure-local-manifest.mjs && next dev",
+    "build": "node scripts/ensure-local-manifest.mjs && next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "vitest run",
+    "test": "node scripts/ensure-local-manifest.mjs && vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "node scripts/ensure-local-manifest.mjs && tsc --noEmit",
     "test:integration": "vitest run --config vitest.integration.config.mts"
   },
   "dependencies": {
@@ -44,7 +44,6 @@
     "jsdom": "^30.1.3",
     "tailwindcss": "^4",
     "typescript": "^5",
-    "vite-tsconfig-paths": "^6.1.1",
     "vitest": "^5.0.5"
   },
   "packageManager": "pnpm@12.5.1"
