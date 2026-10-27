@@ -44,3 +44,6 @@ export type WalletState =
   | { status: "unverified_network"; publicKey: string; expectedPassphrase: string; reason: string }
   | { status: "wrong_network"; publicKey: string; actualPassphrase: string; expectedPassphrase: string }
   | { status: "rejected"; reason: string }
+
+/** A chain value, or the reason it could not be read. Gates treat `unavailable` as a refusal. */
+export type Live<T> = { status: "live"; value: T; ledger: number } | { status: "unavailable"; error: string }
