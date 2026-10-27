@@ -11,6 +11,9 @@ import type { Live } from "../types"
 const manifest = parseManifest(testnetJson)
 const market = manifest.markets[0]
 const sac = market.underlying.sac
+const ADMIN = market.underlying.issuer
+const VERIFIER = market.contracts.router
+const RESTORE = "Contract read requires restoring archived ledger entries before it can be queried."
 
 const live = <T,>(value: T): Live<T> => ({ status: "live", value, ledger: 1 })
 const down = (error = "rpc down"): Live<never> => ({ status: "unavailable", error })
@@ -87,6 +90,16 @@ describe("evaluateAccountCompliance", () => {
     expect(items.authorized.status).not.toBe("ok")
   })
 
+  it("an unknown kind makes trustline and authorized unavailable with the cause", () => {
+    const items = byId(evaluateAccountCompliance(account({ trustline: live("none"), sacAuthorized: down() }), null, "admin read failed: 429"))
+    for (const id of ["trustline", "authorized"] as const) {
+      expect(items[id].status).toBe("unavailable")
+      expect(items[id].fix).toBeUndefined()
+      expect(items[id].message).toMatch(/admin read failed: 429/)
+    }
+    expect(items.account.status).toBe("ok")
+  })
+
   describe("sep57", () => {
     const sep = (frozen: Live<boolean>, identityVerified: Live<boolean>) =>
       account({ sacAuthorized: down("not applicable"), trustline: live("none"), sep57: { frozen, identityVerified } })
@@ -128,22 +141,49 @@ describe("fetchMarketCompliance", () => {
   it("a SAC (admin() answers) reports issuer flags and the administrator", async () => {
     const r = await fetchMarketCompliance(
       flagsHorizon(live({ authRequired: true, authRevocable: true, clawbackEnabled: false })),
-      reader({ [`${sac}.admin`]: "GADMIN" }),
+      reader({ [`${sac}.admin`]: ADMIN }),
       market,
     )
     expect(r).toMatchObject({
       status: "live",
-      value: { kind: "sac", authRequired: true, authRevocable: true, clawbackEnabled: false, administrator: "GADMIN" },
+      value: { kind: "sac", authRequired: true, authRevocable: true, clawbackEnabled: false, administrator: ADMIN },
     })
   })
 
   it("sep57 kind: admin() reverts as a contract error", async () => {
     const r = await fetchMarketCompliance(
       flagsHorizon(down("unused")),
-      reader({ [`${sac}.admin`]: new Error("HostError: Error(WasmVm, MissingValue)\n non-existent contract function") }),
+      reader({
+        [`${sac}.admin`]: new Error("HostError: Error(WasmVm, MissingValue)\n non-existent contract function"),
+        [`${sac}.identity_verifier`]: VERIFIER,
+      }),
       market,
     )
     expect(r).toMatchObject({ status: "live", value: { kind: "sep57", administrator: null } })
+  })
+
+  it("admin() trap without a valid identity_verifier is unavailable, not sep57", async () => {
+    const trap = new Error("HostError: Error(WasmVm, MissingValue)")
+    for (const verifier of [new Error("HostError: Error(WasmVm, MissingValue)"), "not-an-address", new Error(RESTORE)]) {
+      const r = await fetchMarketCompliance(flagsHorizon(down("unused")), reader({ [`${sac}.admin`]: trap, [`${sac}.identity_verifier`]: verifier }), market)
+      expect(r.status).toBe("unavailable")
+    }
+  })
+
+  it("archival and storage failures on admin() are unavailable, never sep57", async () => {
+    for (const msg of [RESTORE, "HostError: Error(Storage, MissingValue)", "HostError: Error(Budget, ExceededLimit)"]) {
+      const r = await fetchMarketCompliance(
+        flagsHorizon(down("unused")),
+        reader({ [`${sac}.admin`]: new Error(msg), [`${sac}.identity_verifier`]: VERIFIER }),
+        market,
+      )
+      expect(r).toEqual({ status: "unavailable", error: msg })
+    }
+  })
+
+  it("an invalid admin() address is unavailable", async () => {
+    const r = await fetchMarketCompliance(flagsHorizon(down("unused")), reader({ [`${sac}.admin`]: "GADMIN" }), market)
+    expect(r.status).toBe("unavailable")
   })
 
   it("admin() failing for a transport reason is unavailable, never guessed as sep57", async () => {
@@ -156,7 +196,7 @@ describe("fetchMarketCompliance", () => {
   })
 
   it("a SAC whose issuer flags cannot be read is unavailable", async () => {
-    const r = await fetchMarketCompliance(flagsHorizon(down("horizon 500")), reader({ [`${sac}.admin`]: "GADMIN" }), market)
+    const r = await fetchMarketCompliance(flagsHorizon(down("horizon 500")), reader({ [`${sac}.admin`]: ADMIN }), market)
     expect(r).toEqual({ status: "unavailable", error: "horizon 500" })
   })
 })

@@ -1,6 +1,6 @@
 import type { Horizon, HorizonAccount } from "./horizon"
 import { getMarket } from "./manifest"
-import { isContractError, liveValue, readLive, toBigint, toBool, unavailable, type ContractReader } from "./reader"
+import { isContractError, liveValue, readLive, toAddress, toBigint, toBool, unavailable, type ContractReader } from "./reader"
 import type { ScArg } from "./stellar"
 import type { Live, Manifest, Market } from "./types"
 
@@ -64,7 +64,7 @@ async function readSep57(
 ): Promise<NonNullable<AccountState["sep57"]>> {
   const who = [address(account)]
   const frozen = readLive<unknown, boolean>(reader, { contractId: token, functionName: "is_frozen", args: who }, toBool)
-  const identityVerified = readLive<unknown, string>(reader, { contractId: token, functionName: "identity_verifier" }, String).then(
+  const identityVerified = readLive<unknown, string>(reader, { contractId: token, functionName: "identity_verifier" }, toAddress).then(
     (verifier) =>
       verifier.status === "unavailable"
         ? verifier
@@ -80,7 +80,8 @@ export async function fetchAccountState(
   m: Manifest,
   marketId: string,
   account: string,
-  kind: ComplianceKind = "sac",
+  /** The market's compliance kind; null when that read is unavailable (no default is assumed). */
+  kind: ComplianceKind | null,
 ): Promise<AccountState> {
   const market = getMarket(m, marketId)
   if (!market) throw new Error(`Unknown market "${marketId}"`)
@@ -110,7 +111,13 @@ export async function fetchAccountState(
     big(c.sy, "net_deposited", who),
     kind === "sac"
       ? readAnswer(reader, { contractId: sac, functionName: "authorized", args: who }, toBool)
-      : Promise.resolve(unavailable("SAC authorized() does not apply to a SEP-57 underlying")),
+      : Promise.resolve(
+          unavailable(
+            kind === null
+              ? "the underlying's compliance model is unknown"
+              : "SAC authorized() does not apply to a SEP-57 underlying",
+          ),
+        ),
     kind === "sep57" ? readSep57(reader, sac, account) : Promise.resolve(null),
     allowed("is_allowed", who),
     allowed("is_allowed_for_asset", [address(account), address(c.pt)]),

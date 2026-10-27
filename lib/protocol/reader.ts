@@ -1,3 +1,4 @@
+import { StrKey } from "@stellar/stellar-sdk"
 import { createRpcServer, simulateContractRead, type ContractReadResult, type ScArg } from "./stellar"
 import type { Live, Manifest } from "./types"
 
@@ -75,10 +76,16 @@ export function allLive<T extends readonly Live<unknown>[], U>(
 }
 
 /**
- * True when a read failed because the contract itself trapped or rejected the call (a Soroban
- * HostError from the simulation), as opposed to a transport, rate-limit or archival failure.
- * Only the former may be read as an answer ("not authorized", "not verified").
+ * True only when the simulation shows the contract itself trapped or rejected the call (a Soroban
+ * HostError of type Contract, WasmVm, Auth, Value or Object). Storage, Budget and Context errors,
+ * archival ("requires restoring"), transport and rate-limit failures are not answers.
  */
 export function isContractError(error: string): boolean {
-  return /HostError|Error\((Contract|WasmVm|Auth|Value|Object|Storage|Context|Budget)/.test(error)
+  return /HostError:\s*Error\((Contract|WasmVm|Auth|Value|Object)\b/.test(error)
+}
+
+/** Strict strkey check: a valid account (G...) or contract (C...) address. */
+export function toAddress(value: unknown): string {
+  if (typeof value === "string" && (StrKey.isValidEd25519PublicKey(value) || StrKey.isValidContract(value))) return value
+  throw new Error("expected a valid Stellar address")
 }
