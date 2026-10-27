@@ -7,6 +7,7 @@ import {
   assertSignedTransactionMatchesReview,
   buildInvokeTransaction,
   getLedgerClock,
+  SubmissionRejectedError,
   pollTransactionStatus,
   simulateContractRead,
   simulateInvocation,
@@ -254,6 +255,57 @@ describe("submitSignedTransaction", () => {
         },
       }),
     ).rejects.toThrow("Soroban submission failed");
+  });
+
+  describe("explains a rejected submission in plain words (R30)", () => {
+    const source = Keypair.random().publicKey();
+    const signedXdr = buildInvokeTransaction({
+      source,
+      sequence: "1",
+      networkPassphrase: testnetMarket.networkPassphrase,
+      invocation: principalInvocationForIntent(testnetMarket, { action: "claim_yield", source, amount: "1" }),
+    }).unsignedXdr;
+    const result = (outcome: xdr.TransactionResultResult) =>
+      new xdr.TransactionResult({ feeCharged: 100n, result: outcome, ext: xdr.TransactionResultExt.v0() });
+    const rejected = (response: { errorResult?: xdr.TransactionResult; errorResultXdr?: string }) =>
+      submitSignedTransaction({
+        rpcUrl: testnetMarket.rpcUrl,
+        networkPassphrase: testnetMarket.networkPassphrase,
+        signedXdr,
+        server: {
+          async sendTransaction() {
+            return { status: "ERROR", hash: "abc123", ...response };
+          },
+        },
+      });
+
+    it("reads the SDK's parsed errorResult", async () => {
+      const failure = rejected({ errorResult: result(xdr.TransactionResultResult.txBadSeq()) });
+      await expect(failure).rejects.toThrow(SubmissionRejectedError);
+      await expect(failure).rejects.toThrow(
+        "Soroban submission failed: the network rejected the transaction because the account's sequence number changed, so another transaction was sent from this account; prepare it again. Nothing was executed.",
+      );
+    });
+
+    it("falls back to a raw errorResultXdr", async () => {
+      const raw = result(xdr.TransactionResultResult.txTooLate()).toXdr("base64");
+      await expect(rejected({ errorResultXdr: raw })).rejects.toThrow("after its time window closed");
+    });
+
+    it("names the contract-call failure inside txFailed", async () => {
+      const archived = xdr.OperationResult.opInner(
+        xdr.OperationResultTr.invokeHostFunction(xdr.InvokeHostFunctionResult.invokeHostFunctionEntryArchived()),
+      );
+      await expect(rejected({ errorResult: result(xdr.TransactionResultResult.txFailed([archived])) })).rejects.toThrow(
+        "contract data it needs is archived; restore it first",
+      );
+    });
+
+    it("reports an undecodable result as raw XDR", async () => {
+      await expect(rejected({ errorResultXdr: "AAAA" })).rejects.toThrow(
+        "the network rejected the transaction (result AAAA). Nothing was executed.",
+      );
+    });
   });
 });
 

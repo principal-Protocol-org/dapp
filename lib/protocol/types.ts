@@ -18,6 +18,8 @@ export type Market = {
   underlying: { code: string; issuer: string; sac: string; decimals: number }
   maturity: number
   contracts: MarketContracts
+  /** Wasm hash (hex) each contract runs, by contract name; optional in the manifest. */
+  wasmHashes?: Record<string, string>
 }
 
 export type Manifest = {

@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, expect, it } from "vitest"
 import testnetJson from "@/config/manifests/testnet.json"
 import localExample from "@/config/manifests/local.example.json"
@@ -36,6 +37,15 @@ describe("manifest v1", () => {
     expect(() => parseManifest(raw)).toThrow(/markets\.0\.contracts\.router/)
     raw.markets[0].contracts.router = "not-a-contract"
     expect(() => parseManifest(raw)).toThrow(/markets\.0\.contracts\.router/)
+  })
+
+  it("keeps optional wasmHashes and rejects a malformed one (R29b)", () => {
+    const raw = structuredClone(testnetJson) as Raw & { markets: { wasmHashes?: Record<string, string> }[] }
+    expect(parseManifest(raw).markets[0].wasmHashes).toBeUndefined()
+    raw.markets[0].wasmHashes = { manager: "AB".repeat(32) }
+    expect(parseManifest(raw).markets[0].wasmHashes).toEqual({ manager: "AB".repeat(32) })
+    raw.markets[0].wasmHashes = { manager: "ab".repeat(31) }
+    expect(() => parseManifest(raw)).toThrow(/markets\.0\.wasmHashes\.manager/)
   })
 
   it("rejects a non-G issuer", () => {

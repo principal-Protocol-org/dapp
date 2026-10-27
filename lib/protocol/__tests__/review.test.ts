@@ -14,12 +14,12 @@ import {
   scValToNative,
   xdr,
 } from "@stellar/stellar-sdk"
-import { describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import testnetJson from "@/config/manifests/testnet.json"
 import { ACTION_META, invocationFor, type ActionId, type ActionInput, type GuardValues } from "../actions"
 import { hashLike } from "../hash"
 import { parseManifest } from "../manifest"
-import { createRpcServer } from "../stellar"
+import { createRpcServer, transactionEnvelopeHash } from "../stellar"
 import {
   MAX_TX_FEE_STROOPS,
   REVIEW_TTL_MS,
@@ -42,7 +42,10 @@ const RESOURCE_FEE = 12_345n
 /** `assembleTransaction` keeps the 100-stroop inclusion fee and adds the resource fee. */
 const PREPARED_FEE = (BigInt(BASE_FEE) + RESOURCE_FEE).toString()
 const DEADLINE = 1_900_000_000n
+/** The hash the fake RPC claims for every submission; the pipeline must report the real one. */
 const HASH = "abc123"
+/** The transaction hash, computed locally (the same signed or unsigned). */
+const hashOf = (unsignedXdr: string) => transactionEnvelopeHash(unsignedXdr, passphrase)
 /** A valid contract address that is no contract of the manifest. */
 const FOREIGN = StrKey.encodeContract(new Uint8Array(32).fill(5))
 
@@ -95,22 +98,14 @@ function assemble(tx: Transaction, opts: Parameters<typeof simulationSuccess>[0]
   return rpc.assembleTransaction(tx, simulationSuccess({ auth: [authFor(callOf(tx))], ...opts })).build()
 }
 
-/** Wasm hash every market contract instance runs in the fake ledger. */
+/** The Wasm hash the pinned manifest lists for the market's manager (R29b). */
 const MARKET_WASM = new Uint8Array(32).fill(3)
-
-function instanceEntry(contractId: string, wasm: Uint8Array): xdr.LedgerEntryData {
-  return xdr.LedgerEntryData.contractData(
-    new xdr.ContractDataEntry({
-      ext: xdr.ExtensionPoint.v0(),
-      contract: new Address(contractId).toScAddress(),
-      key: xdr.ScVal.scvLedgerKeyContractInstance(),
-      durability: xdr.ContractDataDurability.persistent,
-      val: xdr.ScVal.scvContractInstance(
-        new xdr.ScContractInstance({ executable: xdr.ContractExecutable.contractExecutableWasm(wasm), storage: null }),
-      ),
-    }),
-  )
-}
+const hex = (bytes: Uint8Array) => Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("")
+/** The testnet manifest with `wasmHashes` pinned, in upper case: the comparison is on exact bytes. */
+const pinnedManifest = parseManifest({
+  ...structuredClone(testnetJson),
+  markets: [{ ...structuredClone(testnetJson.markets[0]), wasmHashes: { manager: hex(MARKET_WASM).toUpperCase() } }],
+})
 
 type Calls = { getAccount: string[]; prepared: Transaction[]; sent: Transaction[]; polled: string[] }
 
@@ -129,15 +124,6 @@ function fakeRpc(overrides: Partial<ReviewRpcServer> = {}): ReviewRpcServer & { 
     async prepareTransaction(tx) {
       calls.prepared.push(tx)
       return assemble(tx)
-    },
-    async getLedgerEntries(...keys) {
-      return {
-        entries: keys.flatMap((key) =>
-          key.type === "contractData"
-            ? [{ val: instanceEntry(Address.fromScAddress(key.contractData.contract).toString(), MARKET_WASM) }]
-            : [],
-        ),
-      }
     },
     async sendTransaction(tx) {
       calls.sent.push(tx)
@@ -442,8 +428,10 @@ describe("executeReview", () => {
     expect(sign.seen).toEqual([[r.unsignedXdr, passphrase, SOURCE]])
     expect(server.calls.sent).toHaveLength(1)
     expect(server.calls.sent[0].hash()).toEqual(new Transaction(r.unsignedXdr, passphrase).hash())
-    expect(server.calls.polled).toEqual([HASH])
-    expect(result).toEqual({ hash: HASH, status: "SUCCESS", output: { kind: "amount", value: 9_5000000n } })
+    // R30: the hash is computed locally from the signed envelope, not taken from RPC's answer.
+    expect(server.calls.polled).toEqual([hashOf(r.unsignedXdr)])
+    expect(result).toEqual({ hash: hashOf(r.unsignedXdr), status: "SUCCESS", output: { kind: "amount", value: 9_5000000n } })
+    expect(result.hash).not.toBe(HASH)
   })
 
   it("refuses an expired review", async () => {
@@ -511,7 +499,7 @@ describe("executeReview", () => {
     })
     const r = await review("mint", {}, server)
     const result = await executeReview({ review: r, manifest, sign: signWith(), rpc: server })
-    expect(result).toMatchObject({ hash: HASH, status: "SUCCESS", output: undefined })
+    expect(result).toMatchObject({ status: "SUCCESS", output: undefined })
     expect(result.decodeError).toMatch(/could not be decoded/)
   })
 
@@ -519,7 +507,7 @@ describe("executeReview", () => {
     // mint returns a MintResult; an i128 is not one.
     const r = await review("mint")
     const result = await executeReview({ review: r, manifest, sign: signWith(), rpc: fakeRpc() })
-    expect(result).toMatchObject({ hash: HASH, status: "SUCCESS", output: undefined })
+    expect(result).toMatchObject({ status: "SUCCESS", output: undefined })
     expect(result.decodeError).toMatch(/Unexpected simulation result for mint/)
   })
 
@@ -530,7 +518,7 @@ describe("executeReview", () => {
       },
     })
     const result = await executeReview({ review: await review("mint", {}, server), manifest, sign: signWith(), rpc: server })
-    expect(result).toMatchObject({ hash: HASH, status: "SUCCESS", output: undefined })
+    expect(result).toMatchObject({ status: "SUCCESS", output: undefined })
     expect(result.decodeError).toMatch(/returned no value/)
   })
 
@@ -541,7 +529,7 @@ describe("executeReview", () => {
       },
     })
     const result = await executeReview({ review: await review("buy_pt", {}, server), manifest, sign: signWith(), rpc: server })
-    expect(result).toEqual({ hash: HASH, status: "FAILED" })
+    expect(result).toEqual({ hash: expect.stringMatching(/^[a-f0-9]{64}$/), status: "FAILED" })
   })
 
   it("keeps the hash when polling fails after submission", async () => {
@@ -550,9 +538,10 @@ describe("executeReview", () => {
         throw new Error("rate limited")
       },
     })
-    const result = await executeReview({ review: await review("buy_pt", {}, server), manifest, sign: signWith(), rpc: server })
-    expect(result).toMatchObject({ hash: HASH, status: "NOT_FOUND" })
-    expect(result.pollError).toMatch(/rate limited/)
+    const r = await review("buy_pt", {}, server)
+    const result = await executeReview({ review: r, manifest, sign: signWith(), rpc: server })
+    expect(result).toMatchObject({ hash: hashOf(r.unsignedXdr), status: "NOT_FOUND" })
+    expect(result.pollError).toMatch(/The transaction was submitted, but its status could not be read \(rate limited\)/)
   })
 
   it("polls a duplicate submission", async () => {
@@ -561,9 +550,10 @@ describe("executeReview", () => {
         return { status: "DUPLICATE", hash: HASH }
       },
     })
-    const result = await executeReview({ review: await review("buy_pt", {}, server), manifest, sign: signWith(), rpc: server })
+    const r = await review("buy_pt", {}, server)
+    const result = await executeReview({ review: r, manifest, sign: signWith(), rpc: server })
     expect(result.status).toBe("SUCCESS")
-    expect(server.calls.polled).toEqual([HASH])
+    expect(server.calls.polled).toEqual([hashOf(r.unsignedXdr)])
   })
 
   it("refuses a submission the network did not accept", async () => {
@@ -576,6 +566,78 @@ describe("executeReview", () => {
       executeReview({ review: await review("buy_pt", {}, server), manifest, sign: signWith(), rpc: server }),
     ).rejects.toThrow("The network is busy and did not accept the transaction")
     expect(server.calls.polled).toEqual([])
+  })
+
+  describe("never loses the hash of a transaction that may have landed (R30)", () => {
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    it("polls the locally computed hash when sendTransaction throws", async () => {
+      const server = fakeRpc({
+        async sendTransaction() {
+          throw new Error("socket hang up")
+        },
+      })
+      const r = await review("buy_pt", {}, server)
+      const result = await executeReview({ review: r, manifest, sign: signWith(), rpc: server })
+      // The send failed, but the transaction landed: the poll by the local hash finds it.
+      expect(server.calls.polled).toEqual([hashOf(r.unsignedXdr)])
+      expect(result).toEqual({ hash: hashOf(r.unsignedXdr), status: "SUCCESS", output: { kind: "amount", value: 9_5000000n } })
+    })
+
+    it("returns the hash with a pollError when the failed send is not found", async () => {
+      const server = fakeRpc({
+        async sendTransaction() {
+          throw new Error("socket hang up")
+        },
+        async getTransaction(hash) {
+          server.calls.polled.push(hash)
+          return { status: "NOT_FOUND" }
+        },
+      })
+      const r = await review("buy_pt", {}, server)
+      vi.useFakeTimers({ toFake: ["setTimeout"] })
+      const pending = executeReview({ review: r, manifest, sign: signWith(), rpc: server })
+      await vi.runAllTimersAsync()
+      const result = await pending
+
+      expect(result).toMatchObject({ hash: hashOf(r.unsignedXdr), status: "NOT_FOUND" })
+      expect(result.pollError).toBe(
+        "Sending the transaction failed (socket hang up), and the network does not show it yet. Look it up by its hash before trying again.",
+      )
+      expect(server.calls.polled.every((h) => h === hashOf(r.unsignedXdr))).toBe(true)
+    })
+
+    it("uses the local hash when RPC returns none", async () => {
+      const server = fakeRpc({
+        async sendTransaction() {
+          return { status: "PENDING" }
+        },
+      })
+      const r = await review("buy_pt", {}, server)
+      const result = await executeReview({ review: r, manifest, sign: signWith(), rpc: server })
+      expect(result).toMatchObject({ hash: hashOf(r.unsignedXdr), status: "SUCCESS" })
+    })
+
+    it("does not poll a submission the network rejected", async () => {
+      const server = fakeRpc({
+        async sendTransaction() {
+          return {
+            status: "ERROR",
+            errorResult: new xdr.TransactionResult({
+              feeCharged: 100n,
+              result: xdr.TransactionResultResult.txBadSeq(),
+              ext: xdr.TransactionResultExt.v0(),
+            }),
+          }
+        },
+      })
+      await expect(
+        executeReview({ review: await review("buy_pt", {}, server), manifest, sign: signWith(), rpc: server }),
+      ).rejects.toThrow("the account's sequence number changed")
+      expect(server.calls.polled).toEqual([])
+    })
   })
 })
 
@@ -606,8 +668,8 @@ describe("prepareRestore", () => {
     })
   }
   const invocation = () => invocationFor(manifest, input("buy_pt"))
-  const restoreWith = (simulation: ReturnType<typeof restoreSimulation>, extra: Partial<ReviewRpcServer> = {}) =>
-    prepareRestore({ manifest, source: SOURCE, invocation: invocation(), rpc: fakeRpc({ simulateTransaction: async () => simulation, ...extra }) })
+  const restoreWith = (simulation: ReturnType<typeof restoreSimulation>, m = manifest) =>
+    prepareRestore({ manifest: m, source: SOURCE, invocation: invocation(), rpc: fakeRpc({ simulateTransaction: async () => simulation }) })
 
   it("restore-required yields a restore transaction", async () => {
     const simulated: Transaction[] = []
@@ -646,7 +708,7 @@ describe("prepareRestore", () => {
   })
 
   describe("treats the restore preamble as untrusted (R29)", () => {
-    it("accepts the market's data, shared contracts, the SAC and the code its instances run", async () => {
+    it("accepts the market's data, shared contracts, the SAC and contract code the manifest pins", async () => {
       const keys = [
         instance(manager),
         instance(manifest.shared.riskControl),
@@ -654,7 +716,7 @@ describe("prepareRestore", () => {
         instance(market.underlying.sac),
         code(MARKET_WASM),
       ]
-      const restore = await restoreWith(restoreSimulation({ readWrite: keys }))
+      const restore = await restoreWith(restoreSimulation({ readWrite: keys }), pinnedManifest)
       const tx = new Transaction(restore.unsignedXdr, passphrase)
       expect(tx.operations[0].type).toBe("restoreFootprint")
     })
@@ -677,15 +739,33 @@ describe("prepareRestore", () => {
       await expect(restoreWith(restoreSimulation({ readWrite: [account] }))).rejects.toThrow("includes a account entry")
     })
 
-    it("refuses contract code no market instance runs", async () => {
-      await expect(restoreWith(restoreSimulation({ readWrite: [code(new Uint8Array(32).fill(9))] }))).rejects.toThrow(
-        "contract code that no contract of this market runs",
-      )
-      // Fails closed when the instances cannot be read.
-      const down = { getLedgerEntries: async () => Promise.reject(new Error("rate limited")) }
-      await expect(restoreWith(restoreSimulation({ readWrite: [code(MARKET_WASM)] }), down)).rejects.toThrow(
-        "could not be matched to this market (rate limited)",
-      )
+    describe("contract code is restored only if the manifest pins its hash (R29b)", () => {
+      it("accepts a pinned hash", async () => {
+        const restore = await restoreWith(restoreSimulation({ readWrite: [code(MARKET_WASM)] }), pinnedManifest)
+        expect(new Transaction(restore.unsignedXdr, passphrase).operations[0].type).toBe("restoreFootprint")
+      })
+
+      it("refuses an unpinned hash", async () => {
+        const unpinned = new Uint8Array(32).fill(9)
+        await expect(restoreWith(restoreSimulation({ readWrite: [code(unpinned)] }), pinnedManifest)).rejects.toThrow(
+          `includes contract code the manifest does not pin (${hex(unpinned)}). Refusing to restore it; ask the operator`,
+        )
+      })
+
+      it("refuses a hash that differs in one byte", async () => {
+        const nearly = MARKET_WASM.slice()
+        nearly[31] = 4
+        await expect(restoreWith(restoreSimulation({ readWrite: [code(nearly)] }), pinnedManifest)).rejects.toThrow(
+          "contract code the manifest does not pin",
+        )
+      })
+
+      it("refuses any contract code when the manifest pins none", async () => {
+        expect(manifest.markets[0].wasmHashes).toBeUndefined()
+        await expect(restoreWith(restoreSimulation({ readWrite: [instance(router), code(MARKET_WASM)] }))).rejects.toThrow(
+          "Restore needs contract code the manifest does not pin; ask the operator.",
+        )
+      })
     })
 
     it("refuses a read-only entry", async () => {
@@ -741,7 +821,7 @@ describe("executeRestore", () => {
     const sign = signWith()
     const result = await executeRestore({ restore, manifest, sign, rpc: server })
     expect(sign.seen).toEqual([[restore.unsignedXdr, passphrase, SOURCE]])
-    expect(result).toEqual({ hash: HASH, status: "SUCCESS" })
+    expect(result).toEqual({ hash: hashOf(restore.unsignedXdr), status: "SUCCESS" })
     expect(server.calls.sent[0].operations[0].type).toBe("restoreFootprint")
   })
 

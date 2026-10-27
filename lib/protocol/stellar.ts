@@ -9,7 +9,7 @@ import {
   nativeToScVal,
   rpc,
   scValToNative,
-  type xdr,
+  xdr,
 } from "@stellar/stellar-sdk";
 import { NULL_ACCOUNT } from "@stellar/stellar-sdk/contract";
 import { bytesToHex } from "./bytes";
@@ -50,7 +50,13 @@ type ReadRpcServer = {
 };
 
 type SubmitRpcServer = {
-  sendTransaction(transaction: Transaction): Promise<{ status: string; hash?: string; errorResultXdr?: string }>;
+  // SDK 17 parses the result into `errorResult`; a raw response carries `errorResultXdr` (base64).
+  sendTransaction(transaction: Transaction): Promise<{
+    status: string;
+    hash?: string;
+    errorResult?: xdr.TransactionResult;
+    errorResultXdr?: string;
+  }>;
 };
 
 type PollRpcServer = {
@@ -214,6 +220,56 @@ export async function simulateContractRead<T = unknown>(params: {
   };
 }
 
+/** The network refused the submission (status ERROR): the transaction was not accepted. */
+export class SubmissionRejectedError extends Error {}
+
+const TX_RESULT_REASONS: Partial<Record<string, string>> = {
+  txTooLate: "it reached the network after its time window closed; prepare it again",
+  txTooEarly: "its time window has not opened yet; check the device clock, then prepare it again",
+  txBadSeq: "the account's sequence number changed, so another transaction was sent from this account; prepare it again",
+  txBadAuth: "the signature does not match this account or network; reconnect the wallet, then prepare it again",
+  txBadAuthExtra: "it carries a signature it does not need; prepare it again",
+  txInsufficientBalance: "the account has too little XLM for the fee and its reserve; add XLM, then try again",
+  txNoAccount: "the account does not exist on this network; fund it first",
+  txInsufficientFee: "its fee is too low for the current network load; prepare it again in a moment",
+  txSorobanInvalid: "its Soroban resources or footprint are invalid; prepare it again",
+  txMalformed: "it is malformed; prepare it again",
+  txMissingOperation: "it has no operation; prepare it again",
+  txInternalError: "the network hit an internal error; try again in a moment",
+};
+
+const HOST_FUNCTION_REASONS: Partial<Record<string, string>> = {
+  invokeHostFunctionTrapped: "the contract call failed",
+  invokeHostFunctionResourceLimitExceeded: "it ran out of the resources it declared; prepare it again",
+  invokeHostFunctionEntryArchived: "contract data it needs is archived; restore it first",
+  invokeHostFunctionInsufficientRefundableFee: "its refundable fee is too low; prepare it again",
+  invokeHostFunctionMalformed: "the contract call is malformed; prepare it again",
+};
+
+/** A transaction result code in plain words, for a refusal message. */
+export function describeTransactionResult(result: xdr.TransactionResult): string {
+  const outcome = result.result;
+  if (outcome.type === "txFailed") {
+    const [operation] = outcome.results;
+    if (operation?.type === "opInner" && operation.tr.type === "invokeHostFunction") {
+      const code = operation.tr.invokeHostFunctionResult.type;
+      return HOST_FUNCTION_REASONS[code] ?? `the contract call failed (${code})`;
+    }
+    return `its operation failed (${operation?.type ?? "no operation result"})`;
+  }
+  return TX_RESULT_REASONS[outcome.type] ?? `the network answered with result code ${outcome.type}`;
+}
+
+function rejectionReason(result: { errorResult?: xdr.TransactionResult; errorResultXdr?: string }): string | undefined {
+  try {
+    if (result.errorResult) return describeTransactionResult(result.errorResult);
+    if (result.errorResultXdr) return describeTransactionResult(xdr.TransactionResult.fromXdr(result.errorResultXdr, "base64"));
+  } catch {
+    // An undecodable result: the raw XDR is reported instead.
+  }
+  return undefined;
+}
+
 export async function submitSignedTransaction(params: {
   rpcUrl: string;
   networkPassphrase: string;
@@ -222,14 +278,18 @@ export async function submitSignedTransaction(params: {
 }): Promise<SubmitTransactionResult> {
   const server = params.server ?? createRpcServer(params.rpcUrl);
   const transaction = new Transaction(params.signedXdr, params.networkPassphrase);
-  const result = (await server.sendTransaction(transaction)) as {
-    status: string;
-    hash?: string;
-    errorResultXdr?: string;
-  };
+  const result: Awaited<ReturnType<SubmitRpcServer["sendTransaction"]>> = await server.sendTransaction(transaction);
 
   if (result.status === "ERROR") {
-    throw new Error(result.errorResultXdr ? `Soroban submission failed: ${result.errorResultXdr}` : "Soroban submission failed.");
+    const reason = rejectionReason(result);
+    const detail = reason
+      ? ` because ${reason}`
+      : result.errorResultXdr
+        ? ` (result ${result.errorResultXdr})`
+        : "";
+    throw new SubmissionRejectedError(
+      `Soroban submission failed: the network rejected the transaction${detail}. Nothing was executed.`,
+    );
   }
 
   if (!result.hash) {
