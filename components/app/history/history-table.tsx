@@ -5,13 +5,26 @@ import { useHistory, type HistoryData, type HistoryRow } from "@/hooks/use-histo
 import { useWallet } from "@/hooks/use-wallet"
 import { ACTION_META } from "@/lib/protocol/actions"
 import { readLog, subscribeLog, type LogEntry } from "@/lib/app/local-log"
+import { explorerTxUrl } from "@/lib/app/tx-notice"
 import { shorten } from "@/lib/protocol/format"
 import { activeManifest } from "@/lib/protocol/manifest-source"
+import { TX_TIMEOUT_SECONDS } from "@/lib/protocol/review"
+import type { Network } from "@/lib/protocol/types"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { UNAVAILABLE } from "@/components/app/live"
 
 const SECONDS_PER_LEDGER = 5
+
+/**
+ * A NOT_FOUND entry this long after submission can no longer land (M10): its time bound closed
+ * TX_TIMEOUT_SECONDS after it was prepared, which was before it was submitted. The margin covers
+ * the device clock drifting from the network's in between.
+ */
+const EXPIRED_AFTER_MS = (TX_TIMEOUT_SECONDS + 60) * 1000
+/** How often the page re-checks whether a pending entry has expired. */
+const EXPIRY_CHECK_MS = 15_000
+const EXPIRED_LINE = "Its time window closed before the network showed it, so it can no longer land. Look it up by its hash to be sure."
 
 const KIND_LABEL: Record<HistoryRow["kind"], string> = {
   deposit: "Deposit",
@@ -39,13 +52,15 @@ function windowText(w: { oldestLedger: number; latestLedger: number }): string {
 
 const when = (iso: string) => iso.slice(0, 16).replace("T", " ") + " UTC"
 
-function TxHash({ hash, network }: { hash: string; network: string }) {
-  if (network !== "testnet") return <span className="break-all font-mono text-xs">{hash}</span>
+function TxHash({ hash, network }: { hash: string; network: Network }) {
+  const url = explorerTxUrl(network, hash)
+  if (!url) return <span className="break-all font-mono text-xs">{hash}</span>
   return (
     <a
-      href={`https://stellar.expert/explorer/testnet/tx/${hash}`}
+      href={url}
       target="_blank"
       rel="noreferrer"
+      aria-label={`View transaction ${hash} on stellar.expert`}
       className="font-mono text-xs underline-offset-4 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
     >
       {shorten(hash, 8, 8)}
@@ -62,13 +77,23 @@ export function HistoryTable() {
   const account = state.status === "connected" ? state.publicKey : null
 
   // The local log lives in localStorage: read it after mount (no server/client mismatch) and again
-  // on every change and every history refresh.
+  // on every change and every history refresh. The browser clock is read here too, never in render:
+  // it only decides whether a pending entry's time window has closed (the window is set by it).
   const [log, setLog] = useState<LogEntry[]>([])
+  const [now, setNow] = useState<number | null>(null)
   const refreshedAt = history.dataUpdatedAt
   useEffect(() => {
-    const read = () => setLog(account ? readLog(account) : [])
+    const read = () => {
+      setLog(account ? readLog(account) : [])
+      setNow(Date.now())
+    }
     read()
-    return subscribeLog(read)
+    const timer = setInterval(() => setNow(Date.now()), EXPIRY_CHECK_MS)
+    const unsubscribe = subscribeLog(read)
+    return () => {
+      clearInterval(timer)
+      unsubscribe()
+    }
   }, [account, refreshedAt])
 
   if (!account) {
@@ -80,7 +105,9 @@ export function HistoryTable() {
   const seen = new Set(data?.entries.map((e) => e.hash))
   const name = (id: string) => m.markets.find((x) => x.marketId === id)?.displayName ?? id
 
-  // Local-log entries stay "Pending" until their hash shows up in the events.
+  // Local-log entries stay "Pending" until their hash shows up in the events, or until their time
+  // window has closed (M10).
+  const expired = (e: LogEntry) => e.status === "NOT_FOUND" && now !== null && now - e.at > EXPIRED_AFTER_MS
   const pending: Row[] = log
     .filter((e) => !seen.has(e.hash))
     .map((e) => ({
@@ -88,8 +115,8 @@ export function HistoryTable() {
       when: when(new Date(e.at).toISOString()),
       label: ACTION_META[e.action].label,
       // A failed transaction emits no events, so its cause (R49) is all there is to show.
-      lines: e.reason ? [e.reason] : [],
-      status: e.status === "SUCCESS" ? "Confirmed" : e.status === "FAILED" ? "Failed" : "Pending",
+      lines: e.reason ? [e.reason] : expired(e) ? [EXPIRED_LINE] : [],
+      status: e.status === "SUCCESS" ? "Confirmed" : e.status === "FAILED" ? "Failed" : expired(e) ? "Not found — expired" : "Pending",
       market: name(e.marketId),
     }))
   const confirmed: Row[] = (data?.entries ?? []).map((e) => ({
