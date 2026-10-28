@@ -93,7 +93,7 @@ describe("MarketHeader", () => {
     expect(screen.getByText("YT total supply").nextSibling?.textContent).toBe("500")
     expect(screen.getByText("Pool PT reserve").nextSibling?.textContent).toBe("1200")
     expect(screen.getByText("Pool SY reserve").nextSibling?.textContent).toBe("3400")
-    expect(screen.getByText("PT price (pool spot)").nextSibling?.textContent).toBe("0.9800 SY per PT (notional)")
+    expect(screen.getByText("PT price (pool spot)").nextSibling?.textContent).toBe("0.9800 notional value per PT")
     expect(screen.getByText("Matures in 10d 0h 0m")).toBeTruthy()
   })
   it("shows the pool value estimate and the three fees", () => {

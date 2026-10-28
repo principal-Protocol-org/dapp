@@ -44,7 +44,7 @@ export function MarketHeader({ marketId }: { marketId: string }) {
             <FixedApy impliedRate={ms.impliedRate} maturity={ms.maturity} ledgerTime={ledgerTime} poolSeeded={ms.poolSeeded} />
           </Metric>
           <Metric label="PT price (pool spot)">
-            {showLive(ms.ptPrice, (v) => `${formatRate(v)} SY per PT (notional)`)}
+            {showLive(ms.ptPrice, (v) => `${formatRate(v)} notional value per PT`)}
           </Metric>
           <Metric label="Oracle rate">
             {ms.oracleRate.status === "live" ? (
@@ -54,7 +54,7 @@ export function MarketHeader({ marketId }: { marketId: string }) {
                     {formatRate(ms.oracleRate.value)}
                   </button>
                 </TooltipTrigger>
-                <TooltipContent>Underlying per SY, read from the market oracle.</TooltipContent>
+                <TooltipContent>Value of 1 underlying token in notional units, read from the market oracle.</TooltipContent>
               </Tooltip>
             ) : (
               UNAVAILABLE

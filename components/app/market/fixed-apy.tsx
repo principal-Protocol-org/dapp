@@ -25,6 +25,7 @@ export function FixedApy({
   if (!maturity || maturity.status === "unavailable" || ledgerTime === null) return <>{UNAVAILABLE}</>
   const seconds = maturity.value - BigInt(Math.floor(ledgerTime))
   if (seconds <= 0n) return <>Matured</>
+  if (poolSeeded?.status === "unavailable") return <>{UNAVAILABLE}</>
   if (poolSeeded?.status === "live" && !poolSeeded.value) return <>No liquidity yet</>
   if (!impliedRate || impliedRate.status === "unavailable") return <>{UNAVAILABLE}</>
   const apy = impliedApy(impliedRate.value, seconds)

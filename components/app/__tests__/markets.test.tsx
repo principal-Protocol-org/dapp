@@ -132,6 +132,12 @@ describe("MarketsTable", () => {
     expect(cells[4].textContent).toBe("No liquidity yet")
   })
 
+  it("shows Unavailable, not 0.00%, when pool seeding is unreadable", () => {
+    mocks.ms = marketState({ poolSeeded: down(), impliedRate: live(0n) })
+    renderTable()
+    expect(within(screen.getByRole("row", { name: /STA · test/ })).getAllByRole("cell")[3].textContent).toBe("Unavailable")
+  })
+
   it("does not show old values after a failed refresh", () => {
     mocks.stale = true
     renderTable()
