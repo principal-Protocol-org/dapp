@@ -2,7 +2,7 @@ import { HistoryTable } from "@/components/app/history/history-table"
 
 export default function HistoryPage() {
   return (
-    <section aria-labelledby="history-heading" className="grid gap-6">
+    <section aria-labelledby="history-heading" className="grid grid-cols-[minmax(0,1fr)] gap-6">
       <div>
         <h1 id="history-heading" className="font-serif text-3xl text-ink">
           History
