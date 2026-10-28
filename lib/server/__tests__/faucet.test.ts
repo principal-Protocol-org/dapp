@@ -120,19 +120,46 @@ describe("runFaucet", () => {
     await expect(runFaucet({ account: b, manifest, ip: "1.1.1.1", now: T0 + 60_000, chain })).resolves.toHaveProperty("performed")
   })
 
-  it("caps the instance at 20 accepted runs per rolling minute, whatever the address (R42)", async () => {
-    const { chain } = fakeChain({ account: { exists: true, trustline: { authorized: true, balance: 5_000n * UNITS } }, allowed: true, assets: granted(manifest) })
+  it("caps the instance at 20 real runs per rolling minute, whatever the address (R42)", async () => {
+    // Each run has work to do (a top-up), so each takes a global slot.
+    const { chain } = fakeChain({ account: { exists: true, trustline: { authorized: true, balance: 0n } }, allowed: true, assets: granted(manifest) })
     for (let i = 0; i < FAUCET_GLOBAL_LIMIT_PER_MINUTE; i += 1) {
-      await expect(runFaucet({ account: user(), manifest, ip: `10.0.0.${i}`, now: T0 + i, chain })).resolves.toEqual({ performed: [] })
+      await expect(runFaucet({ account: user(), manifest, ip: `10.0.0.${i}`, now: T0 + i, chain })).resolves.toEqual({ performed: ["pay"] })
     }
     expect(FAUCET_GLOBAL_LIMIT_PER_MINUTE).toBe(20)
-    // A 21st new address from a new IP inside the minute is refused, and reads nothing.
-    const reads = chain.readAccount.mock.calls.length
+    // A 21st new address from a new IP inside the minute is refused before any transaction.
     await expect(runFaucet({ account: user(), manifest, ip: "10.0.1.1", now: T0 + 30_000, chain })).resolves.toEqual({ error: "rate_limited" })
-    expect(chain.readAccount.mock.calls.length).toBe(reads)
+    expect(chain.pay).toHaveBeenCalledTimes(FAUCET_GLOBAL_LIMIT_PER_MINUTE)
     // Rolling: once the first run is a minute old, one slot frees up.
-    await expect(runFaucet({ account: user(), manifest, ip: "10.0.1.2", now: T0 + 60_000, chain })).resolves.toEqual({ performed: [] })
+    await expect(runFaucet({ account: user(), manifest, ip: "10.0.1.2", now: T0 + 60_000, chain })).resolves.toEqual({ performed: ["pay"] })
     await expect(runFaucet({ account: user(), manifest, ip: "10.0.1.3", now: T0 + 60_000, chain })).resolves.toEqual({ error: "rate_limited" })
+  })
+
+  it("never spends a global slot on a no_trustline or nothing-to-do request (R42b)", async () => {
+    const junk = fakeChain({ account: { exists: true, trustline: null } })
+    const missing = fakeChain({ account: { exists: false } })
+    const idle = fakeChain({ account: { exists: true, trustline: { authorized: true, balance: 5_000n * UNITS } }, allowed: true, assets: granted(manifest) })
+    const n = FAUCET_GLOBAL_LIMIT_PER_MINUTE * 2
+    for (let i = 0; i < n; i += 1) {
+      await expect(runFaucet({ account: user(), manifest, ip: `10.1.0.${i}`, now: T0, chain: junk.chain })).resolves.toEqual({ error: "no_trustline" })
+      await expect(runFaucet({ account: user(), manifest, ip: `10.2.0.${i}`, now: T0, chain: missing.chain })).resolves.toEqual({ error: "no_trustline" })
+      await expect(runFaucet({ account: user(), manifest, ip: `10.3.0.${i}`, now: T0, chain: idle.chain })).resolves.toEqual({ performed: [] })
+    }
+    // All 20 slots are still free for real runs within the same minute.
+    const real = fakeChain()
+    for (let i = 0; i < FAUCET_GLOBAL_LIMIT_PER_MINUTE; i += 1) {
+      await expect(runFaucet({ account: user(), manifest, ip: `10.4.0.${i}`, now: T0 + 1, chain: real.chain })).resolves.toHaveProperty("performed")
+    }
+    await expect(runFaucet({ account: user(), manifest, ip: "10.4.1.1", now: T0 + 2, chain: real.chain })).resolves.toEqual({ error: "rate_limited" })
+  })
+
+  it("still limits per address and per IP before any read (R42b)", async () => {
+    const junk = fakeChain({ account: { exists: true, trustline: null } })
+    const a = user()
+    await expect(runFaucet({ account: a, manifest, ip: "1.1.1.1", now: T0, chain: junk.chain })).resolves.toEqual({ error: "no_trustline" })
+    await expect(runFaucet({ account: a, manifest, ip: "2.2.2.2", now: T0 + 1, chain: junk.chain })).resolves.toEqual({ error: "rate_limited" })
+    await expect(runFaucet({ account: user(), manifest, ip: "1.1.1.1", now: T0 + 1, chain: junk.chain })).resolves.toEqual({ error: "rate_limited" })
+    expect(junk.chain.readAccount).toHaveBeenCalledTimes(1)
   })
 
   it("performs every missing step for a fresh trustline, in order", async () => {
