@@ -13,17 +13,21 @@ import { PositionCard, type CardStatus } from "@/components/app/portfolio/positi
  * appears only once every market has said it is empty.
  */
 export function PortfolioView() {
-  const m = activeManifest()
   const { state } = useWallet()
+  if (state.status !== "connected") {
+    return <p className="text-ink-muted">Connect your wallet to see your positions.</p>
+  }
+  // Keyed by account and network: statuses reported for another account must never be reused.
+  return <Positions key={`${state.publicKey}|${state.networkPassphrase}`} />
+}
+
+function Positions() {
+  const m = activeManifest()
   const history = useHistory()
   const [statuses, setStatuses] = useState<Record<string, CardStatus>>({})
   const report = useCallback((marketId: string, status: CardStatus) => {
     setStatuses((prev) => (prev[marketId] === status ? prev : { ...prev, [marketId]: status }))
   }, [])
-
-  if (state.status !== "connected") {
-    return <p className="text-ink-muted">Connect your wallet to see your positions.</p>
-  }
 
   const allEmpty = m.markets.every((mk) => statuses[mk.marketId] === "empty")
   return (

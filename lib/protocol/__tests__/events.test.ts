@@ -110,6 +110,16 @@ const run = (all: FakeEvent[], opts?: Parameters<typeof fakeServer>[1]) => {
   }
 }
 
+describe("entry facts", () => {
+  it("are omitted, not thrown, when a decoded field is not a bigint", async () => {
+    const { promise } = run([ev(200, "h1", C.manager, "mint", addr(ACCOUNT), i128(95_000_000n), i128(99_500_000n), addr(ACCOUNT))])
+    const { entries } = await promise
+    expect(entries).toHaveLength(1)
+    expect(entries[0].kind).toBe("mint")
+    expect(entries[0].facts).toBeUndefined()
+  })
+})
+
 describe("fetchAccountHistory", () => {
   it("filters to the account: events without it in their data are dropped", async () => {
     const { promise } = run([
