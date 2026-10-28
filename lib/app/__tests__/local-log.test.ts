@@ -52,6 +52,15 @@ describe("local log", () => {
     ])
   })
 
+  it("keeps the cause of a failed transaction (R49), and drops an entry whose cause is not text", () => {
+    const s = memoryStorage()
+    const failed = entry({ status: "FAILED", reason: "Cause: the contract call failed. Nothing was taken except the network fee." })
+    appendLog(failed, s)
+    expect(readLog(A, s)).toEqual([failed])
+    const odd = memoryStorage({ "pp-txlog": JSON.stringify({ [A]: [{ ...entry(), reason: 42 }] }) })
+    expect(readLog(A, odd)).toEqual([])
+  })
+
   it(`keeps at most ${LOG_LIMIT} entries per account`, () => {
     const s = memoryStorage()
     for (let i = 0; i < LOG_LIMIT + 5; i++) appendLog(entry({ hash: i.toString(16).padStart(64, "0"), at: i }), s)

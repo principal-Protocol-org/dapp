@@ -87,7 +87,8 @@ export function HistoryTable() {
       hash: e.hash,
       when: when(new Date(e.at).toISOString()),
       label: ACTION_META[e.action].label,
-      lines: [],
+      // A failed transaction emits no events, so its cause (R49) is all there is to show.
+      lines: e.reason ? [e.reason] : [],
       status: e.status === "SUCCESS" ? "Confirmed" : e.status === "FAILED" ? "Failed" : "Pending",
       market: name(e.marketId),
     }))

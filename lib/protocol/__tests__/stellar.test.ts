@@ -4,8 +4,10 @@ import { describe, expect, it } from "vitest";
 import testnetJson from "@/config/manifests/testnet.json";
 import { parseManifest } from "../manifest";
 import {
+  AMOUNTS_MOVED_REASON,
   assertSignedTransactionMatchesReview,
   buildInvokeTransaction,
+  failedTransactionReason,
   getLedgerClock,
   SubmissionRejectedError,
   pollTransactionStatus,
@@ -423,6 +425,74 @@ describe("pollTransactionStatus", () => {
     });
 
     expect(result).toEqual({ hash: "abc123", status: "NOT_FOUND", attempts: 2 });
+  });
+
+  it("keeps the result and diagnostic events of a FAILED transaction (R49)", async () => {
+    const resultXdr = txResult(trapped);
+    const diagnosticEventsXdr = [authRefused()];
+    const result = await pollTransactionStatus({
+      rpcUrl: testnetMarket.rpcUrl,
+      hash: "abc123",
+      wait: async () => undefined,
+      server: {
+        async getTransaction() {
+          return { status: "FAILED", resultXdr, diagnosticEventsXdr };
+        },
+      },
+    });
+    expect(result).toEqual({ hash: "abc123", status: "FAILED", attempts: 1, failure: { result: resultXdr, diagnosticEvents: diagnosticEventsXdr } });
+  });
+});
+
+// A FAILED Soroban transaction as RPC reports it (shapes from the Task 23 live run).
+const txResult = (outcome: xdr.TransactionResultResult) =>
+  new xdr.TransactionResult({ feeCharged: 48_031n, result: outcome, ext: xdr.TransactionResultExt.v0() });
+const trapped = xdr.TransactionResultResult.txFailed([
+  xdr.OperationResult.opInner(xdr.OperationResultTr.invokeHostFunction(xdr.InvokeHostFunctionResult.invokeHostFunctionTrapped())),
+]);
+/** A diagnostic `error` event, decoded from base64 as the SDK's getTransaction does. */
+function diagnosticError(error: xdr.ScError, text: string): xdr.DiagnosticEvent {
+  const event = new xdr.DiagnosticEvent({
+    inSuccessfulContractCall: false,
+    event: new xdr.ContractEvent({
+      ext: xdr.ExtensionPoint.v0(),
+      contractId: null,
+      type: xdr.ContractEventType.diagnostic,
+      body: xdr.ContractEventBody.v0(
+        new xdr.ContractEventV0({ topics: [xdr.ScVal.scvSymbol("error"), xdr.ScVal.scvError(error)], data: xdr.ScVal.scvString(text) }),
+      ),
+    }),
+  });
+  return xdr.DiagnosticEvent.fromXdr(event.toXdr("base64"), "base64");
+}
+/** The host refusing a nested call whose arguments no longer match the signed authorization. */
+const authRefused = () => diagnosticError(xdr.ScError.sceAuth(xdr.ScErrorCode.scecInvalidAction), "Unauthorized function call for address");
+
+describe("failedTransactionReason (R49)", () => {
+  it("says the amounts moved when the host refused an authorization (Error(Auth, InvalidAction))", () => {
+    expect(failedTransactionReason({ result: txResult(trapped), diagnosticEvents: [authRefused()] })).toBe(AMOUNTS_MOVED_REASON);
+    expect(AMOUNTS_MOVED_REASON).toBe(
+      "Amounts moved between your review and inclusion (the pool or oracle changed). Nothing was taken except the network fee; prepare again.",
+    );
+  });
+
+  it("names the result code otherwise, and that only the fee was taken", () => {
+    expect(failedTransactionReason({ result: txResult(trapped) })).toBe("Cause: the contract call failed. Nothing was taken except the network fee.");
+    const contractError = diagnosticError(xdr.ScError.sceContract(9), "failing with contract error");
+    expect(failedTransactionReason({ result: txResult(trapped), diagnosticEvents: [contractError] })).toBe(
+      "Cause: the contract call failed. Nothing was taken except the network fee.",
+    );
+    const archived = xdr.TransactionResultResult.txFailed([
+      xdr.OperationResult.opInner(xdr.OperationResultTr.invokeHostFunction(xdr.InvokeHostFunctionResult.invokeHostFunctionEntryArchived())),
+    ]);
+    expect(failedTransactionReason({ result: txResult(archived) })).toBe(
+      "Cause: contract data it needs is archived; restore it first. Nothing was taken except the network fee.",
+    );
+  });
+
+  it("says the network gave no reason when RPC returned no result", () => {
+    expect(failedTransactionReason(undefined)).toBe("The network did not say why. Nothing was taken except the network fee.");
+    expect(failedTransactionReason({})).toBe("The network did not say why. Nothing was taken except the network fee.");
   });
 });
 

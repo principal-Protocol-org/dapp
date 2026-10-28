@@ -19,6 +19,8 @@ export type LogEntry = {
   /** When it was submitted, in browser milliseconds. */
   at: number
   status: TxStatus
+  /** FAILED: why, in plain words (R49). */
+  reason?: string
 }
 
 type Store = Record<string, LogEntry[]>
@@ -44,7 +46,8 @@ function isEntry(value: unknown, account: string): value is LogEntry {
     e.account === account &&
     typeof e.at === "number" &&
     Number.isFinite(e.at) &&
-    STATUSES.includes(e.status as TxStatus)
+    STATUSES.includes(e.status as TxStatus) &&
+    (e.reason === undefined || typeof e.reason === "string")
   )
 }
 

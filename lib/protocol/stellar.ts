@@ -61,7 +61,12 @@ type SubmitRpcServer = {
 
 type PollRpcServer = {
   // Only the fields read below, so the SDK's rpc.Server (parsed XDR objects) satisfies it.
-  getTransaction(hash: string): Promise<{ status: string; returnValue?: xdr.ScVal }>;
+  getTransaction(hash: string): Promise<{
+    status: string;
+    returnValue?: xdr.ScVal;
+    resultXdr?: xdr.TransactionResult;
+    diagnosticEventsXdr?: xdr.DiagnosticEvent[];
+  }>;
 };
 
 export type SubmitTransactionResult = {
@@ -76,6 +81,8 @@ export type PolledTransactionResult = {
   returnValue?: unknown;
   /** Set when a SUCCESS return value could not be decoded; hash and status are still reported. */
   decodeError?: string;
+  /** FAILED: the transaction result and the diagnostic events, when RPC returned them (R49). */
+  failure?: { result?: xdr.TransactionResult; diagnosticEvents?: readonly xdr.DiagnosticEvent[] };
 };
 
 export function createRpcServer(rpcUrl: string) {
@@ -268,6 +275,50 @@ export function describeTransactionResult(result: xdr.TransactionResult): string
   return TX_RESULT_REASONS[outcome.type] ?? `the network answered with result code ${outcome.type}`;
 }
 
+/** R49: what a FAILED transaction says when a pool or oracle amount moved after the review. */
+export const AMOUNTS_MOVED_REASON =
+  "Amounts moved between your review and inclusion (the pool or oracle changed). Nothing was taken except the network fee; prepare again.";
+
+/**
+ * The host refused an authorization because the call made on-chain is not the one that was signed
+ * (`Error(Auth, InvalidAction)`): a nested amount was worked out again at inclusion and differs.
+ */
+function authInvalidAction(events: readonly xdr.DiagnosticEvent[] | undefined): boolean {
+  try {
+    return (events ?? []).some(({ event }) => {
+      const [topic, error] = event.body.value.topics;
+      return (
+        topic?.type === "scvSymbol" &&
+        topic.value === "error" &&
+        error?.type === "scvError" &&
+        error.error.type === "sceAuth" &&
+        error.error.code.name === "scecInvalidAction"
+      );
+    });
+  } catch {
+    // An event of unexpected shape: no special cause is claimed.
+    return false;
+  }
+}
+
+/**
+ * Why a transaction included in a ledger FAILED, in plain words (R49): an authorization refused
+ * because an amount moved (from the diagnostic events, when RPC returns them), else the result code.
+ * A failed transaction changes nothing on-chain but its fee and sequence number.
+ */
+export function failedTransactionReason(failure: PolledTransactionResult["failure"]): string {
+  if (authInvalidAction(failure?.diagnosticEvents)) return AMOUNTS_MOVED_REASON;
+  let cause: string | undefined;
+  try {
+    if (failure?.result) cause = describeTransactionResult(failure.result);
+  } catch {
+    // An undecodable result: reported without a cause.
+  }
+  return cause
+    ? `Cause: ${cause}. Nothing was taken except the network fee.`
+    : "The network did not say why. Nothing was taken except the network fee.";
+}
+
 function rejectionReason(result: { errorResult?: xdr.TransactionResult; errorResultXdr?: string }): string | undefined {
   try {
     if (result.errorResult) return describeTransactionResult(result.errorResult);
@@ -341,6 +392,9 @@ export async function pollTransactionStatus(params: {
         } catch (error) {
           found.decodeError = `The return value could not be decoded: ${error instanceof Error ? error.message : String(error)}`;
         }
+      }
+      if (result.status === "FAILED") {
+        found.failure = { result: result.resultXdr, diagnosticEvents: result.diagnosticEventsXdr };
       }
       return found;
     }

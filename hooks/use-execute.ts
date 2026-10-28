@@ -66,7 +66,15 @@ export function useExecute(): Execute {
       track(async () => {
         const result = await executeReview({ review, manifest: activeManifest(), sign })
         const { action, marketId, source } = review.input
-        appendLog({ hash: result.hash, action, marketId, account: source, at: Date.now(), status: result.status })
+        appendLog({
+          hash: result.hash,
+          action,
+          marketId,
+          account: source,
+          at: Date.now(),
+          status: result.status,
+          ...(result.reason ? { reason: result.reason } : {}),
+        })
         refresh()
         return result
       }),

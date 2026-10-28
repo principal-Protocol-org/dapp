@@ -794,6 +794,18 @@ describe("ActionPanel — results", () => {
     expect(screen.getByText(HASH)).toBeTruthy()
     expect(readLog(A)[0]).toEqual(expect.objectContaining({ hash: HASH, status: "FAILED" }))
   })
+
+  it("a failed transaction shows its cause, and logs it (R49)", async () => {
+    const reason = "Cause: the contract call failed. Nothing was taken except the network fee."
+    mocks.executeReview.mockResolvedValue({ hash: HASH, status: "FAILED", reason })
+    await renderPanel()
+    await openReview()
+    await user().click(signButton())
+    await settle()
+    expect(screen.getByText("Buy PT failed on-chain.")).toBeTruthy()
+    expect(screen.getByText(`${reason} Look it up by its hash for the details.`)).toBeTruthy()
+    expect(readLog(A)[0]).toEqual(expect.objectContaining({ hash: HASH, status: "FAILED", reason }))
+  })
 })
 
 describe("ActionPanel — archived data (Review Focus 5)", () => {
