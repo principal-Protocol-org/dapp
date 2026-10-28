@@ -5,6 +5,8 @@ import { useMarketCompliance } from "@/hooks/use-market-compliance"
 import { useWallet } from "@/hooks/use-wallet"
 import { evaluateAccountCompliance, type ComplianceItem, type MarketCompliance } from "@/lib/protocol/compliance"
 import { shorten } from "@/lib/protocol/format"
+import { activeManifest } from "@/lib/protocol/manifest-source"
+import { onboardingAvailable } from "@/lib/protocol/onboarding"
 import type { Live } from "@/lib/protocol/types"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -17,6 +19,9 @@ const FIX_TEXT: Record<NonNullable<ComplianceItem["fix"]>, string> = {
   onboarding: "Get test tokens.",
   issuer: "Contact the issuer of the underlying asset.",
 }
+
+/** Where Get test tokens does not exist (mainnet), access is the market administrator's to grant. */
+const NO_ONBOARDING_FIX = "Ask the market's administrator to grant your account access."
 
 const STATUS_TEXT: Record<ComplianceItem["status"], string> = {
   ok: "OK",
@@ -78,6 +83,7 @@ export function ComplianceCard({
   const compliance = useMarketCompliance(marketId)
   const account = useAccountState(marketId)
   const connected = state.status === "connected"
+  const testTokens = onboardingAvailable(activeManifest())
   const marketCompliance = compliance.data
   const kind = marketCompliance?.status === "live" ? marketCompliance.value.kind : null
   const kindError = marketCompliance?.status === "unavailable" ? marketCompliance.error : undefined
@@ -108,12 +114,14 @@ export function ComplianceCard({
                     <span className="font-semibold">{STATUS_TEXT[item.status]}.</span> {item.message}
                   </p>
                   {item.fix ? (
-                    item.fix === "onboarding" ? (
+                    item.fix === "onboarding" && testTokens ? (
                       <Button type="button" variant="secondary" className="w-fit" onClick={onGetTestTokens}>
                         Get test tokens
                       </Button>
                     ) : (
-                      <p className="text-ink-muted">Fix: {FIX_TEXT[item.fix]}</p>
+                      <p className="text-ink-muted">
+                        Fix: {item.fix === "onboarding" ? NO_ONBOARDING_FIX : FIX_TEXT[item.fix]}
+                      </p>
                     )
                   ) : null}
                 </li>

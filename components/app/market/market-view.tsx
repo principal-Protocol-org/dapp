@@ -1,16 +1,17 @@
 "use client"
 
-import { useCallback } from "react"
+import { useState } from "react"
 import { useManifestFindings } from "@/hooks/use-manifest-findings"
 import { ActionTabs } from "@/components/app/actions/action-tabs"
 import { ComplianceCard } from "@/components/app/market/compliance-card"
 import { MarketHeader } from "@/components/app/market/market-header"
 import { SafetyCard } from "@/components/app/market/safety-card"
+import { OnboardingDialog } from "@/components/app/onboarding/onboarding-dialog"
 
 export function MarketView({ marketId }: { marketId: string }) {
   const errors = useManifestFindings().filter((f) => f.severity === "error")
-  // Placeholder: the Get test tokens dialog arrives with the onboarding task.
-  const openOnboarding = useCallback(() => {}, [])
+  const [onboarding, setOnboarding] = useState(false)
+  const openOnboarding = () => setOnboarding(true)
   return (
     <div className="grid gap-8">
       {errors.length > 0 ? (
@@ -31,6 +32,7 @@ export function MarketView({ marketId }: { marketId: string }) {
           <SafetyCard marketId={marketId} />
         </div>
       </div>
+      <OnboardingDialog open={onboarding} onOpenChange={setOnboarding} marketId={marketId} />
     </div>
   )
 }

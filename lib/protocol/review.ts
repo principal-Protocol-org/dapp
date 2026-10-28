@@ -192,9 +192,10 @@ function assertFeeCapped(fee: bigint, what: string): void {
 /**
  * RPC is untrusted (R29). It may add footprint, resources, auth and the resource fee; it must not
  * change who calls what, at which sequence and in which time window, add an authorization for
- * anything but this call, or charge a fee it does not explain.
+ * anything but this call, or charge a fee it does not explain. Also applied by the server faucet
+ * to the transactions it signs with its own keys (`lib/server/faucet.ts`).
  */
-function assertPreparedMatches(built: Transaction, prepared: Transaction): void {
+export function assertPreparedMatches(built: Transaction, prepared: Transaction): void {
   const expected = invokedContractArgs(built)
   const call = invokedContractArgs(prepared)
   const same =

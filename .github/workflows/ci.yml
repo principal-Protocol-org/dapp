@@ -21,8 +21,5 @@ jobs:
       - run: pnpm test
       - run: pnpm build
       - name: Fail if faucet secrets reach the client bundle
-        run: |
-          if grep -r "FAUCET_" .next/static; then
-            echo "FAUCET_ found in client bundle" >&2
-            exit 1
-          fi
+        # Fails when the client bundle is missing too, so the check can never pass vacuously (R12).
+        run: test -d .next/static && ! grep -rq FAUCET_ .next/static
