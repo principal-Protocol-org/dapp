@@ -24,7 +24,7 @@ export function keypairSigner(keypair: Keypair, networkPassphrase: string): Keyp
       if (expectedSigner !== publicKey) throw new Error(`signer holds ${publicKey}, asked to sign as ${expectedSigner}`)
       const tx = new Transaction(unsignedXdr, passphrase)
       tx.sign(keypair)
-      return tx.toXDR()
+      return tx.toXdr()
     },
   }
 }
