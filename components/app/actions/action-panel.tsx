@@ -145,6 +145,9 @@ export function ActionPanel({ config, marketId }: { config: PanelConfig; marketI
     }
   }
   const indicativeLines = ms ? [...safeLines(() => config.indicative(ms, inputs, ctx)), ...(quoteLines ?? [])] : []
+  // R38: market context beside either preview; it may compare the exact output with market reads.
+  const marketOf = config.market
+  const marketLines = ms && marketOf ? safeLines(() => marketOf(ms, { ...ctx, inputs, output })) : []
   const notes = configNotes(config, ms, account)
 
   // The review is bound to all of this; a change remounts SignFlow and discards it (Review Focus 2).
@@ -205,6 +208,12 @@ export function ActionPanel({ config, marketId }: { config: PanelConfig; marketI
                     ? "Estimated from on-chain views. Getting an exact quote…"
                     : "Estimated from on-chain views. The exact quote comes from simulating the transaction."}
               </p>
+            </>
+          ) : null}
+          {marketLines.length > 0 ? (
+            <>
+              <p className="label mt-2">{config.marketLabel ?? "Market (indicative)"}</p>
+              <PreviewList lines={marketLines} />
             </>
           ) : null}
         </section>

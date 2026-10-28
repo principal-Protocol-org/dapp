@@ -2,6 +2,7 @@
 
 import { useCallback } from "react"
 import { useManifestFindings } from "@/hooks/use-manifest-findings"
+import { ActionTabs } from "@/components/app/actions/action-tabs"
 import { ComplianceCard } from "@/components/app/market/compliance-card"
 import { MarketHeader } from "@/components/app/market/market-header"
 import { SafetyCard } from "@/components/app/market/safety-card"
@@ -23,9 +24,12 @@ export function MarketView({ marketId }: { marketId: string }) {
         </div>
       ) : null}
       <MarketHeader marketId={marketId} />
-      <div className="grid gap-6 min-[900px]:grid-cols-2">
-        <ComplianceCard marketId={marketId} onGetTestTokens={openOnboarding} />
-        <SafetyCard marketId={marketId} />
+      <div className="grid items-start gap-6 min-[900px]:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
+        <ActionTabs marketId={marketId} />
+        <div className="grid min-w-0 gap-6">
+          <ComplianceCard marketId={marketId} onGetTestTokens={openOnboarding} />
+          <SafetyCard marketId={marketId} />
+        </div>
       </div>
     </div>
   )

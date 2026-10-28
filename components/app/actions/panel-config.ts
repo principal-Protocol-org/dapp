@@ -37,12 +37,21 @@ export type IndicativeContext = {
  * What an exact preview may use: the simulated output (its first argument), the amounts entered and
  * the floors that will be signed. Deliberately no market state: an exact line is never computed
  * from an indicative read. Comparisons with market values (e.g. price impact against `pt_price`)
- * belong in `indicative`.
+ * belong in `market` (R38).
  */
 export type ExactContext = {
   inputs: PanelInputs
   /** The floors that will be signed, when the simulation gave usable ones. */
   guards?: GuardValues
+}
+
+/**
+ * What the `market` section may use (R38): the indicative context, the amounts entered and, once it
+ * is in, the exact simulated output for exactly these amounts (it is dropped on any input change).
+ */
+export type MarketContext = IndicativeContext & {
+  inputs: PanelInputs
+  output?: ActionOutput
 }
 
 /** What a result message may use: the input that was signed (amounts, floors, deadline). */
@@ -67,6 +76,15 @@ export type PanelConfig = {
   quote?(ms: MarketState, inputs: PanelInputs, ctx: IndicativeContext): Promise<PreviewLine[]>
   /** Preview from the simulated return value: the exact numbers. Pure; may throw. */
   exact(output: ActionOutput, ctx: ExactContext): PreviewLine[]
+  /**
+   * Market context that stays visible beside the indicative and the exact preview (R38), e.g. the
+   * pool's spot price, the price impact of the exact quote against it, the swap fee, the room left
+   * under a limit. Every line is indicative: it reads market state, which may move before the
+   * transaction lands. Pure and synchronous; may throw (the section then says why).
+   */
+  market?(ms: MarketState, ctx: MarketContext): PreviewLine[]
+  /** Heading of the `market` section. Default "Market (indicative)". */
+  marketLabel?: string
   /**
    * What a confirmed transaction did, from its decoded return value, e.g. "You bought 100 PT."
    * (spec §6 step 7). Used as the success message; "<label> confirmed." when absent, empty or throwing.

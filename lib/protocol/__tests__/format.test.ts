@@ -6,6 +6,7 @@ import {
   formatFeeRate,
   formatPercent,
   formatRate,
+  formatTokenAmount,
   hashLike,
   parseDecimalToRaw,
   shorten,
@@ -65,5 +66,26 @@ describe("fee formatting", () => {
     expect(formatFeeRate(3_000_000_000n)).toBe("0.3000%");
     expect(formatFeeRate(0n)).toBe("0.0000%");
     expect(formatFeeRate(1_234_567_890n)).toBe("0.1234%");
+  });
+});
+
+describe("formatTokenAmount (preview amounts)", () => {
+  it("shows at least 4 decimals", () => {
+    expect(formatTokenAmount(1_000_000_000n, 7)).toBe("100.0000");
+    expect(formatTokenAmount(500_000n, 7)).toBe("0.0500");
+    expect(formatTokenAmount(0n, 7)).toBe("0.0000");
+    expect(formatTokenAmount(1_049_475_000n, 7)).toBe("104.9475");
+  });
+  it("keeps every further non-zero digit, so an exact amount is never cut or rounded", () => {
+    expect(formatTokenAmount(45_431_818n, 7)).toBe("4.5431818");
+    expect(formatTokenAmount(4_543_182n, 7)).toBe("0.4543182");
+    expect(formatTokenAmount(1n, 7)).toBe("0.0000001");
+    expect(formatTokenAmount(995_000_000n, 7)).toBe("99.5000");
+  });
+  it("handles negatives, other decimals and tokens with fewer than 4 decimals", () => {
+    expect(formatTokenAmount(-500_000n, 7)).toBe("-0.0500");
+    expect(formatTokenAmount(150n, 2)).toBe("1.50");
+    expect(formatTokenAmount(7n, 0)).toBe("7");
+    expect(formatTokenAmount(123_456_789_012n, 9)).toBe("123.456789012");
   });
 });
