@@ -590,6 +590,7 @@ describe("ActionPanel — results", () => {
     await renderPanel()
     await openReview()
     const marketReads = mocks.fetchMarketState.mock.calls.length
+    const accountReads = mocks.fetchAccountState.mock.calls.length
     await user().click(signButton())
     await settle()
     expect(mocks.toast.success).toHaveBeenCalledTimes(1)
@@ -601,6 +602,7 @@ describe("ActionPanel — results", () => {
     expect(readLog(A)).toEqual([expect.objectContaining({ hash: HASH, action: "buy_pt", marketId: "m1", account: A, status: "SUCCESS" })])
     expect(readLog(B)).toEqual([])
     expect(mocks.fetchMarketState.mock.calls.length).toBeGreaterThan(marketReads)
+    expect(mocks.fetchAccountState.mock.calls.length).toBeGreaterThan(accountReads)
   })
 
   it("a failed transaction keeps and shows its hash", async () => {
