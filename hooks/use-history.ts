@@ -6,7 +6,7 @@ import { fetchAccountHistory, type HistoryEntry, type OracleUpdate } from "@/lib
 import { activeManifest } from "@/lib/protocol/manifest-source"
 import { createRpcServer } from "@/lib/protocol/stellar"
 
-export const HISTORY_REFETCH_MS = 30_000
+export const HISTORY_REFETCH_MS = 60_000
 
 export type HistoryRow = HistoryEntry & { marketId: string }
 
@@ -33,9 +33,11 @@ export function useHistory() {
     queryKey: ["history", m.network, address],
     queryFn: async (): Promise<HistoryData> => {
       const server = createRpcServer(m.rpcUrl)
+      const health = await server.getHealth() // once per refresh, shared by every market
+      const window = { oldestLedger: health.oldestLedger, latestLedger: health.latestLedger }
       const results = await Promise.all(
         m.markets.map((mk) =>
-          fetchAccountHistory({ manifest: m, marketId: mk.marketId, account: address as string, server }),
+          fetchAccountHistory({ manifest: m, marketId: mk.marketId, account: address as string, server, window }),
         ),
       )
       const entries = results
@@ -47,7 +49,7 @@ export function useHistory() {
       })
       return {
         entries,
-        window: results[0].window,
+        window,
         oracleUpdates,
         truncated: results.some((r) => r.truncated),
       }

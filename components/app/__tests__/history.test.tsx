@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react"
+import { act, render, screen, within } from "@testing-library/react"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import { appendLog } from "@/lib/app/local-log"
 import type { HistoryData } from "@/hooks/use-history"
@@ -88,6 +88,22 @@ describe("history table", () => {
     expect(screen.getAllByRole("row")).toHaveLength(3) // header + pending + event
   })
 
+  it("shows a confirmed local entry as Confirmed and a failed one as Failed, not Pending", () => {
+    appendLog({ hash: PENDING, action: "buy_pt", marketId: "m1", account: ADDRESS, at: 1, status: "SUCCESS" })
+    appendLog({ hash: "c".repeat(64), action: "sell_pt", marketId: "m1", account: ADDRESS, at: 2, status: "FAILED" })
+    render(<HistoryTable />)
+    expect(within(screen.getByText("Buy PT").closest("tr") as HTMLElement).getByText("Confirmed")).toBeTruthy()
+    expect(within(screen.getByText("Sell PT").closest("tr") as HTMLElement).getByText("Failed")).toBeTruthy()
+    expect(screen.queryByText("Pending")).toBeNull()
+  })
+
+  it("shows an entry appended after mount", async () => {
+    render(<HistoryTable />)
+    expect(screen.queryByText("Buy PT")).toBeNull()
+    act(() => appendLog({ hash: PENDING, action: "buy_pt", marketId: "m1", account: ADDRESS, at: 1, status: "NOT_FOUND" }))
+    expect(screen.getByText("Buy PT")).toBeTruthy()
+  })
+
   it("says unavailable when the history could not be loaded, never an empty list", () => {
     mocks.history = { data: undefined, isPending: false, isError: true, stale: true }
     render(<HistoryTable />)
@@ -108,9 +124,9 @@ describe("history table", () => {
     expect(screen.getByText(/no activity in this window/i)).toBeTruthy()
   })
 
-  it("warns when the history was cut short", () => {
+  it("warns that older entries may be missing when cut short", () => {
     mocks.history = { data: data({ truncated: true }), isPending: false, isError: false, stale: false }
     render(<HistoryTable />)
-    expect(screen.getByText(/too long to load in full/i)).toBeTruthy()
+    expect(screen.getByText(/too long to load in full.*older entries may be missing/i)).toBeTruthy()
   })
 })

@@ -1,9 +1,10 @@
 "use client"
 
+import { useEffect, useState } from "react"
 import { useHistory, type HistoryData, type HistoryRow } from "@/hooks/use-history"
 import { useWallet } from "@/hooks/use-wallet"
 import { ACTION_META } from "@/lib/protocol/actions"
-import { readLog } from "@/lib/app/local-log"
+import { readLog, subscribeLog, type LogEntry } from "@/lib/app/local-log"
 import { shorten } from "@/lib/protocol/format"
 import { activeManifest } from "@/lib/protocol/manifest-source"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -60,6 +61,16 @@ export function HistoryTable() {
   const history = useHistory()
   const account = state.status === "connected" ? state.publicKey : null
 
+  // The local log lives in localStorage: read it after mount (no server/client mismatch) and again
+  // on every change and every history refresh.
+  const [log, setLog] = useState<LogEntry[]>([])
+  const refreshedAt = history.dataUpdatedAt
+  useEffect(() => {
+    const read = () => setLog(account ? readLog(account) : [])
+    read()
+    return subscribeLog(read)
+  }, [account, refreshedAt])
+
   if (!account) {
     return <p className="text-ink-muted">Connect your wallet to see your history.</p>
   }
@@ -70,14 +81,14 @@ export function HistoryTable() {
   const name = (id: string) => m.markets.find((x) => x.marketId === id)?.displayName ?? id
 
   // Local-log entries stay "Pending" until their hash shows up in the events.
-  const pending: Row[] = readLog(account)
+  const pending: Row[] = log
     .filter((e) => !seen.has(e.hash))
     .map((e) => ({
       hash: e.hash,
       when: when(new Date(e.at).toISOString()),
       label: ACTION_META[e.action].label,
       lines: [],
-      status: e.status === "FAILED" ? "Failed" : "Pending",
+      status: e.status === "SUCCESS" ? "Confirmed" : e.status === "FAILED" ? "Failed" : "Pending",
       market: name(e.marketId),
     }))
   const confirmed: Row[] = (data?.entries ?? []).map((e) => ({
@@ -96,7 +107,7 @@ export function HistoryTable() {
       {data && <p className="text-sm text-ink-muted">{windowText(data.window)}</p>}
       {data?.truncated && (
         <p role="status" className="text-sm text-ink-muted">
-          This history was too long to load in full. The oldest entries in the window may be missing.
+          This history was too long to load in full. Older entries may be missing.
         </p>
       )}
       {failed && (

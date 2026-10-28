@@ -2,7 +2,7 @@
 import { Address, Keypair, nativeToScVal, xdr } from "@stellar/stellar-sdk"
 import { describe, expect, it, vi } from "vitest"
 import testnetJson from "@/config/manifests/testnet.json"
-import { decodeEvent, fetchAccountHistory, MAX_PAGES, type Role } from "../events"
+import { decodeEvent, fetchAccountHistory, type Role } from "../events"
 import { parseManifest } from "../manifest"
 
 const manifest = parseManifest(testnetJson)
@@ -61,10 +61,12 @@ describe("decodeEvent: one decoder per topic", () => {
 // ---- fake RPC ----
 type FakeEvent = { id: string; ledger: number; hash: string; contract: string; topic: string; data: xdr.ScVal; ok?: boolean }
 let seq = 0
+/** A real event id / cursor: the ledger in the high 32 bits. */
+const toid = (ledger: number, n: number) => `${(BigInt(ledger) << 32n).toString().padStart(19, "0")}-${String(n).padStart(10, "0")}`
 function ev(ledger: number, hash: string, contract: string, topic: string, ...fields: xdr.ScVal[]): FakeEvent {
   seq += 1
   return {
-    id: `${String(ledger).padStart(10, "0")}-${String(seq).padStart(10, "0")}`,
+    id: toid(ledger, seq),
     ledger,
     hash,
     contract,
@@ -84,14 +86,18 @@ const toResponse = (e: FakeEvent) => ({
   inSuccessfulContractCall: e.ok ?? true,
 })
 
-type Req = { startLedger?: number; cursor?: string; limit?: number; filters: { contractIds: string[] }[] }
+type Req = { startLedger?: number; endLedger?: number; cursor?: string; limit?: number; filters: { contractIds: string[] }[] }
 function fakeServer(all: FakeEvent[], opts: { pageSize?: number; oldest?: number; latest?: number } = {}) {
   const getEvents = vi.fn(async (req: Req) => {
     const ids = req.filters[0].contractIds
     const mine = all.filter((e) => ids.includes(e.contract)).sort((a, b) => a.id.localeCompare(b.id))
-    const after = req.cursor ? mine.filter((e) => e.id > (req.cursor as string)) : mine.filter((e) => e.ledger >= (req.startLedger ?? 0))
+    const after = req.cursor
+      ? mine.filter((e) => e.id > (req.cursor as string))
+      : mine.filter((e) => e.ledger >= (req.startLedger ?? 0) && e.ledger < (req.endLedger ?? Infinity))
     const page = after.slice(0, opts.pageSize ?? 1000)
-    return { events: page.map(toResponse), cursor: page.at(-1)?.id ?? req.cursor ?? "0", latestLedger: opts.latest ?? 500, oldestLedger: opts.oldest ?? 100 }
+    // An empty range scan hands back a cursor at the end of what it scanned.
+    const scanned = req.endLedger ? toid(req.endLedger, 0) : (req.cursor ?? toid(0, 0))
+    return { events: page.map(toResponse), cursor: page.at(-1)?.id ?? scanned, latestLedger: opts.latest ?? 500, oldestLedger: opts.oldest ?? 100 }
   })
   const getHealth = vi.fn(async () => ({ status: "healthy", latestLedger: opts.latest ?? 500, oldestLedger: opts.oldest ?? 100, ledgerRetentionWindow: 120960 }))
   return { getEvents, getHealth }
@@ -226,17 +232,34 @@ describe("fetchAccountHistory", () => {
     expect(server.getEvents.mock.calls.some((c) => typeof c[0].cursor === "string")).toBe(true)
   })
 
-  it("bounds pagination at MAX_PAGES and says the history is truncated", async () => {
-    const getEvents = vi.fn(async () => ({
-      events: [toResponse(ev(200, "x", C.sy, "deposit", addr(ACCOUNT), i128(1n), i128(1n)))].map((e, i) => ({ ...e, id: `${getEvents.mock.calls.length}-${i}` })),
-      cursor: `c${getEvents.mock.calls.length}`,
-      latestLedger: 500,
-      oldestLedger: 100,
-    }))
-    const getHealth = async () => ({ status: "healthy", latestLedger: 500, oldestLedger: 100, ledgerRetentionWindow: 1 })
-    const res = await fetchAccountHistory({ manifest, marketId: market.marketId, account: ACCOUNT, server: { getEvents, getHealth } as never })
-    expect(getEvents).toHaveBeenCalledTimes(MAX_PAGES * 2)
+  it("when the request budget runs out only the OLDEST activity is lost", async () => {
+    const all = [150, 250, 350, 450].map((l) => ev(l, `h${l}`, C.sy, "deposit", addr(ACCOUNT), i128(1n), i128(1n)))
+    const server = fakeServer(all, { pageSize: 1 })
+    const res = await fetchAccountHistory({
+      manifest, marketId: market.marketId, account: ACCOUNT, server: server as never, maxPages: 5, windowLedgers: 100,
+    })
     expect(res.truncated).toBe(true)
+    expect(res.entries.map((e) => e.hash)).toEqual(["h450", "h350"])
+  })
+
+  it("keeps walking past an empty page whose cursor advanced", async () => {
+    const sy = ev(320, "late", C.sy, "deposit", addr(ACCOUNT), i128(1n), i128(1n))
+    const getEvents = vi.fn(async (req: Req) => {
+      if (!req.filters[0].contractIds.includes(C.sy)) return { events: [], cursor: toid(501, 0) }
+      if (req.cursor === undefined) return { events: [], cursor: toid(300, 0) } // scan capped, nothing yet
+      if (req.cursor === toid(300, 0)) return { events: [toResponse(sy)], cursor: sy.id }
+      return { events: [], cursor: req.cursor }
+    })
+    const getHealth = async () => ({ latestLedger: 500, oldestLedger: 100 })
+    const res = await fetchAccountHistory({ manifest, marketId: market.marketId, account: ACCOUNT, server: { getEvents, getHealth } as never })
+    expect(res.entries.map((e) => e.hash)).toEqual(["late"])
+    expect(res.truncated).toBe(false)
+  })
+
+  it("uses a supplied window instead of calling getHealth", async () => {
+    const server = fakeServer([])
+    await fetchAccountHistory({ manifest, marketId: market.marketId, account: ACCOUNT, server: server as never, window: { oldestLedger: 100, latestLedger: 500 } })
+    expect(server.getHealth).not.toHaveBeenCalled()
   })
 
   it("ignores events of failed contract calls", async () => {
