@@ -20,7 +20,7 @@ import testnetJson from "@/config/manifests/testnet.json"
 import { ACTION_META, invocationFor, type ActionId, type ActionInput, type GuardValues } from "../actions"
 import { hashLike } from "../hash"
 import { parseManifest } from "../manifest"
-import { SubmissionRejectedError, createRpcServer, transactionEnvelopeHash } from "../stellar"
+import { AMOUNTS_MOVED_REASON, SubmissionRejectedError, createRpcServer, transactionEnvelopeHash } from "../stellar"
 import {
   MAX_TX_FEE_STROOPS,
   REVIEW_TTL_MS,
@@ -138,6 +138,33 @@ function fakeRpc(overrides: Partial<ReviewRpcServer> = {}): ReviewRpcServer & { 
     ...overrides,
   }
 }
+
+/** The result of a transaction whose contract call trapped, as RPC returns it for a FAILED one. */
+const failedResult = () =>
+  new xdr.TransactionResult({
+    feeCharged: 48_031n,
+    result: xdr.TransactionResultResult.txFailed([
+      xdr.OperationResult.opInner(xdr.OperationResultTr.invokeHostFunction(xdr.InvokeHostFunctionResult.invokeHostFunctionTrapped())),
+    ]),
+    ext: xdr.TransactionResultExt.v0(),
+  })
+
+/** The diagnostic event of the host refusing an authorization (`Error(Auth, InvalidAction)`). */
+const authInvalidActionEvent = () =>
+  new xdr.DiagnosticEvent({
+    inSuccessfulContractCall: false,
+    event: new xdr.ContractEvent({
+      ext: xdr.ExtensionPoint.v0(),
+      contractId: null,
+      type: xdr.ContractEventType.diagnostic,
+      body: xdr.ContractEventBody.v0(
+        new xdr.ContractEventV0({
+          topics: [xdr.ScVal.scvSymbol("error"), xdr.ScVal.scvError(xdr.ScError.sceAuth(xdr.ScErrorCode.scecInvalidAction))],
+          data: xdr.ScVal.scvString("Unauthorized function call for address"),
+        }),
+      ),
+    }),
+  })
 
 /** An RPC that fails the test if anything is called. */
 const noIo: ReviewRpcServer = new Proxy({} as ReviewRpcServer, {
@@ -559,14 +586,29 @@ describe("executeReview", () => {
     expect(result.decodeError).toMatch(/returned no value/)
   })
 
-  it("reports a failed transaction without an output", async () => {
-    const server = fakeRpc({
-      async getTransaction() {
-        return { status: "FAILED" }
-      },
+  it("reports a failed transaction without an output, with the cause RPC gives (R49)", async () => {
+    const failing = (failure: { resultXdr?: xdr.TransactionResult; diagnosticEventsXdr?: xdr.DiagnosticEvent[] }) =>
+      fakeRpc({
+        async getTransaction() {
+          return { status: "FAILED", ...failure }
+        },
+      })
+    const run = async (server: ReturnType<typeof fakeRpc>) =>
+      executeReview({ review: await review("buy_pt", {}, server), manifest, sign: signWith(), rpc: server })
+
+    expect(await run(failing({}))).toEqual({
+      hash: expect.stringMatching(/^[a-f0-9]{64}$/),
+      status: "FAILED",
+      reason: "The network did not say why. Nothing was taken except the network fee.",
     })
-    const result = await executeReview({ review: await review("buy_pt", {}, server), manifest, sign: signWith(), rpc: server })
-    expect(result).toEqual({ hash: expect.stringMatching(/^[a-f0-9]{64}$/), status: "FAILED" })
+    expect(await run(failing({ resultXdr: failedResult() }))).toMatchObject({
+      status: "FAILED",
+      reason: "Cause: the contract call failed. Nothing was taken except the network fee.",
+    })
+    // The host refused a nested transfer whose amount was worked out again at inclusion.
+    const refused = await run(failing({ resultXdr: failedResult(), diagnosticEventsXdr: [authInvalidActionEvent()] }))
+    expect(refused).toMatchObject({ status: "FAILED", reason: AMOUNTS_MOVED_REASON })
+    expect(refused.output).toBeUndefined()
   })
 
   it("keeps the hash when polling fails after submission", async () => {
@@ -989,6 +1031,17 @@ describe("executeRestore", () => {
     expect(sign.seen).toEqual([[restore.unsignedXdr, passphrase, SOURCE]])
     expect(result).toEqual({ hash: hashOf(restore.unsignedXdr), status: "SUCCESS" })
     expect(server.calls.sent[0].operations[0].type).toBe("restoreFootprint")
+  })
+
+  it("reports a failed restore with its cause (R49)", async () => {
+    const server = restoreServer()
+    server.getTransaction = async () => ({ status: "FAILED", resultXdr: failedResult() })
+    const restore = await prepare(server)
+    expect(await executeRestore({ restore, manifest, sign: signWith(), rpc: server })).toEqual({
+      hash: hashOf(restore.unsignedXdr),
+      status: "FAILED",
+      reason: "Cause: the contract call failed. Nothing was taken except the network fee.",
+    })
   })
 
   it("refuses an expired restore", async () => {

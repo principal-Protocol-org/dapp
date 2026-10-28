@@ -37,6 +37,7 @@ import {
   assertSignedTransactionMatchesReview,
   buildInvocationEnvelope,
   createRpcServer,
+  failedTransactionReason,
   pollTransactionStatus,
   SubmissionRejectedError,
   simulateInvocation,
@@ -85,6 +86,8 @@ export type TxStatus = "SUCCESS" | "FAILED" | "NOT_FOUND"
 export type TxResult = {
   hash: string
   status: TxStatus
+  /** FAILED: why, in plain words (R49). Always set for a FAILED transaction. */
+  reason?: string
   output?: ActionOutput
   /** The transaction succeeded but its return value could not be read; hash and status stand. */
   decodeError?: string
@@ -483,6 +486,7 @@ export function isExpired(review: Pick<Review, "preparedAtMs">, nowMs: number): 
 type SubmittedTransaction = {
   hash: string
   status: TxStatus
+  reason?: string
   returnValue?: unknown
   decodeError?: string
   pollError?: string
@@ -552,7 +556,7 @@ async function signAndSubmit(p: {
       ? { hash, status: "SUCCESS", decodeError: polled.decodeError }
       : { hash, status: "SUCCESS", returnValue: polled.returnValue }
   }
-  if (polled.status === "FAILED") return { hash, status: "FAILED" }
+  if (polled.status === "FAILED") return { hash, status: "FAILED", reason: failedTransactionReason(polled.failure) }
   return sendError
     ? {
         hash,
@@ -560,6 +564,12 @@ async function signAndSubmit(p: {
         pollError: `Sending the transaction failed (${sendError}), and the network does not show it yet. ${lookItUp}`,
       }
     : { hash, status: "NOT_FOUND" }
+}
+
+/** A FAILED or NOT_FOUND outcome, with its cause (R49) or poll error when there is one. */
+function unsuccessful(sent: SubmittedTransaction): TxResult {
+  const { hash, status, reason, pollError } = sent
+  return { hash, status, ...(reason === undefined ? {} : { reason }), ...(pollError === undefined ? {} : { pollError }) }
 }
 
 /**
@@ -598,9 +608,7 @@ export async function executeReview(p: {
     rpc: p.rpc,
     afterSign: fresh,
   })
-  if (sent.status !== "SUCCESS") {
-    return sent.pollError ? { hash: sent.hash, status: sent.status, pollError: sent.pollError } : { hash: sent.hash, status: sent.status }
-  }
+  if (sent.status !== "SUCCESS") return unsuccessful(sent)
 
   const unreadable = (reason: string): TxResult => ({
     hash: sent.hash,
@@ -750,5 +758,5 @@ export async function executeRestore(p: {
     rpc: p.rpc,
     afterSign: fresh,
   })
-  return sent.pollError ? { hash: sent.hash, status: sent.status, pollError: sent.pollError } : { hash: sent.hash, status: sent.status }
+  return sent.status === "SUCCESS" ? { hash: sent.hash, status: sent.status } : unsuccessful(sent)
 }

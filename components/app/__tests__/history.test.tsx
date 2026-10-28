@@ -97,6 +97,15 @@ describe("history table", () => {
     expect(screen.queryByText("Pending")).toBeNull()
   })
 
+  it("shows the cause of a failed local entry in its details (R49)", () => {
+    const reason = "Amounts moved between your review and inclusion (the pool or oracle changed). Nothing was taken except the network fee; prepare again."
+    appendLog({ hash: "d".repeat(64), action: "buy_yt", marketId: "m1", account: ADDRESS, at: 3, status: "FAILED", reason })
+    render(<HistoryTable />)
+    const row = screen.getByText("Buy YT").closest("tr") as HTMLElement
+    expect(within(row).getByText("Failed")).toBeTruthy()
+    expect(within(row).getByText(reason)).toBeTruthy()
+  })
+
   it("shows an entry appended after mount", async () => {
     render(<HistoryTable />)
     expect(screen.queryByText("Buy PT")).toBeNull()

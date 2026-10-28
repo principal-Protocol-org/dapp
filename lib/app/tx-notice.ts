@@ -32,7 +32,10 @@ export function noticeForResult(label: string, result: TxResult, network: Networ
       return {
         tone: "error",
         title: `${label} failed on-chain.`,
-        detail: "It was included in a ledger but did not go through, and the network fee was charged. To see why, look it up by its hash.",
+        // R49: the cause, when the result names one; the hash is kept either way.
+        detail: result.reason
+          ? `${result.reason} Look it up by its hash for the details.`
+          : "It was included in a ledger but did not go through, and the network fee was charged. To see why, look it up by its hash.",
         ...link,
       }
     case "NOT_FOUND":

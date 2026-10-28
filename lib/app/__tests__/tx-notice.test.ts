@@ -48,6 +48,15 @@ describe("noticeForResult", () => {
     expect(n.url).toContain(HASH)
   })
 
+  it("names the cause of a failed transaction (R49)", () => {
+    const reason = "Amounts moved between your review and inclusion (the pool or oracle changed). Nothing was taken except the network fee; prepare again."
+    const n = noticeForResult("Buy YT", { hash: HASH, status: "FAILED", reason }, "testnet")
+    expect(n.tone).toBe("error")
+    expect(n.title).toBe("Buy YT failed on-chain.")
+    expect(n.detail).toBe(`${reason} Look it up by its hash for the details.`)
+    expect(n.hash).toBe(HASH)
+  })
+
   it("keeps the hash of an ambiguous result and says to look it up", () => {
     const n = noticeForResult("Buy PT", { hash: HASH, status: "NOT_FOUND" }, "local")
     expect(n.tone).toBe("warning")
