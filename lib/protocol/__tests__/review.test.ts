@@ -1055,12 +1055,20 @@ describe("executeRestore", () => {
 
   it("reports a failed restore with its cause (R49)", async () => {
     const server = restoreServer()
-    server.getTransaction = async () => ({ status: "FAILED", resultXdr: failedResult() })
+    // What a restore can actually fail with: a restoreFootprint result, never a contract-call one.
+    const restoreFailed = new xdr.TransactionResult({
+      feeCharged: 48_031n,
+      result: xdr.TransactionResultResult.txFailed([
+        xdr.OperationResult.opInner(xdr.OperationResultTr.restoreFootprint(xdr.RestoreFootprintResult.restoreFootprintResourceLimitExceeded())),
+      ]),
+      ext: xdr.TransactionResultExt.v0(),
+    })
+    server.getTransaction = async () => ({ status: "FAILED", resultXdr: restoreFailed })
     const restore = await prepare(server)
     expect(await executeRestore({ restore, manifest, sign: signWith(), rpc: server })).toEqual({
       hash: hashOf(restore.unsignedXdr),
       status: "FAILED",
-      reason: "Cause: the contract call failed. Nothing was taken except the network fee.",
+      reason: "Cause: the restore ran out of the resources it declared; prepare it again. Nothing was taken except the network fee.",
     })
   })
 

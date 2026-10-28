@@ -7,6 +7,7 @@ import {
   AMOUNTS_MOVED_REASON,
   assertSignedTransactionMatchesReview,
   buildInvokeTransaction,
+  describeTransactionResult,
   failedTransactionReason,
   getLedgerClock,
   SubmissionRejectedError,
@@ -454,9 +455,9 @@ const trapped = xdr.TransactionResultResult.txFailed([
   xdr.OperationResult.opInner(xdr.OperationResultTr.invokeHostFunction(xdr.InvokeHostFunctionResult.invokeHostFunctionTrapped())),
 ]);
 /** A diagnostic `error` event, decoded from base64 as the SDK's getTransaction does. */
-function diagnosticError(error: xdr.ScError, text: string): xdr.DiagnosticEvent {
+function diagnosticError(error: xdr.ScError, text: string, inSuccessfulContractCall = false): xdr.DiagnosticEvent {
   const event = new xdr.DiagnosticEvent({
-    inSuccessfulContractCall: false,
+    inSuccessfulContractCall,
     event: new xdr.ContractEvent({
       ext: xdr.ExtensionPoint.v0(),
       contractId: null,
@@ -474,8 +475,20 @@ const authRefused = () => diagnosticError(xdr.ScError.sceAuth(xdr.ScErrorCode.sc
 describe("failedTransactionReason (R49)", () => {
   it("says the amounts moved when the host refused an authorization (Error(Auth, InvalidAction))", () => {
     expect(failedTransactionReason({ result: txResult(trapped), diagnosticEvents: [authRefused()] })).toBe(AMOUNTS_MOVED_REASON);
+    // No cause beyond what the event shows is claimed (R49 hint).
     expect(AMOUNTS_MOVED_REASON).toBe(
-      "Amounts moved between your review and inclusion (the pool or oracle changed). Nothing was taken except the network fee; prepare again.",
+      "Amounts moved between your review and inclusion. Nothing was taken except the network fee; prepare again.",
+    );
+  });
+
+  it("counts only an authorization refusal raised in a call that failed (inSuccessfulContractCall false)", () => {
+    const inSuccessfulCall = diagnosticError(
+      xdr.ScError.sceAuth(xdr.ScErrorCode.scecInvalidAction),
+      "Unauthorized function call for address",
+      true,
+    );
+    expect(failedTransactionReason({ result: txResult(trapped), diagnosticEvents: [inSuccessfulCall] })).toBe(
+      "Cause: the contract call failed. Nothing was taken except the network fee.",
     );
   });
 
@@ -491,6 +504,37 @@ describe("failedTransactionReason (R49)", () => {
     expect(failedTransactionReason({ result: txResult(archived) })).toBe(
       "Cause: contract data it needs is archived; restore it first. Nothing was taken except the network fee.",
     );
+  });
+
+  it("describes a failed restore in plain words (R49)", () => {
+    const restore = (r: xdr.RestoreFootprintResult) =>
+      txResult(xdr.TransactionResultResult.txFailed([xdr.OperationResult.opInner(xdr.OperationResultTr.restoreFootprint(r))]));
+    expect(failedTransactionReason({ result: restore(xdr.RestoreFootprintResult.restoreFootprintResourceLimitExceeded()) })).toBe(
+      "Cause: the restore ran out of the resources it declared; prepare it again. Nothing was taken except the network fee.",
+    );
+    expect(failedTransactionReason({ result: restore(xdr.RestoreFootprintResult.restoreFootprintInsufficientRefundableFee()) })).toBe(
+      "Cause: its refundable fee is too low to restore the data; prepare it again. Nothing was taken except the network fee.",
+    );
+    expect(failedTransactionReason({ result: restore(xdr.RestoreFootprintResult.restoreFootprintMalformed()) })).toBe(
+      "Cause: the restore is malformed; prepare it again. Nothing was taken except the network fee.",
+    );
+  });
+
+  it("never prints the raw operation-result discriminant", () => {
+    const failed = (op: xdr.OperationResult) => describeTransactionResult(txResult(xdr.TransactionResultResult.txFailed([op])));
+    const results = [
+      xdr.OperationResult.opInner(xdr.OperationResultTr.restoreFootprint(xdr.RestoreFootprintResult.restoreFootprintMalformed())),
+      xdr.OperationResult.opInner(xdr.OperationResultTr.extendFootprintTtl(xdr.ExtendFootprintTtlResult.extendFootprintTtlMalformed())),
+      xdr.OperationResult.opInner(xdr.OperationResultTr.payment(xdr.PaymentResult.paymentUnderfunded())),
+      xdr.OperationResult.opBadAuth(),
+      xdr.OperationResult.opNoAccount(),
+      xdr.OperationResult.opTooManySubentries(),
+    ];
+    for (const op of results) expect(failed(op)).not.toMatch(/opInner|opBad|opNo|opToo/);
+    expect(failed(xdr.OperationResult.opBadAuth())).toBe(
+      "its operation is not signed by the right account; reconnect the wallet, then prepare it again",
+    );
+    expect(failed(results[2])).toBe("its payment operation failed (paymentUnderfunded)");
   });
 
   it("says the network gave no reason when RPC returned no result", () => {

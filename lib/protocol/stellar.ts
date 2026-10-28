@@ -261,31 +261,61 @@ const HOST_FUNCTION_REASONS: Partial<Record<string, string>> = {
   invokeHostFunctionMalformed: "the contract call is malformed; prepare it again",
 };
 
-/** A transaction result code in plain words, for a refusal message. */
+const RESTORE_REASONS: Partial<Record<string, string>> = {
+  restoreFootprintMalformed: "the restore is malformed; prepare it again",
+  restoreFootprintResourceLimitExceeded: "the restore ran out of the resources it declared; prepare it again",
+  restoreFootprintInsufficientRefundableFee: "its refundable fee is too low to restore the data; prepare it again",
+};
+
+/** Operation results that carry no operation-specific code. */
+const OPERATION_REASONS: Partial<Record<string, string>> = {
+  opBadAuth: "its operation is not signed by the right account; reconnect the wallet, then prepare it again",
+  opNoAccount: "the account its operation acts for does not exist on this network; fund it first",
+  opNotSupported: "its operation is not supported by this network",
+  opTooManySubentries: "the account holds too many trustlines, offers or signers for this operation",
+  opExceededWorkLimit: "its operation needed more work than the network allows",
+  opTooManySponsoring: "the account sponsors too many entries for this operation",
+};
+
+/** The operation's own result code, e.g. `paymentUnderfunded` (each arm is named `<type>Result`). */
+function innerResultCode(tr: xdr.OperationResultTr): string | undefined {
+  const arm = (tr as unknown as Record<string, { type?: unknown } | undefined>)[`${tr.type}Result`];
+  return typeof arm?.type === "string" ? arm.type : undefined;
+}
+
+/** A transaction result code in plain words, for a refusal message. Never a raw union discriminant. */
 export function describeTransactionResult(result: xdr.TransactionResult): string {
   const outcome = result.result;
   if (outcome.type === "txFailed") {
     const [operation] = outcome.results;
-    if (operation?.type === "opInner" && operation.tr.type === "invokeHostFunction") {
-      const code = operation.tr.invokeHostFunctionResult.type;
+    if (!operation) return "its operation failed without a result";
+    if (operation.type !== "opInner") return OPERATION_REASONS[operation.type] ?? "its operation failed";
+    const tr = operation.tr;
+    if (tr.type === "invokeHostFunction") {
+      const code = tr.invokeHostFunctionResult.type;
       return HOST_FUNCTION_REASONS[code] ?? `the contract call failed (${code})`;
     }
-    return `its operation failed (${operation?.type ?? "no operation result"})`;
+    if (tr.type === "restoreFootprint") return RESTORE_REASONS[tr.restoreFootprintResult.type] ?? "the restore failed";
+    const code = innerResultCode(tr);
+    return `its ${tr.type} operation failed${code ? ` (${code})` : ""}`;
   }
   return TX_RESULT_REASONS[outcome.type] ?? `the network answered with result code ${outcome.type}`;
 }
 
-/** R49: what a FAILED transaction says when a pool or oracle amount moved after the review. */
+/** R49: what a FAILED transaction says when an amount moved after the review. */
 export const AMOUNTS_MOVED_REASON =
-  "Amounts moved between your review and inclusion (the pool or oracle changed). Nothing was taken except the network fee; prepare again.";
+  "Amounts moved between your review and inclusion. Nothing was taken except the network fee; prepare again.";
 
 /**
  * The host refused an authorization because the call made on-chain is not the one that was signed
  * (`Error(Auth, InvalidAction)`): a nested amount was worked out again at inclusion and differs.
+ * Only an event raised in a call that failed counts: one logged inside a call that went on to
+ * succeed did not fail this transaction.
  */
 function authInvalidAction(events: readonly xdr.DiagnosticEvent[] | undefined): boolean {
   try {
-    return (events ?? []).some(({ event }) => {
+    return (events ?? []).some(({ inSuccessfulContractCall, event }) => {
+      if (inSuccessfulContractCall !== false) return false;
       const [topic, error] = event.body.value.topics;
       return (
         topic?.type === "scvSymbol" &&
