@@ -207,7 +207,7 @@ describe("previewBuyYt", () => {
 
 describe("previewAddLiquiditySingleSy (T17)", () => {
   // Pool 1000 PT / 2000 SY / 1000 LP; 100 SY in, zap_swap_amount says 50 SY is swapped, and
-  // quote_sy_for_pt(50 SY) buys 24.5 PT for a 0.15 SY fee. Hand-computed with market_pool:462-489.
+  // quote_sy_for_pt(50 SY) buys 24.5 PT for a 0.15 SY fee. Hand-computed with market_pool:456-508.
   const reserves = { pt: 10_000_000_000n, sy: 20_000_000_000n };
   const totalLp = 10_000_000_000n;
 

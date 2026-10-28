@@ -47,11 +47,11 @@ beforeEach(() => installDefaults(mocks))
 afterEach(teardown)
 
 describe("ActionTabs (R8)", () => {
-  it("groups the actions in Mint, Trade, Liquidity and Redeem; tabs not built yet are disabled", async () => {
+  it("groups the actions in Mint, Trade, Liquidity and Redeem, every one built (T15–T18), Mint first", async () => {
     await renderUi(<ActionTabs marketId="m1" />)
     const tabs = screen.getAllByRole("tab").filter((t) => t.closest("[aria-label='Market actions']"))
     expect(tabs.map((t) => t.textContent)).toEqual(["Mint", "Trade", "Liquidity", "Redeem"])
-    expect(tabs.map((t) => (t as HTMLButtonElement).disabled)).toEqual([false, false, false, true])
+    expect(tabs.map((t) => (t as HTMLButtonElement).disabled)).toEqual([false, false, false, false])
     expect(tabs[0].getAttribute("aria-selected")).toBe("true")
     expect(screen.getByRole("button", { name: "Review Deposit" })).toBeTruthy()
   })

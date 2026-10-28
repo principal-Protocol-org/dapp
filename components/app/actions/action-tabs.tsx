@@ -4,6 +4,7 @@ import { useId, type ComponentType } from "react"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { LiquidityTab } from "@/components/app/actions/liquidity-tab"
 import { MintTab } from "@/components/app/actions/mint-tab"
+import { RedeemTab } from "@/components/app/actions/redeem-tab"
 import { TradeTab } from "@/components/app/actions/trade-tab"
 
 type TabSpec = { id: "mint" | "trade" | "liquidity" | "redeem"; label: string; Panel?: ComponentType<{ marketId: string }> }
@@ -13,7 +14,7 @@ const TABS: TabSpec[] = [
   { id: "mint", label: "Mint", Panel: MintTab },
   { id: "trade", label: "Trade", Panel: TradeTab },
   { id: "liquidity", label: "Liquidity", Panel: LiquidityTab },
-  { id: "redeem", label: "Redeem" },
+  { id: "redeem", label: "Redeem", Panel: RedeemTab },
 ]
 
 /** The market page's actions. Only the selected tab is mounted, so only its panel reads and simulates. */
