@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it, vi } from "vitest"
-import { quoteBuyExactPt, quotePtForSy, quoteSyForPt } from "../quotes"
+import { quoteBuyExactPt, quotePtForSy, quoteSyForPt, zapSwapAmount } from "../quotes"
 import type { ContractReader } from "../reader"
 
 const POOL = "CPOOL"
@@ -43,5 +43,20 @@ describe("pool quotes", () => {
   it("rejects a malformed quote rather than guessing a number", async () => {
     await expect(quoteSyForPt(reader({ amount_out: "9500000", amount_in: 1n, fee_shares: 0n }), POOL, 1n)).rejects.toThrow(/expected an integer/)
     await expect(quoteSyForPt(reader(null), POOL, 1n)).rejects.toThrow("quote_sy_for_pt did not return a quote.")
+  })
+})
+
+describe("zap_swap_amount (T17)", () => {
+  it("reads how much of a single-sided deposit the pool swaps into PT", async () => {
+    const read = reader(500_000_000n)
+    await expect(zapSwapAmount(read, POOL, 1_000_000_000n)).resolves.toBe(500_000_000n)
+    expect(read).toHaveBeenCalledWith({ contractId: POOL, functionName: "zap_swap_amount", args: [{ type: "i128", value: 1_000_000_000n }] })
+  })
+
+  it("rejects a non-positive deposit before reading, and a non-integer answer", async () => {
+    const read = reader(1n)
+    await expect(zapSwapAmount(read, POOL, 0n)).rejects.toThrow("A quote needs an amount greater than zero.")
+    expect(read).not.toHaveBeenCalled()
+    await expect(zapSwapAmount(reader("5"), POOL, 1n)).rejects.toThrow(/expected an integer/)
   })
 })

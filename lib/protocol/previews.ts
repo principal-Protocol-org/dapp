@@ -177,3 +177,40 @@ export function previewBuyYt(
   const { yt } = previewMint(syIn, oracleRate, tokenizationFeeBps);
   return { yt, syBack: ptForSyAmountOut, netCost: syIn - ptForSyAmountOut };
 }
+
+/**
+ * LP minted by a single-sided deposit of `syIn` SY. Mirrors `add_liquidity_single_sy`,
+ * `market_pool/src/lib.rs:462-489`: the pool swaps `split` (`zap_swap_amount(syIn)`) into PT —
+ * `buy` is `quote_sy_for_pt(split)`: `ptOut` PT for a `feeShares` fee — so the reserves become
+ * `pt1 = pt_res − ptOut`, `sy1 = sy_res + split − feeShares`; then
+ * `lp = min(ptOut·total_lp/pt1, (syIn − split)·total_lp/sy1)` (each floored),
+ * `pt_used = min(ceil(lp·pt1/total_lp), ptOut)`, `sy_used = min(ceil(lp·sy1/total_lp), syIn − split)`.
+ * `syUsed` is `split + sy_used`, the SY the contract takes and returns; `ptRefund = ptOut − pt_used`
+ * is sent back to the caller and `syKept = syIn − split − sy_used` never leaves the wallet.
+ * Zero LP (the contract reverts `ZeroAmount`) gives all zeros. Throws on an unseeded pool (R18:
+ * the contract reverts `InsufficientLiquidity`) or a split larger than the deposit.
+ */
+export function previewAddLiquiditySingleSy(
+  syIn: bigint,
+  split: bigint,
+  buy: { ptOut: bigint; feeShares: bigint },
+  reserves: PoolReserves,
+  totalLp: bigint,
+): { lp: bigint; ptUsed: bigint; syUsed: bigint; ptRefund: bigint; syKept: bigint } {
+  if (totalLp <= 0n) throw new RangeError("pool not seeded: a single-sided deposit needs liquidity");
+  if (split < 0n || split > syIn) throw new RangeError("the swap is larger than the deposit");
+  const pt1 = reserves.pt - buy.ptOut;
+  const sy1 = reserves.sy + (split - buy.feeShares);
+  assertPositive(pt1, "PT reserve after the swap");
+  assertPositive(sy1, "SY reserve after the swap");
+  const remaining = syIn - split;
+  const lpFromPt = (buy.ptOut * totalLp) / pt1;
+  const lpFromSy = (remaining * totalLp) / sy1;
+  const lp = lpFromPt < lpFromSy ? lpFromPt : lpFromSy;
+  if (lp <= 0n) return { lp: 0n, ptUsed: 0n, syUsed: 0n, ptRefund: 0n, syKept: 0n };
+  const ceilPt = ceilDiv(lp * pt1, totalLp);
+  const ceilSy = ceilDiv(lp * sy1, totalLp);
+  const ptUsed = ceilPt < buy.ptOut ? ceilPt : buy.ptOut;
+  const syAdded = ceilSy < remaining ? ceilSy : remaining;
+  return { lp, ptUsed, syUsed: split + syAdded, ptRefund: buy.ptOut - ptUsed, syKept: remaining - syAdded };
+}
