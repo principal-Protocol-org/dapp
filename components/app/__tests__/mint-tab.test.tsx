@@ -51,7 +51,7 @@ describe("ActionTabs (R8)", () => {
     await renderUi(<ActionTabs marketId="m1" />)
     const tabs = screen.getAllByRole("tab").filter((t) => t.closest("[aria-label='Market actions']"))
     expect(tabs.map((t) => t.textContent)).toEqual(["Mint", "Trade", "Liquidity", "Redeem"])
-    expect(tabs.map((t) => (t as HTMLButtonElement).disabled)).toEqual([false, true, true, true])
+    expect(tabs.map((t) => (t as HTMLButtonElement).disabled)).toEqual([false, false, true, true])
     expect(tabs[0].getAttribute("aria-selected")).toBe("true")
     expect(screen.getByRole("button", { name: "Review Deposit" })).toBeTruthy()
   })
