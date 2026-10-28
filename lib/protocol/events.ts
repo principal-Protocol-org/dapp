@@ -326,16 +326,19 @@ function genericLine(i: Item): string {
   return `${i.role} ${i.topic}: ${fields.join(", ")}`
 }
 
-/** The raw amounts the portfolio needs; only for a plain mint or buy_pt, from the first matching event. */
+/** The raw amounts the portfolio needs; only for a plain mint or buy_pt. A missing or mistyped field omits the facts. */
 function factsOf(items: Item[], kind: HistoryKind): { facts: EntryFacts } | Record<string, never> {
   const find = (k: string) => items.find((i) => key(i) === k)?.decoded?.fields
+  const big = (...v: unknown[]) => v.every((x) => typeof x === "bigint")
   if (kind === "mint") {
     const f = find("manager.mint")
-    if (f) return { facts: { mint: { notional: f.notional as bigint, syShares: f.sy_shares as bigint, feeShares: f.fee_shares as bigint } } }
+    if (f && big(f.notional, f.sy_shares, f.fee_shares)) {
+      return { facts: { mint: { notional: f.notional as bigint, syShares: f.sy_shares as bigint, feeShares: f.fee_shares as bigint } } }
+    }
   }
   if (kind === "buy_pt") {
     const f = find("pool.buy_pt")
-    if (f) return { facts: { buyPt: { syIn: f.sy_in as bigint, ptOut: f.pt_out as bigint } } }
+    if (f && big(f.sy_in, f.pt_out)) return { facts: { buyPt: { syIn: f.sy_in as bigint, ptOut: f.pt_out as bigint } } }
   }
   return {}
 }

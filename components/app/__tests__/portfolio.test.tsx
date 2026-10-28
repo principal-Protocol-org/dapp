@@ -25,6 +25,7 @@ vi.mock("@/hooks/use-wallet", () => ({ useWallet: () => ({ state: mocks.wallet }
 vi.mock("@/hooks/use-history", () => ({ useHistory: () => mocks.history }))
 vi.mock("@/hooks/use-ledger-clock", () => ({ useLedgerClock: () => ({ ledgerTime: LEDGER_TIME, sequence: 1, isError: false }) }))
 
+import { claimPanel } from "../actions/redeem-tab"
 import { PortfolioView } from "../portfolio/portfolio-view"
 
 const AT = "2026-10-05T10:00:00Z"
@@ -96,14 +97,19 @@ describe("portfolio", () => {
     expect(screen.getByText(/stale \(older than 1 hour\)/)).toBeTruthy()
   })
 
-  it("shows pending yield net, with gross and fee in a tooltip", async () => {
-    // index at rate 1.00 -> oracle 1.05: pending = 50 * (idx_1.00 - idx_1.05 - 1) / INDEX_SCALE; fee 10%
+  it("shows pending yield net, with gross and fee in a tooltip, equal to the claim panel's", async () => {
+    // 50 YT, last index at rate 1.00, oracle 1.05, 10% fee, exchange rate 1.0:
+    // gross = 500_000_000 * (1e12 - 952_380_952_381 - 1) / 1e12 = 23_809_523; fee shares = ceil(10%) = 2_380_953; net = 21_428_570
     mocks.ms = marketState({ fees: { tokenizationBps: live(0n), ytBps: live(1000n), swapTierBps: live(0n), protocolShareBps: live(0n) } })
     mocks.account = accountState({ pt: live(0n), yt: live(50n * E7), ytLastClaimedIndex: live(indexFor(10_000_000n)), ytPendingClaim: live(0n) })
     wrap()
-    const net = screen.getByText(/^2\.\d+ STA$/)
+    const net = screen.getByText("2.142857 STA")
     await userEvent.hover(net)
-    expect((await screen.findAllByText(/Gross 2\.\d+ STA, YT fee 0\.\d+ STA\./)).length).toBeGreaterThan(0)
+    expect((await screen.findAllByText("Gross 2.3809523 STA, YT fee 0.2380953 STA.")).length).toBeGreaterThan(0)
+    const lines = claimPanel(MARKET as never).market!(mocks.ms as never, { account: mocks.account } as never)
+    expect(lines.find((l) => l.label === "You receive (net)")?.value).toBe("2.142857 STA")
+    expect(lines.find((l) => l.label === "Pending yield (gross)")?.value).toBe("2.3809523 STA")
+    expect(lines.find((l) => l.label === "YT fee")?.value).toBe("0.2380953 STA")
   })
 
   it("shows the fixed return in notional units, the APY, and the underlying paid apart", () => {
@@ -113,7 +119,7 @@ describe("portfolio", () => {
     expect(within(card).getByText("100.0000 notional")).toBeTruthy() // 100 PT
     expect(within(card).getByText("98.0000 notional")).toBeTruthy() // 100 * 0.98
     // 10 days left, price 0.98: positive APY, shown as a percent
-    expect(within(card).getByText(/^\d+\.\d\d%$/)).toBeTruthy()
+    expect(within(card).getByText("109.05%")).toBeTruthy()
     // 100 PT / oracle 1.05 at exchange rate 1.0 = 95.2380952 STA, indicative before settlement
     expect(within(card).getByText("95.2380952 STA")).toBeTruthy()
     expect(within(card).getByText(/indicative until settlement/)).toBeTruthy()
@@ -122,7 +128,39 @@ describe("portfolio", () => {
   it("shows a negative APY above par truthfully", () => {
     mocks.ms = marketState({ ptPrice: live(10_200_000n) })
     wrap()
-    expect(screen.getByText(/^-\d+\.\d\d%$/)).toBeTruthy()
+    expect(screen.getByText("-51.46%")).toBeTruthy()
+  })
+
+  it("after maturity shows Matured, not Unavailable, and a final redemption value", () => {
+    mocks.ms = marketState({ settledRate: live<bigint | null>(10_500_000n), maturity: live(BigInt(LEDGER_TIME - 1)) })
+    wrap()
+    const card = screen.getByRole("region", { name: "STA · test" })
+    expect(within(card).getAllByText("Matured")).toHaveLength(2)
+    expect(within(card).getByText("Redeems for (STA)")).toBeTruthy()
+    expect(within(card).getByText("95.2380952 STA")).toBeTruthy()
+  })
+
+  it("a frozen YT index fixes the redemption rate: no indicative label", () => {
+    mocks.ms = marketState({ ytFrozen: live(true), ytAccruedIndex: live(indexFor(10_500_000n)) })
+    wrap()
+    expect(screen.getByText("Redeems for (STA)")).toBeTruthy()
+  })
+
+  it("does not reuse empty statuses of another account", () => {
+    mocks.account = accountState()
+    const view = render(<TooltipProvider><PortfolioView /></TooltipProvider>)
+    expect(screen.getByText(/hold nothing in any market/i)).toBeTruthy()
+    mocks.wallet = { status: "connected", publicKey: "GB" } as WalletState
+    mocks.account = accountState({ pt: live(1n * E7) })
+    view.rerender(<TooltipProvider><PortfolioView /></TooltipProvider>)
+    expect(screen.queryByText(/hold nothing in any market/i)).toBeNull()
+    expect(screen.getByRole("region", { name: "STA · test" })).toBeTruthy()
+    mocks.wallet = { status: "disconnected" } as WalletState
+    view.rerender(<TooltipProvider><PortfolioView /></TooltipProvider>)
+    mocks.wallet = { status: "connected", publicKey: "GA" } as WalletState
+    mocks.account = undefined
+    view.rerender(<TooltipProvider><PortfolioView /></TooltipProvider>)
+    expect(screen.queryByText(/hold nothing in any market/i)).toBeNull()
   })
 
   it("shows the mint entry rate and date, saying it is the most recent", () => {
@@ -147,7 +185,7 @@ describe("portfolio", () => {
     }
     wrap()
     // maturity is MATURITY (1.8e9), well after AT: APY is positive
-    expect(screen.getByText(/Fixed APY locked at purchase \d+\.\d\d% \(from your PT purchase on 2026-10-05\)/)).toBeTruthy()
+    expect(screen.getByText("Fixed APY locked at purchase 19.09% (from your PT purchase on 2026-10-05)")).toBeTruthy()
     expect(MATURITY).toBeGreaterThan(0n)
   })
 

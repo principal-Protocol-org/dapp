@@ -266,12 +266,12 @@ function FixedReturn({
       </div>
       <Metric label="Face value at maturity (notional)">{face}</Metric>
       <Metric label="Current value (notional, at the pool price)">
-        {fixed.status === "live" ? tokens(fixed.value.valueNow, "notional") : ms.ptPrice.status === "unavailable" ? noPrice : UNAVAILABLE}
+        {matured ? "Matured" : fixed.status === "live" ? tokens(fixed.value.valueNow, "notional") : ms.ptPrice.status === "unavailable" ? noPrice : UNAVAILABLE}
       </Metric>
       <Metric label="Fixed APY from now">
         {matured ? "Matured" : fixed.status === "live" ? <Tip tip="Negative when PT trades above par: holding to maturity returns less than the price now.">{formatPercent(fixed.value.apy)}</Tip> : ms.ptPrice.status === "unavailable" ? noPrice : UNAVAILABLE}
       </Metric>
-      <Metric label={redeemable.status === "live" && redeemable.value.basis === "settled" ? `Redeems for (${code})` : `Redeems for (${code}, indicative until settlement)`}>
+      <Metric label={redeemable.status === "live" && redeemable.value.basis !== "oracle" ? `Redeems for (${code})` : `Redeems for (${code}, indicative until settlement)`}>
         {showLive(redeemable, (v) => tokens(v.paid, code, decimals))}
       </Metric>
     </dl>
