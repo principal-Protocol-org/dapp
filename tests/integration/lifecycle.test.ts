@@ -396,7 +396,7 @@ describe.skipIf(skip !== null)("protocol layer on the local network", () => {
     return step
   }
 
-  /** An admin call (the dev stack's pp-admin is the issuer and every contract's admin), checked like the faucet's. */
+  /** An admin call (the dev stack's admin key, principal-localdev-admin, is the issuer and every contract's admin), checked like the faucet's. */
   async function adminInvoke(invocation: ContractInvocation): Promise<void> {
     const admin = Keypair.fromSecret(issuerSecret)
     const node = server()
@@ -445,7 +445,10 @@ describe.skipIf(skip !== null)("protocol layer on the local network", () => {
         })
       } catch (error) {
         const e = error as { stdout?: string; stderr?: string }
-        throw new Error(`deploy.sh failed:\n${String(e.stdout ?? "").slice(-2000)}\n${String(e.stderr ?? "").slice(-2000)}`)
+        // The deploy's output can carry a secret key (S + 55 base32 characters): never into the error.
+        // Redact before cutting, so no secret is split at the cut and left half visible.
+        const tail = (out: unknown) => String(out ?? "").replace(/S[A-Z2-7]{55}/g, "S…[redacted]").slice(-2000)
+        throw new Error(`deploy.sh failed:\n${tail(e.stdout)}\n${tail(e.stderr)}`)
       }
       log(`deployed in ${Math.round((Date.now() - started) / 1000)} s`)
       manifest = readManifest()
