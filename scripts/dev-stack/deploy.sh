@@ -75,8 +75,8 @@ adm() { invoke "$ADMIN_KEY" "$@" >/dev/null; } # adm <contract id> <fn> [args...
 scalar() { tr -d '"[:space:]'; }
 
 # ---------------------------------------------------------------------------------------------
-# Underlying: classic asset STA issued by pp-admin (AUTH_REQUIRED | AUTH_REVOCABLE | AUTH_CLAWBACK_ENABLED)
-# and its Stellar Asset Contract. pp-admin is the issuer, the SAC admin and the Permissioning admin.
+# Underlying: classic asset STA issued by the dev admin key (AUTH_REQUIRED | AUTH_REVOCABLE | AUTH_CLAWBACK_ENABLED)
+# and its Stellar Asset Contract. The dev admin key is the issuer, the SAC admin and the Permissioning admin.
 # ---------------------------------------------------------------------------------------------
 ASSET="STA:$ADMIN"
 log "Issuing STA with AUTH_REQUIRED, AUTH_REVOCABLE, AUTH_CLAWBACK_ENABLED"
@@ -177,7 +177,7 @@ adm "$ROUTER" register_market --caller "$ADMIN" --pool "$POOL"
 
 # ---------------------------------------------------------------------------------------------
 # Step 11: compliance standing. Both layers: SAC authorization and Permissioning grants.
-# The Router holds nothing and gets none. pp-admin trades too (seeding), so it gets grants as well;
+# The Router holds nothing and gets none. The dev admin key trades too (seeding), so it gets grants as well;
 # as issuer it needs no SAC authorization.
 # ---------------------------------------------------------------------------------------------
 log "11. Compliance standing"
@@ -193,7 +193,7 @@ done
 adm "$PERMISSIONING" grant_account --caller "$ADMIN" --account "$ADMIN"
 
 # ---------------------------------------------------------------------------------------------
-# Seed the pool from pp-admin.
+# Seed the pool from the dev admin key.
 #   deposit 200_000 STA -> 200_000 SY (first deposit is 1:1)
 #   mint with 100_000 SY -> notional PT = YT = (SY - 5 bps fee) * oracle rate / 1e7
 #   add_liquidity(all PT, 95 % of its SY value)
