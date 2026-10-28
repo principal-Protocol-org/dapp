@@ -110,6 +110,7 @@ import { ActionPanel } from "../actions/action-panel"
 import type { PanelConfig } from "../actions/panel-config"
 import { WalletContext, useWalletController } from "@/hooks/use-wallet"
 import { resetSettingsStoreForTests } from "@/hooks/use-settings"
+import { SIMULATION_DEBOUNCE_MS } from "@/hooks/use-simulation"
 import { evaluateGates } from "@/lib/protocol/gates"
 import { readLog } from "@/lib/app/local-log"
 
@@ -381,6 +382,30 @@ describe("ActionPanel — previews", () => {
       { type: "address", value: A },
       { type: "address", value: "CPOOL" },
     ])
+  })
+
+  it("debounces the indicative quote: one read once typing stops, none per keystroke (M1)", async () => {
+    mocks.adapter.restore.mockResolvedValue({ status: "disconnected" })
+    const quote = vi.fn(async () => [{ label: "Quoted PT out", value: "101 PT" }])
+    await renderPanel({ ...buyPt, quote })
+    await settle(400)
+    quote.mockClear()
+    await user().type(screen.getByLabelText("SY to spend"), "125")
+    await settle(SIMULATION_DEBOUNCE_MS - 100)
+    expect(quote).not.toHaveBeenCalled()
+    await settle(100)
+    expect(quote).toHaveBeenCalledTimes(1)
+    expect(quote).toHaveBeenCalledWith(expect.anything(), { amount: 1_250_000_000n }, expect.anything())
+    expect(await screen.findByText("Quoted PT out")).toBeTruthy()
+  })
+
+  it("never quotes an action that is not offered (M1, R47)", async () => {
+    const quote = vi.fn(async () => [{ label: "LP received", value: "1 LP" }])
+    await renderPanel({ ...buyPt, action: "add_liquidity_sy", fields: [{ id: "amount", label: "SY to add", unit: "SY" }], quote })
+    await enter("SY to add", "10")
+    await settle(SIMULATION_DEBOUNCE_MS)
+    expect(quote).not.toHaveBeenCalled()
+    expect(screen.queryByText("LP received")).toBeNull()
   })
 
   it("shows async quote lines as indicative", async () => {
