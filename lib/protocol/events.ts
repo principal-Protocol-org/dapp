@@ -119,10 +119,13 @@ export function decodeEvent(role: Role, topic: string, data: unknown): DecodedEv
 
 export const EVENTS_LIMIT = 1000
 /**
- * Page cap per request group (5 contract IDs each): 20 pages of 1000 events = 20 000 events. The
- * Testnet window is about a week; past the cap `truncated` is set so the page says so.
+ * Request budget per contract group (5 contract IDs each), counting every `getEvents` call. The
+ * walk goes newest window first, so when the budget runs out only the OLDEST activity is lost and
+ * `truncated` is set. A window cut off mid-way is dropped whole, so the loss stays contiguous.
  */
-export const MAX_PAGES = 20
+export const MAX_PAGES = 60
+/** Ledgers per scanned window (about 14 hours at 5 s per ledger). */
+export const WINDOW_LEDGERS = 10_000
 
 type RawEvent = {
   id: string
@@ -137,8 +140,8 @@ type RawEvent = {
 
 type EventFilters = { type: "contract"; contractIds: string[] }[]
 type EventsRequest =
-  | { filters: EventFilters; limit: number; startLedger: number; cursor?: never }
-  | { filters: EventFilters; limit: number; cursor: string; startLedger?: never }
+  | { filters: EventFilters; limit: number; startLedger: number; endLedger?: number; cursor?: never }
+  | { filters: EventFilters; limit: number; cursor: string; startLedger?: never; endLedger?: never }
 
 /** The RPC calls used here; `createRpcServer` satisfies it, tests inject a fake. */
 export type EventsRpcServer = {
@@ -153,21 +156,51 @@ function idOf(c: RawEvent["contractId"]): string | undefined {
   return String(c)
 }
 
-async function fetchGroup(server: EventsRpcServer, contractIds: string[], startLedger: number) {
+/** The ledger a Soroban event id / cursor points at (TOID: ledger in the high 32 bits); NaN if unreadable. */
+function cursorLedger(cursor: string): number {
+  try {
+    return Number(BigInt(cursor.split("-")[0]) >> 32n)
+  } catch {
+    return Number.NaN
+  }
+}
+
+type Scan = { maxPages: number; windowLedgers: number }
+
+async function fetchGroup(
+  server: EventsRpcServer,
+  contractIds: string[],
+  window: { oldestLedger: number; latestLedger: number },
+  scan: Scan,
+) {
   const filters = [{ type: "contract" as const, contractIds }]
   const events: RawEvent[] = []
-  let cursor: string | undefined
-  for (let page = 0; page < MAX_PAGES; page++) {
-    const res = await server.getEvents(
-      cursor === undefined ? { startLedger, filters, limit: EVENTS_LIMIT } : { cursor, filters, limit: EVENTS_LIMIT },
-    )
-    // An empty page ends the walk: the RPC may cap the ledger range scanned per call, so a short
-    // page is not proof that nothing follows.
-    if (res.events.length === 0 || res.cursor === cursor) return { events: events.concat(res.events), truncated: false }
-    events.push(...res.events)
-    cursor = res.cursor
+  let calls = 0
+  for (let end = window.latestLedger + 1; end > window.oldestLedger; end -= scan.windowLedgers) {
+    const start = Math.max(window.oldestLedger, end - scan.windowLedgers)
+    const inWindow: RawEvent[] = []
+    let cursor: string | undefined
+    for (;;) {
+      if (calls >= scan.maxPages) return { events, truncated: true }
+      calls++
+      const res = await server.getEvents(
+        cursor === undefined
+          ? { startLedger: start, endLedger: end, filters, limit: EVENTS_LIMIT }
+          : { cursor, filters, limit: EVENTS_LIMIT },
+      )
+      let pastEnd = false
+      for (const e of res.events) {
+        if (e.ledger >= end) pastEnd = true
+        else inWindow.push(e)
+      }
+      // An empty page is not the end: the RPC may cap the range scanned per call and hand back an
+      // advanced cursor. The window is done when the cursor stops moving or reaches its end.
+      if (pastEnd || res.cursor === cursor || cursorLedger(res.cursor) >= end) break
+      cursor = res.cursor
+    }
+    events.push(...inWindow)
   }
-  return { events, truncated: true }
+  return { events, truncated: false }
 }
 
 function mentions(value: unknown, account: string): boolean {
@@ -300,6 +333,11 @@ export async function fetchAccountHistory(p: {
   marketId: string
   account: string
   server?: EventsRpcServer
+  /** The RPC window, when the caller already read `getHealth` (shared across markets). */
+  window?: { oldestLedger: number; latestLedger: number }
+  /** Test hooks: request budget and window size. */
+  maxPages?: number
+  windowLedgers?: number
 }): Promise<AccountHistory> {
   const market: Market | undefined = getMarket(p.manifest, p.marketId)
   if (!market) throw new Error(`Unknown market "${p.marketId}".`)
@@ -315,12 +353,13 @@ export async function fetchAccountHistory(p: {
     [k.oracle, "oracle"],
   ])
 
-  const health = await server.getHealth()
+  const health = p.window ?? (await server.getHealth())
   const window = { oldestLedger: health.oldestLedger, latestLedger: health.latestLedger }
+  const scan = { maxPages: p.maxPages ?? MAX_PAGES, windowLedgers: p.windowLedgers ?? WINDOW_LEDGERS }
   // The RPC accepts at most 5 contract IDs per request (checked 2026-10-27): two requests.
   const groups = await Promise.all([
-    fetchGroup(server, [k.sy, k.manager, k.pt, k.yt, k.pool], window.oldestLedger),
-    fetchGroup(server, [k.recoveryEscrow, k.oracle], window.oldestLedger),
+    fetchGroup(server, [k.sy, k.manager, k.pt, k.yt, k.pool], window, scan),
+    fetchGroup(server, [k.recoveryEscrow, k.oracle], window, scan),
   ])
 
   const seen = new Set<string>()

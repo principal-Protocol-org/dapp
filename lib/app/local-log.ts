@@ -66,6 +66,21 @@ export function readLog(account: string, storage: Storage | undefined = defaultS
   return Array.isArray(list) ? list.filter((e) => isEntry(e, account)) : []
 }
 
+const listeners = new Set<() => void>()
+
+/** Calls `fn` after every `appendLog` in this tab and when another tab changes the log. */
+export function subscribeLog(fn: () => void): () => void {
+  listeners.add(fn)
+  const onStorage = (e: StorageEvent) => {
+    if (e.key === LOG_KEY || e.key === null) fn()
+  }
+  if (typeof window !== "undefined") window.addEventListener("storage", onStorage)
+  return () => {
+    listeners.delete(fn)
+    if (typeof window !== "undefined") window.removeEventListener("storage", onStorage)
+  }
+}
+
 /** Adds (or, for a hash already logged, replaces) an entry at the top of its account's list. */
 export function appendLog(entry: LogEntry, storage: Storage | undefined = defaultStorage()): void {
   const store = load(storage)
@@ -76,4 +91,5 @@ export function appendLog(entry: LogEntry, storage: Storage | undefined = defaul
   } catch {
     // storage full or blocked: the log just won't persist
   }
+  listeners.forEach((fn) => fn())
 }
