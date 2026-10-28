@@ -155,6 +155,34 @@ describe("useWallet", () => {
     await waitFor(() => expect(result.current.state.status).toBe("wrong_network"))
   })
 
+  it("ignores watcher events while connecting, so approval is not dropped", async () => {
+    let release!: (s: WalletState) => void
+    mocks.adapter.connect.mockReturnValue(new Promise<WalletState>((r) => (release = r)))
+    const { result } = renderHook(() => useWallet(), { wrapper: Providers })
+    await waitFor(() => expect(mocks.adapter.restore).toHaveBeenCalledTimes(1))
+    let pending!: Promise<WalletState>
+    act(() => {
+      pending = result.current.connect()
+    })
+    expect(result.current.state.status).toBe("connecting")
+    act(() => watcher?.({ address: ADDRESS, networkPassphrase: PASSPHRASE }))
+    expect(mocks.adapter.restore).toHaveBeenCalledTimes(1)
+    await act(async () => {
+      release(connected)
+      await pending
+    })
+    expect(result.current.state).toEqual(connected)
+  })
+
+  it("turns a throwing connect into a rejected state", async () => {
+    mocks.adapter.connect.mockRejectedValue(new Error("boom"))
+    const { result } = renderHook(() => useWallet(), { wrapper: Providers })
+    await act(async () => {
+      await result.current.connect()
+    })
+    expect(result.current.state).toEqual({ status: "rejected", reason: "boom" })
+  })
+
   it("refuses to sign unless connected, and signs for the connected account", async () => {
     mocks.adapter.sign.mockResolvedValue("signed-xdr")
     const { result } = renderHook(() => useWallet(), { wrapper: Providers })
@@ -225,21 +253,42 @@ describe("settings", () => {
     spy.mockRestore()
   })
 
-  it("shows an inline message for an invalid value in the popover", async () => {
+  it("commits a valid draft on blur and never stores an invalid one", async () => {
     const user = userEvent.setup()
     render(<SettingsPopover />)
     await user.click(screen.getByRole("button", { name: /settings/i }))
     const input = await screen.findByLabelText(/slippage/i)
     expect((input as HTMLInputElement).value).toBe("50")
     await user.clear(input)
-    await user.type(input, "900")
-    expect((await screen.findByRole("alert")).textContent).toMatch(/1 and 500/)
-    // "900" is rejected; the last valid keystroke ("90") stays stored.
-    expect(JSON.parse(localStorage.getItem("pp-settings") ?? "{}").slippageBps).toBe(90)
+    await user.type(input, "300")
+    // Nothing is stored while typing ("3" is never saved).
+    expect(localStorage.getItem("pp-settings")).toBeNull()
+    await user.tab()
+    expect(JSON.parse(localStorage.getItem("pp-settings") ?? "{}").slippageBps).toBe(300)
+
     await user.clear(input)
-    await user.type(input, "75")
-    expect(screen.queryByRole("alert")).toBeNull()
+    await user.type(input, "900")
+    await user.tab()
+    expect((await screen.findByRole("alert")).textContent).toMatch(/1 and 500/)
+    expect(JSON.parse(localStorage.getItem("pp-settings") ?? "{}").slippageBps).toBe(300)
+  })
+
+  it("commits on Enter, and on close discards an invalid draft", async () => {
+    const user = userEvent.setup()
+    render(<SettingsPopover />)
+    await user.click(screen.getByRole("button", { name: /settings/i }))
+    const input = await screen.findByLabelText(/slippage/i)
+    await user.clear(input)
+    await user.type(input, "75{Enter}")
     expect(JSON.parse(localStorage.getItem("pp-settings") ?? "{}").slippageBps).toBe(75)
+
+    await user.clear(input)
+    await user.type(input, "900")
+    await user.keyboard("{Escape}")
+    await waitFor(() => expect(screen.queryByLabelText(/slippage/i)).toBeNull())
+    expect(JSON.parse(localStorage.getItem("pp-settings") ?? "{}").slippageBps).toBe(75)
+    await user.click(screen.getByRole("button", { name: /settings/i }))
+    expect(((await screen.findByLabelText(/slippage/i)) as HTMLInputElement).value).toBe("75")
   })
 })
 
