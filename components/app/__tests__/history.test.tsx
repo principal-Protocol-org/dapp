@@ -1,6 +1,7 @@
 import { act, render, screen, within } from "@testing-library/react"
-import { beforeEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { appendLog } from "@/lib/app/local-log"
+import { TX_TIMEOUT_SECONDS } from "@/lib/protocol/review"
 import type { HistoryData } from "@/hooks/use-history"
 
 const ADDRESS = "GBZXN7PIRZGNMHGA7MUUUF4GWPY5AYPV6LY4UV2GL6VJGIQRXFDNMADI"
@@ -71,6 +72,14 @@ describe("history table", () => {
     expect(screen.getByRole("link", { name: /aaaaaa/ }).getAttribute("href")).toBe(`https://stellar.expert/explorer/testnet/tx/${HASH}`)
   })
 
+  it("names the link with the full hash and where it goes (M11)", () => {
+    render(<HistoryTable />)
+    const link = screen.getByRole("link", { name: `View transaction ${HASH} on stellar.expert` })
+    // The URL comes from explorerTxUrl, which encodes the hash.
+    expect(link.getAttribute("href")).toBe(`https://stellar.expert/explorer/testnet/tx/${encodeURIComponent(HASH)}`)
+    expect(link.textContent).toBe("aaaaaaaa...aaaaaaaa")
+  })
+
   it("shows the full hash and no link on a local network", () => {
     mocks.network = "local"
     render(<HistoryTable />)
@@ -79,13 +88,46 @@ describe("history table", () => {
   })
 
   it("merges pending local-log entries and drops the ones already seen in events", () => {
-    appendLog({ hash: PENDING, action: "buy_pt", marketId: "m1", account: ADDRESS, at: 1, status: "NOT_FOUND" })
+    appendLog({ hash: PENDING, action: "buy_pt", marketId: "m1", account: ADDRESS, at: Date.now(), status: "NOT_FOUND" })
     appendLog({ hash: HASH, action: "mint", marketId: "m1", account: ADDRESS, at: 2, status: "SUCCESS" })
     render(<HistoryTable />)
     const row = screen.getByText("Buy PT").closest("tr") as HTMLElement
     expect(within(row).getByText("Pending")).toBeTruthy()
     expect(screen.getAllByText(/Minted 9.95 PT/)).toHaveLength(1)
     expect(screen.getAllByRole("row")).toHaveLength(3) // header + pending + event
+  })
+
+  describe("a local entry the network never showed (M10)", () => {
+    const EXPIRED_AFTER_MS = (TX_TIMEOUT_SECONDS + 60) * 1000
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    it("is Pending within its time window plus a margin", () => {
+      appendLog({ hash: PENDING, action: "buy_pt", marketId: "m1", account: ADDRESS, at: Date.now() - EXPIRED_AFTER_MS + 5_000, status: "NOT_FOUND" })
+      render(<HistoryTable />)
+      expect(within(screen.getByText("Buy PT").closest("tr") as HTMLElement).getByText("Pending")).toBeTruthy()
+    })
+
+    it("is Not found — expired once its window and the margin have passed", () => {
+      appendLog({ hash: PENDING, action: "buy_pt", marketId: "m1", account: ADDRESS, at: Date.now() - EXPIRED_AFTER_MS - 1_000, status: "NOT_FOUND" })
+      render(<HistoryTable />)
+      const row = screen.getByText("Buy PT").closest("tr") as HTMLElement
+      expect(within(row).getByText("Not found — expired")).toBeTruthy()
+      expect(within(row).getByText(/can no longer land/)).toBeTruthy()
+      expect(screen.queryByText("Pending")).toBeNull()
+    })
+
+    it("turns from Pending to expired while the page stays open", async () => {
+      vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] })
+      appendLog({ hash: PENDING, action: "buy_pt", marketId: "m1", account: ADDRESS, at: Date.now(), status: "NOT_FOUND" })
+      render(<HistoryTable />)
+      expect(screen.getByText("Pending")).toBeTruthy()
+      act(() => {
+        vi.advanceTimersByTime(EXPIRED_AFTER_MS + 30_000)
+      })
+      expect(screen.getByText("Not found — expired")).toBeTruthy()
+    })
   })
 
   it("shows a confirmed local entry as Confirmed and a failed one as Failed, not Pending", () => {
@@ -109,7 +151,7 @@ describe("history table", () => {
   it("shows an entry appended after mount", async () => {
     render(<HistoryTable />)
     expect(screen.queryByText("Buy PT")).toBeNull()
-    act(() => appendLog({ hash: PENDING, action: "buy_pt", marketId: "m1", account: ADDRESS, at: 1, status: "NOT_FOUND" }))
+    act(() => appendLog({ hash: PENDING, action: "buy_pt", marketId: "m1", account: ADDRESS, at: Date.now(), status: "NOT_FOUND" }))
     expect(screen.getByText("Buy PT")).toBeTruthy()
   })
 
