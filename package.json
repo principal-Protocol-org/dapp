@@ -8,9 +8,9 @@
     "start": "next start",
     "lint": "eslint",
     "test": "node scripts/ensure-local-manifest.mjs && vitest run",
-    "test:watch": "vitest",
+    "test:watch": "node scripts/ensure-local-manifest.mjs && vitest",
     "typecheck": "node scripts/ensure-local-manifest.mjs && tsc --noEmit",
-    "test:integration": "vitest run --config vitest.integration.config.mts"
+    "test:integration": "node scripts/ensure-local-manifest.mjs && vitest run --config vitest.integration.config.mts"
   },
   "dependencies": {
     "@stellar/freighter-api": "^4.1.0",
