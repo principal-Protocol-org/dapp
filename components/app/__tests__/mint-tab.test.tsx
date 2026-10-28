@@ -72,6 +72,13 @@ describe("Mint tab — deposit", () => {
     expect(valueIn("Market (indicative)", "Your deposit cap left")).toBe("Connect a wallet to see it")
   })
 
+  it("says the deposit cap is loading, not to connect a wallet, while the account loads (V6)", async () => {
+    mocks.accounts[A] = "pending"
+    await renderUi(<MintTab marketId="m1" />)
+    await enter("STA to deposit", "100")
+    expect(valueIn("Market (indicative)", "Your deposit cap left")).toBe("Loading…")
+  })
+
   it("deposit follows the exchange rate: amount·1e7/exchange_rate, floored", async () => {
     disconnect(mocks)
     mocks.fetchMarketState.mockResolvedValue(marketState({ exchangeRate: live(12_500_000n) }))

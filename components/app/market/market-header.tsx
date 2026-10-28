@@ -13,14 +13,25 @@ import { FixedApy } from "@/components/app/market/fixed-apy"
 import { liquidityText } from "@/components/app/market/liquidity"
 import { Metric } from "@/components/app/market/metric"
 import { marketStatus } from "@/components/app/markets/markets-table"
-import { StatusBadge } from "@/components/app/markets/status-badge"
+import { StatusBadge, type MarketStatus } from "@/components/app/markets/status-badge"
 
 export function MarketHeader({ marketId }: { marketId: string }) {
   const market = getMarket(activeManifest(), marketId)
   const { data, isPending, stale } = useMarketState(marketId)
   const ms = stale ? undefined : data
-  const { ledgerTime } = useLedgerClock()
+  const { ledgerTime, isError: clockFailed } = useLedgerClock()
   if (!market) return null
+  // While the clock or the market data is still loading the badge says so (V6); "Unavailable" is
+  // for a read that failed.
+  const status: MarketStatus | null = ms
+    ? ledgerTime === null
+      ? clockFailed
+        ? "unavailable"
+        : "loading"
+      : marketStatus(ms, ledgerTime)
+    : isPending
+      ? "loading"
+      : null
   const decimals = market.underlying.decimals
   const amount = (v: bigint) => formatAmount(v, decimals)
 
@@ -33,7 +44,7 @@ export function MarketHeader({ marketId }: { marketId: string }) {
     <header className="grid gap-6">
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
         <h1 className="font-serif text-3xl text-ink">{market.displayName}</h1>
-        {ms ? <StatusBadge status={marketStatus(ms, ledgerTime)} /> : null}
+        {status ? <StatusBadge status={status} /> : null}
         <p className="font-mono text-sm text-ink-muted">
           <Countdown maturity={ms && ms.maturity.status === "live" ? ms.maturity.value : null} />
         </p>

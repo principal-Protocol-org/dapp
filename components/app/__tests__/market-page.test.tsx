@@ -20,6 +20,8 @@ const mocks = vi.hoisted(() => ({
   wallet: { status: "disconnected" } as WalletState,
   findings: [] as { severity: string; message: string }[],
   network: "testnet" as "testnet" | "local" | "mainnet",
+  pending: false,
+  clock: { ledgerTime: null as number | null, isError: false },
   notFound: vi.fn(() => {
     throw new Error("NEXT_NOT_FOUND")
   }),
@@ -30,7 +32,7 @@ vi.mock("@/lib/protocol/manifest-source", () => ({
 }))
 vi.mock("next/navigation", () => ({ notFound: mocks.notFound }))
 vi.mock("@/hooks/use-market-state", () => ({
-  useMarketState: () => ({ data: mocks.ms, isPending: false, stale: mocks.stale }),
+  useMarketState: () => ({ data: mocks.ms, isPending: mocks.pending, stale: mocks.stale }),
 }))
 vi.mock("@/hooks/use-market-compliance", () => ({
   useMarketCompliance: () => ({ data: mocks.compliance, isPending: false }),
@@ -40,7 +42,7 @@ vi.mock("@/hooks/use-account-state", () => ({
 }))
 vi.mock("@/hooks/use-wallet", () => ({ useWallet: () => ({ state: mocks.wallet }) }))
 vi.mock("@/hooks/use-ledger-clock", () => ({
-  useLedgerClock: () => ({ ledgerTime: LEDGER_TIME, sequence: 1, isError: false }),
+  useLedgerClock: () => ({ ...mocks.clock, sequence: 1 }),
 }))
 vi.mock("@/hooks/use-manifest-findings", () => ({ useManifestFindings: () => mocks.findings }))
 // The action panels have their own tests (mint-tab, trade-tab, …); here only their mounting matters.
@@ -80,6 +82,8 @@ beforeEach(() => {
   mocks.findings = []
   mocks.network = "testnet"
   mocks.notFound.mockClear()
+  mocks.pending = false
+  mocks.clock = { ledgerTime: LEDGER_TIME, isError: false }
 })
 
 describe("market page route", () => {
@@ -107,6 +111,27 @@ describe("market page route", () => {
 })
 
 describe("MarketHeader", () => {
+  const badge = () => document.querySelector('[data-slot="badge"]')?.textContent
+  it("says Loading, not Unavailable, in the status badge while the ledger clock loads (V6)", () => {
+    mocks.clock = { ledgerTime: null, isError: false }
+    wrap(<MarketHeader marketId="m1" />)
+    expect(badge()).toBe("Loading")
+  })
+  it("says Loading in the status badge while the market data loads (V6)", () => {
+    mocks.ms = undefined
+    mocks.pending = true
+    wrap(<MarketHeader marketId="m1" />)
+    expect(badge()).toBe("Loading")
+  })
+  it("says Unavailable once the ledger clock has failed", () => {
+    mocks.clock = { ledgerTime: null, isError: true }
+    wrap(<MarketHeader marketId="m1" />)
+    expect(badge()).toBe("Unavailable")
+  })
+  it("shows the market's status once both have loaded", () => {
+    wrap(<MarketHeader marketId="m1" />)
+    expect(badge()).toBe("Live")
+  })
   it("defines the oracle rate as the mint panel does: notional per SY share (M4)", async () => {
     // Radix positions the tooltip with a ResizeObserver, which jsdom lacks.
     globalThis.ResizeObserver ??= class {

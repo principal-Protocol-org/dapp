@@ -50,6 +50,7 @@ export function useQuoteLines(
   const [result, setResult] = useState<{ key: string; lines: PreviewLine[] } | null>(null)
   const quote = ACTION_META[config.action].disabled ? undefined : config.quote
   const account: AccountState | undefined = ctx.account
+  const accountStatus = ctx.accountStatus
   const { amount, secondaryAmount } = inputs
   // The ledger time ticks every second; a quote is re-read with the market data, not per tick.
   const ledgerTime = useRef(ctx.ledgerTime)
@@ -63,7 +64,7 @@ export function useQuoteLines(
     if (amount !== undefined) values.amount = amount
     if (secondaryAmount !== undefined) values.secondaryAmount = secondaryAmount
     const timer = setTimeout(() => {
-      quote(ms, values, { account, ledgerTime: ledgerTime.current })
+      quote(ms, values, { account, accountStatus, ledgerTime: ledgerTime.current })
         .then((lines) => !cancelled && setResult({ key, lines }))
         .catch((error: unknown) => !cancelled && setResult({ key, lines: [{ label: "Quote unavailable", value: errorText(error) }] }))
     }, SIMULATION_DEBOUNCE_MS)
@@ -71,6 +72,6 @@ export function useQuoteLines(
       cancelled = true
       clearTimeout(timer)
     }
-  }, [quote, ms, account, amount, secondaryAmount, key])
+  }, [quote, ms, account, accountStatus, amount, secondaryAmount, key])
   return quote && result && result.key === key ? result.lines : null
 }

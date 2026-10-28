@@ -1,3 +1,4 @@
+import type { AccountStatus } from "@/hooks/use-gate-context"
 import type { FieldKey } from "@/lib/app/amounts"
 import type { AccountState } from "@/lib/protocol/account-state"
 import type { ActionId, ActionInput, GuardValues } from "@/lib/protocol/actions"
@@ -29,6 +30,8 @@ export type PanelInputs = Partial<Record<FieldKey, bigint>>
 export type IndicativeContext = {
   /** The connected account's state, when it has been read (never another address's). */
   account?: AccountState
+  /** Why `account` is absent: no wallet (the default), still loading, or unreadable (V6). */
+  accountStatus?: AccountStatus
   /** Latest ledger close time (seconds), or null until it loads. Never the browser clock. */
   ledgerTime: number | null
 }

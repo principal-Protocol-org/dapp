@@ -1,10 +1,9 @@
 "use client"
 
 import { showLive } from "@/components/app/live"
-import type { PanelConfig, PreviewLine } from "@/components/app/actions/panel-config"
+import type { IndicativeContext, PanelConfig, PreviewLine } from "@/components/app/actions/panel-config"
 import { PanelGroup, usePanels, type PanelEntry } from "@/components/app/actions/panel-group"
-import { amountOf, max0, outputOf, plain, tokens } from "@/components/app/actions/panel-lines"
-import type { AccountState } from "@/lib/protocol/account-state"
+import { amountOf, max0, outputOf, plain, tokens, withoutAccount } from "@/components/app/actions/panel-lines"
 import { formatBps, formatRate } from "@/lib/protocol/format"
 import type { MarketState } from "@/lib/protocol/market-state"
 import { previewDeposit, previewMint, previewWithdraw } from "@/lib/protocol/previews"
@@ -25,9 +24,10 @@ const exchangeRateLine = (ms: MarketState, code: string): PreviewLine => ({
 })
 
 /** The connected account's room under the SY wrapper's cap: `deposit_cap − net_deposited`; 0 is off. */
-function capLeftLine(account: AccountState | undefined, code: string, decimals: number): PreviewLine {
+function capLeftLine(ctx: IndicativeContext, code: string, decimals: number): PreviewLine {
   const label = "Your deposit cap left"
-  if (!account) return { label, value: "Connect a wallet to see it" }
+  const { account } = ctx
+  if (!account) return { label, value: withoutAccount(ctx) }
   const left = allLive([account.depositCap, account.netDeposited] as const, ([cap, net]) => (cap <= 0n ? null : max0(cap - net)))
   return {
     label,
@@ -69,10 +69,10 @@ export function depositPanel(market: Market): PanelConfig {
       amount === undefined
         ? []
         : [{ label: "SY received", value: showLive(allLive([ms.exchangeRate] as const, ([r]) => previewDeposit(amount, r)), (v) => tokens(v, "SY")) }],
-    market: (ms, { inputs, account }) => [
+    market: (ms, ctx) => [
       exchangeRateLine(ms, code),
-      capLeftLine(account, code, decimals),
-      ...breakerLines(ms, inputs.amount, 1n, code, decimals),
+      capLeftLine(ctx, code, decimals),
+      ...breakerLines(ms, ctx.inputs.amount, 1n, code, decimals),
     ],
     exact: (output) => [{ label: "SY received", value: tokens(amountOf(output), "SY") }],
     floors: { minOut: { label: "Minimum SY received", unit: "SY" } },
@@ -121,15 +121,15 @@ export function mintPanel(market: Market): PanelConfig {
         { label: "Deposited as SY first", value: showLive(minted, (m) => tokens(m.shares, "SY")) },
       ]
     },
-    market: (ms, { inputs, account }) => [
+    market: (ms, ctx) => [
       {
         label: "Oracle rate",
         value: showLive(ms.oracleRate, (r) => `${formatRate(r)} notional per SY share`),
         hint: "PT and YT are counted in notional units: (SY − fee) × oracle rate.",
       },
       { label: "Tokenization fee rate", value: showLive(ms.fees.tokenizationBps, formatBps) },
-      capLeftLine(account, code, decimals),
-      ...breakerLines(ms, inputs.amount, 2n, code, decimals),
+      capLeftLine(ctx, code, decimals),
+      ...breakerLines(ms, ctx.inputs.amount, 2n, code, decimals),
     ],
     exact(output) {
       const m = outputOf(output, "mint")

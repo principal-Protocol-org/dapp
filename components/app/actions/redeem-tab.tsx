@@ -4,7 +4,7 @@ import { showLive } from "@/components/app/live"
 import type { PanelConfig, PreviewLine } from "@/components/app/actions/panel-config"
 import { PanelGroup, usePanels, type PanelEntry } from "@/components/app/actions/panel-group"
 import { useMatured } from "@/hooks/use-matured"
-import { amountOf, outputOf, plain, tokens } from "@/components/app/actions/panel-lines"
+import { amountOf, outputOf, plain, tokens, withoutAccount } from "@/components/app/actions/panel-lines"
 import { formatBps, formatRate } from "@/lib/protocol/format"
 import { previewRecombine, previewRedeemPt } from "@/lib/protocol/previews"
 import { allLive } from "@/lib/protocol/reader"
@@ -56,8 +56,9 @@ export function claimPanel(market: Market): PanelConfig {
     description: `Collect the yield your YT has earned since your last claim, paid in ${code}. You keep your YT.`,
     indicative: () => [],
     marketLabel: "Your yield (indicative)",
-    market(ms, { account }) {
-      if (!account) return [{ label: "Pending yield", value: "Connect a wallet to see it" }]
+    market(ms, ctx) {
+      const { account } = ctx
+      if (!account) return [{ label: "Pending yield", value: withoutAccount(ctx) }]
       const y = pendingOf(ms, account)
       const bps = ms.fees.ytBps
       return [
@@ -84,7 +85,8 @@ export function redeemPanel(market: Market): PanelConfig {
       { id: "secondaryAmount", label: "YT to redeem", unit: "YT", optional: true },
     ],
     description: `At maturity, PT pays ${code} at the settlement rate and YT pays the yield it has left. Redeem either or both.`,
-    indicative(ms, { amount: pt, secondaryAmount: yt }, { account }) {
+    indicative(ms, { amount: pt, secondaryAmount: yt }, ctx) {
+      const { account } = ctx
       const lines: PreviewLine[] = []
       if (pt !== undefined && pt > 0n) {
         // PT is notional: underlying = previewRedeemPt(pt, settlement rate, exchange rate) (T6 note).
@@ -94,7 +96,7 @@ export function redeemPanel(market: Market): PanelConfig {
       if (yt !== undefined && yt > 0n) {
         lines.push({
           label: "From YT (net of the YT fee)",
-          value: account ? showLive(pendingOf(ms, account), (v) => tokens(v.net, code, decimals)) : "Connect a wallet to see it",
+          value: account ? showLive(pendingOf(ms, account), (v) => tokens(v.net, code, decimals)) : withoutAccount(ctx),
           hint: "Redeeming YT pays all the yield your YT has earned, net of the YT fee.",
         })
       }
