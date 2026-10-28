@@ -24,24 +24,49 @@ function Group({ title, items }: { title: string; items: string[] }) {
   )
 }
 
+/**
+ * When the transaction can no longer land, in plain words (M3). Two limits apply: the contract
+ * call's deadline (actions that take one) and the transaction's own time bound, 5 minutes after it
+ * was prepared. The network checks both against ledger time; the earlier one is the one shown, and
+ * says who refuses the transaction after it.
+ */
+function TimeLimit({ deadline, validUntil, ledgerTime }: { deadline?: number; validUntil: number; ledgerTime: number | null }) {
+  const at = (t: number) => `${formatUnixTime(t)}${ledgerTime !== null ? `, in ${formatDuration(t - ledgerTime)} by ledger time` : ""}`
+  const lines =
+    deadline !== undefined && deadline <= validUntil
+      ? [`${at(deadline)}. If the transaction lands after it, the contract refuses it and only the network fee is spent.`]
+      : [
+          `${at(validUntil)}. After it the network refuses the transaction: it is valid for 5 minutes from when it was prepared.`,
+          ...(deadline !== undefined ? [`Your deadline, ${formatUnixTime(deadline)}, comes later, so this is the limit that applies.`] : []),
+        ]
+  // The time bound comes from the device clock; one already past by ledger time can never land.
+  const clockBehind = ledgerTime !== null && validUntil <= ledgerTime
+  return (
+    <div className="grid gap-1">
+      <h3 className="label">{deadline !== undefined ? "Deadline" : "Valid until"}</h3>
+      {lines.map((line) => (
+        <p key={line} className="text-sm text-ink">
+          {line}
+        </p>
+      ))}
+      {clockBehind ? (
+        <p className="text-sm text-negative">
+          This device&apos;s clock is behind the network&apos;s, so the network will refuse this transaction. Check your device clock, then
+          review again.
+        </p>
+      ) : null}
+    </div>
+  )
+}
+
 function Body({ review, ledgerTime, secondsLeft }: { review: Review; ledgerTime: number | null; secondsLeft: number | null }) {
   const { summary } = review
-  const deadline = summary.deadline
   return (
     <div className="grid gap-4">
       <Group title="You give" items={summary.give} />
       <Group title="You get at least" items={summary.getAtLeast} />
       <Group title="Fees" items={summary.fees} />
-      {deadline !== undefined ? (
-        <div className="grid gap-1">
-          <h3 className="label">Deadline</h3>
-          <p className="text-sm text-ink">
-            {formatUnixTime(deadline)}
-            {ledgerTime !== null ? `, in ${formatDuration(deadline - ledgerTime)} by ledger time` : null}. After it the
-            network refuses the transaction.
-          </p>
-        </div>
-      ) : null}
+      <TimeLimit deadline={summary.deadline} validUntil={summary.validUntil} ledgerTime={ledgerTime} />
       {secondsLeft !== null ? (
         <p className="text-xs text-ink-muted">
           This review is valid for {secondsLeft} more seconds; after that it is prepared again with the live conditions.

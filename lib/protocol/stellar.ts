@@ -239,7 +239,7 @@ export class SubmissionRejectedError extends Error {
 }
 
 const TX_RESULT_REASONS: Partial<Record<string, string>> = {
-  txTooLate: "it reached the network after its time window closed; prepare it again",
+  txTooLate: "it reached the network after its time window closed; check your device clock, then prepare it again",
   txTooEarly: "its time window has not opened yet; check the device clock, then prepare it again",
   txBadSeq: "the account's sequence number changed, so another transaction was sent from this account; prepare it again",
   txBadAuth: "the signature does not match this account or network; reconnect the wallet, then prepare it again",

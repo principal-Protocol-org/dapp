@@ -54,7 +54,7 @@ export function MarketHeader({ marketId }: { marketId: string }) {
                     {formatRate(ms.oracleRate.value)}
                   </button>
                 </TooltipTrigger>
-                <TooltipContent>Value of 1 underlying token in notional units, read from the market oracle.</TooltipContent>
+                <TooltipContent>Notional per SY share, read from the market oracle. PT and YT are counted in notional units.</TooltipContent>
               </Tooltip>
             ) : (
               UNAVAILABLE
