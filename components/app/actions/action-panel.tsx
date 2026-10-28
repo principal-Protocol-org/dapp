@@ -17,7 +17,8 @@ import type { AccountState } from "@/lib/protocol/account-state"
 import type { TxNotice } from "@/lib/app/tx-notice"
 import { ACTION_META, invocationFor, type ActionId, type ActionInput, type GuardValues } from "@/lib/protocol/actions"
 import { formatAmount, formatBps } from "@/lib/protocol/format"
-import { evaluateGates, type Blocker } from "@/lib/protocol/gates"
+import { BLOCKER_ORDER, evaluateGates, type Blocker } from "@/lib/protocol/gates"
+import type { ActionOutput } from "@/lib/protocol/guards"
 import { getMarket } from "@/lib/protocol/manifest"
 import { activeManifest } from "@/lib/protocol/manifest-source"
 import type { MarketState } from "@/lib/protocol/market-state"
@@ -113,10 +114,20 @@ export function ActionPanel({ config, marketId }: { config: PanelConfig; marketI
   if (gate.base) {
     blockers = evaluateGates({ ...draft, guards: {}, deadline: 0n }, { ...gate.base, simulation: sim.outcome })
     if (sim.guards && !sim.guards.ok) blockers = [...blockers, { code: "quote", message: sim.guards.reason }]
-    // The inline message is the refusal of an invalid amount; the gate's restatement would contradict it.
-    if (fieldError) blockers = blockers.filter((b) => b.code !== "amount" && b.code !== "balance")
+    // Nothing is simulated until the amounts are complete: the amount is the reason, not a missing quote.
+    if (!complete) blockers = blockers.filter((b) => b.code !== "quote")
+    if (fieldError) {
+      // The gates saw 0 for an amount that does not parse; the field's own refusal replaces theirs.
+      const several = fields.length > 1
+      const refusals: Blocker[] = fields.flatMap((f) =>
+        f.check.ok ? [] : [{ code: f.check.code, message: several ? `${f.spec.label}: ${f.check.message}` : f.check.message }],
+      )
+      const rank = (b: Blocker) => BLOCKER_ORDER.indexOf(b.code)
+      blockers = [...refusals, ...blockers.filter((b) => b.code !== "amount" && b.code !== "balance")].sort((a, b) => rank(a) - rank(b))
+    }
   }
-  const canReview = simInput !== null && blockers.length === 0 && guards !== undefined
+  // Signing needs every gate evaluated (a context) and passed, and floors from this input's simulation.
+  const canReview = gate.base !== null && simInput !== null && blockers.length === 0 && guards !== undefined
   const buildInput = (): ActionInput | null =>
     canReview && simInput && guards && ledgerTime !== null ? { ...draft, source: simInput.source, guards, deadline: deadlineAt(ledgerTime) } : null
 
@@ -124,7 +135,15 @@ export function ActionPanel({ config, marketId }: { config: PanelConfig; marketI
   const ctx = { account, ledgerTime }
   const quoteLines = useQuoteLines(config, ms, inputs, ctx)
   const output = sim.output
-  const exactLines = ms && output ? [...safeLines(() => config.exact(output, { inputs, ms, guards })), ...(guards ? floorLines(guards, config, slippageBps, decimals) : [])] : null
+  // Shown only alongside live market data, but computed from the simulation and the input alone.
+  const exactLines = ms && output ? [...safeLines(() => config.exact(output, { inputs, guards })), ...(guards ? floorLines(guards, config, slippageBps, decimals) : [])] : null
+  const describeResult = (out: ActionOutput, input: ActionInput): string | undefined => {
+    try {
+      return config.result?.(out, { input }) || undefined
+    } catch {
+      return undefined
+    }
+  }
   const indicativeLines = ms ? [...safeLines(() => config.indicative(ms, inputs, ctx)), ...(quoteLines ?? [])] : []
   const notes = configNotes(config, ms, account)
 
@@ -206,6 +225,7 @@ export function ActionPanel({ config, marketId }: { config: PanelConfig; marketI
           canReview={canReview}
           blockers={blockers}
           buildInput={buildInput}
+          describeResult={describeResult}
           restoreCall={restoreCall}
           onRestored={sim.refresh}
           onNotice={(notice) => setLast({ owner, notice })}

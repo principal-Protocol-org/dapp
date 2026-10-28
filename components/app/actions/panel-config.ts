@@ -1,6 +1,6 @@
 import type { FieldKey } from "@/lib/app/amounts"
 import type { AccountState } from "@/lib/protocol/account-state"
-import type { ActionId, GuardValues } from "@/lib/protocol/actions"
+import type { ActionId, ActionInput, GuardValues } from "@/lib/protocol/actions"
 import type { ActionOutput } from "@/lib/protocol/guards"
 import type { MarketState } from "@/lib/protocol/market-state"
 import type { Live } from "@/lib/protocol/types"
@@ -33,13 +33,20 @@ export type IndicativeContext = {
   ledgerTime: number | null
 }
 
+/**
+ * What an exact preview may use: the simulated output (its first argument), the amounts entered and
+ * the floors that will be signed. Deliberately no market state: an exact line is never computed
+ * from an indicative read. Comparisons with market values (e.g. price impact against `pt_price`)
+ * belong in `indicative`.
+ */
 export type ExactContext = {
   inputs: PanelInputs
-  /** Live market state, when available. */
-  ms?: MarketState
   /** The floors that will be signed, when the simulation gave usable ones. */
   guards?: GuardValues
 }
+
+/** What a result message may use: the input that was signed (amounts, floors, deadline). */
+export type ResultContext = { input: ActionInput }
 
 /** How a signed floor is labelled; the panel renders every floor itself. */
 export type FloorSpec = { label: string; unit: string }
@@ -60,6 +67,11 @@ export type PanelConfig = {
   quote?(ms: MarketState, inputs: PanelInputs, ctx: IndicativeContext): Promise<PreviewLine[]>
   /** Preview from the simulated return value: the exact numbers. Pure; may throw. */
   exact(output: ActionOutput, ctx: ExactContext): PreviewLine[]
+  /**
+   * What a confirmed transaction did, from its decoded return value, e.g. "You bought 100 PT."
+   * (spec §6 step 7). Used as the success message; "<label> confirmed." when absent, empty or throwing.
+   */
+  result?(output: ActionOutput, ctx: ResultContext): string
   /** Labels of the guard values the panel shows as "at least" lines. */
   floors?: Partial<Record<keyof GuardValues, FloorSpec>>
   /** Plain-words notes under the preview (e.g. what an SY balance can be used for). */

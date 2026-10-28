@@ -8,6 +8,7 @@ import { showTxToast } from "@/components/app/actions/tx-feedback"
 import { useExecute } from "@/hooks/use-execute"
 import { noticeForError, noticeForResult, type TxNotice } from "@/lib/app/tx-notice"
 import type { ActionInput } from "@/lib/protocol/actions"
+import type { ActionOutput } from "@/lib/protocol/guards"
 import type { Blocker } from "@/lib/protocol/gates"
 import { isExpired, type RestoreReview, type Review } from "@/lib/protocol/review"
 import type { ContractInvocation } from "@/lib/protocol/stellar"
@@ -28,6 +29,8 @@ export type SignFlowProps = {
   blockers: Blocker[]
   /** The input to sign now (draft, floors from the simulation, ledger-time deadline), or null. */
   buildInput(): ActionInput | null
+  /** What a confirmed transaction did, from its decoded output; undefined for "<label> confirmed.". */
+  describeResult(output: ActionOutput, input: ActionInput): string | undefined
   /** The simulated call, when its simulation asked for a restore. */
   restoreCall: { source: string; invocation: ContractInvocation } | null
   /** A restore landed: simulate again. */
@@ -39,6 +42,12 @@ export type SignFlowProps = {
 
 const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error))
 const NOT_READY = "The checks no longer all pass, so this was not prepared. Close this and review again once they do."
+
+/**
+ * A review is not sent to Freighter with less than this left before it expires: approving it takes
+ * time, and a signature that lands after expiry is refused and wasted. It is prepared again instead.
+ */
+export const SIGN_MARGIN_MS = 20_000
 
 /**
  * The review and restore lifecycle of one panel. The panel mounts it with a `key` made of
@@ -114,8 +123,8 @@ export function SignFlow(props: SignFlowProps) {
   const sign = async () => {
     const review = reviewRef.current
     if (flow.step !== "review" || review === null || review !== flow.review || busy.current) return
-    if (latest.current.blockers.length > 0) return
-    if (isExpired(review, Date.now())) {
+    if (!latest.current.canReview || latest.current.blockers.length > 0) return
+    if (isExpired(review, Date.now() + SIGN_MARGIN_MS)) {
       setFlow({ step: "preparing" })
       void runPrepare()
       return
@@ -126,7 +135,9 @@ export function SignFlow(props: SignFlowProps) {
     setFlow({ step: "signing", review })
     let notice: TxNotice
     try {
-      notice = noticeForResult(latest.current.label, await exec.execute(review), latest.current.network)
+      const result = await exec.execute(review)
+      const message = result.status === "SUCCESS" && result.output ? latest.current.describeResult(result.output, review.input) : undefined
+      notice = noticeForResult(latest.current.label, result, latest.current.network, message)
     } catch (error) {
       notice = noticeForError(latest.current.label, error, latest.current.network)
     }
@@ -153,7 +164,7 @@ export function SignFlow(props: SignFlowProps) {
   const signRestore = async () => {
     const prepared = restoreRef.current
     if (restore.step !== "ready" || prepared === null || prepared !== restore.restore || busy.current) return
-    if (isExpired(prepared, Date.now())) {
+    if (isExpired(prepared, Date.now() + SIGN_MARGIN_MS)) {
       void startRestore()
       return
     }
@@ -224,6 +235,7 @@ export function SignFlow(props: SignFlowProps) {
         ledgerTime={props.ledgerTime}
         secondsLeft={secondsLeft}
         pending={exec.pending}
+        canSign={props.canReview}
         onSign={() => void sign()}
         onClose={close}
       />

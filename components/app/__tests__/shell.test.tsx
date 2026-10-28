@@ -186,12 +186,22 @@ describe("useWallet", () => {
   it("refuses to sign unless connected, and signs for the connected account", async () => {
     mocks.adapter.sign.mockResolvedValue("signed-xdr")
     const { result } = renderHook(() => useWallet(), { wrapper: Providers })
-    await expect(result.current.sign("xdr")).rejects.toThrow(/not connected/i)
+    await expect(result.current.sign("xdr", ADDRESS)).rejects.toThrow(/not connected/i)
     mocks.adapter.restore.mockResolvedValue(connected)
     const second = renderHook(() => useWallet(), { wrapper: Providers })
     await waitFor(() => expect(second.result.current.state.status).toBe("connected"))
-    await expect(second.result.current.sign("xdr")).resolves.toBe("signed-xdr")
+    await expect(second.result.current.sign("xdr", ADDRESS)).resolves.toBe("signed-xdr")
     expect(mocks.adapter.sign).toHaveBeenCalledWith("xdr", PASSPHRASE, ADDRESS)
+  })
+
+  it("passes the expected signer to Freighter, and refuses another one before it opens", async () => {
+    mocks.adapter.sign.mockResolvedValue("signed-xdr")
+    mocks.adapter.restore.mockResolvedValue(connected)
+    const { result } = renderHook(() => useWallet(), { wrapper: Providers })
+    await waitFor(() => expect(result.current.state.status).toBe("connected"))
+    const other = "GCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"
+    await expect(result.current.sign("xdr", other)).rejects.toThrow(/not the one this was prepared for/)
+    expect(mocks.adapter.sign).not.toHaveBeenCalled()
   })
 })
 

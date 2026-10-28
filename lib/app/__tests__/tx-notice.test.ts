@@ -24,6 +24,14 @@ describe("noticeForResult", () => {
     })
   })
 
+  it("uses the action's result message as the title of a success", () => {
+    const n = noticeForResult("Buy PT", { hash: HASH, status: "SUCCESS" }, "testnet", "You bought 100 PT.")
+    expect(n.title).toBe("You bought 100 PT.")
+    expect(n.hash).toBe(HASH)
+    // Never for anything but a success.
+    expect(noticeForResult("Buy PT", { hash: HASH, status: "FAILED" }, "testnet", "You bought 100 PT.").title).toBe("Buy PT failed on-chain.")
+  })
+
   it("keeps the hash of a success whose result could not be read", () => {
     const n = noticeForResult("Buy PT", { hash: HASH, status: "SUCCESS", decodeError: "The transaction succeeded, but its result could not be read (x)." }, "testnet")
     expect(n.tone).toBe("success")
