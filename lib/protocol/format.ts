@@ -43,6 +43,20 @@ export function formatAmount(raw: bigint, decimals: number, maxFraction = 4): st
   return fixed(raw, decimals, Math.min(maxFraction, decimals), true);
 }
 
+/**
+ * A preview amount: at least 4 decimals (all of them for a token with fewer), plus every further
+ * digit up to the token's `decimals` while it is not zero. Exact: nothing is cut or rounded, so a
+ * previewed amount reads the same as the raw value. 1_000_000_000n (7) -> "100.0000",
+ * 45_431_818n -> "4.5431818".
+ */
+export function formatTokenAmount(raw: bigint, decimals: number): string {
+  const min = Math.min(4, decimals);
+  const exact = fixed(raw, decimals, decimals, true);
+  const [whole, fraction = ""] = exact.split(".");
+  const padded = fraction.padEnd(min, "0");
+  return padded ? `${whole}.${padded}` : whole;
+}
+
 /** Rate at SCALE with 4 fixed decimals: 10_500_000n -> "1.0500". */
 export function formatRate(rate: bigint): string {
   return fixed(rate, SCALE.toString().length - 1, 4, false);

@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, within } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { useState } from "react"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
@@ -380,6 +380,67 @@ describe("ActionPanel — previews", () => {
     expect(await screen.findByText("Quoted PT out")).toBeTruthy()
     expect(screen.getByText("Indicative")).toBeTruthy()
     expect(quote).toHaveBeenCalledWith(expect.anything(), { amount: 100_000_000n }, expect.anything())
+  })
+})
+
+describe("ActionPanel — market section (R38)", () => {
+  const spot: NonNullable<PanelConfig["market"]> = (ms, ctx) => [
+    { label: "Spot PT price", value: showLive(ms.ptPrice, formatRate) },
+    ...(ctx.output?.kind === "amount" ? [{ label: "Exact PT seen", value: formatAmount(ctx.output.value, 7, 7) }] : []),
+  ]
+  const marketList = () => screen.getByText("Market (indicative)", { selector: "p" }).nextElementSibling as HTMLElement
+
+  it("stays visible next to the exact quote, and gets the exact output for these inputs", async () => {
+    const market = vi.fn(spot)
+    await renderPanel({ ...buyPt, market })
+    await enter("SY to spend", "10")
+    expect(screen.getByText("Exact (simulated)")).toBeTruthy()
+    expect(within(marketList()).getByText("Spot PT price").nextSibling?.textContent).toBe("0.9800")
+    expect(within(marketList()).getByText("Exact PT seen").nextSibling?.textContent).toBe("100")
+    const ctx = market.mock.calls.at(-1)![1]
+    expect(ctx.inputs).toEqual({ amount: 100_000_000n })
+    expect(ctx.output).toEqual({ kind: "amount", value: SY_100 })
+    expect(ctx.account).toBeDefined()
+    expect(ctx.ledgerTime).toBeGreaterThanOrEqual(LEDGER_TIME)
+  })
+
+  it("shows beside the indicative preview without a wallet, with no exact output", async () => {
+    mocks.adapter.restore.mockResolvedValue({ status: "disconnected" })
+    const market = vi.fn(spot)
+    await renderPanel({ ...buyPt, market })
+    await enter("SY to spend", "10")
+    expect(screen.getByText("Indicative")).toBeTruthy()
+    expect(within(marketList()).getByText("Spot PT price")).toBeTruthy()
+    expect(within(marketList()).queryByText("Exact PT seen")).toBeNull()
+    expect(market.mock.calls.at(-1)![1].output).toBeUndefined()
+  })
+
+  it("an input change drops the exact output from the section at once", async () => {
+    await renderPanel({ ...buyPt, market: spot })
+    await enter("SY to spend", "10")
+    expect(within(marketList()).getByText("Exact PT seen")).toBeTruthy()
+    await user().type(screen.getByLabelText("SY to spend"), "5")
+    expect(within(marketList()).queryByText("Exact PT seen")).toBeNull()
+  })
+
+  it("can carry its own title, and shows Unavailable or the reason instead of a guess", async () => {
+    mocks.fetchMarketState.mockResolvedValue(marketState({ ptPrice: down() }))
+    const broken: PanelConfig["market"] = () => {
+      throw new Error("oracle rate is not positive")
+    }
+    await renderPanel({ ...buyPt, market: spot, marketLabel: "Your yield (indicative)" })
+    expect(screen.queryByText("Market (indicative)")).toBeNull()
+    const list = screen.getByText("Your yield (indicative)", { selector: "p" }).nextElementSibling as HTMLElement
+    expect(within(list).getByText("Spot PT price").nextSibling?.textContent).toBe("Unavailable")
+    cleanup()
+    await renderPanel({ ...buyPt, market: broken })
+    expect(within(marketList()).getByText("Preview unavailable").nextSibling?.textContent).toBe("oracle rate is not positive")
+  })
+
+  it("is not shown without live market data", async () => {
+    mocks.fetchMarketState.mockRejectedValue(new Error("rpc down"))
+    await renderPanel({ ...buyPt, market: spot })
+    expect(screen.queryByText("Market (indicative)")).toBeNull()
   })
 })
 

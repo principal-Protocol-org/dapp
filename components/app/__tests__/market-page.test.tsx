@@ -42,6 +42,10 @@ vi.mock("@/hooks/use-ledger-clock", () => ({
   useLedgerClock: () => ({ ledgerTime: LEDGER_TIME, sequence: 1, isError: false }),
 }))
 vi.mock("@/hooks/use-manifest-findings", () => ({ useManifestFindings: () => mocks.findings }))
+// The action panels have their own tests (mint-tab, trade-tab, …); here only their mounting matters.
+vi.mock("@/components/app/actions/action-tabs", () => ({
+  ActionTabs: ({ marketId }: { marketId: string }) => <section aria-label={`Actions for ${marketId}`} />,
+}))
 
 import MarketPage, { generateStaticParams } from "../../../app/app/markets/[marketId]/page"
 import { ComplianceCard } from "../market/compliance-card"
@@ -224,5 +228,9 @@ describe("MarketView", () => {
   it("has no banner for a clean manifest", () => {
     wrap(<MarketView marketId="m1" />)
     expect(screen.queryByRole("alert")).toBeNull()
+  })
+  it("mounts the action tabs for this market (R8)", () => {
+    wrap(<MarketView marketId="m1" />)
+    expect(screen.getByRole("region", { name: "Actions for m1" })).toBeTruthy()
   })
 })
