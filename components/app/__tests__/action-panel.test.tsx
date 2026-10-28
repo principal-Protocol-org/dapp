@@ -285,6 +285,17 @@ afterEach(() => {
 
 // ---------------------------------------------------------------------------------------------
 
+describe("ActionPanel — layout", () => {
+  it("stacks the title above the description in a narrow panel (V5)", async () => {
+    await renderPanel()
+    const header = document.querySelector('[data-slot="card-header"]')
+    // The card is a size container: below 32rem the header is a column, beside each other above.
+    expect(header?.closest('[data-slot="card"]')?.className).toContain("@container")
+    expect(header?.className).toMatch(/(^| )flex-col( |$)/)
+    expect(header?.className).toContain("@lg:flex-row")
+  })
+})
+
 describe("ActionPanel — gates", () => {
   it("sign button disabled while any gate fails: a stale oracle shows its reason", async () => {
     mocks.fetchMarketState.mockResolvedValue(marketState({ oracleFresh: live(false) }))
