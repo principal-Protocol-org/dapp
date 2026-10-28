@@ -19,13 +19,14 @@ const mocks = vi.hoisted(() => ({
   account: undefined as AccountState | undefined,
   wallet: { status: "disconnected" } as WalletState,
   findings: [] as { severity: string; message: string }[],
+  network: "testnet" as "testnet" | "local" | "mainnet",
   notFound: vi.fn(() => {
     throw new Error("NEXT_NOT_FOUND")
   }),
 }))
 
 vi.mock("@/lib/protocol/manifest-source", () => ({
-  activeManifest: () => ({ network: "testnet", markets: [MARKET] }),
+  activeManifest: () => ({ network: mocks.network, markets: [MARKET] }),
 }))
 vi.mock("next/navigation", () => ({ notFound: mocks.notFound }))
 vi.mock("@/hooks/use-market-state", () => ({
@@ -45,6 +46,11 @@ vi.mock("@/hooks/use-manifest-findings", () => ({ useManifestFindings: () => moc
 // The action panels have their own tests (mint-tab, trade-tab, …); here only their mounting matters.
 vi.mock("@/components/app/actions/action-tabs", () => ({
   ActionTabs: ({ marketId }: { marketId: string }) => <section aria-label={`Actions for ${marketId}`} />,
+}))
+// The dialog has its own tests (onboarding.test.tsx); here only its wiring matters.
+vi.mock("@/components/app/onboarding/onboarding-dialog", () => ({
+  OnboardingDialog: ({ open, marketId }: { open: boolean; marketId?: string }) =>
+    open ? <div role="dialog" aria-label={`Get test tokens for ${marketId}`} /> : null,
 }))
 
 import MarketPage, { generateStaticParams } from "../../../app/app/markets/[marketId]/page"
@@ -70,6 +76,7 @@ beforeEach(() => {
   mocks.account = undefined
   mocks.wallet = { status: "disconnected" }
   mocks.findings = []
+  mocks.network = "testnet"
   mocks.notFound.mockClear()
 })
 
@@ -175,6 +182,14 @@ describe("ComplianceCard", () => {
     await userEvent.click(screen.getAllByRole("button", { name: "Get test tokens" })[0])
     expect(open).toHaveBeenCalledTimes(1)
   })
+  it("offers Get test tokens only on testnet or a local network", () => {
+    mocks.wallet = { status: "connected", publicKey: "GABC", networkPassphrase: "x" }
+    mocks.account = accountState({ permPt: live(false) })
+    mocks.network = "mainnet"
+    wrap(<ComplianceCard marketId="m1" onGetTestTokens={() => {}} />)
+    expect(screen.queryByRole("button", { name: "Get test tokens" })).toBeNull()
+    expect(screen.getAllByText(/Fix: Ask the market's administrator/).length).toBeGreaterThan(0)
+  })
 })
 
 describe("SafetyCard", () => {
@@ -232,5 +247,13 @@ describe("MarketView", () => {
   it("mounts the action tabs for this market (R8)", () => {
     wrap(<MarketView marketId="m1" />)
     expect(screen.getByRole("region", { name: "Actions for m1" })).toBeTruthy()
+  })
+  it("opens the Get test tokens dialog for this market from the compliance card", async () => {
+    mocks.wallet = { status: "connected", publicKey: "GABC", networkPassphrase: "x" }
+    mocks.account = accountState({ permYt: live(false) })
+    wrap(<MarketView marketId="m1" />)
+    expect(screen.queryByRole("dialog")).toBeNull()
+    await userEvent.click(screen.getByRole("button", { name: "Get test tokens" }))
+    expect(screen.getByRole("dialog", { name: "Get test tokens for m1" })).toBeTruthy()
   })
 })

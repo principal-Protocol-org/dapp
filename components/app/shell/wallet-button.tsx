@@ -1,5 +1,6 @@
 "use client"
 
+import { useState } from "react"
 import { ChevronDown, TriangleAlert } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
@@ -13,6 +14,8 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { useWallet } from "@/hooks/use-wallet"
 import { activeManifest } from "@/lib/protocol/manifest-source"
+import { onboardingAvailable } from "@/lib/protocol/onboarding"
+import { OnboardingDialog } from "@/components/app/onboarding/onboarding-dialog"
 import { networkLabel } from "./network"
 
 const FREIGHTER_URL = "https://www.freighter.app"
@@ -24,11 +27,14 @@ export function shortAddress(address: string): string {
 function AccountMenu({
   address,
   onDisconnect,
+  onGetTestTokens,
   children,
   triggerClassName,
 }: {
   address: string
   onDisconnect: () => void
+  /** Shown only for a connected wallet on Testnet or a local network. */
+  onGetTestTokens?: () => void
   children: React.ReactNode
   triggerClassName?: string
 }) {
@@ -53,6 +59,7 @@ function AccountMenu({
         >
           Copy address
         </DropdownMenuItem>
+        {onGetTestTokens ? <DropdownMenuItem onSelect={onGetTestTokens}>Get test tokens</DropdownMenuItem> : null}
         <DropdownMenuItem onSelect={onDisconnect}>Disconnect</DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
@@ -61,8 +68,10 @@ function AccountMenu({
 
 export function WalletButton() {
   const { state, connect, disconnect } = useWallet()
-  const { network } = activeManifest()
-  const label = networkLabel(network)
+  const manifest = activeManifest()
+  const label = networkLabel(manifest.network)
+  const testTokens = onboardingAvailable(manifest)
+  const [onboarding, setOnboarding] = useState(false)
 
   async function onConnect() {
     const next = await connect()
@@ -88,10 +97,17 @@ export function WalletButton() {
       )
     case "connected":
       return (
-        <AccountMenu address={state.publicKey} onDisconnect={disconnect}>
-          <span aria-hidden="true" className="size-1.5 rounded-full bg-positive" />
-          <span className="font-mono">{shortAddress(state.publicKey)}</span>
-        </AccountMenu>
+        <>
+          <AccountMenu
+            address={state.publicKey}
+            onDisconnect={disconnect}
+            onGetTestTokens={testTokens ? () => setOnboarding(true) : undefined}
+          >
+            <span aria-hidden="true" className="size-1.5 rounded-full bg-positive" />
+            <span className="font-mono">{shortAddress(state.publicKey)}</span>
+          </AccountMenu>
+          {testTokens ? <OnboardingDialog open={onboarding} onOpenChange={setOnboarding} /> : null}
+        </>
       )
     case "wrong_network":
     case "unverified_network":
