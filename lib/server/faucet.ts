@@ -45,6 +45,8 @@ export const FAUCET_AMOUNT = TEST_TOKEN_AMOUNT
 export const FAUCET_TOP_UP_BELOW = TEST_TOKEN_TOP_UP_BELOW
 /** One accepted request per address and per IP in this window. */
 export const FAUCET_RATE_LIMIT_MS = 60_000
+/** At most this many accepted runs per instance in any rolling window, whatever the address or IP (R42). */
+export const FAUCET_GLOBAL_LIMIT_PER_MINUTE = 20
 
 export type TestAsset = Market["underlying"]
 
@@ -111,20 +113,31 @@ export type FaucetOutcome = { performed: FaucetStep[] } | { error: "network" | "
 
 /** Last accepted request time, by `addr:<account>` and `ip:<ip>`. Best effort: one instance only. */
 const lastAccepted = new Map<string, number>()
+/** Times of the runs accepted in the current rolling window, oldest first: the global cap. */
+let acceptedTimes: number[] = []
 /** Tail of the transaction queue: each write starts once the previous one settled. */
 let queueTail: Promise<unknown> = Promise.resolve()
 
 export function resetFaucetStateForTests(): void {
   lastAccepted.clear()
+  acceptedTimes = []
   queueTail = Promise.resolve()
 }
 
-/** Takes the slot for both keys, or refuses (a refused request does not restart the window). */
+/**
+ * Takes the slot for both keys and one of the instance's global slots, or refuses (a refused
+ * request does not restart any window). The global cap stops a stream of fresh addresses and
+ * spoofed IPs from bypassing the per-address limit (R42).
+ */
 function takeRateLimit(account: string, ip: string, now: number): boolean {
-  for (const [key, at] of lastAccepted) if (now - at >= FAUCET_RATE_LIMIT_MS || at > now) lastAccepted.delete(key)
+  const expired = (at: number) => now - at >= FAUCET_RATE_LIMIT_MS || at > now
+  for (const [key, at] of lastAccepted) if (expired(at)) lastAccepted.delete(key)
+  acceptedTimes = acceptedTimes.filter((at) => !expired(at))
   const keys = [`addr:${account}`, `ip:${ip}`]
   if (keys.some((key) => lastAccepted.has(key))) return false
+  if (acceptedTimes.length >= FAUCET_GLOBAL_LIMIT_PER_MINUTE) return false
   for (const key of keys) lastAccepted.set(key, now)
+  acceptedTimes.push(now)
   return true
 }
 

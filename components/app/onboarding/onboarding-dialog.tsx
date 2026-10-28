@@ -24,10 +24,11 @@ import {
 
 /** The server's refusals, in plain words with their fix. */
 const REFUSAL_TEXT: Record<FaucetErrorCode, string> = {
-  rate_limited: "Get test tokens was used for this account or from this connection less than a minute ago. Try again in a minute.",
+  rate_limited: "Get test tokens was used for this account or from this connection less than a minute ago, or is busy with other requests. Try again in a minute.",
   no_trustline: "The faucet found no trustline to the test asset on your account yet. Wait a few seconds, then try again.",
   network: "Get test tokens runs only on Testnet or a local network.",
   invalid_account: "The faucet refused the account address. Reconnect your wallet, then try again.",
+  request_too_large: "The faucet refused the request as too large. Reload the page, then try again.",
   not_configured: "Get test tokens is not set up on this server yet. Ask the Principal team.",
   failed: "The faucet could not finish: a network transaction did not go through. Steps already done are kept; try again in a minute.",
 }
