@@ -5,13 +5,16 @@ import testnetJson from "@/config/manifests/testnet.json"
 import type { AccountState } from "../account-state"
 import { bytesToHex } from "../bytes"
 import { parseManifest } from "../manifest"
+import type { ContractReader } from "../reader"
 import {
   addTrustline,
   buildChangeTrustXdr,
+  fetchMarketPermissions,
   fundWithFriendbot,
   onboardingAvailable,
   onboardingSteps,
   requestTestTokens,
+  sharedTestAsset,
   testAsset,
   TEST_TOKEN_AMOUNT,
   TEST_TOKEN_TOP_UP_BELOW,
@@ -94,7 +97,18 @@ describe("onboarding steps", () => {
   it("converts the top-up threshold with the asset's decimals", () => {
     const six = { ...ready, underlying: live(TEST_TOKEN_TOP_UP_BELOW * 10n ** 6n) }
     expect(done(six).grant).toBe(false)
-    expect(onboardingSteps(six, 6).find((s) => s.id === "grant")?.done).toBe(true)
+    expect(onboardingSteps(six, { decimals: 6 }).find((s) => s.id === "grant")?.done).toBe(true)
+  })
+
+  it("judges the grant step from every market's PT and YT permissions, not only the opened one (R44)", () => {
+    const granted = { permPt: live(true), permYt: live(true) }
+    expect(done(ready).grant).toBe(true)
+    const all = (markets: { permPt: Live<boolean>; permYt: Live<boolean> }[]) =>
+      onboardingSteps(ready, { markets }).find((s) => s.id === "grant")?.done
+    expect(all([granted, granted])).toBe(true)
+    expect(all([granted, { permPt: live(true), permYt: live(false) }])).toBe(false)
+    expect(all([granted, { permPt: live(false), permYt: live(true) }])).toBe(false)
+    expect(all([granted, { permPt: down, permYt: live(true) }])).toBe(false)
   })
 
   it("uses the faucet constants of the plan: 10 000 units, topped up below 1 000", () => {
@@ -112,6 +126,18 @@ describe("onboarding availability", () => {
 
   it("names the first market's underlying as the test asset", () => {
     expect(testAsset(manifest)).toEqual(asset)
+  })
+
+  it("requires every market to share one underlying: code, issuer and SAC (R44)", () => {
+    const second = { ...manifest.markets[0], marketId: "second" }
+    expect(sharedTestAsset({ markets: [manifest.markets[0], second] })).toEqual(asset)
+    for (const other of [
+      { ...asset, code: "STB" },
+      { ...asset, issuer: Keypair.random().publicKey() },
+      { ...asset, sac: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" },
+    ]) {
+      expect(sharedTestAsset({ markets: [manifest.markets[0], { ...second, underlying: other }] })).toBeNull()
+    }
   })
 })
 
@@ -208,12 +234,46 @@ describe("fundWithFriendbot", () => {
   })
 })
 
+describe("fetchMarketPermissions", () => {
+  it("reads is_allowed_for_asset for the PT and the YT of every market, keeping failures unavailable", async () => {
+    const second = { ...manifest.markets[0], marketId: "second", contracts: { ...manifest.markets[0].contracts, pt: "CPT2", yt: "CYT2" } }
+    const two: Manifest = { ...manifest, markets: [manifest.markets[0], second] }
+    const user = Keypair.random().publicKey()
+    const reader = vi.fn(async (call: { contractId: string; functionName: string; args?: { value: unknown }[] }) => {
+      const asset = call.args?.[1]?.value
+      if (asset === "CYT2") throw new Error("rpc down")
+      return { value: asset !== "CPT2", latestLedger: 5, minResourceFee: "0" }
+    }) as unknown as ContractReader
+    const perms = await fetchMarketPermissions(reader, two, user)
+    expect(perms.map((p) => p.marketId)).toEqual([manifest.markets[0].marketId, "second"])
+    expect(perms[0]).toMatchObject({ permPt: { status: "live", value: true }, permYt: { status: "live", value: true } })
+    expect(perms[1]).toMatchObject({ permPt: { status: "live", value: false }, permYt: { status: "unavailable" } })
+    expect(reader).toHaveBeenCalledWith({
+      contractId: manifest.shared.permissioning,
+      functionName: "is_allowed_for_asset",
+      args: [{ type: "address", value: user }, { type: "address", value: "CPT2" }],
+    })
+  })
+})
+
 describe("requestTestTokens", () => {
-  it("posts the account to /api/faucet and returns the steps performed", async () => {
+  it("posts the account as JSON to /api/faucet and returns the steps performed", async () => {
     const fetchImpl = vi.fn(async () => Response.json({ performed: ["authorize", "pay"] }))
     const user = Keypair.random().publicKey()
     await expect(requestTestTokens({ account: user, fetchImpl })).resolves.toEqual({ performed: ["authorize", "pay"] })
-    expect(fetchImpl).toHaveBeenCalledWith("/api/faucet", { method: "POST", body: JSON.stringify({ account: user }) })
+    expect(fetchImpl).toHaveBeenCalledWith("/api/faucet", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ account: user }),
+    })
+  })
+
+  it("keeps the step and the retry delay of a refusal", async () => {
+    const user = Keypair.random().publicKey()
+    const failed = vi.fn(async () => Response.json({ error: "failed", step: "grant_pt" }, { status: 502 }))
+    await expect(requestTestTokens({ account: user, fetchImpl: failed })).resolves.toEqual({ error: "failed", step: "grant_pt" })
+    const busy = vi.fn(async () => Response.json({ error: "busy", retryAfterSeconds: 60 }, { status: 503 }))
+    await expect(requestTestTokens({ account: user, fetchImpl: busy })).resolves.toEqual({ error: "busy", retryAfterSeconds: 60 })
   })
 
   it("returns the typed refusal, and `failed` for an unreadable answer", async () => {

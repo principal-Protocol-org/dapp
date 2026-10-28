@@ -24,8 +24,9 @@ import { FaucetConfigError, FaucetStepError, FaucetTxError } from "@/lib/server/
 const manifest = parseManifest(testnetJson)
 const ACCOUNT = Keypair.random().publicKey()
 
-function post(body: string, headers: Record<string, string> = {}) {
-  return route.POST(new Request("http://localhost/api/faucet", { method: "POST", body, headers }))
+const JSON_TYPE = { "content-type": "application/json" }
+function post(body: string, headers: Record<string, string> = {}, base: Record<string, string> = JSON_TYPE) {
+  return route.POST(new Request("http://localhost/api/faucet", { method: "POST", body, headers: { ...base, ...headers } }))
 }
 
 let consoleError: ReturnType<typeof vi.spyOn>
@@ -129,7 +130,7 @@ describe("POST /api/faucet", () => {
         cancelled = true
       },
     })
-    const request = new Request("http://localhost/api/faucet", { method: "POST", body: stream, duplex: "half" } as RequestInit)
+    const request = new Request("http://localhost/api/faucet", { method: "POST", body: stream, duplex: "half", headers: JSON_TYPE } as RequestInit)
     expect(request.headers.get("content-length")).toBeNull()
     const res = await route.POST(request)
     expect(res.status).toBe(413)
@@ -149,10 +150,35 @@ describe("POST /api/faucet", () => {
       },
     })
     const res = await route.POST(
-      new Request("http://localhost/api/faucet", { method: "POST", body: stream, duplex: "half" } as RequestInit),
+      new Request("http://localhost/api/faucet", { method: "POST", body: stream, duplex: "half", headers: JSON_TYPE } as RequestInit),
     )
     expect(res.status).toBe(200)
     expect(mocks.runFaucet).toHaveBeenCalledWith(expect.objectContaining({ account: ACCOUNT }))
+  })
+
+  it("requires a JSON content type (415), so a plain cross-site form cannot post (minor 5)", async () => {
+    const body = JSON.stringify({ account: ACCOUNT })
+    for (const type of [undefined, "text/plain", "application/x-www-form-urlencoded", "multipart/form-data; boundary=x", "application/jsonp"]) {
+      const res = await post(body, type ? { "content-type": type } : {}, {})
+      expect(res.status, String(type)).toBe(415)
+      expect((await res.json()).error).toBe("invalid_content_type")
+    }
+    expect(mocks.runFaucet).not.toHaveBeenCalled()
+    const ok = await post(body, { "content-type": "Application/JSON; charset=utf-8" }, {})
+    expect(ok.status).toBe(200)
+  })
+
+  it("refuses a browser request that is not same-origin, by Sec-Fetch-Site (minor 5)", async () => {
+    const body = JSON.stringify({ account: ACCOUNT })
+    for (const site of ["cross-site", "same-site", "none"]) {
+      const res = await post(body, { "sec-fetch-site": site })
+      expect(res.status, site).toBe(403)
+      expect((await res.json()).error).toBe("cross_site")
+    }
+    expect(mocks.runFaucet).not.toHaveBeenCalled()
+    expect((await post(body, { "sec-fetch-site": "same-origin" })).status).toBe(200)
+    // Without the header (a non-browser client) the other checks still apply.
+    expect((await post(body)).status).toBe(200)
   })
 
   it("maps each refusal to a typed error and status", async () => {
@@ -160,6 +186,8 @@ describe("POST /api/faucet", () => {
       ["network", 403],
       ["no_trustline", 409],
       ["rate_limited", 429],
+      ["busy", 503],
+      ["not_configured", 503],
     ] as const
     for (const [error, status] of cases) {
       mocks.runFaucet.mockResolvedValueOnce({ error })
@@ -168,10 +196,11 @@ describe("POST /api/faucet", () => {
       const body = await res.json()
       expect(body.error).toBe(error)
       expect(typeof body.message).toBe("string")
-      if (error === "rate_limited") {
+      if (error === "rate_limited" || error === "busy") {
         expect(res.headers.get("retry-after")).toBe("60")
         expect(body.retryAfterSeconds).toBe(60)
       }
+      if (error === "busy") expect(body.message).toBe("The faucet is busy — try again in a minute.")
     }
   })
 
@@ -184,6 +213,9 @@ describe("POST /api/faucet", () => {
     expect(text).not.toContain(secret)
     expect(text).not.toContain("rpc said")
     expect(JSON.parse(text)).toMatchObject({ error: "failed", step: "grant_pt" })
+    // Neutral: a read failure or a timeout is not necessarily a refused transaction (minor 6).
+    expect(JSON.parse(text).message).toMatch(/^The faucet could not finish — try again/)
+    expect(JSON.parse(text).message).not.toMatch(/transaction/)
 
     mocks.runFaucet.mockRejectedValueOnce(new Error(`boom ${secret}`))
     const other = await post(JSON.stringify({ account: ACCOUNT }))
