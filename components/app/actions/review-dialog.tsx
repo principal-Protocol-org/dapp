@@ -95,6 +95,7 @@ export function ReviewDialog({
   ledgerTime,
   secondsLeft,
   pending,
+  canSign,
   onSign,
   onClose,
 }: {
@@ -108,6 +109,8 @@ export function ReviewDialog({
   secondsLeft: number | null
   /** A signature or submission is in flight (this review or a restore). */
   pending: boolean
+  /** Every gate was evaluated and passes, with floors from this input's simulation. */
+  canSign: boolean
   onSign(): void
   onClose(): void
 }) {
@@ -134,7 +137,7 @@ export function ReviewDialog({
           <Button type="button" variant="secondary" onClick={onClose} disabled={signing}>
             Cancel
           </Button>
-          <Button type="button" onClick={onSign} disabled={signing || phase !== "review" || review === null || blockers.length > 0}>
+          <Button type="button" onClick={onSign} disabled={signing || !canSign || phase !== "review" || review === null || blockers.length > 0}>
             Sign with Freighter
           </Button>
         </DialogFooter>

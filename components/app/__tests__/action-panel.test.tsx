@@ -50,6 +50,8 @@ const mocks = vi.hoisted(() => ({
     ],
   },
   findings: [] as Finding[],
+  /** Finding 1: an (artificial) state with no gate context and no blocker listed. */
+  forceBaseNull: false,
   accounts: {} as Record<string, AccountState | "pending">,
   adapter: { restore: vi.fn(), connect: vi.fn(), disconnect: vi.fn(), sign: vi.fn(), watch: vi.fn() },
   fetchMarketState: vi.fn(),
@@ -89,6 +91,16 @@ vi.mock("@/lib/protocol/review", async (orig) => ({
   prepareRestore: mocks.prepareRestore,
   executeRestore: mocks.executeRestore,
 }))
+vi.mock("@/hooks/use-gate-context", async (orig) => {
+  const real = await orig<typeof import("@/hooks/use-gate-context")>()
+  return {
+    ...real,
+    useGateContext: (marketId: string) => {
+      const inputs = real.useGateContext(marketId)
+      return mocks.forceBaseNull ? { ...inputs, base: null, unavailable: [] } : inputs
+    },
+  }
+})
 vi.mock("@/lib/protocol/gates", async (orig) => {
   const real = await orig<typeof import("@/lib/protocol/gates")>()
   return { ...real, evaluateGates: vi.fn(real.evaluateGates) }
@@ -119,6 +131,15 @@ const buyYt: PanelConfig = {
   floors: { minOut: { label: "Minimum YT received", unit: "YT" }, maxNetCost: { label: "Maximum net cost", unit: "SY" } },
 }
 const claim: PanelConfig = { action: "claim_yield", fields: [], indicative: () => [], exact: () => [] }
+const redeem: PanelConfig = {
+  action: "redeem",
+  fields: [
+    { id: "amount", label: "PT to redeem", unit: "PT", optional: true },
+    { id: "secondaryAmount", label: "YT to redeem", unit: "YT", optional: true },
+  ],
+  indicative: () => [],
+  exact: () => [],
+}
 
 // ---------------------------------------------------------------------------------------------
 
@@ -184,6 +205,10 @@ async function settle(ms = 0) {
 const user = () => userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
 const reviewButton = (label = "Buy PT") => screen.getByRole("button", { name: `Review ${label}` }) as HTMLButtonElement
 const signButton = () => screen.getByRole("button", { name: "Sign with Freighter" }) as HTMLButtonElement
+/** The inline message under a field, or null. */
+const inlineError = (label: string) => document.getElementById(`${screen.getByLabelText(label).id}-error`)?.textContent ?? null
+/** The panel's "Signing is off" list (scoped to `root`, e.g. the dialog). */
+const gateList = (root: HTMLElement = document.body) => within(root).getByText("Signing is off").parentElement!
 
 async function renderPanel(config: PanelConfig = buyPt) {
   render(
@@ -227,6 +252,7 @@ beforeEach(() => {
   localStorage.clear()
   resetSettingsStoreForTests()
   mocks.findings = []
+  mocks.forceBaseNull = false
   mocks.accounts = { [A]: accountState({ sy: live(SY_100), permYt: live(true) }) }
   mocks.adapter.restore.mockResolvedValue(connected(A))
   mocks.adapter.connect.mockResolvedValue(connected(A))
@@ -306,8 +332,11 @@ describe("ActionPanel — previews", () => {
   })
 
   it("exact preview from simulation shows the floor computed with 50 bps", async () => {
-    await renderPanel()
+    const exact = vi.fn(buyPt.exact)
+    await renderPanel({ ...buyPt, exact })
     await enter("SY to spend", "10")
+    // Exact lines come from the simulation output and the input only, never from market reads.
+    expect(Object.keys(exact.mock.calls.at(-1)![1]).sort()).toEqual(["guards", "inputs"])
     expect(screen.getByText("Exact (simulated)")).toBeTruthy()
     expect(screen.queryByText("Indicative")).toBeNull()
     expect(screen.getByText("PT received").nextSibling?.textContent).toBe("100 PT")
@@ -363,7 +392,9 @@ describe("ActionPanel — amount input (Review Focus 3)", () => {
   ])("amount input matrix: %s is refused inline with signing off", async (_case, text, message) => {
     await renderPanel()
     await enter("SY to spend", text)
-    expect(screen.getByText(message)).toBeTruthy()
+    expect(inlineError("SY to spend")).toMatch(message)
+    expect(within(gateList()).getByText(message)).toBeTruthy()
+    expect(within(gateList()).queryByText(/Waiting for an exact quote/)).toBeNull()
     expect(screen.getByLabelText("SY to spend").getAttribute("aria-invalid")).toBe("true")
     expect(reviewButton().disabled).toBe(true)
     expect(mocks.simulateInvocation).not.toHaveBeenCalled()
@@ -373,7 +404,8 @@ describe("ActionPanel — amount input (Review Focus 3)", () => {
     await renderPanel()
     await enter("SY to spend", "5")
     await enter("SY to spend", "")
-    expect(screen.getByText("Enter an amount.")).toBeTruthy()
+    expect(inlineError("SY to spend")).toBe("Enter an amount.")
+    expect(within(gateList()).getByText("Enter an amount.")).toBeTruthy()
     expect(reviewButton().disabled).toBe(true)
   })
 
@@ -383,8 +415,24 @@ describe("ActionPanel — amount input (Review Focus 3)", () => {
     await user().click(screen.getByRole("button", { name: "Max SY to spend" }))
     await settle(400)
     expect((screen.getByLabelText("SY to spend") as HTMLInputElement).value).toBe("0")
-    expect(screen.getByText("You have no SY to use.")).toBeTruthy()
+    expect(inlineError("SY to spend")).toBe("You have no SY to use.")
+    expect(within(gateList()).getByText("You have no SY to use.")).toBeTruthy()
     expect(reviewButton().disabled).toBe(true)
+    expect(mocks.simulateInvocation).not.toHaveBeenCalled()
+  })
+
+  it("an untouched empty field names the amount as the reason, not the quote", async () => {
+    await renderPanel()
+    expect(inlineError("SY to spend")).toBeNull()
+    expect(within(gateList()).getByText("Enter an amount.")).toBeTruthy()
+    expect(within(gateList()).queryByText(/Waiting for an exact quote/)).toBeNull()
+    expect(reviewButton().disabled).toBe(true)
+  })
+
+  it("incomplete amounts name the amount as the reason, not the quote (redeem with both sides empty)", async () => {
+    await renderPanel(redeem)
+    expect(within(gateList()).getByText("Enter an amount of PT or YT to redeem, greater than zero.")).toBeTruthy()
+    expect(within(gateList()).queryByText(/Waiting for an exact quote/)).toBeNull()
     expect(mocks.simulateInvocation).not.toHaveBeenCalled()
   })
 
@@ -520,6 +568,49 @@ describe("ActionPanel — review lifecycle", () => {
     expect(mocks.executeReview.mock.calls[0][0].review).toBe(second)
   })
 
+  it("signing with under 20 s left prepares again instead of opening Freighter", async () => {
+    await renderPanel()
+    await openReview()
+    const first = await mocks.prepareReview.mock.results[0].value
+    await settle(45_000)
+    expect(mocks.prepareReview).toHaveBeenCalledTimes(1)
+    await user().click(signButton())
+    await settle()
+    expect(mocks.prepareReview).toHaveBeenCalledTimes(2)
+    expect(mocks.executeReview).not.toHaveBeenCalled()
+    expect(mocks.adapter.sign).not.toHaveBeenCalled()
+    const second = await mocks.prepareReview.mock.results[1].value
+    expect(second).not.toBe(first)
+    await user().click(signButton())
+    await settle()
+    expect(mocks.executeReview).toHaveBeenCalledTimes(1)
+    expect(mocks.executeReview.mock.calls[0][0].review).toBe(second)
+  })
+
+  it("sign stays off without a gate context, even when no blocker is listed", async () => {
+    await renderPanel()
+    await openReview()
+    expect(signButton().disabled).toBe(false)
+    mocks.forceBaseNull = true
+    await settle(1_000)
+    expect(within(screen.getByRole("dialog")).queryByText("Signing is off")).toBeNull()
+    expect(signButton().disabled).toBe(true)
+    act(() => signButton().click())
+    await settle()
+    expect(mocks.executeReview).not.toHaveBeenCalled()
+  })
+
+  it("a balance that drops under the amount while the review is open is the reason shown", async () => {
+    await renderPanel()
+    await openReview()
+    mocks.accounts[A] = accountState({ sy: live(50_000_000n), permYt: live(true) })
+    await settle(6_000)
+    const dialog = screen.getByRole("dialog")
+    expect(within(gateList(dialog)).getByText("More than your balance: you have 5 SY.")).toBeTruthy()
+    expect(within(gateList(dialog)).queryByText(/Waiting for an exact quote/)).toBeNull()
+    expect(signButton().disabled).toBe(true)
+  })
+
   it("double submit is impossible: the sign button is disabled while pending", async () => {
     let finish: (v: unknown) => void = () => {}
     mocks.executeReview.mockImplementation(() => new Promise((resolve) => (finish = resolve)))
@@ -603,6 +694,31 @@ describe("ActionPanel — results", () => {
     expect(readLog(B)).toEqual([])
     expect(mocks.fetchMarketState.mock.calls.length).toBeGreaterThan(marketReads)
     expect(mocks.fetchAccountState.mock.calls.length).toBeGreaterThan(accountReads)
+  })
+
+  it("the success notice says what happened, from the config's result message", async () => {
+    const result = vi.fn((output: { kind: string; value?: bigint }, ctx: { input: ActionInput }) =>
+      output.kind === "amount" && output.value !== undefined
+        ? `You bought ${formatAmount(output.value, 7, 7)} PT for ${formatAmount(ctx.input.amount, 7, 7)} SY.`
+        : "",
+    )
+    await renderPanel({ ...buyPt, result } as PanelConfig)
+    await openReview()
+    await user().click(signButton())
+    await settle()
+    expect(mocks.toast.success.mock.calls[0][0]).toBe("You bought 100 PT for 10 SY.")
+    expect(screen.getByText("You bought 100 PT for 10 SY.")).toBeTruthy()
+  })
+
+  it("falls back to \"confirmed\" when the result message cannot be worked out", async () => {
+    const result = () => {
+      throw new Error("bad output")
+    }
+    await renderPanel({ ...buyPt, result })
+    await openReview()
+    await user().click(signButton())
+    await settle()
+    expect(mocks.toast.success.mock.calls[0][0]).toBe("Buy PT confirmed.")
   })
 
   it("a failed transaction keeps and shows its hash", async () => {

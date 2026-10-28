@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useState } from "react"
 import { useQueryClient } from "@tanstack/react-query"
 import { useWallet } from "@/hooks/use-wallet"
 import { appendLog } from "@/lib/app/local-log"
@@ -36,25 +36,13 @@ export type Execute = {
  */
 export function useExecute(): Execute {
   const queryClient = useQueryClient()
-  const { state, sign: walletSign } = useWallet()
-  const walletState = useRef(state)
-  useEffect(() => {
-    walletState.current = state
-  })
+  const { sign: walletSign } = useWallet()
   const [inFlight, setInFlight] = useState(0)
 
-  // Refuses before Freighter opens when the connected account is not the one the transaction is for.
-  // executeReview/executeRestore then check the signed envelope against it again.
-  const sign = useCallback<SignTransaction>(
-    async (xdr, _networkPassphrase, expectedSigner) => {
-      const now = walletState.current
-      if (now.status !== "connected" || now.publicKey !== expectedSigner) {
-        throw new Error("The account connected in Freighter is not the one this was prepared for. Nothing was signed; review it again.")
-      }
-      return walletSign(xdr)
-    },
-    [walletSign],
-  )
+  // The signer the transaction was prepared for goes to the wallet, which refuses another live
+  // account before Freighter opens and has Freighter enforce it; executeReview/executeRestore then
+  // check the signed envelope against it again. The passphrase is the manifest's, in the wallet.
+  const sign = useCallback<SignTransaction>((xdr, _networkPassphrase, expectedSigner) => walletSign(xdr, expectedSigner), [walletSign])
 
   const refresh = useCallback(() => {
     const { network } = activeManifest()

@@ -17,13 +17,17 @@ export function explorerTxUrl(network: Network, hash: string): string | null {
   return network === "testnet" ? `https://stellar.expert/explorer/testnet/tx/${encodeURIComponent(hash)}` : null
 }
 
-export function noticeForResult(label: string, result: TxResult, network: Network): TxNotice {
+/**
+ * `message` is what the action did, decoded from its return value (spec §6 step 7, the panel
+ * config's `result`); a success without one reads "<label> confirmed.".
+ */
+export function noticeForResult(label: string, result: TxResult, network: Network, message?: string): TxNotice {
   const link = { hash: result.hash, url: explorerTxUrl(network, result.hash) }
   switch (result.status) {
-    case "SUCCESS":
-      return result.decodeError
-        ? { tone: "success", title: `${label} confirmed.`, detail: result.decodeError, ...link }
-        : { tone: "success", title: `${label} confirmed.`, ...link }
+    case "SUCCESS": {
+      const title = message?.trim() ? message.trim() : `${label} confirmed.`
+      return result.decodeError ? { tone: "success", title, detail: result.decodeError, ...link } : { tone: "success", title, ...link }
+    }
     case "FAILED":
       return {
         tone: "error",

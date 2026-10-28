@@ -10,8 +10,11 @@ export type WalletApi = {
   /** Prompts for access; resolves with the resulting state. */
   connect(): Promise<WalletState>
   disconnect(): void
-  /** Signs for the connected account on the manifest network; rejects when not connected. */
-  sign(xdr: string): Promise<string>
+  /**
+   * Signs for `expectedSigner` on the manifest network. Rejects, before Freighter opens, when not
+   * connected or when the connected account is another one; Freighter is told which signer to enforce.
+   */
+  sign(xdr: string, expectedSigner: string): Promise<string>
 }
 
 export const WalletContext = createContext<WalletApi | null>(null)
@@ -88,10 +91,14 @@ export function useWalletController(): WalletApi {
     apply({ status: "disconnected" })
   }, [apply])
 
-  const sign = useCallback(async (xdr: string) => {
+  const sign = useCallback(async (xdr: string, expectedSigner: string) => {
+    // stateRef is written with every state change, so this is the live account, not the last render's.
     const current = stateRef.current
     if (current.status !== "connected") throw new Error("Wallet is not connected on the right network.")
-    return freighterAdapter.sign(xdr, activeManifest().networkPassphrase, current.publicKey)
+    if (current.publicKey !== expectedSigner) {
+      throw new Error("The account connected in Freighter is not the one this was prepared for. Nothing was signed; review it again.")
+    }
+    return freighterAdapter.sign(xdr, activeManifest().networkPassphrase, expectedSigner)
   }, [])
 
   return useMemo(() => ({ state, connect, disconnect, sign }), [state, connect, disconnect, sign])

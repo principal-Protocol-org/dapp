@@ -61,20 +61,20 @@ describe("checkAmount (Review Focus 3)", () => {
   })
 
   it("refuses an empty field unless the field is optional, where it means zero", () => {
-    expect(checkAmount("", SY)).toEqual({ ok: false, message: "Enter an amount." })
-    expect(checkAmount("  ", SY)).toEqual({ ok: false, message: "Enter an amount." })
+    expect(checkAmount("", SY)).toEqual({ ok: false, code: "amount", message: "Enter an amount." })
+    expect(checkAmount("  ", SY)).toEqual({ ok: false, code: "amount", message: "Enter an amount." })
     expect(checkAmount("", { ...SY, optional: true })).toEqual({ ok: true, raw: 0n })
   })
 
   it("refuses zero, and says so plainly when the balance itself is zero", () => {
-    expect(checkAmount("0", SY)).toEqual({ ok: false, message: "Enter an amount greater than zero." })
-    expect(checkAmount("0", { ...SY, balance: live(0n) })).toEqual({ ok: false, message: "You have no SY to use." })
+    expect(checkAmount("0", SY)).toEqual({ ok: false, code: "amount", message: "Enter an amount greater than zero." })
+    expect(checkAmount("0", { ...SY, balance: live(0n) })).toEqual({ ok: false, code: "balance", message: "You have no SY to use." })
     expect(checkAmount("0", { ...SY, optional: true })).toEqual({ ok: true, raw: 0n })
   })
 
   it("refuses more than the balance, naming the balance exactly", () => {
     const r = checkAmount("100.0000001", { ...SY, balance: live(1_000_000_000n) })
-    expect(r).toEqual({ ok: false, message: "More than your balance: you have 100 SY." })
+    expect(r).toEqual({ ok: false, code: "balance", message: "More than your balance: you have 100 SY." })
     expect(checkAmount("100", { ...SY, balance: live(1_000_000_000n) })).toEqual({ ok: true, raw: 1_000_000_000n })
   })
 

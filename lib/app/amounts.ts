@@ -6,7 +6,10 @@ import type { Live } from "@/lib/protocol/types"
 /** The two amounts an `ActionInput` carries. */
 export type FieldKey = "amount" | "secondaryAmount"
 
-export type AmountCheck = { ok: true; raw: bigint } | { ok: false; message: string }
+/** A refusal is about the amount itself, or about the balance it would spend (gate codes). */
+export type AmountCheck = { ok: true; raw: bigint } | { ok: false; code: "amount" | "balance"; message: string }
+
+const refuse = (message: string, code: "amount" | "balance" = "amount"): AmountCheck => ({ ok: false, code, message })
 
 /** Contract amounts are i128. */
 const MAX_I128 = (1n << 127n) - 1n
@@ -22,30 +25,23 @@ export function checkAmount(
   opts: { decimals: number; unit: string; optional?: boolean; balance?: Live<bigint> | null },
 ): AmountCheck {
   const trimmed = text.trim()
-  if (trimmed === "") return opts.optional ? { ok: true, raw: 0n } : { ok: false, message: "Enter an amount." }
-  if (trimmed.startsWith("-")) return { ok: false, message: "Amounts cannot be negative." }
+  if (trimmed === "") return opts.optional ? { ok: true, raw: 0n } : refuse("Enter an amount.")
+  if (trimmed.startsWith("-")) return refuse("Amounts cannot be negative.")
   if (/e/i.test(trimmed) && /^[\d.]+e[+-]?\d+$/i.test(trimmed)) {
-    return { ok: false, message: "Exponents like 1e3 are not accepted: enter the plain number, for example 1000." }
+    return refuse("Exponents like 1e3 are not accepted: enter the plain number, for example 1000.")
   }
-  if (!/^\d+(\.\d+)?$/.test(trimmed)) {
-    return { ok: false, message: "Enter a number using digits and one decimal point, for example 12.5." }
-  }
+  if (!/^\d+(\.\d+)?$/.test(trimmed)) return refuse("Enter a number using digits and one decimal point, for example 12.5.")
   const raw = parseDecimalToRaw(trimmed, opts.decimals)
   if (raw === null) {
-    return {
-      ok: false,
-      message: `${opts.unit} has ${opts.decimals} decimal places: use at most ${opts.decimals} digits after the point.`,
-    }
+    return refuse(`${opts.unit} has ${opts.decimals} decimal places: use at most ${opts.decimals} digits after the point.`)
   }
-  if (raw > MAX_I128) return { ok: false, message: "This amount is too large." }
+  if (raw > MAX_I128) return refuse("This amount is too large.")
   const balance = opts.balance?.status === "live" ? opts.balance.value : undefined
   if (raw === 0n && !opts.optional) {
-    return balance === 0n
-      ? { ok: false, message: `You have no ${opts.unit} to use.` }
-      : { ok: false, message: "Enter an amount greater than zero." }
+    return balance === 0n ? refuse(`You have no ${opts.unit} to use.`, "balance") : refuse("Enter an amount greater than zero.")
   }
   if (balance !== undefined && raw > balance) {
-    return { ok: false, message: `More than your balance: you have ${maxText(balance, opts.decimals)} ${opts.unit}.` }
+    return refuse(`More than your balance: you have ${maxText(balance, opts.decimals)} ${opts.unit}.`, "balance")
   }
   return { ok: true, raw }
 }
