@@ -82,7 +82,7 @@ export function ComplianceCard({
   const kind = marketCompliance?.status === "live" ? marketCompliance.value.kind : null
   const kindError = marketCompliance?.status === "unavailable" ? marketCompliance.error : undefined
 
-  const items = account.data ? evaluateAccountCompliance(account.data, kind, kindError) : null
+  const items = account.data && !account.stale ? evaluateAccountCompliance(account.data, kind, kindError) : null
 
   return (
     <Card>
@@ -120,7 +120,7 @@ export function ComplianceCard({
               ))}
             </ul>
           ) : (
-            <p>{UNAVAILABLE}: your account could not be read right now.</p>
+            <p>{account.stale ? "Unavailable — last update failed." : `${UNAVAILABLE}: your account could not be read right now.`}</p>
           )}
         </section>
       </CardContent>

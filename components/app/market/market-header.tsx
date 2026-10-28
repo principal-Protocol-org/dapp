@@ -2,7 +2,7 @@
 
 import { useLedgerClock } from "@/hooks/use-ledger-clock"
 import { useMarketState } from "@/hooks/use-market-state"
-import { formatAmount, formatRate } from "@/lib/protocol/format"
+import { formatAmount, formatBps, formatFeeRate, formatRate } from "@/lib/protocol/format"
 import { getMarket } from "@/lib/protocol/manifest"
 import { activeManifest } from "@/lib/protocol/manifest-source"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -10,13 +10,15 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { formatDuration, showLive, UNAVAILABLE } from "@/components/app/live"
 import { Countdown } from "@/components/app/market/countdown"
 import { FixedApy } from "@/components/app/market/fixed-apy"
+import { liquidityText } from "@/components/app/market/liquidity"
 import { Metric } from "@/components/app/market/metric"
 import { marketStatus } from "@/components/app/markets/markets-table"
 import { StatusBadge } from "@/components/app/markets/status-badge"
 
 export function MarketHeader({ marketId }: { marketId: string }) {
   const market = getMarket(activeManifest(), marketId)
-  const { data: ms, isPending } = useMarketState(marketId)
+  const { data, isPending, stale } = useMarketState(marketId)
+  const ms = stale ? undefined : data
   const { ledgerTime } = useLedgerClock()
   if (!market) return null
   const decimals = market.underlying.decimals
@@ -39,9 +41,11 @@ export function MarketHeader({ marketId }: { marketId: string }) {
       {ms ? (
         <dl className="grid grid-cols-1 gap-x-8 gap-y-5 rounded-lg border border-line bg-surface p-5 min-[480px]:grid-cols-2 min-[900px]:grid-cols-3">
           <Metric label="Fixed APY">
-            <FixedApy impliedRate={ms.impliedRate} maturity={ms.maturity} ledgerTime={ledgerTime} />
+            <FixedApy impliedRate={ms.impliedRate} maturity={ms.maturity} ledgerTime={ledgerTime} poolSeeded={ms.poolSeeded} />
           </Metric>
-          <Metric label="PT price (pool spot)">{showLive(ms.ptPrice, formatRate)}</Metric>
+          <Metric label="PT price (pool spot)">
+            {showLive(ms.ptPrice, (v) => `${formatRate(v)} SY per PT (notional)`)}
+          </Metric>
           <Metric label="Oracle rate">
             {ms.oracleRate.status === "live" ? (
               <Tooltip>
@@ -61,6 +65,14 @@ export function MarketHeader({ marketId }: { marketId: string }) {
           <Metric label="YT total supply">{showLive(ms.totalYt, amount)}</Metric>
           <Metric label="Pool PT reserve">{showLive(ms.poolState, (p) => amount(p.ptReserve))}</Metric>
           <Metric label="Pool SY reserve">{showLive(ms.poolState, (p) => amount(p.syReserve))}</Metric>
+          <Metric label="Pool value (estimate)">
+            {liquidityText(ms, decimals, market.underlying.code, true)}
+          </Metric>
+          <Metric label="Tokenization fee">{showLive(ms.fees.tokenizationBps, formatBps)}</Metric>
+          <Metric label="YT fee">{showLive(ms.fees.ytBps, formatBps)}</Metric>
+          <Metric label="Current swap fee (decreases to 0 at maturity)">
+            {showLive(ms.swapFeeRate, formatFeeRate)}
+          </Metric>
           {ms.settledRate.status === "live" && ms.settledRate.value !== null ? (
             <Metric label="Settlement rate">{formatRate(ms.settledRate.value)}</Metric>
           ) : null}
@@ -69,7 +81,7 @@ export function MarketHeader({ marketId }: { marketId: string }) {
         <Skeleton className="h-40 w-full" />
       ) : (
         <p role="alert" className="rounded-lg border border-line bg-surface p-5 text-ink">
-          {UNAVAILABLE}: this market could not be read right now. Nothing below is current.
+          {stale ? "Unavailable — last update failed." : `${UNAVAILABLE}: this market could not be read right now.`} Nothing below is current.
         </p>
       )}
     </header>

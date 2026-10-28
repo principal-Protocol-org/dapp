@@ -21,11 +21,13 @@ export function useAccountState(marketId: string) {
   const compliance = useMarketCompliance(marketId)
   const settled = !compliance.isPending
   const kind = compliance.data?.status === "live" ? compliance.data.value.kind : null
-  return useQuery({
+  const query = useQuery({
     // The kind trails the documented key so a change in the compliance model refetches.
     queryKey: ["account", m.network, marketId, address, kind],
     queryFn: () => fetchAccountState(createRpcReader(m), createHorizon(m.horizonUrl), m, marketId, address as string, kind),
     enabled: address !== null && settled,
     refetchInterval: MARKET_REFETCH_MS,
   })
+  // A failed refetch keeps the old `data`; `stale` tells callers not to show it as current (R35).
+  return { ...query, stale: query.isError }
 }

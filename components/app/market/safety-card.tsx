@@ -33,7 +33,8 @@ function roomLeft(limit: Live<bigint>, volume: Live<bigint>, amount: (v: bigint)
 
 export function SafetyCard({ marketId }: { marketId: string }) {
   const market = getMarket(activeManifest(), marketId)
-  const { data: ms, isPending } = useMarketState(marketId)
+  const { data, isPending, stale } = useMarketState(marketId)
+  const ms = stale ? undefined : data
   const { ledgerTime } = useLedgerClock()
   const { state } = useWallet()
   const account = useAccountState(marketId)
@@ -50,7 +51,7 @@ export function SafetyCard({ marketId }: { marketId: string }) {
 
   const depositCap = (): string => {
     if (state.status !== "connected") return "Connect a wallet to see your cap"
-    const acc = account.data
+    const acc = account.stale ? undefined : account.data
     if (!acc) return account.isPending ? "Loading" : UNAVAILABLE
     if (acc.depositCap.status === "unavailable" || acc.netDeposited.status === "unavailable") return UNAVAILABLE
     if (acc.depositCap.value <= 0n) return "No cap (disabled)"
@@ -79,7 +80,7 @@ export function SafetyCard({ marketId }: { marketId: string }) {
         ) : isPending ? (
           <Skeleton className="h-48 w-full" />
         ) : (
-          <p className="text-sm text-ink">{UNAVAILABLE}: safety data could not be read right now.</p>
+          <p className="text-sm text-ink">{stale ? "Unavailable — last update failed." : `${UNAVAILABLE}: safety data could not be read right now.`}</p>
         )}
       </CardContent>
     </Card>
