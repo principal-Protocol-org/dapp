@@ -162,6 +162,7 @@ function fakeReview(input: ActionInput): Review {
       getAtLeast: ["99.5 PT (the minimum this transaction accepts)"],
       fees: ["Network fee: up to 0.025 XLM"],
       deadline: Number(input.deadline),
+      validUntil: Math.floor(now / 1000) + 300,
     },
     callTree: ["Router.swap_sy_for_pt", "MarketPool.swap_sy_for_pt"],
   }

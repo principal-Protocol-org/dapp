@@ -99,7 +99,13 @@ function fakeReview(input: ActionInput): Review {
     fee: "250000",
     preparedAtMs: now,
     expiresAtMs: now + 60_000,
-    summary: { give: ["x"], getAtLeast: ["y"], fees: ["Network fee: up to 0.025 XLM"], deadline: Number(input.deadline) },
+    summary: {
+      give: ["x"],
+      getAtLeast: ["y"],
+      fees: ["Network fee: up to 0.025 XLM"],
+      deadline: Number(input.deadline),
+      validUntil: Math.floor(now / 1000) + 300,
+    },
     callTree: ["Router.x"],
   }
 }

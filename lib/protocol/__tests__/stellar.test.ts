@@ -291,7 +291,10 @@ describe("submitSignedTransaction", () => {
 
     it("falls back to a raw errorResultXdr", async () => {
       const raw = result(xdr.TransactionResultResult.txTooLate()).toXdr("base64");
-      await expect(rejected({ errorResultXdr: raw })).rejects.toThrow("after its time window closed");
+      // A device clock behind the network makes every transaction too late: say so (M3).
+      await expect(rejected({ errorResultXdr: raw })).rejects.toThrow(
+        "it reached the network after its time window closed; check your device clock, then prepare it again",
+      );
     });
 
     it("names the contract-call failure inside txFailed", async () => {

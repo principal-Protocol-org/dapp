@@ -62,7 +62,7 @@ const issued = new WeakMap<object, Issued>()
 export const MAX_TX_FEE_STROOPS = 100_000_000n
 
 /** Transaction validity window (time bounds), as dapp-old used for its 300 s deadline default. */
-const TX_TIMEOUT_SECONDS = 300
+export const TX_TIMEOUT_SECONDS = 300
 
 /** Every Principal token, and XLM, have 7 decimals. */
 const TOKEN_DECIMALS = 7
@@ -77,7 +77,18 @@ export type Review = {
   fee: string
   preparedAtMs: number
   expiresAtMs: number
-  summary: { give: string[]; getAtLeast: string[]; fees: string[]; deadline?: number }
+  summary: {
+    give: string[]
+    getAtLeast: string[]
+    fees: string[]
+    /** The contract call's deadline (unix seconds, from ledger time), for the actions that take one. */
+    deadline?: number
+    /**
+     * The transaction's own time bound (`maxTime`, unix seconds): set 300 s after preparation by the
+     * device clock. The network refuses the transaction after it, whatever the deadline (M3).
+     */
+    validUntil: number
+  }
   callTree: string[]
 }
 
@@ -334,7 +345,7 @@ function assertRestoreIntact(restore: RestoreReview, manifest: Manifest, record:
   }
 }
 
-function summarize(market: Market, input: ActionInput, fee: string): Review["summary"] {
+function summarize(market: Market, input: ActionInput, fee: string, validUntil: number): Review["summary"] {
   const underlying = market.underlying.code
   const decimalsOf = (token: string) => (token === underlying ? market.underlying.decimals : TOKEN_DECIMALS)
   // Every digit: the review shows exactly the amounts being signed, never a rounded floor.
@@ -393,7 +404,8 @@ function summarize(market: Market, input: ActionInput, fee: string): Review["sum
       protocolFees = [swapFee]
       break
     case "add_liquidity":
-      give = [amount(a, "PT"), amount(b, "SY")]
+      // Only pt_used / sy_used, the amounts in the pool's ratio, are taken (MarketPool.add_liquidity).
+      give = [`up to ${amount(a, "PT")}`, `up to ${amount(b, "SY")}`]
       getAtLeast = [floor(g.minOut, "LP")]
       break
     case "add_liquidity_sy":
@@ -415,8 +427,18 @@ function summarize(market: Market, input: ActionInput, fee: string): Review["sum
       protocolFees = [ytFee]
       break
     case "redeem":
-      give = b > 0n ? [amount(a, "PT"), amount(b, "YT")] : [amount(a, "PT")]
-      getAtLeast = [`${underlying} at the settlement rate. The rate is fixed at settlement, so this call sets no minimum.`]
+      // Either side may be 0: only the legs redeemed are listed.
+      give = [...(a > 0n ? [amount(a, "PT")] : []), ...(b > 0n ? [amount(b, "YT")] : [])]
+      getAtLeast = [
+        // Unsettled, this redemption may be the one that settles the market (R40): no rate is fixed yet.
+        ...(a > 0n
+          ? [
+              `${underlying} for your PT, at the settlement rate. If the market has not settled yet, this redemption may be the one that settles it, at the rate in force when it lands.`,
+            ]
+          : []),
+        ...(b > 0n ? [`${underlying} for your YT: the yield it has left, net of the YT fee.`] : []),
+        "This call sets no minimum.",
+      ]
       protocolFees = b > 0n ? [ytFee] : []
       break
   }
@@ -424,8 +446,15 @@ function summarize(market: Market, input: ActionInput, fee: string): Review["sum
   // The exact fee field being signed; the network may charge less, never more.
   const fees = [`Network fee: up to ${xlm(BigInt(fee))}`, ...protocolFees]
   return ACTION_META[input.action].hasDeadline
-    ? { give, getAtLeast, fees, deadline: Number(input.deadline) }
-    : { give, getAtLeast, fees }
+    ? { give, getAtLeast, fees, deadline: Number(input.deadline), validUntil }
+    : { give, getAtLeast, fees, validUntil }
+}
+
+/** The time bound this app set on the transaction it built (R29 keeps RPC from changing it). */
+function maxTimeOf(transaction: Transaction): number {
+  const maxTime = Number(transaction.timeBounds?.maxTime)
+  if (!Number.isFinite(maxTime) || maxTime <= 0) throw new Error("The transaction was built without a time bound. Nothing was signed.")
+  return maxTime
 }
 
 /**
@@ -470,7 +499,7 @@ export async function prepareReview(p: { manifest: Manifest; input: ActionInput;
     fee: prepared.fee,
     preparedAtMs,
     expiresAtMs: preparedAtMs + REVIEW_TTL_MS,
-    summary: summarize(market, input, prepared.fee),
+    summary: summarize(market, input, prepared.fee, maxTimeOf(built)),
     callTree: CALL_TREES[input.action],
   }
   issued.set(review, { preparedAtMs, unsignedXdrHash: review.unsignedXdrHash })

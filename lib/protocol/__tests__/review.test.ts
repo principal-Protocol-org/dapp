@@ -32,6 +32,7 @@ import {
   type RestoreReview,
   type Review,
   type ReviewRpcServer,
+  TX_TIMEOUT_SECONDS,
 } from "../review"
 
 const manifest = parseManifest(structuredClone(testnetJson))
@@ -405,6 +406,15 @@ describe("prepareReview", () => {
       expect(r.summary.deadline).toBe(Number(DEADLINE))
     })
 
+    it("carries the transaction's own time bound, as signed (M3)", async () => {
+      const r = await review("buy_pt")
+      const maxTime = Number(new Transaction(r.unsignedXdr, passphrase).timeBounds?.maxTime)
+      expect(r.summary.validUntil).toBe(maxTime)
+      // 300 s after preparation, by the device clock; how it is computed is unchanged.
+      expect(Math.abs(maxTime - (Math.floor(r.preparedAtMs / 1000) + TX_TIMEOUT_SECONDS))).toBeLessThanOrEqual(1)
+      expect((await review("deposit")).summary.validUntil).toBeGreaterThan(0)
+    })
+
     it("names the token on each side, with every signed floor", async () => {
       const g = { minOut: 1_2345678n, minOut2: 2_0000001n, maxNetCost: 3_5000000n }
       const lines = async (action: ActionId, extra: Partial<ActionInput> = {}) => {
@@ -427,8 +437,9 @@ describe("prepareReview", () => {
         "10 SY, all of which may be spent: no SY is guaranteed back",
       ])
       expect(await lines("sell_yt")).toEqual({ give: ["10 YT"], getAtLeast: ["1.2345678 SY"] })
+      // Only pt_used / sy_used, in the pool's ratio, are taken (M4).
       expect(await lines("add_liquidity", { secondaryAmount: 4_0000000n })).toEqual({
-        give: ["10 PT", "4 SY"],
+        give: ["up to 10 PT", "up to 4 SY"],
         getAtLeast: ["1.2345678 LP"],
       })
       expect(await whileOffered("add_liquidity_sy", () => lines("add_liquidity_sy"))).toEqual({ give: ["10 SY"], getAtLeast: ["1.2345678 LP"] })
@@ -442,11 +453,20 @@ describe("prepareReview", () => {
       expect(claim.getAtLeast).toEqual(["Your pending yield, paid in STA. This call sets no minimum."])
       const redeem = (await review("redeem", { guards: {}, secondaryAmount: 2_0000000n })).summary
       expect(redeem.give).toEqual(["10 PT", "2 YT"])
+      // This redemption may be the one that settles the market: the rate is not claimed to be fixed (M4).
       expect(redeem.getAtLeast).toEqual([
-        "STA at the settlement rate. The rate is fixed at settlement, so this call sets no minimum.",
+        "STA for your PT, at the settlement rate. If the market has not settled yet, this redemption may be the one that settles it, at the rate in force when it lands.",
+        "STA for your YT: the yield it has left, net of the YT fee.",
+        "This call sets no minimum.",
       ])
       const ptOnly = (await review("redeem", { guards: {}, secondaryAmount: 0n })).summary
       expect(ptOnly.give).toEqual(["10 PT"])
+      expect(ptOnly.getAtLeast).toHaveLength(2)
+      expect(ptOnly.fees).toEqual(["Network fee: up to 0.0012445 XLM"])
+      // A YT-only redeem lists no "0 PT" (M4).
+      const ytOnly = (await review("redeem", { guards: {}, amount: 0n, secondaryAmount: 2_0000000n })).summary
+      expect(ytOnly.give).toEqual(["2 YT"])
+      expect(ytOnly.getAtLeast).toEqual(["STA for your YT: the yield it has left, net of the YT fee.", "This call sets no minimum."])
     })
 
     it("lists the protocol fee the action pays, after the network fee", async () => {

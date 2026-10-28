@@ -107,6 +107,17 @@ describe("market page route", () => {
 })
 
 describe("MarketHeader", () => {
+  it("defines the oracle rate as the mint panel does: notional per SY share (M4)", async () => {
+    // Radix positions the tooltip with a ResizeObserver, which jsdom lacks.
+    globalThis.ResizeObserver ??= class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+    wrap(<MarketHeader marketId="m1" />)
+    await userEvent.hover(screen.getByRole("button", { name: "1.0500" }))
+    expect((await screen.findAllByText(/^Notional per SY share, read from the market oracle\./)).length).toBeGreaterThan(0)
+  })
   it("shows the oracle rate, its age, the totals and the reserves", () => {
     wrap(<MarketHeader marketId="m1" />)
     expect(screen.getByRole("heading", { name: "STA · test" })).toBeTruthy()
