@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { SCALE } from "../math";
 import {
   previewAddLiquidity,
+  previewAddLiquiditySingleSy,
   previewBuyYt,
   previewDeposit,
   previewMint,
@@ -201,5 +202,37 @@ describe("previewBuyYt", () => {
     const r = previewBuyYt(1_000_000_000n, 10_500_000n, 5n, 1_000_000_000n);
     expect(r.yt).toBe(1_049_475_000n);
     expect(r.netCost).toBe(0n);
+  });
+});
+
+describe("previewAddLiquiditySingleSy (T17)", () => {
+  // Pool 1000 PT / 2000 SY / 1000 LP; 100 SY in, zap_swap_amount says 50 SY is swapped, and
+  // quote_sy_for_pt(50 SY) buys 24.5 PT for a 0.15 SY fee. Hand-computed with market_pool:462-489.
+  const reserves = { pt: 10_000_000_000n, sy: 20_000_000_000n };
+  const totalLp = 10_000_000_000n;
+
+  it("mirrors add_liquidity_single_sy: LP, PT and SY used, PT refunded, SY kept", () => {
+    expect(previewAddLiquiditySingleSy(1_000_000_000n, 500_000_000n, { ptOut: 245_000_000n, feeShares: 1_500_000n }, reserves, totalLp)).toEqual({
+      lp: 243_920_286n,
+      ptUsed: 237_944_239n,
+      syUsed: 999_999_999n, // split + the SY added beside the PT, as the contract returns it
+      ptRefund: 7_055_761n,
+      syKept: 1n,
+    });
+  });
+
+  it("returns zeros when no LP would be minted (the contract reverts ZeroAmount)", () => {
+    expect(previewAddLiquiditySingleSy(10n, 10n, { ptOut: 1n, feeShares: 0n }, reserves, totalLp)).toEqual({
+      lp: 0n,
+      ptUsed: 0n,
+      syUsed: 0n,
+      ptRefund: 0n,
+      syKept: 0n,
+    });
+  });
+
+  it("throws on an unseeded pool or a swap larger than the deposit", () => {
+    expect(() => previewAddLiquiditySingleSy(1n, 1n, { ptOut: 1n, feeShares: 0n }, reserves, 0n)).toThrow(RangeError);
+    expect(() => previewAddLiquiditySingleSy(1n, 2n, { ptOut: 1n, feeShares: 0n }, reserves, totalLp)).toThrow(RangeError);
   });
 });

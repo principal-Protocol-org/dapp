@@ -40,3 +40,10 @@ export const quotePtForSy = (reader: ContractReader, pool: string, ptIn: bigint)
 
 /** SY needed, fee included, to buy exactly `ptOut` PT (`amountIn`). */
 export const quoteBuyExactPt = (reader: ContractReader, pool: string, ptOut: bigint) => readQuote(reader, pool, "quote_buy_exact_pt", ptOut)
+
+/** How much of `syIn` SY a single-sided deposit swaps into PT (`zap_swap_amount`, `market_pool:684-689`). */
+export async function zapSwapAmount(reader: ContractReader, pool: string, syIn: bigint): Promise<bigint> {
+  positive(syIn)
+  const result = await reader<unknown>({ contractId: pool, functionName: "zap_swap_amount", args: [{ type: "i128", value: syIn }] })
+  return toBigint(result.value)
+}
