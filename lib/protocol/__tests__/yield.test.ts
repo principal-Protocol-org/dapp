@@ -5,6 +5,7 @@ import {
   accruingSinceRate,
   impliedApy,
   impliedRateFromPrice,
+  poolValueInUnderlying,
   indexFor,
   pendingYield,
   ptFixedReturn,
@@ -274,5 +275,19 @@ describe("ptFixedReturn", () => {
       valueNow: 0n,
       apy: 0,
     });
+  });
+});
+
+describe("poolValueInUnderlying", () => {
+  const base = { syReserve: 34_000_000_000n, ptReserve: 12_000_000_000n, exchangeRate: 10_500_000n, ptPrice: 9_800_000n, oracleRate: 10_500_000n };
+  it("adds SY at the exchange rate and PT at spot price over the oracle rate, flooring each term", () => {
+    // 34e9 * 1.05 = 35.7e9 ; 12e9 * 0.98 / 1.05 = 11_200_000_000
+    expect(poolValueInUnderlying(base)).toBe(35_700_000_000n + 11_200_000_000n);
+    expect(poolValueInUnderlying({ ...base, syReserve: 3n, ptReserve: 3n, ptPrice: 9_999_999n, exchangeRate: 10_000_001n, oracleRate: 10_000_000n })).toBe(3n + 2n);
+  });
+  it("is null for a non-positive rate or price", () => {
+    expect(poolValueInUnderlying({ ...base, oracleRate: 0n })).toBeNull();
+    expect(poolValueInUnderlying({ ...base, ptPrice: 0n })).toBeNull();
+    expect(poolValueInUnderlying({ ...base, exchangeRate: -1n })).toBeNull();
   });
 });

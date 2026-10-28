@@ -59,3 +59,18 @@ export function formatUnixTime(seconds: number) {
     timeStyle: "short",
   }).format(new Date(seconds * 1000));
 }
+
+function percentFrom(scaled: bigint, digits: number): string {
+  const base = 10n ** BigInt(digits);
+  return `${scaled / base}.${(scaled % base).toString().padStart(digits, "0")}%`;
+}
+
+/** Basis points as a percent, exact: 30n -> "0.30%". */
+export function formatBps(bps: bigint): string {
+  return percentFrom(bps, 2);
+}
+
+/** A `swap_fee_rate` (scale 1e12) as a percent with 4 decimals, truncated: 3_000_000_000n -> "0.3000%". */
+export function formatFeeRate(rate: bigint): string {
+  return percentFrom((rate * 100n * 10_000n) / 1_000_000_000_000n, 4);
+}

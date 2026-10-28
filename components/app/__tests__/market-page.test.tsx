@@ -13,6 +13,8 @@ const MARKET = {
 }
 const mocks = vi.hoisted(() => ({
   ms: undefined as unknown,
+  stale: false,
+  accountStale: false,
   compliance: undefined as unknown,
   account: undefined as AccountState | undefined,
   wallet: { status: "disconnected" } as WalletState,
@@ -27,13 +29,13 @@ vi.mock("@/lib/protocol/manifest-source", () => ({
 }))
 vi.mock("next/navigation", () => ({ notFound: mocks.notFound }))
 vi.mock("@/hooks/use-market-state", () => ({
-  useMarketState: () => ({ data: mocks.ms, isPending: false }),
+  useMarketState: () => ({ data: mocks.ms, isPending: false, stale: mocks.stale }),
 }))
 vi.mock("@/hooks/use-market-compliance", () => ({
   useMarketCompliance: () => ({ data: mocks.compliance, isPending: false }),
 }))
 vi.mock("@/hooks/use-account-state", () => ({
-  useAccountState: () => ({ data: mocks.account, isPending: false }),
+  useAccountState: () => ({ data: mocks.account, isPending: false, stale: mocks.accountStale }),
 }))
 vi.mock("@/hooks/use-wallet", () => ({ useWallet: () => ({ state: mocks.wallet }) }))
 vi.mock("@/hooks/use-ledger-clock", () => ({
@@ -58,6 +60,8 @@ const sac = live({
 
 beforeEach(() => {
   mocks.ms = marketState()
+  mocks.stale = false
+  mocks.accountStale = false
   mocks.compliance = sac
   mocks.account = undefined
   mocks.wallet = { status: "disconnected" }
@@ -89,8 +93,37 @@ describe("MarketHeader", () => {
     expect(screen.getByText("YT total supply").nextSibling?.textContent).toBe("500")
     expect(screen.getByText("Pool PT reserve").nextSibling?.textContent).toBe("1200")
     expect(screen.getByText("Pool SY reserve").nextSibling?.textContent).toBe("3400")
-    expect(screen.getByText("PT price (pool spot)").nextSibling?.textContent).toBe("0.9800")
+    expect(screen.getByText("PT price (pool spot)").nextSibling?.textContent).toBe("0.9800 SY per PT (notional)")
     expect(screen.getByText("Matures in 10d 0h 0m")).toBeTruthy()
+  })
+  it("shows the pool value estimate and the three fees", () => {
+    mocks.ms = marketState({
+      fees: { tokenizationBps: live(5n), ytBps: live(30n), swapTierBps: live(0n), protocolShareBps: live(0n) },
+      swapFeeRate: live(3_000_000_000n),
+    })
+    wrap(<MarketHeader marketId="m1" />)
+    expect(screen.getByText("Pool value (estimate)").nextSibling?.textContent).toBe("≈ 4520 STA, PT at pool price")
+    expect(screen.getByText("Tokenization fee").nextSibling?.textContent).toBe("0.05%")
+    expect(screen.getByText("YT fee").nextSibling?.textContent).toBe("0.30%")
+    expect(screen.getByText("Current swap fee (decreases to 0 at maturity)").nextSibling?.textContent).toBe("0.3000%")
+  })
+  it("shows Unavailable for the fees and pool value when unreadable", () => {
+    mocks.ms = marketState({ fees: { tokenizationBps: down(), ytBps: down(), swapTierBps: live(0n), protocolShareBps: live(0n) }, swapFeeRate: down(), exchangeRate: down() })
+    wrap(<MarketHeader marketId="m1" />)
+    for (const label of ["Tokenization fee", "YT fee", "Current swap fee (decreases to 0 at maturity)", "Pool value (estimate)"]) {
+      expect(screen.getByText(label).nextSibling?.textContent).toBe("Unavailable")
+    }
+  })
+  it("shows an oracle timestamp in the future as 0s ago, not a negative age", () => {
+    mocks.ms = marketState({ oracleTimestamp: live(BigInt(LEDGER_TIME + 500)) })
+    wrap(<MarketHeader marketId="m1" />)
+    expect(screen.getByText("Oracle updated").nextSibling?.textContent).toBe("0s ago")
+  })
+  it("hides old values after a failed refresh", () => {
+    mocks.stale = true
+    wrap(<MarketHeader marketId="m1" />)
+    expect(screen.getByRole("alert").textContent).toMatch(/Unavailable — last update failed/)
+    expect(screen.queryByText("1.0500")).toBeNull()
   })
   it("shows Unavailable for an unavailable value", () => {
     mocks.ms = marketState({ oracleRate: down(), totalPt: down(), poolState: down() })
@@ -120,6 +153,14 @@ describe("ComplianceCard", () => {
     wrap(<ComplianceCard marketId="m1" onGetTestTokens={() => {}} />)
     expect(screen.getByText(/compliance model could not be read \(horizon 503\)/)).toBeTruthy()
   })
+  it("hides old account items after a failed refresh", () => {
+    mocks.wallet = { status: "connected", publicKey: "GABC", networkPassphrase: "x" }
+    mocks.account = accountState()
+    mocks.accountStale = true
+    wrap(<ComplianceCard marketId="m1" onGetTestTokens={() => {}} />)
+    expect(screen.getByText(/Unavailable — last update failed/)).toBeTruthy()
+    expect(screen.queryByText(/Your account exists/)).toBeNull()
+  })
   it("lists account items with fixes; onboarding opens Get test tokens", async () => {
     mocks.wallet = { status: "connected", publicKey: "GABC", networkPassphrase: "x" }
     mocks.account = accountState({ permPt: live(false), trustline: live("none"), sacAuthorized: live(false) })
@@ -148,6 +189,17 @@ describe("SafetyCard", () => {
     mocks.account = accountState()
     wrap(<SafetyCard marketId="m1" />)
     expect(screen.getByText("Your deposit cap").nextSibling?.textContent).toBe("6000 left of 10000")
+  })
+  it("says a stale oracle is stale", () => {
+    mocks.ms = marketState({ oracleFresh: live(false) })
+    wrap(<SafetyCard marketId="m1" />)
+    expect(screen.getByText("Oracle").nextSibling?.textContent).toBe("Stale (not updated within the last hour), updated 10m 0s ago")
+  })
+  it("hides old values after a failed refresh", () => {
+    mocks.stale = true
+    wrap(<SafetyCard marketId="m1" />)
+    expect(screen.getByText(/Unavailable — last update failed/)).toBeTruthy()
+    expect(screen.queryByText("Not paused")).toBeNull()
   })
   it("never reads an unavailable value as zero", () => {
     mocks.ms = marketState({ syPaused: down(), oracleFresh: down(), cb: { limit: down(), volume: live(0n), assetLimit: live(0n), assetVolume: live(0n) } })

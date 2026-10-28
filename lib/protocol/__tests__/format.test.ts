@@ -2,6 +2,8 @@
 import { describe, expect, it } from "vitest";
 import {
   formatAmount,
+  formatBps,
+  formatFeeRate,
   formatPercent,
   formatRate,
   hashLike,
@@ -49,5 +51,19 @@ describe("formatRate / formatPercent / helpers", () => {
   it("shorten and hashLike", () => {
     expect(shorten("abcdefghijklmnopqrstuvwxyz")).toBe("abcdef...uvwxyz");
     expect(hashLike("a")).toMatch(/^sha256:[0-9a-f]{64}$/);
+  });
+});
+
+describe("fee formatting", () => {
+  it("formats bps exactly", () => {
+    expect(formatBps(30n)).toBe("0.30%");
+    expect(formatBps(5n)).toBe("0.05%");
+    expect(formatBps(100n)).toBe("1.00%");
+    expect(formatBps(0n)).toBe("0.00%");
+  });
+  it("formats a 1e12-scaled swap fee rate", () => {
+    expect(formatFeeRate(3_000_000_000n)).toBe("0.3000%");
+    expect(formatFeeRate(0n)).toBe("0.0000%");
+    expect(formatFeeRate(1_234_567_890n)).toBe("0.1234%");
   });
 });

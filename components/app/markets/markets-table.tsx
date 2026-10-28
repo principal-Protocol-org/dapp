@@ -3,12 +3,13 @@
 import Link from "next/link"
 import { useLedgerClock } from "@/hooks/use-ledger-clock"
 import { useMarketState } from "@/hooks/use-market-state"
-import { formatAmount, formatUnixTime } from "@/lib/protocol/format"
+import { formatUnixTime } from "@/lib/protocol/format"
 import { activeManifest } from "@/lib/protocol/manifest-source"
 import type { MarketState } from "@/lib/protocol/market-state"
 import type { Market } from "@/lib/protocol/types"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+import { liquidityText } from "@/components/app/market/liquidity"
 import { FixedApy } from "@/components/app/market/fixed-apy"
 import { showLive, UNAVAILABLE } from "@/components/app/live"
 import { StatusBadge, type MarketStatus } from "@/components/app/markets/status-badge"
@@ -33,11 +34,15 @@ export function marketStatus(ms: MarketState, ledgerTime: number | null): Market
 function daysLeft(ms: MarketState, ledgerTime: number | null): string {
   if (ledgerTime === null || ms.maturity.status === "unavailable") return UNAVAILABLE
   const seconds = ms.maturity.value - BigInt(Math.floor(ledgerTime))
-  return seconds <= 0n ? "Matured" : `${seconds / 86400n} d`
+  if (seconds <= 0n) return "Matured"
+  if (seconds >= 86400n) return `${seconds / 86400n} d`
+  return seconds >= 3600n ? `${seconds / 3600n} h` : "<1 h"
 }
 
 function MarketRow({ market, ledgerTime }: { market: Market; ledgerTime: number | null }) {
-  const { data: ms, isPending } = useMarketState(market.marketId)
+  const { data, isPending, stale } = useMarketState(market.marketId)
+  // After a failed refetch the old data is not shown as current.
+  const ms = stale ? undefined : data
   const decimals = market.underlying.decimals
   return (
     <TableRow>
@@ -54,11 +59,9 @@ function MarketRow({ market, ledgerTime }: { market: Market; ledgerTime: number 
           <TableCell>{showLive(ms.maturity, (v) => formatUnixTime(Number(v)))}</TableCell>
           <TableCell>{daysLeft(ms, ledgerTime)}</TableCell>
           <TableCell>
-            <FixedApy impliedRate={ms.impliedRate} maturity={ms.maturity} ledgerTime={ledgerTime} />
+            <FixedApy impliedRate={ms.impliedRate} maturity={ms.maturity} ledgerTime={ledgerTime} poolSeeded={ms.poolSeeded} />
           </TableCell>
-          <TableCell>
-            {showLive(ms.poolState, (p) => `${formatAmount(p.syReserve, decimals)} SY`)}
-          </TableCell>
+          <TableCell>{liquidityText(ms, decimals, market.underlying.code)}</TableCell>
           <TableCell>
             <StatusBadge status={marketStatus(ms, ledgerTime)} />
           </TableCell>
@@ -68,7 +71,9 @@ function MarketRow({ market, ledgerTime }: { market: Market; ledgerTime: number 
           <Skeleton className="h-5 w-full" />
         </TableCell>
       ) : (
-        <TableCell colSpan={5}>{UNAVAILABLE}: this market could not be read right now.</TableCell>
+        <TableCell colSpan={5}>
+          {stale ? "Unavailable — last update failed." : `${UNAVAILABLE}: this market could not be read right now.`}
+        </TableCell>
       )}
     </TableRow>
   )
@@ -86,7 +91,7 @@ export function MarketsTable() {
             <TableHead>Maturity</TableHead>
             <TableHead>Days left</TableHead>
             <TableHead>Fixed APY</TableHead>
-            <TableHead>Liquidity (pool SY)</TableHead>
+            <TableHead>Liquidity (est., PT at pool price)</TableHead>
             <TableHead>Status</TableHead>
           </TableRow>
         </TableHeader>

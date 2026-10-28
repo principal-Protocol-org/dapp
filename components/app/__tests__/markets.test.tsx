@@ -6,6 +6,7 @@ import { down, live, LEDGER_TIME, marketState, MATURITY } from "./fixtures"
 
 const mocks = vi.hoisted(() => ({
   ms: undefined as unknown,
+  stale: false,
   ledgerTime: null as number | null,
 }))
 
@@ -16,7 +17,7 @@ vi.mock("@/lib/protocol/manifest-source", () => ({
   }),
 }))
 vi.mock("@/hooks/use-market-state", () => ({
-  useMarketState: () => ({ data: mocks.ms, isPending: mocks.ms === undefined }),
+  useMarketState: () => ({ data: mocks.ms, isPending: mocks.ms === undefined, stale: mocks.stale }),
 }))
 vi.mock("@/hooks/use-ledger-clock", () => ({
   useLedgerClock: () => ({ ledgerTime: mocks.ledgerTime, sequence: 1, isError: false }),
@@ -32,6 +33,7 @@ beforeEach(() => {
     disconnect() {}
   }
   mocks.ms = marketState()
+  mocks.stale = false
   mocks.ledgerTime = LEDGER_TIME
 })
 
@@ -72,15 +74,15 @@ describe("MarketsTable", () => {
     expect(screen.getByRole("columnheader", { name: "Fixed APY" })).toBeTruthy()
     expect(within(row).getByRole("link", { name: "STA · test" }).getAttribute("href")).toBe("/app/markets/m1")
     expect(within(row).getByText("10 d")).toBeTruthy()
-    expect(within(row).getByText("3400 SY")).toBeTruthy()
+    expect(within(row).getByText("≈ 4520 STA")).toBeTruthy()
     expect(within(row).getByText("Live")).toBeTruthy()
-    // 5% APR over 10 days compounds to a little over 5%.
-    expect(within(row).getByRole("button", { name: /^5\.\d\d%$/ })).toBeTruthy()
+    // 5% APR compounded over 10 days: (1 + 0.05 * 10/365)^(365/10) - 1 = 5.1235%.
+    expect(within(row).getByRole("button", { name: "5.12%" })).toBeTruthy()
   })
 
   it("explains the APR in a tooltip", async () => {
     renderTable()
-    await userEvent.hover(screen.getByRole("button", { name: /^5\.\d\d%$/ }))
+    await userEvent.hover(screen.getByRole("button", { name: "5.12%" }))
     expect((await screen.findAllByText(/APR 5\.00%/))[0]).toBeTruthy()
   })
 
@@ -99,9 +101,42 @@ describe("MarketsTable", () => {
     expect(within(row).getAllByText("Unavailable").length).toBeGreaterThanOrEqual(3)
   })
 
-  it("shows Matured instead of an APY after maturity", () => {
+  it("shows Matured in the badge, days left and APY cells after maturity", () => {
     mocks.ledgerTime = Number(MATURITY) + 100
     renderTable()
-    expect(within(screen.getByRole("row", { name: /STA · test/ })).getAllByText("Matured").length).toBeGreaterThanOrEqual(2)
+    const cells = within(screen.getByRole("row", { name: /STA · test/ })).getAllByRole("cell")
+    expect(cells[2].textContent).toBe("Matured")
+    expect(cells[3].textContent).toBe("Matured")
+    expect(cells[5].textContent).toBe("Matured")
+  })
+
+  it("shows Settled once the settlement rate is set", () => {
+    mocks.ms = marketState({ settledRate: live<bigint | null>(10_500_000n) })
+    mocks.ledgerTime = Number(MATURITY) + 100
+    renderTable()
+    const cells = within(screen.getByRole("row", { name: /STA · test/ })).getAllByRole("cell")
+    expect(cells[5].textContent).toBe("Settled")
+  })
+
+  it("shows hours, not 0 d, inside the last day", () => {
+    mocks.ledgerTime = Number(MATURITY) - 23 * 3600
+    renderTable()
+    expect(within(screen.getByRole("row", { name: /STA · test/ })).getAllByRole("cell")[2].textContent).toBe("23 h")
+  })
+
+  it("shows No liquidity yet for an unseeded pool, not 0%", () => {
+    mocks.ms = marketState({ poolSeeded: live(false), impliedRate: live(0n) })
+    renderTable()
+    const cells = within(screen.getByRole("row", { name: /STA · test/ })).getAllByRole("cell")
+    expect(cells[3].textContent).toBe("No liquidity yet")
+    expect(cells[4].textContent).toBe("No liquidity yet")
+  })
+
+  it("does not show old values after a failed refresh", () => {
+    mocks.stale = true
+    renderTable()
+    const row = screen.getByRole("row", { name: /STA · test/ })
+    expect(within(row).getByText(/Unavailable — last update failed/)).toBeTruthy()
+    expect(within(row).queryByText("≈ 4520 STA")).toBeNull()
   })
 })
