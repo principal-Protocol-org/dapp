@@ -25,21 +25,26 @@ export function usePanels(marketId: string, build: (market: Market) => PanelEntr
  * The panels of one action tab, one at a time behind a row of sub-tabs. Only the selected panel is
  * mounted, so only it reads quotes and simulates. `defaultId` (the first panel when absent or
  * unknown) applies until the user picks a panel, and may change meanwhile (e.g. at maturity).
+ * `requestedId` (from a portfolio shortcut's `?panel=`) beats `defaultId` when it names a panel;
+ * the user's pick beats both.
  */
 export function PanelGroup({
   label,
   marketId,
   panels,
   defaultId,
+  requestedId,
 }: {
   label: string
   marketId: string
   panels: PanelEntry[]
   defaultId?: string
+  requestedId?: string
 }) {
   const [chosen, setChosen] = useState<string | null>(null)
   if (panels.length === 0) return null
-  const fallback = panels.some((p) => p.id === defaultId) ? defaultId! : panels[0].id
+  const known = (id: string | undefined): id is string => panels.some((p) => p.id === id)
+  const fallback = known(requestedId) ? requestedId : known(defaultId) ? defaultId : panels[0].id
   return (
     <Tabs value={chosen ?? fallback} onValueChange={setChosen} className="gap-4">
       <TabsList variant="line" aria-label={`${label} actions`} className="max-w-full justify-start overflow-x-auto">

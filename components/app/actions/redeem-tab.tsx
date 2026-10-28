@@ -5,14 +5,12 @@ import type { PanelConfig, PreviewLine } from "@/components/app/actions/panel-co
 import { PanelGroup, usePanels, type PanelEntry } from "@/components/app/actions/panel-group"
 import { useMatured } from "@/hooks/use-matured"
 import { amountOf, outputOf, plain, tokens } from "@/components/app/actions/panel-lines"
-import type { AccountState } from "@/lib/protocol/account-state"
 import { formatBps, formatRate } from "@/lib/protocol/format"
-import type { MarketState } from "@/lib/protocol/market-state"
-import { SCALE } from "@/lib/protocol/math"
 import { previewRecombine, previewRedeemPt } from "@/lib/protocol/previews"
-import { allLive, liveValue } from "@/lib/protocol/reader"
-import type { Live, Market } from "@/lib/protocol/types"
-import { pendingYield, redemptionRate, type PendingYield, type RedemptionRate } from "@/lib/protocol/yield"
+import { allLive } from "@/lib/protocol/reader"
+import type { Market } from "@/lib/protocol/types"
+import { pendingOf, settlementOf } from "@/lib/protocol/position"
+import type { RedemptionRate } from "@/lib/protocol/yield"
 
 /**
  * The Redeem tab (spec §6): recombine PT + YT into SY before maturity, claim YT yield, and redeem
@@ -23,34 +21,6 @@ const BASIS_HINT: Record<RedemptionRate["basis"], string> = {
   settled: "Final: fixed when the market settled.",
   frozen: "Fixed: the YT yield index froze at maturity at this rate; the first redemption records it.",
   oracle: "Indicative — settles at the oracle rate of your redemption.",
-}
-
-/**
- * What a claim pays now — and what redeeming any YT pays, since burning YT settles and claims the
- * yield of the whole balance (`principal_manager:514-516`). Once the YT index is frozen the oracle
- * is not needed (nor read), as in the claim gate.
- */
-function pendingOf(ms: MarketState, account: AccountState): Live<PendingYield> {
-  const frozen = ms.ytFrozen.status === "live" && ms.ytFrozen.value
-  const oracle: Live<bigint> = frozen ? liveValue(SCALE, 0) : ms.oracleRate
-  return allLive(
-    [account.yt, account.ytLastClaimedIndex, account.ytPendingClaim, ms.ytFrozen, ms.ytAccruedIndex, ms.fees.ytBps, ms.exchangeRate, oracle] as const,
-    ([balance, lastClaimedIndex, pendingClaim, ytFrozen, accruedYieldIndex, ytFeeBps, exchangeRate, liveOracleRate]) =>
-      pendingYield({ balance, lastClaimedIndex, pendingClaim, liveOracleRate, ytFrozen, accruedYieldIndex, ytFeeBps, exchangeRate }),
-  )
-}
-
-/** The rate PT redeems at, reading only what the market's state needs (`redemptionRate`). */
-function settlementOf(ms: MarketState): Live<RedemptionRate> {
-  const { settledRate, ytFrozen, ytAccruedIndex, oracleRate } = ms
-  if (settledRate.status === "unavailable") return settledRate
-  if (settledRate.value !== null) return allLive([settledRate] as const, ([rate]) => redemptionRate({ settledRate: rate }))
-  if (ytFrozen.status === "live" && ytFrozen.value) {
-    return allLive([ytAccruedIndex] as const, ([index]) => redemptionRate({ settledRate: null, ytFrozen: true, accruedYieldIndex: index }))
-  }
-  return allLive([ytFrozen, ytAccruedIndex, oracleRate] as const, ([frozen, index, live]) =>
-    redemptionRate({ settledRate: null, ytFrozen: frozen, accruedYieldIndex: index, liveOracleRate: live }),
-  )
 }
 
 export function recombinePanel(): PanelConfig {
@@ -170,8 +140,8 @@ const redeemPanels = (market: Market): PanelEntry[] => [
 ]
 
 /** Opens on Recombine before maturity and on Redeem after it (fix round 1). */
-export function RedeemTab({ marketId }: { marketId: string }) {
+export function RedeemTab({ marketId, initialPanel }: { marketId: string; initialPanel?: string }) {
   const panels = usePanels(marketId, redeemPanels)
   const matured = useMatured(marketId)
-  return <PanelGroup label="Redeem" marketId={marketId} panels={panels} defaultId={matured ? "redeem" : undefined} />
+  return <PanelGroup label="Redeem" marketId={marketId} panels={panels} defaultId={matured ? "redeem" : undefined} requestedId={initialPanel} />
 }

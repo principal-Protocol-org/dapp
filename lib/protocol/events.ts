@@ -39,6 +39,15 @@ export type HistoryEntry = {
   at: string
   kind: HistoryKind
   lines: string[]
+  /** Raw event amounts (SCALE-free, token units) for the entry figures on the portfolio. */
+  facts?: EntryFacts
+}
+
+export type EntryFacts = {
+  /** `manager.mint`: SY shares in, notional minted, fee in SY shares. Mint entries only. */
+  mint?: { notional: bigint; syShares: bigint; feeShares: bigint }
+  /** `pool.buy_pt`: SY paid in and PT received. Buy PT entries only. */
+  buyPt?: { syIn: bigint; ptOut: bigint }
 }
 
 export type OracleUpdate = { ledger: number; value: bigint }
@@ -317,6 +326,20 @@ function genericLine(i: Item): string {
   return `${i.role} ${i.topic}: ${fields.join(", ")}`
 }
 
+/** The raw amounts the portfolio needs; only for a plain mint or buy_pt, from the first matching event. */
+function factsOf(items: Item[], kind: HistoryKind): { facts: EntryFacts } | Record<string, never> {
+  const find = (k: string) => items.find((i) => key(i) === k)?.decoded?.fields
+  if (kind === "mint") {
+    const f = find("manager.mint")
+    if (f) return { facts: { mint: { notional: f.notional as bigint, syShares: f.sy_shares as bigint, feeShares: f.fee_shares as bigint } } }
+  }
+  if (kind === "buy_pt") {
+    const f = find("pool.buy_pt")
+    if (f) return { facts: { buyPt: { syIn: f.sy_in as bigint, ptOut: f.pt_out as bigint } } }
+  }
+  return {}
+}
+
 function toEntry(items: Item[], c: Ctx): HistoryEntry {
   const kind = classify(items)
   let lines: string[]
@@ -325,7 +348,7 @@ function toEntry(items: Item[], c: Ctx): HistoryEntry {
   else lines = items.flatMap((i) => lineFor(i, kind, c) ?? [])
   if (lines.length === 0) lines = items.map(genericLine)
   const first = items[0]
-  return { hash: first.hash, ledger: first.ledger, at: first.at, kind, lines }
+  return { hash: first.hash, ledger: first.ledger, at: first.at, kind, lines, ...factsOf(items, kind) }
 }
 
 export async function fetchAccountHistory(p: {

@@ -161,7 +161,7 @@ const liquidityPanels = (market: Market): PanelEntry[] => [
   { id: "remove_liquidity", label: "Remove", config: removeLiquidityPanel() },
 ]
 
-export function LiquidityTab({ marketId }: { marketId: string }) {
+export function LiquidityTab({ marketId, initialPanel }: { marketId: string; initialPanel?: string }) {
   const panels = usePanels(marketId, liquidityPanels)
-  return <PanelGroup label="Liquidity" marketId={marketId} panels={panels} />
+  return <PanelGroup label="Liquidity" marketId={marketId} panels={panels} requestedId={initialPanel} />
 }

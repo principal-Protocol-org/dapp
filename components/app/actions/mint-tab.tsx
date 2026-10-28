@@ -157,7 +157,7 @@ const mintPanels = (market: Market): PanelEntry[] => [
   { id: "mint", label: "Mint PT + YT", config: mintPanel(market) },
 ]
 
-export function MintTab({ marketId }: { marketId: string }) {
+export function MintTab({ marketId, initialPanel }: { marketId: string; initialPanel?: string }) {
   const panels = usePanels(marketId, mintPanels)
-  return <PanelGroup label="Mint" marketId={marketId} panels={panels} />
+  return <PanelGroup label="Mint" marketId={marketId} panels={panels} requestedId={initialPanel} />
 }
