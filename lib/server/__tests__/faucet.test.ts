@@ -15,6 +15,7 @@ vi.mock("server-only", () => ({}))
 import {
   BadSequenceError,
   FAUCET_AMOUNT,
+  FAUCET_GLOBAL_LIMIT_PER_MINUTE,
   FaucetConfigError,
   FaucetTxError,
   createStellarFaucetChain,
@@ -117,6 +118,21 @@ describe("runFaucet", () => {
     expect(chain.readAccount).toHaveBeenCalledTimes(1)
     // 60 s later both are free again.
     await expect(runFaucet({ account: b, manifest, ip: "1.1.1.1", now: T0 + 60_000, chain })).resolves.toHaveProperty("performed")
+  })
+
+  it("caps the instance at 20 accepted runs per rolling minute, whatever the address (R42)", async () => {
+    const { chain } = fakeChain({ account: { exists: true, trustline: { authorized: true, balance: 5_000n * UNITS } }, allowed: true, assets: granted(manifest) })
+    for (let i = 0; i < FAUCET_GLOBAL_LIMIT_PER_MINUTE; i += 1) {
+      await expect(runFaucet({ account: user(), manifest, ip: `10.0.0.${i}`, now: T0 + i, chain })).resolves.toEqual({ performed: [] })
+    }
+    expect(FAUCET_GLOBAL_LIMIT_PER_MINUTE).toBe(20)
+    // A 21st new address from a new IP inside the minute is refused, and reads nothing.
+    const reads = chain.readAccount.mock.calls.length
+    await expect(runFaucet({ account: user(), manifest, ip: "10.0.1.1", now: T0 + 30_000, chain })).resolves.toEqual({ error: "rate_limited" })
+    expect(chain.readAccount.mock.calls.length).toBe(reads)
+    // Rolling: once the first run is a minute old, one slot frees up.
+    await expect(runFaucet({ account: user(), manifest, ip: "10.0.1.2", now: T0 + 60_000, chain })).resolves.toEqual({ performed: [] })
+    await expect(runFaucet({ account: user(), manifest, ip: "10.0.1.3", now: T0 + 60_000, chain })).resolves.toEqual({ error: "rate_limited" })
   })
 
   it("performs every missing step for a fresh trustline, in order", async () => {

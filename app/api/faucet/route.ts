@@ -24,6 +24,7 @@ const RETRY_AFTER_SECONDS = FAUCET_RATE_LIMIT_MS / 1_000
 
 const STATUS: Record<FaucetErrorCode, number> = {
   invalid_account: 400,
+  request_too_large: 413,
   network: 403,
   no_trustline: 409,
   rate_limited: 429,
@@ -33,9 +34,10 @@ const STATUS: Record<FaucetErrorCode, number> = {
 
 const MESSAGES: Record<FaucetErrorCode, string> = {
   invalid_account: "The request must be JSON with a Stellar account address (G…) in \"account\".",
+  request_too_large: `The request body is larger than ${MAX_BODY_BYTES} bytes; send only { "account": "G…" }.`,
   network: "Get test tokens runs only on Testnet or a local network.",
   no_trustline: "The account does not exist or has no trustline to the test asset yet. Fund it and add the trustline first.",
-  rate_limited: `Get test tokens was used for this account or from this connection less than a minute ago. Try again in ${RETRY_AFTER_SECONDS} seconds.`,
+  rate_limited: `Get test tokens was used for this account or from this connection less than a minute ago, or is busy with other requests. Try again in ${RETRY_AFTER_SECONDS} seconds.`,
   failed: "Get test tokens could not finish: a network transaction did not go through. Steps already done are kept; try again in a minute.",
   not_configured: "Get test tokens is not set up on this server.",
 }
@@ -52,17 +54,46 @@ function refuse(error: FaucetErrorCode, extra: { step?: FaucetStep } = {}): Resp
   return reply(body, STATUS[error])
 }
 
-/** The account from a small JSON body, or null for anything else. */
-async function accountFrom(request: Request): Promise<string | null> {
-  // Refuse a declared oversize body before reading it; the length is checked again once read.
-  if (Number(request.headers.get("content-length") ?? 0) > MAX_BODY_BYTES) return null
-  let text: string
+/**
+ * The body as text, read as a stream: bytes are counted as they arrive and the stream is cancelled
+ * as soon as the total passes `MAX_BODY_BYTES`, so an oversized or endless body is never buffered
+ * (R42). A declared oversize `content-length` is refused before reading anything.
+ */
+async function readBody(request: Request): Promise<{ text: string } | "too_large" | "unreadable"> {
+  if (Number(request.headers.get("content-length") ?? 0) > MAX_BODY_BYTES) return "too_large"
+  if (!request.body) return { text: "" }
+  const reader = request.body.getReader()
+  const chunks: Uint8Array[] = []
+  let total = 0
   try {
-    text = await request.text()
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      total += value.byteLength
+      if (total > MAX_BODY_BYTES) {
+        await reader.cancel().catch(() => undefined)
+        return "too_large"
+      }
+      chunks.push(value)
+    }
   } catch {
-    return null
+    return "unreadable"
   }
-  if (text.length > MAX_BODY_BYTES) return null
+  const bytes = new Uint8Array(total)
+  let offset = 0
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  try {
+    return { text: new TextDecoder("utf-8", { fatal: true }).decode(bytes) }
+  } catch {
+    return "unreadable"
+  }
+}
+
+/** The account from a small JSON body, or null for anything else. */
+function accountFrom(text: string): string | null {
   let body: unknown
   try {
     body = JSON.parse(text)
@@ -74,10 +105,23 @@ async function accountFrom(request: Request): Promise<string | null> {
   return typeof account === "string" && StrKey.isValidEd25519PublicKey(account) ? account : null
 }
 
-/** The first `x-forwarded-for` hop (set by the platform's proxy), else one shared fallback key. */
+/** The rightmost non-empty entry of a comma-separated header: the hop the nearest proxy added. */
+function lastHop(value: string | null): string | undefined {
+  const hops = (value ?? "").split(",").map((hop) => hop.trim()).filter(Boolean)
+  return hops.at(-1)?.slice(0, 64)
+}
+
+/**
+ * The rate-limit key for the client (R42). Trust assumption: the app is deployed on Vercel (Task 25),
+ * whose edge sets `x-vercel-forwarded-for` and `x-real-ip` itself, so a client cannot choose them.
+ * Behind another proxy, that proxy must overwrite these headers; the rightmost `x-forwarded-for`
+ * hop is then the one the nearest proxy appended (the leftmost is whatever the client sent). With
+ * none of them, every request shares one fallback key. The per-instance global cap in `runFaucet`
+ * bounds the damage of a spoofed key either way.
+ */
 function clientIp(request: Request): string {
-  const first = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim()
-  return first ? first.slice(0, 64) : FALLBACK_IP
+  const h = request.headers
+  return lastHop(h.get("x-vercel-forwarded-for")) ?? lastHop(h.get("x-real-ip")) ?? lastHop(h.get("x-forwarded-for")) ?? FALLBACK_IP
 }
 
 /** Server logs only: a Stellar secret key (S…) is never written, whatever an error carries. */
@@ -86,7 +130,9 @@ function redact(text: string): string {
 }
 
 export async function POST(request: Request): Promise<Response> {
-  const account = await accountFrom(request)
+  const body = await readBody(request)
+  if (body === "too_large") return refuse("request_too_large")
+  const account = body === "unreadable" ? null : accountFrom(body.text)
   if (!account) return refuse("invalid_account")
 
   try {

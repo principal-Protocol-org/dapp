@@ -181,13 +181,28 @@ export async function addTrustline(p: {
 /** What the faucet does, in order. `grant_pt`/`grant_yt` repeat once per market. */
 export type FaucetStep = "authorize" | "grant_account" | "grant_pt" | "grant_yt" | "pay"
 
-export type FaucetErrorCode = "network" | "rate_limited" | "no_trustline" | "invalid_account" | "not_configured" | "failed"
+export type FaucetErrorCode =
+  | "network"
+  | "rate_limited"
+  | "no_trustline"
+  | "invalid_account"
+  | "request_too_large"
+  | "not_configured"
+  | "failed"
 
 export type FaucetResponse =
   | { performed: FaucetStep[] }
   | { error: FaucetErrorCode; message?: string; step?: FaucetStep; retryAfterSeconds?: number }
 
-const ERROR_CODES: readonly string[] = ["network", "rate_limited", "no_trustline", "invalid_account", "not_configured", "failed"]
+const ERROR_CODES: readonly string[] = [
+  "network",
+  "rate_limited",
+  "no_trustline",
+  "invalid_account",
+  "request_too_large",
+  "not_configured",
+  "failed",
+]
 const STEPS: readonly string[] = ["authorize", "grant_account", "grant_pt", "grant_yt", "pay"]
 
 /** Step 3: asks the server route to authorize, grant and pay. Never throws on a refusal: it is typed. */

@@ -51,14 +51,33 @@ describe("POST /api/faucet", () => {
     expect(res.headers.get("cache-control")).toContain("no-store")
   })
 
-  it("passes the account, the first x-forwarded-for hop, the manifest and the time", async () => {
-    await post(JSON.stringify({ account: ACCOUNT }), { "x-forwarded-for": " 203.0.113.5 , 10.0.0.1" })
-    expect(mocks.runFaucet).toHaveBeenCalledWith({ account: ACCOUNT, ip: "203.0.113.5", manifest, now: expect.any(Number) })
+  it("passes the account, the client key, the manifest and the time", async () => {
+    await post(JSON.stringify({ account: ACCOUNT }), { "x-vercel-forwarded-for": "198.51.100.7" })
+    expect(mocks.runFaucet).toHaveBeenCalledWith({ account: ACCOUNT, ip: "198.51.100.7", manifest, now: expect.any(Number) })
   })
 
-  it("uses one fallback key when there is no x-forwarded-for", async () => {
+  const ipOf = async (headers: Record<string, string>) => {
+    mocks.runFaucet.mockClear()
+    await post(JSON.stringify({ account: ACCOUNT }), headers)
+    return (mocks.runFaucet.mock.calls[0][0] as { ip: string }).ip
+  }
+
+  it("keys the client by the platform's header: x-vercel-forwarded-for, then x-real-ip (R42)", async () => {
+    const spoofed = { "x-forwarded-for": "6.6.6.6, 10.0.0.1" }
+    expect(await ipOf({ ...spoofed, "x-vercel-forwarded-for": " 198.51.100.7 ", "x-real-ip": "192.0.2.1" })).toBe("198.51.100.7")
+    expect(await ipOf({ ...spoofed, "x-real-ip": " 192.0.2.1 " })).toBe("192.0.2.1")
+  })
+
+  it("otherwise takes the rightmost x-forwarded-for hop, so a spoofed leftmost entry does not change the key (R42)", async () => {
+    const a = await ipOf({ "x-forwarded-for": "1.1.1.1, 203.0.113.9" })
+    const b = await ipOf({ "x-forwarded-for": "2.2.2.2, 203.0.113.9" })
+    const c = await ipOf({ "x-forwarded-for": " 203.0.113.9 " })
+    expect([a, b, c]).toEqual(["203.0.113.9", "203.0.113.9", "203.0.113.9"])
+  })
+
+  it("uses one fallback key when no client header is present", async () => {
     await post(JSON.stringify({ account: ACCOUNT }))
-    await post(JSON.stringify({ account: ACCOUNT }), { "x-forwarded-for": "" })
+    await post(JSON.stringify({ account: ACCOUNT }), { "x-forwarded-for": " , " })
     const ips = mocks.runFaucet.mock.calls.map(([p]) => (p as { ip: string }).ip)
     expect(ips[0]).toBe(ips[1])
     expect(ips[0]).toBeTruthy()
@@ -78,16 +97,62 @@ describe("POST /api/faucet", () => {
       JSON.stringify({ account: ACCOUNT.toLowerCase() }),
       JSON.stringify({ account: ` ${ACCOUNT}` }),
       JSON.stringify({ account: Keypair.random().secret() }),
-      JSON.stringify({ account: ACCOUNT, padding: "x".repeat(5_000) }),
     ]
     for (const body of bodies) {
       const res = await post(body)
       expect(res.status, body.slice(0, 40)).toBe(400)
       expect((await res.json()).error).toBe("invalid_account")
     }
-    const declared = await post(JSON.stringify({ account: ACCOUNT }), { "content-length": "5000" })
-    expect(declared.status).toBe(400)
     expect(mocks.runFaucet).not.toHaveBeenCalled()
+  })
+
+  it("refuses an oversized body with 413: declared, or streamed past the limit (R42)", async () => {
+    const big = await post(JSON.stringify({ account: ACCOUNT, padding: "x".repeat(5_000) }))
+    expect(big.status).toBe(413)
+    expect((await big.json()).error).toBe("request_too_large")
+    const declared = await post(JSON.stringify({ account: ACCOUNT }), { "content-length": "5000" })
+    expect(declared.status).toBe(413)
+    expect(mocks.runFaucet).not.toHaveBeenCalled()
+  })
+
+  it("stops reading a streamed body without content-length once it passes the limit, and cancels it (R42)", async () => {
+    let pulls = 0
+    let cancelled = false
+    const chunk = new TextEncoder().encode(`{"account":"${ACCOUNT}","pad":"${"x".repeat(400)}`)
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulls += 1
+        // An endless body: only cancelling stops it.
+        controller.enqueue(chunk)
+      },
+      cancel() {
+        cancelled = true
+      },
+    })
+    const request = new Request("http://localhost/api/faucet", { method: "POST", body: stream, duplex: "half" } as RequestInit)
+    expect(request.headers.get("content-length")).toBeNull()
+    const res = await route.POST(request)
+    expect(res.status).toBe(413)
+    expect(cancelled).toBe(true)
+    expect(pulls).toBeLessThan(10)
+    expect(mocks.runFaucet).not.toHaveBeenCalled()
+  })
+
+  it("reads a valid body arriving in several chunks", async () => {
+    const bytes = new TextEncoder().encode(JSON.stringify({ account: ACCOUNT }))
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(bytes.slice(0, 10))
+        controller.enqueue(bytes.slice(10, 30))
+        controller.enqueue(bytes.slice(30))
+        controller.close()
+      },
+    })
+    const res = await route.POST(
+      new Request("http://localhost/api/faucet", { method: "POST", body: stream, duplex: "half" } as RequestInit),
+    )
+    expect(res.status).toBe(200)
+    expect(mocks.runFaucet).toHaveBeenCalledWith(expect.objectContaining({ account: ACCOUNT }))
   })
 
   it("maps each refusal to a typed error and status", async () => {
