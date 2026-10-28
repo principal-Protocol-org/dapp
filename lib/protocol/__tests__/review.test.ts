@@ -166,6 +166,21 @@ async function review(action: ActionId, extra: Partial<ActionInput> = {}, server
   return prepareReview({ manifest, input: input(action, extra), rpc: server })
 }
 
+/**
+ * Runs `fn` with `action` offered, as if its `disabled` metadata (R47) were removed: what the action
+ * would prepare stays covered for the day it is re-enabled. The metadata is restored afterwards.
+ */
+async function whileOffered<T>(action: ActionId, fn: () => Promise<T>): Promise<T> {
+  const meta = ACTION_META[action]
+  const disabled = meta.disabled
+  delete meta.disabled
+  try {
+    return await fn()
+  } finally {
+    if (disabled) meta.disabled = disabled
+  }
+}
+
 describe("prepareReview", () => {
   it("accepts the SDK's RPC server (compile-time check)", () => {
     const real: ReviewRpcServer = createRpcServer(manifest.rpcUrl)
@@ -210,11 +225,31 @@ describe("prepareReview", () => {
   it("names the call tree of every action, starting with the invoked function", async () => {
     for (const action of Object.keys(ACTION_META) as ActionId[]) {
       const guards: GuardValues = { minOut: 1n, minOut2: 1n, maxNetCost: 1n }
-      const r = await review(action, { guards, secondaryAmount: 1n })
+      const r = await whileOffered(action, () => review(action, { guards, secondaryAmount: 1n }))
       const { contractId, functionName } = r.invocation
       const contract = contractId === market.contracts.sy ? "SYWrapper" : "Router"
       expect(r.callTree[0]).toBe(`${contract}.${functionName}`)
     }
+  })
+
+  describe("never prepares an action that is not offered (R47)", () => {
+    it("refuses add_liquidity_sy before any RPC call, naming why", async () => {
+      const reason = ACTION_META.add_liquidity_sy.disabled!.reason
+      await expect(prepareReview({ manifest, input: input("add_liquidity_sy"), rpc: noIo })).rejects.toThrow(
+        `Add liquidity (SY only) is not offered, so it is not prepared. ${reason}`,
+      )
+    })
+
+    it("refuses any action whose metadata marks it disabled", async () => {
+      const meta = ACTION_META.buy_pt
+      meta.disabled = { reason: "Not on this release." }
+      try {
+        await expect(prepareReview({ manifest, input: input("buy_pt"), rpc: noIo })).rejects.toThrow("Not on this release.")
+      } finally {
+        delete meta.disabled
+      }
+      await expect(review("buy_pt")).resolves.toBeDefined()
+    })
   })
 
   describe("never prepares a zero floor (R5)", () => {
@@ -369,7 +404,7 @@ describe("prepareReview", () => {
         give: ["10 PT", "4 SY"],
         getAtLeast: ["1.2345678 LP"],
       })
-      expect(await lines("add_liquidity_sy")).toEqual({ give: ["10 SY"], getAtLeast: ["1.2345678 LP"] })
+      expect(await whileOffered("add_liquidity_sy", () => lines("add_liquidity_sy"))).toEqual({ give: ["10 SY"], getAtLeast: ["1.2345678 LP"] })
       expect(await lines("remove_liquidity")).toEqual({ give: ["10 LP"], getAtLeast: ["1.2345678 PT", "2.0000001 SY"] })
       expect(await lines("recombine")).toEqual({ give: ["10 PT", "10 YT"], getAtLeast: ["1.2345678 SY"] })
     })
@@ -582,6 +617,12 @@ describe("executeReview", () => {
       expect(server.calls.sent).toEqual([])
     }
     const changed = (detail: string) => `This review was changed after it was prepared (${detail}). Prepare it again before signing.`
+
+    it("refuses a review of an action that was disabled after it was prepared (R47)", async () => {
+      const server = fakeRpc()
+      const r = await whileOffered("add_liquidity_sy", () => review("add_liquidity_sy", {}, server))
+      await refusedBeforeSigning(r, server, "Add liquidity (SY only) is not offered")
+    })
 
     it("refuses a review whose floor was changed to 0", async () => {
       const server = fakeRpc()

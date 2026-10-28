@@ -143,10 +143,18 @@ function inputFor(action: ActionId, overrides: Partial<ActionInput> = {}): Actio
 
 type Mutate = (ctx: GateContext, action: ActionId) => void
 
+/** Actions this release does not offer (R47): `evaluateGates` refuses them with `disabled`. */
+const DISABLED = ALL.filter((a) => ACTION_META[a].disabled !== undefined)
+
+/**
+ * The blockers of `action` in a healthy context changed by `mutate`. The `disabled` blocker of an
+ * action that is not offered is left out here, so every rule below is still checked on it (they
+ * apply again the day it is re-enabled); it is asserted on its own in "an action that is not offered".
+ */
 function gates(action: ActionId, mutate?: Mutate, input?: Partial<ActionInput>): Blocker[] {
   const ctx = healthyCtx(action)
   mutate?.(ctx, action)
-  return evaluateGates(inputFor(action, input), ctx)
+  return evaluateGates(inputFor(action, input), ctx).filter((b) => b.code !== "disabled")
 }
 
 const codes = (blockers: Blocker[]) => blockers.map((b) => b.code)
@@ -741,6 +749,32 @@ describe("healthy context", () => {
   })
 })
 
+describe("an action that is not offered (R47)", () => {
+  it("is add_liquidity_sy alone on this release", () => {
+    expect(DISABLED).toEqual(["add_liquidity_sy"])
+  })
+
+  it.each(DISABLED)("%s is refused with exactly the metadata's reason, every other gate passing", (action) => {
+    const blockers = evaluateGates(inputFor(action), healthyCtx(action))
+    expect(blockers).toEqual([{ code: "disabled", message: ACTION_META[action].disabled!.reason }])
+    expect(blockers[0].message).toMatch(/pool works out the SY it takes .* when the transaction runs/)
+    expect(blockers[0].message).not.toMatch(/coming soon/i)
+  })
+
+  it.each(ALL.filter((a) => !DISABLED.includes(a)))("%s is never refused as disabled", (action) => {
+    expect(codes(evaluateGates(inputFor(action), healthyCtx(action)))).not.toContain("disabled")
+  })
+
+  it("is refused even without a wallet, after the deployment checks and before everything else", () => {
+    const ctx = healthyCtx("add_liquidity_sy")
+    ctx.findings = [{ severity: "error", message: "Duplicate marketId." }]
+    ctx.market.topology = live({ matches: false, mismatches: ["pool"] })
+    ctx.wallet = { status: "disconnected" }
+    ctx.simulation = undefined
+    expect(codes(evaluateGates(inputFor("add_liquidity_sy"), ctx))).toEqual(["manifest", "topology", "disabled", "wallet", "quote"])
+  })
+})
+
 describe("gate matrix", () => {
   for (const row of MATRIX) {
     describe(row.rule, () => {
@@ -1109,6 +1143,7 @@ describe("several failing gates", () => {
     expect(BLOCKER_ORDER).toEqual([
       "manifest",
       "topology",
+      "disabled",
       "wallet",
       "network",
       "amount",

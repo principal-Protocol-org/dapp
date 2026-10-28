@@ -158,6 +158,15 @@ function assertNoZeroFloor(input: ActionInput): void {
   }
 }
 
+/**
+ * R47: an action this release does not offer is never prepared or signed, whatever the caller
+ * passed; the gates refuse it too (`disabled`).
+ */
+function assertOffered(input: ActionInput): void {
+  const disabled = ACTION_META[input.action].disabled
+  if (disabled) throw new Error(`${ACTION_META[input.action].label} is not offered, so it is not prepared. ${disabled.reason}`)
+}
+
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
@@ -282,11 +291,12 @@ function currentTime(nowMs: number | undefined): number {
 
 /**
  * R31: re-checks, right before signing, that the review still describes exactly the transaction
- * `prepareReview` issued: no zero floor (R5), the XDR makes the call `input` maps to, from
+ * `prepareReview` issued: an action that is offered (R47), no zero floor (R5), the XDR makes the call `input` maps to, from
  * `input.source`, with no foreign authorization, at the reviewed fee (within the cap), and its hash
  * is both the reviewed one and the issued one.
  */
 function assertReviewIntact(review: Review, manifest: Manifest, record: Issued): void {
+  assertOffered(review.input)
   assertNoZeroFloor(review.input)
   const expected = callXdrOf(manifest, review.input.source, invocationFor(manifest, review.input))
   if (expected === undefined || callXdrOf(manifest, review.input.source, review.invocation) !== expected) {
@@ -417,12 +427,13 @@ function summarize(market: Market, input: ActionInput, fee: string): Review["sum
 
 /**
  * Builds the exact transaction for `input`, has RPC prepare it and describes it for review.
- * Refuses a zero floor (R5) before any RPC call.
+ * Refuses an action that is not offered (R47) and a zero floor (R5) before any RPC call.
  */
 export async function prepareReview(p: { manifest: Manifest; input: ActionInput; rpc?: ReviewRpcServer }): Promise<Review> {
   const { manifest, input } = p
   const market = getMarket(manifest, input.marketId)
   if (!market) throw new Error(`Unknown market "${input.marketId}".`)
+  assertOffered(input)
   assertNoZeroFloor(input)
   const invocation = invocationFor(manifest, input)
 

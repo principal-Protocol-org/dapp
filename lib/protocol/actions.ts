@@ -29,10 +29,29 @@ export type ActionInput = {
   deadline: bigint
 }
 
-export const ACTION_META: Record<
-  ActionId,
-  { label: string; slippageSensitive: boolean; hasDeadline: boolean; tab: "mint" | "trade" | "liquidity" | "redeem" }
-> = {
+export type ActionMeta = {
+  label: string
+  slippageSensitive: boolean
+  hasDeadline: boolean
+  tab: "mint" | "trade" | "liquidity" | "redeem"
+  /**
+   * Not offered on this release (R47): every gate refuses it with `reason`, and it is never prepared
+   * or signed. Remove the field to offer the action again.
+   */
+  disabled?: { reason: string }
+}
+
+/**
+ * R47: `MarketPool.add_liquidity_single_sy` works out the SY it pulls (`split + sy_used`) when the
+ * transaction runs, from a curve that moves with the ledger time, and pulls it with
+ * `SY.transfer(from, pool, amount)`. The signed authorization pins the amount of the simulation, and
+ * inclusion is always at a later ledger, so the host refuses the transfer (`Error(Auth,
+ * InvalidAction)`, reproduced live in Task 23). It returns once the pool takes a fixed amount.
+ */
+const ADD_LIQUIDITY_SY_DISABLED =
+  "Adding liquidity from SY alone is unavailable on this release: the pool works out the SY it takes only when the transaction runs, so the amount you sign can never match it and the transaction would fail. It will return once the pool contract is fixed. You can still add PT and SY together."
+
+export const ACTION_META: Record<ActionId, ActionMeta> = {
   deposit: { label: "Deposit", slippageSensitive: true, hasDeadline: false, tab: "mint" },
   withdraw: { label: "Withdraw", slippageSensitive: true, hasDeadline: true, tab: "mint" },
   mint: { label: "Mint PT + YT", slippageSensitive: true, hasDeadline: true, tab: "mint" },
@@ -41,7 +60,13 @@ export const ACTION_META: Record<
   buy_yt: { label: "Buy YT", slippageSensitive: true, hasDeadline: true, tab: "trade" },
   sell_yt: { label: "Sell YT", slippageSensitive: true, hasDeadline: true, tab: "trade" },
   add_liquidity: { label: "Add liquidity", slippageSensitive: true, hasDeadline: true, tab: "liquidity" },
-  add_liquidity_sy: { label: "Add liquidity (SY only)", slippageSensitive: true, hasDeadline: true, tab: "liquidity" },
+  add_liquidity_sy: {
+    label: "Add liquidity (SY only)",
+    slippageSensitive: true,
+    hasDeadline: true,
+    tab: "liquidity",
+    disabled: { reason: ADD_LIQUIDITY_SY_DISABLED },
+  },
   remove_liquidity: { label: "Remove liquidity", slippageSensitive: true, hasDeadline: true, tab: "liquidity" },
   recombine: { label: "Recombine PT + YT", slippageSensitive: true, hasDeadline: true, tab: "redeem" },
   claim_yield: { label: "Claim yield", slippageSensitive: false, hasDeadline: false, tab: "redeem" },

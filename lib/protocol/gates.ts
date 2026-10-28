@@ -12,7 +12,7 @@
  * references are to `principal` `origin/feat/tranche-1-mvp` (ABI pin `6cf257a`).
  */
 import type { AccountState } from "./account-state"
-import type { ActionId, ActionInput } from "./actions"
+import { ACTION_META, type ActionId, type ActionInput } from "./actions"
 import type { ComplianceItem } from "./compliance"
 import { formatAmount } from "./format"
 import type { MarketState } from "./market-state"
@@ -23,11 +23,14 @@ import { pendingYield } from "./yield"
 
 /**
  * Blocker codes, in the order `evaluateGates` returns them. The UI shows the first prominently.
- * `pool` (unseeded pool) and `claim` (nothing to claim) extend the plan's list.
+ * `pool` (unseeded pool) and `claim` (nothing to claim) extend the plan's list; `disabled` (R47, an
+ * action this release does not offer) comes right after the deployment checks, since nothing the
+ * user does clears it.
  */
 export const BLOCKER_ORDER = [
   "manifest",
   "topology",
+  "disabled",
   "wallet",
   "network",
   "amount",
@@ -196,6 +199,12 @@ function topologyGate(ctx: GateContext, g: Gates): void {
     "topology",
     `This market's contracts in the manifest do not match the chain (${which}). Signing is off for this market until the manifest is corrected.`,
   )
+}
+
+/** R47: an action whose metadata marks it `disabled` is refused with the metadata's reason. */
+function disabledGate(input: ActionInput, g: Gates): void {
+  const disabled = ACTION_META[input.action].disabled
+  if (disabled) g.block("disabled", disabled.reason)
 }
 
 /** Returns true when a wallet is connected, i.e. there is an account to check. */
@@ -574,6 +583,7 @@ export function evaluateGates(input: ActionInput, ctx: GateContext): Blocker[] {
   const g = new Gates()
   manifestGate(ctx, g)
   topologyGate(ctx, g)
+  disabledGate(input, g)
   const connected = walletGate(input, ctx, g)
   amountGate(input, g)
   maturityGate(input, ctx, g)
