@@ -23,7 +23,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
 vi.mock("server-only", () => ({}))
 
 import { fetchAccountState, type AccountState, type ComplianceKind } from "@/lib/protocol/account-state"
-import { invocationFor, type ActionId, type ActionInput, type GuardValues } from "@/lib/protocol/actions"
+import { ACTION_META, invocationFor, type ActionId, type ActionInput, type GuardValues } from "@/lib/protocol/actions"
 import { evaluateAccountCompliance, fetchMarketCompliance, type ComplianceItem } from "@/lib/protocol/compliance"
 import { fetchAccountHistory, type HistoryKind } from "@/lib/protocol/events"
 import { evaluateGates, type GateContext } from "@/lib/protocol/gates"
@@ -34,10 +34,12 @@ import { fetchMarketState, type MarketState } from "@/lib/protocol/market-state"
 import { BPS, ceilDiv } from "@/lib/protocol/math"
 import { addTrustline, fetchMarketPermissions, onboardingSteps } from "@/lib/protocol/onboarding"
 import { createRpcReader, isContractError } from "@/lib/protocol/reader"
-import { assertPreparedMatches, executeReview, prepareReview, type SignTransaction } from "@/lib/protocol/review"
+import { assertPreparedMatches, executeReview, prepareReview } from "@/lib/protocol/review"
 import {
+  AMOUNTS_MOVED_REASON,
   buildInvocationEnvelope,
   createRpcServer,
+  failedTransactionReason,
   getLedgerClock,
   pollTransactionStatus,
   simulateInvocation,
@@ -219,7 +221,7 @@ const HISTORY_KIND: Record<ActionId, HistoryKind> = {
   redeem: "redeem",
 }
 
-/** A user's approval time in Freighter, between preparation and submission (well inside the 60 s review). */
+/** A user's approval time in Freighter, between preparation and submission (well inside the 60 s review window). */
 const SIGNING_DELAY_MS = 5_000
 
 /**
@@ -411,7 +413,7 @@ describe.skipIf(skip !== null)("protocol layer on the local network", () => {
     const { hash } = await submitSignedTransaction({
       rpcUrl: manifest.rpcUrl,
       networkPassphrase: manifest.networkPassphrase,
-      signedXdr: prepared.toXDR(),
+      signedXdr: prepared.toXdr(),
     })
     const polled = await pollTransactionStatus({ rpcUrl: manifest.rpcUrl, hash, attempts: 30, intervalMs: 1_000 })
     expect(polled.status, `${invocation.functionName}`).toBe("SUCCESS")
@@ -578,39 +580,67 @@ describe.skipIf(skip !== null)("protocol layer on the local network", () => {
   }, 3 * MINUTE)
 
   /**
-   * Contract limitation, pinned (not a dApp bug): `MarketPool.add_liquidity_single_sy` computes the
-   * SY it pulls (`split + sy_used`) when the transaction runs, from a curve whose exponent and swap
-   * fee depend on the ledger time (`state()`), then calls `SY.transfer(from, pool, amount)`, which
-   * needs `from`'s authorization for exactly that amount. The signed authorization pins the amount
-   * of the simulation; inclusion is always at a later ledger, so the amounts differ and the host
-   * refuses the transfer (`Error(Auth, InvalidAction)`). Everything the dApp does passes.
+   * R47 and its canary. `MarketPool.add_liquidity_single_sy` computes the SY it pulls
+   * (`split + sy_used`) when the transaction runs, from a curve whose exponent and swap fee depend on
+   * the ledger time (`state()`), then calls `SY.transfer(from, pool, amount)`, which needs `from`'s
+   * authorization for exactly that amount. The signed authorization pins the amount of the
+   * simulation; inclusion is always at a later ledger, so the amounts differ and the host refuses the
+   * transfer (`Error(Auth, InvalidAction)`). The dApp therefore does not offer it: the gates and
+   * `prepareReview` refuse it. The canary then sends the same transaction past them, on purpose, so
+   * this test fails loudly the day the pool takes a fixed amount.
    */
-  it("add_liquidity_sy is reviewed like every action, but the pool's nested SY transfer outruns the signed authorization", async () => {
-    const { review } = await reviewStep("add_liquidity_sy", 1_000n * U)
-    const signed = signedNestedTransfer(review.unsignedXdr, manifest.networkPassphrase)
+  it("add_liquidity_sy is refused (R47); sent past the gates, the pool's nested SY transfer still outruns the signed authorization", async () => {
+    const before = await snapshot()
+    const simInput = simInputFor("add_liquidity_sy", 1_000n * U, undefined, before)
+    const simulation = await simulate(simInput)
+    // Every other gate passes: the only refusal is that the action is not offered.
+    const blockers = evaluateGates({ ...simInput, guards: {}, deadline: 0n }, gateContext(before, simulation))
+    expect(blockers).toEqual([{ code: "disabled", message: ACTION_META.add_liquidity_sy.disabled!.reason }])
+    if (!simulation.ok) throw new Error(`add_liquidity_sy: simulation failed: ${json(simulation)}`)
+    expectRawShape("add_liquidity_sy", simulation.retval)
+    const guards = guardsFrom("add_liquidity_sy", simInput, parseOutput("add_liquidity_sy", simulation.retval), SLIPPAGE_BPS)
+    if (!guards.ok) throw new Error(guards.reason)
+    const input: ActionInput = { ...simInput, guards: guards.guards, deadline: BigInt(Math.floor((await ledgerClock()).now()) + DEADLINE_SECONDS) }
+    await expect(prepareReview({ manifest, input })).rejects.toThrow("Add liquidity (SY only) is not offered")
+
+    // The canary bypasses the gate and prepareReview on purpose: built, RPC-prepared and checked
+    // (R29) like a review, then signed and sent, to show the pool limitation still holds.
+    const node = server()
+    const built = buildInvocationEnvelope({
+      source: account,
+      sequence: (await node.getAccount(account)).sequenceNumber(),
+      networkPassphrase: manifest.networkPassphrase,
+      invocation: invocationFor(manifest, input),
+      timeoutSeconds: DEADLINE_SECONDS,
+    })
+    const prepared = await node.prepareTransaction(built)
+    assertPreparedMatches(built, prepared)
+    const unsignedXdr = prepared.toXdr()
+    const signed = signedNestedTransfer(unsignedXdr, manifest.networkPassphrase)
     expect(signed.from).toBe(account)
     // A user takes a few seconds to approve in Freighter; the pool's curve moves every ledger meanwhile.
-    const slowSign: SignTransaction = async (xdr, passphrase, who) => {
-      await sleep(SIGNING_DELAY_MS)
-      return signer.sign(xdr, passphrase, who)
-    }
-    const result = await executeReview({ review, manifest, sign: slowSign })
-    if (result.status === "SUCCESS") {
+    await sleep(SIGNING_DELAY_MS)
+    const signedXdr = await signer.sign(unsignedXdr, manifest.networkPassphrase, account)
+    const { hash } = await submitSignedTransaction({ rpcUrl: manifest.rpcUrl, networkPassphrase: manifest.networkPassphrase, signedXdr })
+    const polled = await pollTransactionStatus({ rpcUrl: manifest.rpcUrl, hash, attempts: 30, intervalMs: 1_000 })
+    if (polled.status === "SUCCESS") {
       throw new Error(
-        "add_liquidity_sy succeeded: the pool limitation no longer reproduces. If the contract was fixed, move add_liquidity_sy into the main liquidity flow.",
+        "add_liquidity_sy succeeded: the pool limitation no longer reproduces. If the contract was fixed, promote add_liquidity_sy into the main flow and remove `disabled` from its ACTION_META.",
       )
     }
     // NOT_FOUND (a poll timeout) is a flake, not a fix: only SUCCESS above means the limitation is gone.
-    expect(result.status).toBe("FAILED")
-    const failure = await failureOf(manifest.rpcUrl, result.hash)
+    expect(polled.status).toBe("FAILED")
+    // R49, live: the cause the app shows for this failure, read from the real result and diagnostics.
+    expect(failedTransactionReason(polled.failure)).toBe(AMOUNTS_MOVED_REASON)
+    const failure = await failureOf(manifest.rpcUrl, hash)
     expect(failure.result).toBe("invokeHostFunctionTrapped")
     expect(failure.authInvalidAction).toBe(true)
     expect(failure.executedTransfer).toBeDefined()
     expect(failure.executedTransfer).not.toBe(signed.amount)
-    failed.push(result.hash)
+    failed.push(hash)
     log(
-      `add_liquidity_sy: tx ${result.hash.slice(0, 12)} FAILED (${failure.result}, Error(Auth, InvalidAction)): ` +
-        `signed SY.transfer amount ${signed.amount}, executed ${failure.executedTransfer}`,
+      `add_liquidity_sy: gates [disabled], prepareReview refused; canary tx ${hash.slice(0, 12)} FAILED (${failure.result}, ` +
+        `Error(Auth, InvalidAction)): signed SY.transfer amount ${signed.amount}, executed ${failure.executedTransfer}; reason "${failedTransactionReason(polled.failure)}"`,
     )
   }, 2 * MINUTE)
 
