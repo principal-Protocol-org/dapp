@@ -320,7 +320,9 @@ function maturityGate(input: ActionInput, ctx: GateContext, g: Gates): void {
   if (closesAtMaturity && matured) {
     g.block(
       "maturity",
-      "This market has matured: minting, trading, adding liquidity and recombining are closed. You can still redeem, claim yield, remove liquidity and withdraw SY.",
+      TRADES.includes(input.action)
+        ? "Trading closed at maturity: this market has matured, so PT and YT can no longer be bought or sold in the pool. You can still redeem, claim yield, remove liquidity and withdraw SY."
+        : "This market has matured: minting, trading, adding liquidity and recombining are closed. You can still redeem, claim yield, remove liquidity and withdraw SY.",
     )
   }
   if (opensAtMaturity && !matured) {

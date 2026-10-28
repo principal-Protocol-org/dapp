@@ -279,6 +279,24 @@ const MATRIX: Row[] = [
     allows: ["deposit", "withdraw", "remove_liquidity", "claim_yield", "redeem"],
   },
   {
+    rule: "after maturity, a trade is refused as \"Trading closed at maturity\" (T16)",
+    mutate: (c) => {
+      c.ledgerTime = AFTER
+    },
+    code: "maturity",
+    message: /^Trading closed at maturity: this market has matured.*You can still redeem/,
+    blocks: [...TRADES],
+  },
+  {
+    rule: "after maturity, mint, adds and recombine keep the general maturity message",
+    mutate: (c) => {
+      c.ledgerTime = AFTER
+    },
+    code: "maturity",
+    message: /^This market has matured: minting, trading, adding liquidity and recombining are closed/,
+    blocks: ["mint", ...ADDS, "recombine"],
+  },
+  {
     rule: "at the maturity second itself the market counts as matured (timestamp >= maturity)",
     mutate: (c) => {
       c.ledgerTime = MATURITY

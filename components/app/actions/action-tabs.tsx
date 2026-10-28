@@ -3,13 +3,14 @@
 import { useId, type ComponentType } from "react"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { MintTab } from "@/components/app/actions/mint-tab"
+import { TradeTab } from "@/components/app/actions/trade-tab"
 
 type TabSpec = { id: "mint" | "trade" | "liquidity" | "redeem"; label: string; Panel?: ComponentType<{ marketId: string }> }
 
 /** Spec §3: the action panels, grouped in tabs. A tab whose panels are not built yet is disabled (R8). */
 const TABS: TabSpec[] = [
   { id: "mint", label: "Mint", Panel: MintTab },
-  { id: "trade", label: "Trade" },
+  { id: "trade", label: "Trade", Panel: TradeTab },
   { id: "liquidity", label: "Liquidity" },
   { id: "redeem", label: "Redeem" },
 ]
