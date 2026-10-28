@@ -6,8 +6,10 @@ RPC_URL="${RPC_URL:-http://localhost:8000/rpc}"
 HORIZON_URL="${HORIZON_URL:-http://localhost:8000}"
 FRIENDBOT_URL="${FRIENDBOT_URL:-http://localhost:8000/friendbot}"
 NETWORK_PASSPHRASE="Standalone Network ; February 2017"
-ADMIN_KEY="pp-admin"
-TREASURY_KEY="pp-treasury"
+# Dev-only identity names in the Stellar CLI keystore (global, shared with any other project): a
+# name no one would use for a real key, so `.env.local` never receives the secret of a real account.
+ADMIN_KEY="principal-localdev-admin"
+TREASURY_KEY="principal-localdev-treasury"
 
 DEV_STACK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DAPP_DIR="$(cd "$DEV_STACK_DIR/../.." && pwd)"
