@@ -6,5 +6,7 @@ export default defineConfig({
     environment: "node",
     include: ["tests/integration/**/*.test.ts"],
     passWithNoTests: true,
+    // The live run is evidence (hashes, simulated vs decoded): print every test's output, passing ones too.
+    reporters: ["verbose"],
   },
 })
