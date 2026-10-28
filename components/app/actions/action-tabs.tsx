@@ -6,6 +6,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { LiquidityTab } from "@/components/app/actions/liquidity-tab"
 import { MintTab } from "@/components/app/actions/mint-tab"
 import { RedeemTab } from "@/components/app/actions/redeem-tab"
+import { useHydrated } from "@/hooks/use-hydrated"
 import { useMatured } from "@/hooks/use-matured"
 import { TradeTab } from "@/components/app/actions/trade-tab"
 
@@ -48,8 +49,14 @@ function ActionsFallback() {
  * simulates. It opens on Mint, or on Redeem once the market has matured (ledger time), until the
  * user picks a tab. A `?tab=` in the URL (and `?panel=` for that tab's panel) opens there instead; the
  * user's later picks win.
+ *
+ * This boundary is rendered at request time and hydrates after the page around it, when the ledger
+ * clock or the market data may already have loaded: the opening tab, the previews and the gate
+ * list would then differ from the server HTML (I2). So the server, and hydration, render the
+ * fallback; the tabs render from the first client render after it.
  */
 function ActionTabsView({ marketId }: { marketId: string }) {
+  const hydrated = useHydrated()
   const headingId = useId()
   const params = useSearchParams()
   const urlTab = params?.get("tab") ?? ""
@@ -57,6 +64,7 @@ function ActionTabsView({ marketId }: { marketId: string }) {
   const requested = isTabId(urlTab) ? urlTab : null
   const matured = useMatured(marketId)
   const [chosen, setChosen] = useState<TabId | null>(null)
+  if (!hydrated) return <ActionsFallback />
   return (
     <section aria-labelledby={headingId} className="grid min-w-0 gap-3">
       <h2 id={headingId} className="font-serif text-2xl text-ink">
