@@ -32,7 +32,8 @@ const mocks = vi.hoisted(() => ({
   wallet: { status: "connected" } as WalletState,
   account: undefined as AccountState | undefined,
   accountPending: false,
-  perms: [] as MarketPermission[],
+  perms: [] as MarketPermission[] | undefined,
+  permsStale: false,
   sign: vi.fn(),
   addTrustline: vi.fn(),
   fetch: vi.fn(),
@@ -49,7 +50,7 @@ vi.mock("@/hooks/use-account-state", () => ({
   useAccountState: () => ({ data: mocks.account, isPending: mocks.accountPending, stale: false }),
 }))
 vi.mock("@/hooks/use-market-permissions", () => ({
-  useMarketPermissions: () => ({ data: mocks.perms, isPending: false, stale: false }),
+  useMarketPermissions: () => ({ data: mocks.perms, isPending: false, stale: mocks.permsStale }),
 }))
 // No real transaction is built under jsdom (R13): the trustline step is mocked; it still signs through the wallet.
 vi.mock("@/lib/protocol/onboarding", async (importOriginal) => ({
@@ -124,6 +125,7 @@ beforeEach(() => {
   mocks.wallet = { status: "connected", publicKey: ADDRESS, networkPassphrase: mocks.manifest.networkPassphrase }
   mocks.account = fresh()
   mocks.perms = perms(false)
+  mocks.permsStale = false
   mocks.accountPending = false
   mocks.order = []
   mocks.afterFaucet = onboarded
@@ -300,6 +302,37 @@ describe("onboarding dialog", () => {
     mocks.accountPending = true
     renderDialog()
     expect(within(screen.getByRole("dialog")).queryByRole("button", { name: "Start" })).toBeNull()
+  })
+
+  it("does not offer Start while the market permissions cannot be read (round 2)", () => {
+    const check = () => {
+      const dialog = screen.getByRole("dialog")
+      expect(within(dialog).getByText(/permissions on the markets could not be read/i)).toBeTruthy()
+      expect(within(dialog).queryByRole("button", { name: "Start" })).toBeNull()
+      cleanup()
+    }
+    mocks.permsStale = true
+    renderDialog()
+    check()
+    mocks.permsStale = false
+    mocks.perms = undefined
+    renderDialog()
+    check()
+    mocks.perms = [{ marketId: "m1", permPt: { status: "unavailable", error: "rpc down" }, permYt: live(false) }]
+    renderDialog()
+    check()
+  })
+
+  it("asks to wait a minute after a no_trustline refusal, as the faucet's limit does (round 2)", async () => {
+    const user = userEvent.setup()
+    mocks.account = accountState({ accountExists: live(true), trustline: live("unauthorized"), permAllowed: live(false) })
+    mocks.fetch.mockImplementation(async () => Response.json({ error: "no_trustline" }, { status: 409 }))
+    renderDialog()
+    const dialog = screen.getByRole("dialog")
+    await user.click(within(dialog).getByRole("button", { name: "Start" }))
+    const alert = await within(dialog).findByRole("alert")
+    expect(alert.textContent).toMatch(/try again in a minute/i)
+    expect(alert.textContent).not.toMatch(/few seconds/i)
   })
 
   it("refuses to start while the account cannot be read", () => {

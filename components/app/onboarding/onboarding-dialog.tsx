@@ -24,14 +24,14 @@ import {
   type FaucetStep,
   type OnboardingStepId,
 } from "@/lib/protocol/onboarding"
-import type { Live, Market } from "@/lib/protocol/types"
+import type { Market } from "@/lib/protocol/types"
 
 /** The server's refusals, in plain words with their fix. */
 const REFUSAL_TEXT: Record<FaucetErrorCode, string> = {
   rate_limited:
     "Get test tokens was used for this account or from this connection less than a minute ago, or is busy with other requests. Try again in a minute.",
   busy: "The faucet is busy — try again in a minute.",
-  no_trustline: "The faucet found no trustline to the test asset on your account yet. Wait a few seconds, then try again.",
+  no_trustline: "The faucet found no trustline to the test asset on your account yet. Try again in a minute.",
   network: "Get test tokens runs only on Testnet or a local network.",
   invalid_account: "The faucet refused the account address. Reconnect your wallet, then try again.",
   invalid_content_type: "The faucet refused the request from this page. Reload the page, then try again.",
@@ -70,8 +70,6 @@ type Run =
   | { phase: "running"; step: OnboardingStepId; sent: OnboardingStepId[] }
   | { phase: "failed"; step: OnboardingStepId; message: string; sent: OnboardingStepId[] }
   | { phase: "finished"; sent: OnboardingStepId[] }
-
-const UNREAD: Live<boolean> = { status: "unavailable", error: "not read yet" }
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -175,9 +173,12 @@ function AccountChecklist({ marketId, address, asset }: { marketId: string; addr
     return <p className="text-sm text-ink">Your account could not be read right now{cause}. Try again in a moment.</p>
   }
 
-  // Every market's PT and YT (R44). Unread permissions are not granted: the step stays open.
-  const marketPerms =
-    permissions.data && !permissions.stale ? permissions.data : m.markets.map(() => ({ permPt: UNREAD, permYt: UNREAD }))
+  // Every market's PT and YT (R44). Like the account read, an unread or stale permission read
+  // offers nothing: whether the grant step is done cannot be told (round 2).
+  const marketPerms = permissions.data
+  if (!marketPerms || permissions.stale || marketPerms.some((p) => p.permPt.status !== "live" || p.permYt.status !== "live")) {
+    return <p className="text-sm text-ink">Your permissions on the markets could not be read right now. Try again in a moment.</p>
+  }
   const hasFriendbot = Boolean(m.friendbotUrl)
   const sent = run.phase === "idle" ? [] : run.sent
   const steps = onboardingSteps(data, { decimals: asset.decimals, markets: marketPerms })
