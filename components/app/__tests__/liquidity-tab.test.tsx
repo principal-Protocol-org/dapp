@@ -1,6 +1,6 @@
 import { screen, within } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import type { ActionInput } from "@/lib/protocol/actions"
+import { ACTION_META, type ActionInput } from "@/lib/protocol/actions"
 import { accountState, live, MATURITY, marketState } from "./fixtures"
 
 const mocks = await vi.hoisted(async () => (await import("./panel-mocks")).createPanelMocks())
@@ -139,17 +139,34 @@ describe("Liquidity tab — add (SY only)", () => {
     expect(screen.getByText(LP_NOTE)).toBeTruthy()
   })
 
-  it("shows the exact LP and SY used, with the LP floor", async () => {
+  it("stays visible but is not offered (R47): the reason comes first, nothing is simulated, signing is off", async () => {
     zapReads()
     simulateReturns(mocks, [237_944_239n, 999_999_999n, 243_920_286n])
     await renderUi(<LiquidityTab marketId="m1" />)
     await openTab("Add SY only")
     await enter("SY to add", "100")
-    expect(valueIn("Exact (simulated)", "LP received")).toBe("24.3920286 LP")
-    expect(valueIn("Exact (simulated)", "SY used")).toBe("99.9999999 SY")
-    expect(valueIn("Exact (simulated)", "PT added from the swap")).toBe("23.7944239 PT")
-    expect(valueIn("Exact (simulated)", "Minimum LP received")).toBe("24.2700684 LP")
-    expect(mocks.simulateInvocation.mock.calls.at(-1)![0].invocation.functionName).toBe("add_liquidity_single_sy")
+    const reasons = within(gateList()).getAllByRole("listitem").map((li) => li.textContent)
+    expect(reasons[0]).toBe(ACTION_META.add_liquidity_sy.disabled!.reason)
+    // Never simulated, so no "waiting for an exact quote" line and no exact preview.
+    expect(reasons.some((r) => /exact quote/.test(r ?? ""))).toBe(false)
+    expect(screen.queryByText("Exact (simulated)")).toBeNull()
+    expect(mocks.simulateInvocation.mock.calls.some(([p]) => p.invocation.functionName === "add_liquidity_single_sy")).toBe(false)
+    expect(reviewButton("Add liquidity (SY only)").disabled).toBe(true)
+    // The indicative preview stays.
+    expect(valueIn("Indicative", "LP received")).toBe("24.3920286 LP")
+  })
+
+  it("would show the exact LP and SY used from a simulated output (kept for when it is offered again)", () => {
+    const lines = addLiquiditySyPanel(MARKET).exact(
+      { kind: "add_liquidity", pt_used: 237_944_239n, sy_used: 999_999_999n, lp: 243_920_286n },
+      { inputs: { amount: 1_000_000_000n } },
+    )
+    expect(lines.map((l) => [l.label, l.value])).toEqual([
+      ["LP received", "24.3920286 LP"],
+      ["SY used", "99.9999999 SY"],
+      ["PT added from the swap", "23.7944239 PT"],
+      ["SY kept", "0.0000001 SY"],
+    ])
   })
 })
 

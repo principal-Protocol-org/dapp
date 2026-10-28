@@ -104,8 +104,9 @@ export function ActionPanel({ config, marketId }: { config: PanelConfig; marketI
 
   // --- Exact quote (R28: every action), as the connected user, once the network clock is known.
   const draft = { action: config.action, marketId, source: source ?? "", amount, secondaryAmount }
+  // An action this release does not offer (R47) is never simulated: it can never be signed.
   const simInput: ActionInput | null =
-    source !== null && complete && ledgerTime !== null ? { ...draft, guards: {}, deadline: deadlineAt(ledgerTime) } : null
+    source !== null && complete && ledgerTime !== null && !meta.disabled ? { ...draft, guards: {}, deadline: deadlineAt(ledgerTime) } : null
   const sim = useSimulation(simInput)
   const guards = sim.guards?.ok ? sim.guards.guards : undefined
 
@@ -114,8 +115,9 @@ export function ActionPanel({ config, marketId }: { config: PanelConfig; marketI
   if (gate.base) {
     blockers = evaluateGates({ ...draft, guards: {}, deadline: 0n }, { ...gate.base, simulation: sim.outcome })
     if (sim.guards && !sim.guards.ok) blockers = [...blockers, { code: "quote", message: sim.guards.reason }]
-    // Nothing is simulated until the amounts are complete: the amount is the reason, not a missing quote.
-    if (!complete) blockers = blockers.filter((b) => b.code !== "quote")
+    // Nothing is simulated until the amounts are complete, nor ever for an action that is not offered:
+    // the amount, or the `disabled` blocker, is the reason, not a missing quote.
+    if (!complete || meta.disabled) blockers = blockers.filter((b) => b.code !== "quote")
     if (fieldError) {
       // The gates saw 0 for an amount that does not parse; the field's own refusal replaces theirs.
       const several = fields.length > 1
