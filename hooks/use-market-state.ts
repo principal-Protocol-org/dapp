@@ -1,0 +1,18 @@
+"use client"
+
+import { useQuery } from "@tanstack/react-query"
+import { activeManifest } from "@/lib/protocol/manifest-source"
+import { fetchMarketState } from "@/lib/protocol/market-state"
+import { createRpcReader } from "@/lib/protocol/reader"
+
+export const MARKET_REFETCH_MS = 6000
+
+/** Every on-chain value of one market, each as a `Live`. Refetched every 6 s. */
+export function useMarketState(marketId: string) {
+  const m = activeManifest()
+  return useQuery({
+    queryKey: ["market", m.network, marketId],
+    queryFn: () => fetchMarketState(createRpcReader(m), m, marketId),
+    refetchInterval: MARKET_REFETCH_MS,
+  })
+}
