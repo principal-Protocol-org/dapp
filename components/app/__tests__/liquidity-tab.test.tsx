@@ -131,7 +131,7 @@ describe("Liquidity tab — add (SY only)", () => {
     await enter("SY to add", "100")
     expect(mocks.read).toHaveBeenCalledWith({ contractId: "CPOOL", functionName: "zap_swap_amount", args: i128(1_000_000_000n) })
     expect(valueIn("Indicative", "SY swapped to PT")).toBe("50.0000 SY")
-    // Hand-computed from market_pool:462-489 (see previews.test.ts).
+    // Hand-computed from market_pool:456-508 (see previews.test.ts).
     expect(valueIn("Indicative", "LP received")).toBe("24.3920286 LP")
     expect(valueIn("Indicative", "SY used")).toBe("99.9999999 SY")
     expect(valueIn("Indicative", "PT refunded")).toBe("0.7055761 PT")

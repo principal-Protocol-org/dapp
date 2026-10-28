@@ -1,0 +1,173 @@
+"use client"
+
+import { showLive } from "@/components/app/live"
+import type { PanelConfig, PreviewLine } from "@/components/app/actions/panel-config"
+import { PanelGroup, usePanels, type PanelEntry } from "@/components/app/actions/panel-group"
+import { amountOf, outputOf, plain, tokens } from "@/components/app/actions/panel-lines"
+import type { AccountState } from "@/lib/protocol/account-state"
+import { formatBps, formatRate } from "@/lib/protocol/format"
+import type { MarketState } from "@/lib/protocol/market-state"
+import { SCALE } from "@/lib/protocol/math"
+import { previewRecombine, previewRedeemPt } from "@/lib/protocol/previews"
+import { allLive, liveValue } from "@/lib/protocol/reader"
+import type { Live, Market } from "@/lib/protocol/types"
+import { pendingYield, redemptionRate, type PendingYield, type RedemptionRate } from "@/lib/protocol/yield"
+
+/**
+ * The Redeem tab (spec §6): recombine PT + YT into SY before maturity, claim YT yield, and redeem
+ * PT and YT at maturity. Claim and redeem take no floor; the previews say what fixes the amount.
+ */
+
+const BASIS_HINT: Record<RedemptionRate["basis"], string> = {
+  settled: "Final: fixed when the market settled.",
+  frozen: "Fixed: the YT yield index froze at maturity at this rate; the first redemption records it.",
+  oracle: "Indicative — settles at the oracle rate of your redemption.",
+}
+
+/**
+ * What a claim pays now — and what redeeming any YT pays, since burning YT settles and claims the
+ * yield of the whole balance (`principal_manager:514-516`). Once the YT index is frozen the oracle
+ * is not needed (nor read), as in the claim gate.
+ */
+function pendingOf(ms: MarketState, account: AccountState): Live<PendingYield> {
+  const frozen = ms.ytFrozen.status === "live" && ms.ytFrozen.value
+  const oracle: Live<bigint> = frozen ? liveValue(SCALE, 0) : ms.oracleRate
+  return allLive(
+    [account.yt, account.ytLastClaimedIndex, account.ytPendingClaim, ms.ytFrozen, ms.ytAccruedIndex, ms.fees.ytBps, ms.exchangeRate, oracle] as const,
+    ([balance, lastClaimedIndex, pendingClaim, ytFrozen, accruedYieldIndex, ytFeeBps, exchangeRate, liveOracleRate]) =>
+      pendingYield({ balance, lastClaimedIndex, pendingClaim, liveOracleRate, ytFrozen, accruedYieldIndex, ytFeeBps, exchangeRate }),
+  )
+}
+
+/** The rate PT redeems at, reading only what the market's state needs (`redemptionRate`). */
+function settlementOf(ms: MarketState): Live<RedemptionRate> {
+  const { settledRate, ytFrozen, ytAccruedIndex, oracleRate } = ms
+  if (settledRate.status === "unavailable") return settledRate
+  if (settledRate.value !== null) return allLive([settledRate] as const, ([rate]) => redemptionRate({ settledRate: rate }))
+  if (ytFrozen.status === "live" && ytFrozen.value) {
+    return allLive([ytAccruedIndex] as const, ([index]) => redemptionRate({ settledRate: null, ytFrozen: true, accruedYieldIndex: index }))
+  }
+  return allLive([ytFrozen, ytAccruedIndex, oracleRate] as const, ([frozen, index, live]) =>
+    redemptionRate({ settledRate: null, ytFrozen: frozen, accruedYieldIndex: index, liveOracleRate: live }),
+  )
+}
+
+export function recombinePanel(): PanelConfig {
+  return {
+    action: "recombine",
+    fields: [{ id: "amount", label: "PT and YT to recombine", unit: "PT + YT" }],
+    description: "Exit before maturity: burn equal amounts of PT and YT to get SY back at the oracle rate.",
+    indicative: (ms, { amount }) =>
+      amount === undefined
+        ? []
+        : [
+            { label: "SY received", value: showLive(allLive([ms.oracleRate] as const, ([r]) => previewRecombine(amount, r)), (v) => tokens(v, "SY")) },
+            { label: "Burns", value: `${tokens(amount, "PT")} + ${tokens(amount, "YT")}` },
+          ],
+    market: (ms) => [{ label: "Oracle rate", value: showLive(ms.oracleRate, formatRate), hint: "Recombining pays the amount divided by the oracle rate, in SY." }],
+    exact: (output) => [{ label: "SY received", value: tokens(amountOf(output), "SY") }],
+    floors: { minOut: { label: "Minimum SY received", unit: "SY" } },
+    notes({ account }) {
+      if (!account || account.pt.status !== "live" || account.yt.status !== "live") return []
+      const pt = account.pt.value
+      const yt = account.yt.value
+      return [`Recombining burns equal amounts of PT and YT. You can recombine up to ${plain(pt < yt ? pt : yt)} (you hold ${plain(pt)} PT and ${plain(yt)} YT).`]
+    },
+    result: (output, { input }) => `You recombined ${plain(input.amount)} PT and ${plain(input.amount)} YT into ${plain(amountOf(output))} SY.`,
+  }
+}
+
+export function claimPanel(market: Market): PanelConfig {
+  const { code, decimals } = market.underlying
+  return {
+    action: "claim_yield",
+    fields: [],
+    description: `Collect the yield your YT has earned since your last claim, paid in ${code}. You keep your YT.`,
+    indicative: () => [],
+    marketLabel: "Your yield (indicative)",
+    market(ms, { account }) {
+      if (!account) return [{ label: "Pending yield", value: "Connect a wallet to see it" }]
+      const y = pendingOf(ms, account)
+      const bps = ms.fees.ytBps
+      return [
+        { label: "Pending yield (gross)", value: showLive(y, (v) => tokens(v.gross, code, decimals)) },
+        {
+          label: "YT fee",
+          value: showLive(y, (v) => tokens(v.fee, code, decimals)),
+          ...(bps.status === "live" ? { hint: `${formatBps(bps.value)} of the yield, kept by the market.` } : {}),
+        },
+        { label: "You receive (net)", value: showLive(y, (v) => tokens(v.net, code, decimals)) },
+      ]
+    },
+    exact: (output) => [{ label: "You receive", value: tokens(amountOf(output), code, decimals) }],
+    result: (output) => `You claimed ${plain(amountOf(output), decimals)} ${code} of yield.`,
+  }
+}
+
+export function redeemPanel(market: Market): PanelConfig {
+  const { code, decimals } = market.underlying
+  return {
+    action: "redeem",
+    fields: [
+      { id: "amount", label: "PT to redeem", unit: "PT", optional: true },
+      { id: "secondaryAmount", label: "YT to redeem", unit: "YT", optional: true },
+    ],
+    description: `At maturity, PT pays ${code} at the settlement rate and YT pays the yield it has left. Redeem either or both.`,
+    indicative(ms, { amount: pt, secondaryAmount: yt }, { account }) {
+      const lines: PreviewLine[] = []
+      if (pt !== undefined && pt > 0n) {
+        // PT is notional: underlying = previewRedeemPt(pt, settlement rate, exchange rate) (T6 note).
+        const paid = allLive([settlementOf(ms), ms.exchangeRate] as const, ([s, x]) => previewRedeemPt(pt, s.rate, x))
+        lines.push({ label: "From PT", value: showLive(paid, (v) => tokens(v, code, decimals)) })
+      }
+      if (yt !== undefined && yt > 0n) {
+        lines.push({
+          label: "From YT (net of the YT fee)",
+          value: account ? showLive(pendingOf(ms, account), (v) => tokens(v.net, code, decimals)) : "Connect a wallet to see it",
+          hint: "Redeeming YT pays all the yield your YT has earned, net of the YT fee.",
+        })
+      }
+      return lines
+    },
+    marketLabel: "Settlement",
+    market(ms) {
+      const s = settlementOf(ms)
+      const hint = s.status === "live" ? { hint: BASIS_HINT[s.value.basis] } : {}
+      return [{ label: "Settlement rate", value: showLive(s, (v) => formatRate(v.rate)), ...hint }]
+    },
+    exact(output, { inputs }) {
+      const o = outputOf(output, "redeem")
+      const lines: PreviewLine[] = []
+      if ((inputs.amount ?? 0n) > 0n) lines.push({ label: "From PT", value: tokens(o.underlying_from_pt, code, decimals) })
+      if ((inputs.secondaryAmount ?? 0n) > 0n) lines.push({ label: "From YT", value: tokens(o.underlying_from_yt, code, decimals) })
+      lines.push({ label: "Total", value: tokens(o.underlying_from_pt + o.underlying_from_yt, code, decimals) })
+      return lines
+    },
+    notes({ ms }) {
+      if (!ms || ms.settledRate.status !== "live" || ms.settledRate.value !== null) return []
+      const frozen = ms.ytFrozen.status === "live" && ms.ytFrozen.value
+      return [
+        frozen
+          ? "The first redemption records the settlement rate for everyone."
+          : "The first redemption settles the market for everyone, at the oracle rate of that moment.",
+      ]
+    },
+    result(output, { input }) {
+      const o = outputOf(output, "redeem")
+      const yt = input.secondaryAmount ?? 0n
+      const parts = [...(input.amount > 0n ? [`${plain(input.amount)} PT`] : []), ...(yt > 0n ? [`${plain(yt)} YT`] : [])]
+      return `You redeemed ${parts.join(" and ")} for ${plain(o.underlying_from_pt + o.underlying_from_yt, decimals)} ${code}.`
+    },
+  }
+}
+
+const redeemPanels = (market: Market): PanelEntry[] => [
+  { id: "recombine", label: "Recombine", config: recombinePanel() },
+  { id: "claim_yield", label: "Claim yield", config: claimPanel(market) },
+  { id: "redeem", label: "Redeem", config: redeemPanel(market) },
+]
+
+export function RedeemTab({ marketId }: { marketId: string }) {
+  const panels = usePanels(marketId, redeemPanels)
+  return <PanelGroup label="Redeem" marketId={marketId} panels={panels} />
+}

@@ -161,3 +161,33 @@ export function poolValueInUnderlying(p: {
   if (p.syReserve < 0n || p.ptReserve < 0n) return null;
   return (p.syReserve * p.exchangeRate) / SCALE + (p.ptReserve * p.ptPrice) / p.oracleRate;
 }
+
+/** The rate PT redeems at, and what fixes it. */
+export type RedemptionRate = { rate: bigint; basis: "settled" | "frozen" | "oracle" };
+
+/**
+ * The rate a redemption pays PT at (`PrincipalManager.settle`, `principal_manager/src/lib.rs:746-764`):
+ * - settled: the stored `settled_rate`, final;
+ * - unsettled with the YT index frozen: `YTToken.last_oracle_rate()`, which `settle` records as it
+ *   is (no further update); final in fact, though not stored yet;
+ * - unsettled and unfrozen: the redemption first runs `update_yield_index`, which only raises the
+ *   high-water mark (`yt_token:637-649`), so `max(last_oracle_rate, live oracle)` — indicative, since
+ *   the oracle can move before the transaction lands.
+ *
+ * `last_oracle_rate` is recovered from `accrued_yield_index`: the two are always written together,
+ * the index as `index_for(rate)` (`yt_token:246-249`, `:645-648`), and `accruingSinceRate` inverts
+ * `index_for` exactly for any rate below ~316 (R16). Throws when a value the case needs is missing.
+ */
+export function redemptionRate(p: {
+  settledRate: bigint | null;
+  ytFrozen?: boolean;
+  accruedYieldIndex?: bigint;
+  liveOracleRate?: bigint;
+}): RedemptionRate {
+  if (p.settledRate !== null) return { rate: p.settledRate, basis: "settled" };
+  if (p.accruedYieldIndex === undefined) throw new Error("the YT yield index is needed before settlement");
+  const last = accruingSinceRate(p.accruedYieldIndex);
+  if (p.ytFrozen) return { rate: last, basis: "frozen" };
+  if (p.liveOracleRate === undefined) throw new Error("the live oracle rate is needed before the YT index freezes");
+  return { rate: p.liveOracleRate > last ? p.liveOracleRate : last, basis: "oracle" };
+}

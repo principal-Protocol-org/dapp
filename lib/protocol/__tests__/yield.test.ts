@@ -9,6 +9,7 @@ import {
   indexFor,
   pendingYield,
   ptFixedReturn,
+  redemptionRate,
   type PendingYieldInput,
 } from "../yield";
 
@@ -289,5 +290,32 @@ describe("poolValueInUnderlying", () => {
     expect(poolValueInUnderlying({ ...base, oracleRate: 0n })).toBeNull();
     expect(poolValueInUnderlying({ ...base, ptPrice: 0n })).toBeNull();
     expect(poolValueInUnderlying({ ...base, exchangeRate: -1n })).toBeNull();
+  });
+});
+
+describe("redemptionRate (T18: the rate PT redeems at)", () => {
+  it("is the stored settlement rate once the market is settled, whatever the oracle says", () => {
+    expect(redemptionRate({ settledRate: 11_000_000n })).toEqual({ rate: 11_000_000n, basis: "settled" });
+  });
+
+  it("recovers last_oracle_rate exactly from the YT index (both are set together, yt_token:645-648)", () => {
+    for (const r of [SCALE, 10_500_000n, 11_000_000n, 12_345_678n]) expect(accruingSinceRate(indexFor(r))).toBe(r);
+  });
+
+  it("is the frozen last_oracle_rate once the YT index froze, even if the oracle rose since", () => {
+    expect(
+      redemptionRate({ settledRate: null, ytFrozen: true, accruedYieldIndex: indexFor(11_000_000n), liveOracleRate: 12_000_000n }),
+    ).toEqual({ rate: 11_000_000n, basis: "frozen" });
+  });
+
+  it("before the freeze is max(last_oracle_rate, live oracle): the redemption's update only raises it", () => {
+    const at = (live: bigint) => redemptionRate({ settledRate: null, ytFrozen: false, accruedYieldIndex: indexFor(10_500_000n), liveOracleRate: live });
+    expect(at(11_000_000n)).toEqual({ rate: 11_000_000n, basis: "oracle" });
+    expect(at(10_000_000n)).toEqual({ rate: 10_500_000n, basis: "oracle" });
+  });
+
+  it("refuses to guess when a needed value is missing", () => {
+    expect(() => redemptionRate({ settledRate: null, ytFrozen: false, accruedYieldIndex: indexFor(SCALE) })).toThrow(/oracle/);
+    expect(() => redemptionRate({ settledRate: null })).toThrow(/index/);
   });
 });

@@ -180,7 +180,7 @@ export function previewBuyYt(
 
 /**
  * LP minted by a single-sided deposit of `syIn` SY. Mirrors `add_liquidity_single_sy`,
- * `market_pool/src/lib.rs:462-489`: the pool swaps `split` (`zap_swap_amount(syIn)`) into PT —
+ * `market_pool/src/lib.rs:456-508`: the pool swaps `split` (`zap_swap_amount(syIn)`) into PT —
  * `buy` is `quote_sy_for_pt(split)`: `ptOut` PT for a `feeShares` fee — so the reserves become
  * `pt1 = pt_res − ptOut`, `sy1 = sy_res + split − feeShares`; then
  * `lp = min(ptOut·total_lp/pt1, (syIn − split)·total_lp/sy1)` (each floored),

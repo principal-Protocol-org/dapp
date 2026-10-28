@@ -77,7 +77,7 @@ export function buyPtPanel(market: Market): PanelConfig {
       const lines = [spotLine(ms, "PT")]
       if (amount !== undefined && output) lines.push(impactLine(spotOf(ms, "PT"), "buy", amount, amountOf(output)))
       if (amount !== undefined) {
-        // calc_buy_pt takes ceil(sy_in · fee_rate / 1e12) from the SY in (market_pool:794).
+        // calc_buy_pt takes ceil(sy_in · fee_rate / 1e12) from the SY in (market_pool:796).
         const fee = showLive(ms.swapFeeRate, (r) => tokens(ceilDiv(amount * r, FEE_RATE_SCALE), "SY"))
         lines.push({ label: "Swap fee", value: fee, hint: "Taken from the SY you spend, rounded up." })
       }
