@@ -67,11 +67,8 @@ export function buyPtPanel(market: Market): PanelConfig {
     async quote(ms, { amount }) {
       if (amount === undefined) return []
       const q = await quoteSyForPt(reader(), pool, amount)
-      return [
-        { label: "PT received", value: tokens(q.amountOut, "PT") },
-        { label: "Swap fee", value: tokens(q.feeShares, "SY") },
-        impactLine(spotOf(ms, "PT"), "buy", amount, q.amountOut),
-      ]
+      // The swap fee is in the market section (from swapFeeRate), always visible: not repeated here.
+      return [{ label: "PT received", value: tokens(q.amountOut, "PT") }, impactLine(spotOf(ms, "PT"), "buy", amount, q.amountOut)]
     },
     market(ms, { inputs: { amount }, output }) {
       const lines = [spotLine(ms, "PT")]

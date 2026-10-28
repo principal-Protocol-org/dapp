@@ -3,6 +3,7 @@
 import { showLive } from "@/components/app/live"
 import type { PanelConfig, PreviewLine } from "@/components/app/actions/panel-config"
 import { PanelGroup, usePanels, type PanelEntry } from "@/components/app/actions/panel-group"
+import { useMatured } from "@/hooks/use-matured"
 import { amountOf, outputOf, plain, tokens } from "@/components/app/actions/panel-lines"
 import type { AccountState } from "@/lib/protocol/account-state"
 import { formatBps, formatRate } from "@/lib/protocol/format"
@@ -145,11 +146,12 @@ export function redeemPanel(market: Market): PanelConfig {
     },
     notes({ ms }) {
       if (!ms || ms.settledRate.status !== "live" || ms.settledRate.value !== null) return []
-      const frozen = ms.ytFrozen.status === "live" && ms.ytFrozen.value
+      if (ms.ytFrozen.status === "live" && ms.ytFrozen.value) return ["The first redemption records the settlement rate for everyone."]
+      // Unsettled and unfrozen: the rate is the oracle's when the transaction lands; the oracle is
+      // monotonic and the index keeps a high-water mark, so PT pays at most what was simulated.
       return [
-        frozen
-          ? "The first redemption records the settlement rate for everyone."
-          : "The first redemption settles the market for everyone, at the oracle rate of that moment.",
+        "The first redemption settles the market for everyone, at the oracle rate of that moment.",
+        "Until the market is settled, the PT amount depends on the oracle rate when your transaction lands; it can only be lower than shown.",
       ]
     },
     result(output, { input }) {
@@ -167,7 +169,9 @@ const redeemPanels = (market: Market): PanelEntry[] => [
   { id: "redeem", label: "Redeem", config: redeemPanel(market) },
 ]
 
+/** Opens on Recombine before maturity and on Redeem after it (fix round 1). */
 export function RedeemTab({ marketId }: { marketId: string }) {
   const panels = usePanels(marketId, redeemPanels)
-  return <PanelGroup label="Redeem" marketId={marketId} panels={panels} />
+  const matured = useMatured(marketId)
+  return <PanelGroup label="Redeem" marketId={marketId} panels={panels} defaultId={matured ? "redeem" : undefined} />
 }

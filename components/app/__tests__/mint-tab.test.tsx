@@ -146,7 +146,7 @@ describe("Mint tab — mint PT + YT", () => {
     expect(valueIn("Indicative", "You receive")).toBe("104.9475 PT + 104.9475 YT")
     expect(valueIn("Indicative", "Tokenization fee")).toBe("0.0500 SY")
     expect(valueIn("Indicative", "Deposited as SY first")).toBe("100.0000 SY")
-    expect(valueIn("Market (indicative)", "Oracle rate")).toBe("1.0500 notional per STA")
+    expect(valueIn("Market (indicative)", "Oracle rate")).toBe("1.0500 notional per SY share")
     expect(valueIn("Market (indicative)", "Tokenization fee rate")).toBe("0.05%")
   })
 

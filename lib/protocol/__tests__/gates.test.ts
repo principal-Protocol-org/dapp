@@ -353,14 +353,29 @@ const MATRIX: Row[] = [
     blocks: ["claim_yield"],
   },
   {
-    rule: "a stale oracle blocks redeem only while settledRate is null",
+    // R40: settle() checks freshness only while the YT index is not frozen (principal_manager:755-758).
+    rule: "a stale oracle blocks redeem while the market is unsettled and the YT index not frozen (R40)",
     mutate: (c) => {
       c.market.oracleFresh = live(false)
       c.market.settledRate = live(null)
+      c.market.ytFrozen = live(false)
     },
     code: "oracle",
-    message: /settle/i,
+    message: /stale.*The first redemption settles the market at the current oracle price, so that price must be fresh\./,
     blocks: ["redeem"],
+  },
+  {
+    // R40: once frozen, settle() records last_oracle_rate without a freshness check, and the YT
+    // leg's advance() returns before its own (yt_token:616-623): the contract accepts it.
+    rule: "a stale oracle does not block redeem once the YT index is frozen, even unsettled (R40)",
+    mutate: (c) => {
+      c.market.oracleFresh = live(false)
+      c.market.settledRate = live(null)
+      c.market.ytFrozen = live(true)
+    },
+    code: "oracle",
+    blocks: [],
+    allows: ["redeem"],
   },
 
   // §5 "Pool seeded".
@@ -928,16 +943,25 @@ describe("unavailable read blocks", () => {
       expect(blockers).toEqual([{ code: "unavailable", message: expect.stringMatching(/maturity/) }])
     })
 
-    it("redeem reads oracle freshness only while the market is unsettled", () => {
-      expect(gates("redeem", m((x) => (x.oracleFresh = down())))).toEqual([])
+    it("redeem reads oracle freshness only while unsettled and unfrozen (R40)", () => {
+      // Settled: neither the freeze nor the freshness is read.
+      expect(gates("redeem", m((x) => ((x.oracleFresh = down()), (x.ytFrozen = down()))))).toEqual([])
+      // Unsettled but frozen: the freshness is not read.
+      expect(gates("redeem", m((x) => ((x.settledRate = live(null)), (x.ytFrozen = live(true)), (x.oracleFresh = down()))))).toEqual([])
       const blockers = gates(
         "redeem",
         m((x) => {
           x.settledRate = live(null)
+          x.ytFrozen = live(false)
           x.oracleFresh = down()
         }),
       )
       expect(blockers).toEqual([{ code: "unavailable", message: expect.stringMatching(/oracle.*fresh/i) }])
+    })
+
+    it("an unsettled redeem whose freeze cannot be read is refused, naming it (R40, R23)", () => {
+      const blockers = gates("redeem", m((x) => ((x.settledRate = live(null)), (x.ytFrozen = down()))))
+      expect(blockers).toEqual([{ code: "unavailable", message: expect.stringMatching(/frozen/i) }])
     })
 
     it("a frozen YT index does not need the live oracle rate to price the claim", () => {
