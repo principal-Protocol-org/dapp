@@ -124,19 +124,29 @@ export function resetFaucetStateForTests(): void {
   queueTail = Promise.resolve()
 }
 
+const expired = (at: number, now: number) => now - at >= FAUCET_RATE_LIMIT_MS || at > now
+
 /**
- * Takes the slot for both keys and one of the instance's global slots, or refuses (a refused
- * request does not restart any window). The global cap stops a stream of fresh addresses and
- * spoofed IPs from bypassing the per-address limit (R42).
+ * Takes the slot for both keys, or refuses (a refused request does not restart the window).
+ * Checked first, before any read: one request per address and per IP per minute.
  */
-function takeRateLimit(account: string, ip: string, now: number): boolean {
-  const expired = (at: number) => now - at >= FAUCET_RATE_LIMIT_MS || at > now
-  for (const [key, at] of lastAccepted) if (expired(at)) lastAccepted.delete(key)
-  acceptedTimes = acceptedTimes.filter((at) => !expired(at))
+function takeKeySlots(account: string, ip: string, now: number): boolean {
+  for (const [key, at] of lastAccepted) if (expired(at, now)) lastAccepted.delete(key)
   const keys = [`addr:${account}`, `ip:${ip}`]
   if (keys.some((key) => lastAccepted.has(key))) return false
-  if (acceptedTimes.length >= FAUCET_GLOBAL_LIMIT_PER_MINUTE) return false
   for (const key of keys) lastAccepted.set(key, now)
+  return true
+}
+
+/**
+ * Takes one of the instance's global slots (R42), or refuses. Taken only once the reads passed and
+ * a transaction will actually be sent (R42b): a junk address, a `no_trustline` or a nothing-to-do
+ * request never spends one, so it cannot starve real runs. Check and take happen with no await in
+ * between, so concurrent requests cannot both take the last slot.
+ */
+function takeGlobalSlot(now: number): boolean {
+  acceptedTimes = acceptedTimes.filter((at) => !expired(at, now))
+  if (acceptedTimes.length >= FAUCET_GLOBAL_LIMIT_PER_MINUTE) return false
   acceptedTimes.push(now)
   return true
 }
@@ -179,7 +189,7 @@ export async function runFaucet(p: {
   // The route validates the body; this is the last line before anything is signed.
   if (!StrKey.isValidEd25519PublicKey(account)) throw new Error("runFaucet needs a G… account address")
   const chain = p.chain ?? createStellarFaucetChain(manifest)
-  if (!takeRateLimit(account, p.ip, p.now)) return { error: "rate_limited" }
+  if (!takeKeySlots(account, p.ip, p.now)) return { error: "rate_limited" }
 
   const asset = testAsset(manifest)
   const assetGrants = [
@@ -197,24 +207,24 @@ export async function runFaucet(p: {
   ])
   if (!state.exists || !state.trustline) return { error: "no_trustline" }
 
-  const performed: FaucetStep[] = []
-  // Authorization first: an AUTH_REQUIRED asset cannot be paid to an unauthorized trustline.
-  if (!state.trustline.authorized) {
-    await send("authorize", () => chain.setAuthorized(account, asset))
-    performed.push("authorize")
-  }
-  if (!allowed) {
-    await send("grant_account", () => chain.grantAccount(account))
-    performed.push("grant_account")
-  }
+  // Only the missing steps, in order. Authorization first: an AUTH_REQUIRED asset cannot be paid
+  // to an unauthorized trustline.
+  const plan: { step: FaucetStep; write: () => Promise<void> }[] = []
+  if (!state.trustline.authorized) plan.push({ step: "authorize", write: () => chain.setAuthorized(account, asset) })
+  if (!allowed) plan.push({ step: "grant_account", write: () => chain.grantAccount(account) })
   for (const [i, [contract, step]] of assetGrants.entries()) {
-    if (assetsAllowed[i]) continue
-    await send(step, () => chain.grantAsset(account, contract))
-    performed.push(step)
+    if (!assetsAllowed[i]) plan.push({ step, write: () => chain.grantAsset(account, contract) })
   }
   if (state.trustline.balance < wholeTokens(FAUCET_TOP_UP_BELOW, asset.decimals)) {
-    await send("pay", () => chain.pay(account, asset, wholeTokens(FAUCET_AMOUNT, asset.decimals)))
-    performed.push("pay")
+    plan.push({ step: "pay", write: () => chain.pay(account, asset, wholeTokens(FAUCET_AMOUNT, asset.decimals)) })
+  }
+  if (plan.length === 0) return { performed: [] }
+  if (!takeGlobalSlot(p.now)) return { error: "rate_limited" }
+
+  const performed: FaucetStep[] = []
+  for (const { step, write } of plan) {
+    await send(step, write)
+    performed.push(step)
   }
   return { performed }
 }
