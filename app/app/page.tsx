@@ -2,7 +2,7 @@ import { MarketsTable } from "@/components/app/markets/markets-table"
 
 export default function AppPage() {
   return (
-    <section aria-labelledby="markets-heading" className="grid gap-6">
+    <section aria-labelledby="markets-heading" className="grid grid-cols-[minmax(0,1fr)] gap-6">
       <div>
         <h1 id="markets-heading" className="font-serif text-3xl text-ink">
           Markets

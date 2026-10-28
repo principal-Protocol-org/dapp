@@ -83,7 +83,7 @@ export function MarketsTable() {
   const { markets } = activeManifest()
   const { ledgerTime } = useLedgerClock()
   return (
-    <div className="rounded-lg border border-line bg-surface">
+    <div className="min-w-0 rounded-lg border border-line bg-surface">
       <Table>
         <TableHeader>
           <TableRow>

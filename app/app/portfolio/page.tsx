@@ -2,7 +2,7 @@ import { PortfolioView } from "@/components/app/portfolio/portfolio-view"
 
 export default function PortfolioPage() {
   return (
-    <section aria-labelledby="portfolio-heading" className="grid gap-6">
+    <section aria-labelledby="portfolio-heading" className="grid grid-cols-[minmax(0,1fr)] gap-6">
       <div>
         <h1 id="portfolio-heading" className="font-serif text-3xl text-ink">
           Portfolio
