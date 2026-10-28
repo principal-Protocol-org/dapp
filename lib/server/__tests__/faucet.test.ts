@@ -2,7 +2,7 @@
 import { readdirSync, readFileSync, statSync } from "node:fs"
 import { join, relative } from "node:path"
 import { Keypair, StrKey, Transaction, nativeToScVal, xdr } from "@stellar/stellar-sdk"
-import { beforeEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import testnetJson from "@/config/manifests/testnet.json"
 import { bytesToHex } from "@/lib/protocol/bytes"
 import { parseManifest } from "@/lib/protocol/manifest"
@@ -91,6 +91,10 @@ const granted = (m: Manifest) => new Set(m.markets.flatMap((x) => [x.contracts.p
 
 beforeEach(() => {
   resetFaucetStateForTests()
+})
+// A fake-clock test that fails or times out must not leave fake timers to the next one.
+afterEach(() => {
+  vi.useRealTimers()
 })
 
 describe("runFaucet", () => {
@@ -248,6 +252,63 @@ describe("runFaucet", () => {
       const later = runFaucet({ account: accounts[3], manifest, ip: "9.9.9.3", now: T0 + 2, chain })
       await vi.advanceTimersByTimeAsync(5 * 4_000 + 100)
       await expect(later).resolves.toEqual({ performed: all })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("keeps runs admitted first in the write window when an earlier request's reads are slower (round 2)", async () => {
+    const { chain } = fakeChain({ account: { exists: true, trustline: { authorized: true, balance: 0n } }, allowed: true, assets: granted(manifest) })
+    const slow = user()
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const read = chain.readAccount.getMockImplementation()!
+    chain.readAccount.mockImplementation(async (address: string) => {
+      if (address === slow) await gate
+      return read(address)
+    })
+    // The request stamped first (T0 + 1 000) is admitted last, after two stamped later.
+    const first = runFaucet({ account: slow, manifest, ip: "10.9.0.1", now: T0 + 1_000, chain })
+    await expect(runFaucet({ account: user(), manifest, ip: "10.9.0.2", now: T0 + 1_500, chain })).resolves.toEqual({ performed: ["pay"] })
+    await expect(runFaucet({ account: user(), manifest, ip: "10.9.0.3", now: T0 + 1_600, chain })).resolves.toEqual({ performed: ["pay"] })
+    release()
+    await expect(first).resolves.toEqual({ performed: ["pay"] })
+    await expect(runFaucet({ account: user(), manifest, ip: "10.9.0.4", now: T0 + 1_700, chain })).resolves.toEqual({ performed: ["pay"] })
+    // Four runs in this minute, none forgotten: the fifth is refused.
+    await expect(runFaucet({ account: user(), manifest, ip: "10.9.0.5", now: T0 + 1_800, chain })).resolves.toEqual({ error: "rate_limited" })
+    expect(chain.pay).toHaveBeenCalledTimes(FAUCET_RUNS_PER_MINUTE)
+  })
+
+  it("skips a run whose request outlived the time budget while queued: no writes, busy, its slots freed (round 2)", async () => {
+    vi.useFakeTimers()
+    try {
+      const { chain, calls } = fakeChain()
+      // A slow network: each write takes 20 s, so a fresh run (5 writes) takes 100 s.
+      const slow = <A extends unknown[]>(inner: (...args: A) => Promise<void>) =>
+        vi.fn(async (...args: A) => {
+          await new Promise((r) => setTimeout(r, 20_000))
+          await inner(...args)
+        })
+      chain.setAuthorized = slow(chain.setAuthorized)
+      chain.grantAccount = slow(chain.grantAccount)
+      chain.grantAsset = slow(chain.grantAsset)
+      chain.pay = slow(chain.pay)
+      const all = ["authorize", "grant_account", "grant_pt", "grant_yt", "pay"]
+      const a = user()
+      const b = user()
+      const ra = runFaucet({ account: a, manifest, ip: "11.0.0.1", now: T0, chain })
+      const rb = runFaucet({ account: b, manifest, ip: "11.0.0.2", now: T0, chain })
+      await vi.advanceTimersByTimeAsync(5 * 20_000 + 100)
+      await expect(ra).resolves.toEqual({ performed: all })
+      // b left the queue 100 s after its request started, past the 90 s budget: nothing was sent for it.
+      await expect(rb).resolves.toEqual({ error: "busy" })
+      expect(calls.some((c) => c.includes(b))).toBe(false)
+      // Refused before any write: its address and IP are not locked out.
+      const retry = runFaucet({ account: b, manifest, ip: "11.0.0.2", now: T0 + 100_000, chain })
+      await vi.advanceTimersByTimeAsync(5 * 20_000 + 100)
+      await expect(retry).resolves.toEqual({ performed: all })
     } finally {
       vi.useRealTimers()
     }

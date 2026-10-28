@@ -141,7 +141,12 @@ export function resetFaucetStateForTests(): void {
   queueTail = Promise.resolve()
 }
 
-const expired = (at: number, now: number) => now - at >= FAUCET_RATE_LIMIT_MS || at > now
+/**
+ * An entry leaves its rolling window a minute after its stamp. An entry stamped after `now` stays
+ * live: a request stamped earlier can be admitted after one stamped later (its reads were slower),
+ * and dropping the later entries would let extra runs into the same minute (round 2).
+ */
+const expired = (at: number, now: number) => now - at >= FAUCET_RATE_LIMIT_MS
 
 const keysOf = (account: string, ip: string) => [`addr:${account}`, `ip:${ip}`]
 
@@ -160,6 +165,12 @@ function takeKeySlots(account: string, ip: string, now: number): boolean {
 /** A request refused or failed before any transaction does not lock its address and IP out (R42c). */
 function releaseKeySlots(account: string, ip: string): void {
   for (const key of keysOf(account, ip)) lastAccepted.delete(key)
+}
+
+/** Gives back the run slot taken at `at`, for a run that ended up sending nothing. */
+function releaseRunSlot(at: number): void {
+  const i = runTimes.indexOf(at)
+  if (i >= 0) runTimes.splice(i, 1)
 }
 
 /**
@@ -212,9 +223,14 @@ export async function runFaucet(p: {
   account: string
   manifest: Manifest
   ip: string
+  /** The request's time, for the per-minute windows. */
   now: number
   chain?: FaucetChain
+  /** Elapsed-time clock for the queue deadline; `Date.now` by default (faked with the timers in tests). */
+  clock?: () => number
 }): Promise<FaucetOutcome> {
+  const clock = p.clock ?? (() => Date.now())
+  const startedAt = clock()
   const { account, manifest } = p
   if (!onboardingAvailable(manifest) || manifest.networkPassphrase !== PASSPHRASES[manifest.network]) {
     return { error: "network" }
@@ -284,7 +300,13 @@ export async function runFaucet(p: {
   }
   runTimes = runs
 
-  return enqueueRun(async () => {
+  return enqueueRun(async (): Promise<FaucetOutcome> => {
+    // The invocation that queued this run has likely timed out by now: send nothing (round 2).
+    if (clock() - startedAt > FAUCET_QUEUE_BUDGET_MS) {
+      releaseKeySlots(account, ip)
+      releaseRunSlot(now)
+      return { error: "busy" }
+    }
     const performed: FaucetStep[] = []
     for (const { step, write } of plan) {
       await send(step, write)
