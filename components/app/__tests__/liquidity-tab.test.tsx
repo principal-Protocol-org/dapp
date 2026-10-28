@@ -123,23 +123,21 @@ describe("Liquidity tab — add (SY only)", () => {
       args[0].value === 500_000_000n ? { amount_out: 245_000_000n, amount_in: 500_000_000n, fee_shares: 1_500_000n } : new Error("not the swap")
   }
 
-  it("shows the zap swap amount, then the LP from a quote of that swap", async () => {
-    disconnect(mocks)
+  it("would quote the zap swap amount, then the LP from a quote of that swap (kept for when it is offered again)", async () => {
     zapReads()
-    await renderUi(<LiquidityTab marketId="m1" />)
-    await openTab("Add SY only")
-    await enter("SY to add", "100")
+    const lines = await addLiquiditySyPanel(MARKET).quote!(poolMarket(), { amount: 1_000_000_000n }, { ledgerTime: null })
     expect(mocks.read).toHaveBeenCalledWith({ contractId: "CPOOL", functionName: "zap_swap_amount", args: i128(1_000_000_000n) })
-    expect(valueIn("Indicative", "SY swapped to PT")).toBe("50.0000 SY")
     // Hand-computed from market_pool:456-508 (see previews.test.ts).
-    expect(valueIn("Indicative", "LP received")).toBe("24.3920286 LP")
-    expect(valueIn("Indicative", "SY used")).toBe("99.9999999 SY")
-    expect(valueIn("Indicative", "PT refunded")).toBe("0.7055761 PT")
-    expect(valueIn("Indicative", "SY kept")).toBe("0.0000001 SY")
-    expect(screen.getByText(LP_NOTE)).toBeTruthy()
+    expect(lines.map((l) => [l.label, l.value])).toEqual([
+      ["SY swapped to PT", "50.0000 SY"],
+      ["LP received", "24.3920286 LP"],
+      ["SY used", "99.9999999 SY"],
+      ["PT refunded", "0.7055761 PT"],
+      ["SY kept", "0.0000001 SY"],
+    ])
   })
 
-  it("stays visible but is not offered (R47): the reason comes first, nothing is simulated, signing is off", async () => {
+  it("stays visible but is not offered (R47): the reason comes first, nothing is simulated or quoted, signing is off", async () => {
     zapReads()
     simulateReturns(mocks, [237_944_239n, 999_999_999n, 243_920_286n])
     await renderUi(<LiquidityTab marketId="m1" />)
@@ -152,8 +150,12 @@ describe("Liquidity tab — add (SY only)", () => {
     expect(screen.queryByText("Exact (simulated)")).toBeNull()
     expect(mocks.simulateInvocation.mock.calls.some(([p]) => p.invocation.functionName === "add_liquidity_single_sy")).toBe(false)
     expect(reviewButton("Add liquidity (SY only)").disabled).toBe(true)
-    // The indicative preview stays.
-    expect(valueIn("Indicative", "LP received")).toBe("24.3920286 LP")
+    // Nor quoted (M1): no pool read, and no "LP received" for an action that is never allowed.
+    expect(mocks.read.mock.calls.some(([call]) => call.functionName === "zap_swap_amount" || call.functionName === "quote_sy_for_pt")).toBe(false)
+    expect(screen.queryByText("LP received")).toBeNull()
+    // The pool context and the LP note stay.
+    expect(screen.getByText("Pool reserves")).toBeTruthy()
+    expect(screen.getByText(LP_NOTE)).toBeTruthy()
   })
 
   it("would show the exact LP and SY used from a simulated output (kept for when it is offered again)", () => {

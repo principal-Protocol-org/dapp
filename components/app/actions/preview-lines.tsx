@@ -1,7 +1,9 @@
 "use client"
 
 import { useEffect, useRef, useState } from "react"
+import { SIMULATION_DEBOUNCE_MS } from "@/hooks/use-simulation"
 import type { AccountState } from "@/lib/protocol/account-state"
+import { ACTION_META } from "@/lib/protocol/actions"
 import type { MarketState } from "@/lib/protocol/market-state"
 import type { IndicativeContext, PanelConfig, PanelInputs, PreviewLine } from "@/components/app/actions/panel-config"
 
@@ -33,8 +35,10 @@ export function safeLines(compute: () => PreviewLine[]): PreviewLine[] {
 const inputsKey = (inputs: PanelInputs) => `${inputs.amount ?? ""}|${inputs.secondaryAmount ?? ""}`
 
 /**
- * The config's async `quote` lines for the current inputs: re-read when the market data or the
- * account changes, and shown only for the inputs they were read for.
+ * The config's async `quote` lines for the current inputs: read 400 ms after the inputs stop
+ * changing (spec §11: on demand, debounced, like the exact simulation), re-read when the market data
+ * or the account changes, and shown only for the inputs they were read for. An action this release
+ * does not offer (R47) is never quoted: it would preview a result it can never give.
  */
 export function useQuoteLines(
   config: PanelConfig,
@@ -44,7 +48,7 @@ export function useQuoteLines(
 ): PreviewLine[] | null {
   const key = inputsKey(inputs)
   const [result, setResult] = useState<{ key: string; lines: PreviewLine[] } | null>(null)
-  const quote = config.quote
+  const quote = ACTION_META[config.action].disabled ? undefined : config.quote
   const account: AccountState | undefined = ctx.account
   const { amount, secondaryAmount } = inputs
   // The ledger time ticks every second; a quote is re-read with the market data, not per tick.
@@ -58,12 +62,15 @@ export function useQuoteLines(
     const values: PanelInputs = {}
     if (amount !== undefined) values.amount = amount
     if (secondaryAmount !== undefined) values.secondaryAmount = secondaryAmount
-    quote(ms, values, { account, ledgerTime: ledgerTime.current })
-      .then((lines) => !cancelled && setResult({ key, lines }))
-      .catch((error: unknown) => !cancelled && setResult({ key, lines: [{ label: "Quote unavailable", value: errorText(error) }] }))
+    const timer = setTimeout(() => {
+      quote(ms, values, { account, ledgerTime: ledgerTime.current })
+        .then((lines) => !cancelled && setResult({ key, lines }))
+        .catch((error: unknown) => !cancelled && setResult({ key, lines: [{ label: "Quote unavailable", value: errorText(error) }] }))
+    }, SIMULATION_DEBOUNCE_MS)
     return () => {
       cancelled = true
+      clearTimeout(timer)
     }
   }, [quote, ms, account, amount, secondaryAmount, key])
-  return result && result.key === key ? result.lines : null
+  return quote && result && result.key === key ? result.lines : null
 }
