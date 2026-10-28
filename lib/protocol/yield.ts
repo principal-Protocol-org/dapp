@@ -147,8 +147,8 @@ export function ptFixedReturn(p: { pt: bigint; ptPrice: bigint; secondsToMaturit
 /**
  * Estimated value of the pool's reserves in underlying units (display only, ruling R34):
  * `syReserve * exchangeRate / SCALE + ptReserve * ptPrice / oracleRate`, each term floored.
- * PT is priced at the pool's spot price (SY value per PT notional) and converted at the oracle
- * rate. Returns null when any input is not positive, so callers show "Unavailable".
+ * PT is valued in notional units at the pool's spot price, then converted to underlying at the
+ * oracle rate. Returns null when any input is not positive, so callers show "Unavailable".
  */
 export function poolValueInUnderlying(p: {
   syReserve: bigint;
