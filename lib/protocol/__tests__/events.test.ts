@@ -131,6 +131,13 @@ describe("fetchAccountHistory", () => {
     expect(entries).toHaveLength(1)
     expect(entries[0]).toMatchObject({ hash: "h1", ledger: 200, kind: "mint" })
     expect(entries[0].lines).toEqual(["Deposited 10 STA", "Minted 9.95 PT + 9.95 YT"])
+    expect(entries[0].facts).toEqual({ mint: { notional: 99_500_000n, syShares: 95_000_000n, feeShares: 500_000n } })
+  })
+
+  it("a buy_pt entry carries its raw sy_in and pt_out", async () => {
+    const { promise } = run([ev(200, "h1", C.pool, "buy_pt", addr(ACCOUNT), addr(ACCOUNT), i128(10_000_000n), i128(11_000_000n), i128(0n))])
+    const { entries } = await promise
+    expect(entries[0].facts).toEqual({ buyPt: { syIn: 10_000_000n, ptOut: 11_000_000n } })
   })
 
   it("buy_yt is recognised: a manager mint plus a pool sell_pt in one hash", async () => {

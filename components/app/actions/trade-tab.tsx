@@ -206,7 +206,7 @@ const tradePanels = (market: Market): PanelEntry[] => [
   { id: "sell_yt", label: "Sell YT", config: sellYtPanel(market) },
 ]
 
-export function TradeTab({ marketId }: { marketId: string }) {
+export function TradeTab({ marketId, initialPanel }: { marketId: string; initialPanel?: string }) {
   const panels = usePanels(marketId, tradePanels)
-  return <PanelGroup label="Trade" marketId={marketId} panels={panels} />
+  return <PanelGroup label="Trade" marketId={marketId} panels={panels} requestedId={initialPanel} />
 }
