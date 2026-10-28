@@ -7,6 +7,7 @@
  */
 import { Account, Asset, BASE_FEE, Operation, TransactionBuilder } from "@stellar/stellar-sdk"
 import type { AccountState } from "./account-state"
+import { readLive, toBool, type ContractReader } from "./reader"
 import {
   assertSignedTransactionMatchesReview,
   createRpcServer,
@@ -39,6 +40,46 @@ export function testAsset(m: Pick<Manifest, "markets">): Market["underlying"] {
   return m.markets[0].underlying
 }
 
+/**
+ * The one test asset every market shares (same code, issuer and SAC), or null when the markets use
+ * different underlyings (R44). Onboarding authorizes, trusts and pays a single asset, so it is only
+ * offered when there is one; the manifest schema itself is left open.
+ */
+export function sharedTestAsset(m: Pick<Manifest, "markets">): Market["underlying"] | null {
+  const [first, ...rest] = m.markets
+  if (!first) return null
+  const same = rest.every(
+    (x) => x.underlying.code === first.underlying.code && x.underlying.issuer === first.underlying.issuer && x.underlying.sac === first.underlying.sac,
+  )
+  return same ? first.underlying : null
+}
+
+/** Whether the account may hold one market's PT and YT (`Permissioning.is_allowed_for_asset`). */
+export type MarketPermission = { marketId: string; permPt: Live<boolean>; permYt: Live<boolean> }
+
+/** PT and YT permissions for every market: the faucet grants them all, so onboarding checks them all (R44). */
+export async function fetchMarketPermissions(reader: ContractReader, m: Manifest, account: string): Promise<MarketPermission[]> {
+  const allowed = (asset: string) =>
+    readLive<unknown, boolean>(
+      reader,
+      {
+        contractId: m.shared.permissioning,
+        functionName: "is_allowed_for_asset",
+        args: [
+          { type: "address", value: account },
+          { type: "address", value: asset },
+        ],
+      },
+      toBool,
+    )
+  return Promise.all(
+    m.markets.map(async (market) => {
+      const [permPt, permYt] = await Promise.all([allowed(market.contracts.pt), allowed(market.contracts.yt)])
+      return { marketId: market.marketId, permPt, permYt }
+    }),
+  )
+}
+
 export type OnboardingStepId = "fund" | "trustline" | "grant"
 
 const isTrue = (v: Live<boolean>) => v.status === "live" && v.value
@@ -47,17 +88,21 @@ const isTrue = (v: Live<boolean>) => v.status === "live" && v.value
  * The checklist, in order. A step is done only on positive live evidence: an unavailable read is
  * not done (running it again is harmless — Friendbot aside, which the dialog only offers when the
  * account is known to be missing). `grant` covers the whole faucet call, so it stays open while the
- * balance is below the top-up threshold too.
+ * balance is below the top-up threshold, and while any market's PT or YT is not allowed: pass every
+ * market's permissions in `markets` (R44); without it only `acc`'s own market is judged.
  */
 export function onboardingSteps(
   acc: AccountState,
-  decimals: number = DEFAULT_DECIMALS,
+  opts: { decimals?: number; markets?: { permPt: Live<boolean>; permYt: Live<boolean> }[] } = {},
 ): { id: OnboardingStepId; done: boolean }[] {
+  const decimals = opts.decimals ?? DEFAULT_DECIMALS
+  const markets = opts.markets ?? [{ permPt: acc.permPt, permYt: acc.permYt }]
   const fund = isTrue(acc.accountExists)
   const trustline = acc.trustline.status === "live" && acc.trustline.value !== "none"
   const authorized = (acc.trustline.status === "live" && acc.trustline.value === "authorized") || isTrue(acc.sacAuthorized)
   const funded = acc.underlying.status === "live" && acc.underlying.value >= wholeTokens(TEST_TOKEN_TOP_UP_BELOW, decimals)
-  const grant = authorized && isTrue(acc.permAllowed) && isTrue(acc.permPt) && isTrue(acc.permYt) && funded
+  const everyMarket = markets.length > 0 && markets.every((x) => isTrue(x.permPt) && isTrue(x.permYt))
+  const grant = authorized && isTrue(acc.permAllowed) && isTrue(acc.permPt) && isTrue(acc.permYt) && everyMarket && funded
   return [
     { id: "fund", done: fund },
     { id: "trustline", done: trustline },
@@ -186,7 +231,10 @@ export type FaucetErrorCode =
   | "rate_limited"
   | "no_trustline"
   | "invalid_account"
+  | "invalid_content_type"
+  | "cross_site"
   | "request_too_large"
+  | "busy"
   | "not_configured"
   | "failed"
 
@@ -199,7 +247,10 @@ const ERROR_CODES: readonly string[] = [
   "rate_limited",
   "no_trustline",
   "invalid_account",
+  "invalid_content_type",
+  "cross_site",
   "request_too_large",
+  "busy",
   "not_configured",
   "failed",
 ]
@@ -210,7 +261,12 @@ export async function requestTestTokens(p: { account: string; fetchImpl?: FetchL
   const fetchImpl = p.fetchImpl ?? fetch
   let response: Response
   try {
-    response = await fetchImpl("/api/faucet", { method: "POST", body: JSON.stringify({ account: p.account }) })
+    // A JSON content type: the route refuses anything else, so a cross-site form cannot post (minor 5).
+    response = await fetchImpl("/api/faucet", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ account: p.account }),
+    })
   } catch {
     return { error: "failed", message: "The faucet could not be reached." }
   }

@@ -6,7 +6,8 @@ import "server-only"
  * at request time; `dynamic` is not exported, as Cache Components removes it.
  *
  * Answers are plain error codes with short messages. Nothing from the chain or the RPC is echoed,
- * and server logs redact anything shaped like a secret key.
+ * and server logs redact anything shaped like a secret key. Only same-origin JSON requests are
+ * served: a cross-site page cannot make a visitor's browser trigger a run (minor 5).
  */
 import { StrKey } from "@stellar/stellar-sdk"
 import { activeManifest } from "@/lib/protocol/manifest-source"
@@ -24,10 +25,13 @@ const RETRY_AFTER_SECONDS = FAUCET_RATE_LIMIT_MS / 1_000
 
 const STATUS: Record<FaucetErrorCode, number> = {
   invalid_account: 400,
+  cross_site: 403,
+  invalid_content_type: 415,
   request_too_large: 413,
   network: 403,
   no_trustline: 409,
   rate_limited: 429,
+  busy: 503,
   failed: 502,
   not_configured: 503,
 }
@@ -35,10 +39,14 @@ const STATUS: Record<FaucetErrorCode, number> = {
 const MESSAGES: Record<FaucetErrorCode, string> = {
   invalid_account: "The request must be JSON with a Stellar account address (G…) in \"account\".",
   request_too_large: `The request body is larger than ${MAX_BODY_BYTES} bytes; send only { "account": "G…" }.`,
+  invalid_content_type: "The request must be sent as application/json.",
+  cross_site: "Get test tokens can only be requested from this app's own pages.",
   network: "Get test tokens runs only on Testnet or a local network.",
   no_trustline: "The account does not exist or has no trustline to the test asset yet. Fund it and add the trustline first.",
   rate_limited: `Get test tokens was used for this account or from this connection less than a minute ago, or is busy with other requests. Try again in ${RETRY_AFTER_SECONDS} seconds.`,
-  failed: "Get test tokens could not finish: a network transaction did not go through. Steps already done are kept; try again in a minute.",
+  busy: "The faucet is busy — try again in a minute.",
+  // Neutral: a failed read or a timeout is not necessarily a refused transaction (minor 6).
+  failed: "The faucet could not finish — try again in a minute. Steps already done are kept.",
   not_configured: "Get test tokens is not set up on this server.",
 }
 
@@ -48,7 +56,7 @@ function reply(body: FaucetResponse, status = 200, headers: Record<string, strin
 
 function refuse(error: FaucetErrorCode, extra: { step?: FaucetStep } = {}): Response {
   const body: FaucetResponse = { error, message: MESSAGES[error], ...extra }
-  if (error === "rate_limited") {
+  if (error === "rate_limited" || error === "busy") {
     return reply({ ...body, retryAfterSeconds: RETRY_AFTER_SECONDS }, STATUS[error], { "Retry-After": String(RETRY_AFTER_SECONDS) })
   }
   return reply(body, STATUS[error])
@@ -129,7 +137,25 @@ function redact(text: string): string {
   return text.replace(/S[A-Z2-7]{55}/g, "[redacted]")
 }
 
+/** Only `application/json` (parameters such as a charset allowed): a plain HTML form cannot send it. */
+function isJson(request: Request): boolean {
+  const type = request.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase()
+  return type === "application/json"
+}
+
+/**
+ * Browsers send `Sec-Fetch-Site`; anything but `same-origin` is another site (or a typed URL)
+ * driving the visitor's browser. Clients without the header (scripts, tests) are not browsers and
+ * meet every other check.
+ */
+function isCrossSite(request: Request): boolean {
+  const site = request.headers.get("sec-fetch-site")
+  return site !== null && site !== "same-origin"
+}
+
 export async function POST(request: Request): Promise<Response> {
+  if (isCrossSite(request)) return refuse("cross_site")
+  if (!isJson(request)) return refuse("invalid_content_type")
   const body = await readBody(request)
   if (body === "too_large") return refuse("request_too_large")
   const account = body === "unreadable" ? null : accountFrom(body.text)

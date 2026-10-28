@@ -10,9 +10,12 @@ import "server-only"
  * 4. `pay` — a classic payment of `FAUCET_AMOUNT` test tokens from the issuer, only below
  *    `FAUCET_TOP_UP_BELOW`.
  *
- * Grants and authorization are read first and skipped when present. Every transaction is sent
- * one at a time per instance, and sent again once on a stale sequence number. There is no proof
- * that the caller controls the address: on Testnet, granting any account is harmless (spec §9).
+ * Grants and authorization are read first and skipped when present. Runs are queued whole, one at a
+ * time per instance (first come, first finished), and a transaction is sent again once on a stale
+ * sequence number. Abuse limits, all per instance: one request per address and per IP per minute;
+ * 120 requests that reach the chain per minute; 4 runs that send transactions per minute; and no
+ * run is queued that would finish past the time budget (`busy`). There is no proof that the caller
+ * controls the address: on Testnet, granting any account is harmless (spec §9).
  */
 import { Account, Asset, Keypair, Operation, StrKey, Transaction, TransactionBuilder, xdr } from "@stellar/stellar-sdk"
 import { bytesToHex } from "@/lib/protocol/bytes"
@@ -22,7 +25,7 @@ import {
   TEST_TOKEN_AMOUNT,
   TEST_TOKEN_TOP_UP_BELOW,
   onboardingAvailable,
-  testAsset,
+  sharedTestAsset,
   wholeTokens,
   type FaucetStep,
 } from "@/lib/protocol/onboarding"
@@ -45,8 +48,14 @@ export const FAUCET_AMOUNT = TEST_TOKEN_AMOUNT
 export const FAUCET_TOP_UP_BELOW = TEST_TOKEN_TOP_UP_BELOW
 /** One accepted request per address and per IP in this window. */
 export const FAUCET_RATE_LIMIT_MS = 60_000
-/** At most this many accepted runs per instance in any rolling window, whatever the address or IP (R42). */
-export const FAUCET_GLOBAL_LIMIT_PER_MINUTE = 20
+/** At most this many runs that send transactions per instance per rolling minute (R42, lowered by R43). */
+export const FAUCET_RUNS_PER_MINUTE = 4
+/** At most this many requests that read from the chain per instance per rolling minute (R42c). */
+export const FAUCET_READS_PER_MINUTE = 120
+/** Estimated time of one run (up to five transactions, each confirmed), for admission (R43). */
+export const FAUCET_RUN_ESTIMATE_MS = 30_000
+/** A run is queued only if it should finish within this time, under the route's `maxDuration` (R43). */
+export const FAUCET_QUEUE_BUDGET_MS = 90_000
 
 export type TestAsset = Market["underlying"]
 
@@ -107,24 +116,34 @@ export class FaucetStepError extends Error {
   }
 }
 
-export type FaucetOutcome = { performed: FaucetStep[] } | { error: "network" | "rate_limited" | "no_trustline" }
+export type FaucetOutcome =
+  | { performed: FaucetStep[] }
+  | { error: "network" | "rate_limited" | "no_trustline" | "busy" | "not_configured" }
 
 // ---------------------------------------------------------------- per-instance state
 
 /** Last accepted request time, by `addr:<account>` and `ip:<ip>`. Best effort: one instance only. */
 const lastAccepted = new Map<string, number>()
-/** Times of the runs accepted in the current rolling window, oldest first: the global cap. */
-let acceptedTimes: number[] = []
-/** Tail of the transaction queue: each write starts once the previous one settled. */
+/** Times of the requests that read from the chain in the rolling window (R42c). */
+let readTimes: number[] = []
+/** Times of the runs that sent transactions in the rolling window (R42, R43). */
+let runTimes: number[] = []
+/** Runs queued or running, for admission (R43). */
+let pendingRuns = 0
+/** Tail of the run queue: each run starts once the previous one settled. */
 let queueTail: Promise<unknown> = Promise.resolve()
 
 export function resetFaucetStateForTests(): void {
   lastAccepted.clear()
-  acceptedTimes = []
+  readTimes = []
+  runTimes = []
+  pendingRuns = 0
   queueTail = Promise.resolve()
 }
 
 const expired = (at: number, now: number) => now - at >= FAUCET_RATE_LIMIT_MS || at > now
+
+const keysOf = (account: string, ip: string) => [`addr:${account}`, `ip:${ip}`]
 
 /**
  * Takes the slot for both keys, or refuses (a refused request does not restart the window).
@@ -132,42 +151,56 @@ const expired = (at: number, now: number) => now - at >= FAUCET_RATE_LIMIT_MS ||
  */
 function takeKeySlots(account: string, ip: string, now: number): boolean {
   for (const [key, at] of lastAccepted) if (expired(at, now)) lastAccepted.delete(key)
-  const keys = [`addr:${account}`, `ip:${ip}`]
+  const keys = keysOf(account, ip)
   if (keys.some((key) => lastAccepted.has(key))) return false
   for (const key of keys) lastAccepted.set(key, now)
   return true
 }
 
-/**
- * Takes one of the instance's global slots (R42), or refuses. Taken only once the reads passed and
- * a transaction will actually be sent (R42b): a junk address, a `no_trustline` or a nothing-to-do
- * request never spends one, so it cannot starve real runs. Check and take happen with no await in
- * between, so concurrent requests cannot both take the last slot.
- */
-function takeGlobalSlot(now: number): boolean {
-  acceptedTimes = acceptedTimes.filter((at) => !expired(at, now))
-  if (acceptedTimes.length >= FAUCET_GLOBAL_LIMIT_PER_MINUTE) return false
-  acceptedTimes.push(now)
-  return true
+/** A request refused or failed before any transaction does not lock its address and IP out (R42c). */
+function releaseKeySlots(account: string, ip: string): void {
+  for (const key of keysOf(account, ip)) lastAccepted.delete(key)
 }
 
-function serialized<T>(run: () => Promise<T>): Promise<T> {
+/**
+ * Takes a slot of a rolling per-instance budget, or refuses. Check and take happen with no await
+ * in between, so concurrent requests cannot both take the last slot.
+ */
+function takeSlot(times: number[], limit: number, now: number): number[] | null {
+  const live = times.filter((at) => !expired(at, now))
+  if (live.length >= limit) return null
+  live.push(now)
+  return live
+}
+
+/**
+ * Admits a run to the queue only if, behind the runs already queued or running, it should still
+ * finish within the time budget (R43); otherwise the caller answers `busy` at once, rather than
+ * hold a request that would time out while its transactions keep going.
+ */
+function admits(): boolean {
+  return (pendingRuns + 1) * FAUCET_RUN_ESTIMATE_MS <= FAUCET_QUEUE_BUDGET_MS
+}
+
+/** Queues one whole run: its transactions are sent back to back, before the next run's (R43). */
+function enqueueRun<T>(run: () => Promise<T>): Promise<T> {
+  pendingRuns += 1
   const result = queueTail.then(run, run)
   queueTail = result.catch(() => undefined)
-  return result
+  return result.finally(() => {
+    pendingRuns -= 1
+  })
 }
 
-/** Runs `write` in the queue; a stale sequence number gets exactly one more attempt, still in the queue. */
+/** Sends one transaction; a stale sequence number gets exactly one more attempt. */
 async function send(step: FaucetStep, write: () => Promise<void>): Promise<void> {
   try {
-    await serialized(async () => {
-      try {
-        await write()
-      } catch (error) {
-        if (!(error instanceof BadSequenceError)) throw error
-        await write()
-      }
-    })
+    try {
+      await write()
+    } catch (error) {
+      if (!(error instanceof BadSequenceError)) throw error
+      await write()
+    }
   } catch (error) {
     throw new FaucetStepError(step, error)
   }
@@ -188,10 +221,21 @@ export async function runFaucet(p: {
   }
   // The route validates the body; this is the last line before anything is signed.
   if (!StrKey.isValidEd25519PublicKey(account)) throw new Error("runFaucet needs a G… account address")
+  // Onboarding trusts, authorizes and pays one asset: every market must share it (R44).
+  const asset = sharedTestAsset(manifest)
+  if (!asset) return { error: "not_configured" }
   const chain = p.chain ?? createStellarFaucetChain(manifest)
-  if (!takeKeySlots(account, p.ip, p.now)) return { error: "rate_limited" }
 
-  const asset = testAsset(manifest)
+  const { ip, now } = p
+  if (!takeKeySlots(account, ip, now)) return { error: "rate_limited" }
+  // A cheap budget on the requests that reach the chain, checked before any RPC read (R42c).
+  const reads = takeSlot(readTimes, FAUCET_READS_PER_MINUTE, now)
+  if (!reads) {
+    releaseKeySlots(account, ip)
+    return { error: "rate_limited" }
+  }
+  readTimes = reads
+
   const assetGrants = [
     ...new Map(
       manifest.markets.flatMap((m) => [
@@ -200,11 +244,19 @@ export async function runFaucet(p: {
       ] as const),
     ),
   ]
-  const [state, allowed, assetsAllowed] = await Promise.all([
-    chain.readAccount(account, asset),
-    chain.isAllowed(account),
-    Promise.all(assetGrants.map(([contract]) => chain.isAllowedForAsset(account, contract))),
-  ])
+  let state: FaucetAccount
+  let allowed: boolean
+  let assetsAllowed: boolean[]
+  try {
+    ;[state, allowed, assetsAllowed] = await Promise.all([
+      chain.readAccount(account, asset),
+      chain.isAllowed(account),
+      Promise.all(assetGrants.map(([contract]) => chain.isAllowedForAsset(account, contract))),
+    ])
+  } catch (error) {
+    releaseKeySlots(account, ip)
+    throw error
+  }
   if (!state.exists || !state.trustline) return { error: "no_trustline" }
 
   // Only the missing steps, in order. Authorization first: an AUTH_REQUIRED asset cannot be paid
@@ -219,14 +271,27 @@ export async function runFaucet(p: {
     plan.push({ step: "pay", write: () => chain.pay(account, asset, wholeTokens(FAUCET_AMOUNT, asset.decimals)) })
   }
   if (plan.length === 0) return { performed: [] }
-  if (!takeGlobalSlot(p.now)) return { error: "rate_limited" }
 
-  const performed: FaucetStep[] = []
-  for (const { step, write } of plan) {
-    await send(step, write)
-    performed.push(step)
+  // Admission, the run cap and queueing happen with no await in between (R42b, R43).
+  if (!admits()) {
+    releaseKeySlots(account, ip)
+    return { error: "busy" }
   }
-  return { performed }
+  const runs = takeSlot(runTimes, FAUCET_RUNS_PER_MINUTE, now)
+  if (!runs) {
+    releaseKeySlots(account, ip)
+    return { error: "rate_limited" }
+  }
+  runTimes = runs
+
+  return enqueueRun(async () => {
+    const performed: FaucetStep[] = []
+    for (const { step, write } of plan) {
+      await send(step, write)
+      performed.push(step)
+    }
+    return { performed }
+  })
 }
 
 // ---------------------------------------------------------------- the real chain
@@ -288,7 +353,8 @@ export function createStellarFaucetChain(
   const admin = env.FAUCET_PERMISSIONING_ADMIN_SECRET?.trim()
     ? keypairFrom(env.FAUCET_PERMISSIONING_ADMIN_SECRET, "FAUCET_PERMISSIONING_ADMIN_SECRET")
     : issuer
-  const asset = testAsset(manifest)
+  const asset = sharedTestAsset(manifest)
+  if (!asset) throw new FaucetConfigError("The manifest's markets do not share one test asset; onboarding supports a single one.")
   if (issuer.publicKey() !== asset.issuer) {
     throw new FaucetConfigError("FAUCET_ISSUER_SECRET is not the key of the test asset issuer named in the manifest.")
   }

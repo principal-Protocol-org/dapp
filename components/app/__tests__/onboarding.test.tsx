@@ -1,14 +1,24 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
-import { cleanup, render, screen, within } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { AccountState } from "@/lib/protocol/account-state"
+import type { MarketPermission } from "@/lib/protocol/onboarding"
 import type { Live, WalletState } from "@/lib/protocol/types"
 import { accountState } from "./fixtures"
 
 const ADDRESS = "GBZXN7PIRZGNMHGA7MUUUF4GWPY5AYPV6LY4UV2GL6VJGIQRXFDNMADI"
 const ISSUER = "GCWFJKLE45TMVZS42TMIYKAORKGBWE74753YPOSCC5ESJR2G2UMBXBDB"
 const FRIENDBOT = "https://friendbot.example"
+const FAUCET_CALL = { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ account: ADDRESS }) }
+
+type TestMarket = { marketId: string; displayName: string; underlying: { code: string; issuer: string; sac: string; decimals: number }; contracts: object }
+const market = (marketId: string, code = "STA"): TestMarket => ({
+  marketId,
+  displayName: `${code} · ${marketId}`,
+  underlying: { code, issuer: ISSUER, sac: "CSAC", decimals: 7 },
+  contracts: {},
+})
 
 const mocks = vi.hoisted(() => ({
   manifest: {
@@ -17,22 +27,18 @@ const mocks = vi.hoisted(() => ({
     rpcUrl: "https://rpc.example",
     horizonUrl: "https://horizon.example",
     friendbotUrl: "https://friendbot.example" as string | undefined,
-    markets: [
-      {
-        marketId: "m1",
-        displayName: "STA · test",
-        underlying: { code: "STA", issuer: "GCWFJKLE45TMVZS42TMIYKAORKGBWE74753YPOSCC5ESJR2G2UMBXBDB", sac: "CSAC", decimals: 7 },
-        contracts: {},
-      },
-    ],
+    markets: [] as unknown[],
   },
   wallet: { status: "connected" } as WalletState,
   account: undefined as AccountState | undefined,
   accountPending: false,
+  perms: [] as MarketPermission[],
   sign: vi.fn(),
   addTrustline: vi.fn(),
   fetch: vi.fn(),
   order: [] as string[],
+  /** What the chain shows after the faucet ran (the refetched state). */
+  afterFaucet: undefined as (() => void) | undefined,
 }))
 
 vi.mock("@/lib/protocol/manifest-source", () => ({ activeManifest: () => mocks.manifest }))
@@ -41,6 +47,9 @@ vi.mock("@/hooks/use-wallet", () => ({
 }))
 vi.mock("@/hooks/use-account-state", () => ({
   useAccountState: () => ({ data: mocks.account, isPending: mocks.accountPending, stale: false }),
+}))
+vi.mock("@/hooks/use-market-permissions", () => ({
+  useMarketPermissions: () => ({ data: mocks.perms, isPending: false, stale: false }),
 }))
 // No real transaction is built under jsdom (R13): the trustline step is mocked; it still signs through the wallet.
 vi.mock("@/lib/protocol/onboarding", async (importOriginal) => ({
@@ -72,6 +81,13 @@ const ready = () =>
     permYt: live(true),
     underlying: live(5_000n * 10n ** 7n),
   })
+const perms = (granted: boolean, marketIds = (mocks.manifest.markets as TestMarket[]).map((m) => m.marketId)): MarketPermission[] =>
+  marketIds.map((marketId) => ({ marketId, permPt: live(granted), permYt: live(granted) }))
+/** The chain after a successful faucet run: everything granted and funded. */
+const onboarded = () => {
+  mocks.account = ready()
+  mocks.perms = perms(true)
+}
 
 function respond(url: string, init?: RequestInit): Response {
   if (url.startsWith(FRIENDBOT)) {
@@ -80,6 +96,7 @@ function respond(url: string, init?: RequestInit): Response {
   }
   if (url === "/api/faucet") {
     mocks.order.push(`faucet ${String(init?.body)}`)
+    mocks.afterFaucet?.()
     return Response.json({ performed: ["authorize", "grant_account", "grant_pt", "grant_yt", "pay"] })
   }
   throw new Error(`unexpected fetch ${url}`)
@@ -98,13 +115,18 @@ function renderDialog(props: { marketId?: string } = {}) {
   return { onOpenChange }
 }
 
+const faucetText = `faucet ${JSON.stringify({ account: ADDRESS })}`
+
 beforeEach(() => {
   mocks.manifest.network = "testnet"
   mocks.manifest.friendbotUrl = FRIENDBOT
+  mocks.manifest.markets = [market("m1")]
   mocks.wallet = { status: "connected", publicKey: ADDRESS, networkPassphrase: mocks.manifest.networkPassphrase }
   mocks.account = fresh()
+  mocks.perms = perms(false)
   mocks.accountPending = false
   mocks.order = []
+  mocks.afterFaucet = onboarded
   mocks.sign.mockImplementation(async () => "signed-xdr")
   mocks.addTrustline.mockImplementation(async (p: { sign: (xdr: string) => Promise<string> }) => {
     mocks.order.push("trustline")
@@ -127,15 +149,16 @@ describe("onboarding dialog", () => {
     const dialog = screen.getByRole("dialog", { name: "Get test tokens" })
     await user.click(within(dialog).getByRole("button", { name: "Start" }))
     expect(await within(dialog).findByText(/your account is ready/i)).toBeTruthy()
-    expect(mocks.order).toEqual(["friendbot", "trustline", `faucet ${JSON.stringify({ account: ADDRESS })}`])
+    expect(mocks.order).toEqual(["friendbot", "trustline", faucetText])
     expect(mocks.fetch).toHaveBeenCalledWith(`${FRIENDBOT}/?addr=${ADDRESS}`)
-    expect(mocks.fetch).toHaveBeenCalledWith("/api/faucet", { method: "POST", body: JSON.stringify({ account: ADDRESS }) })
+    expect(mocks.fetch).toHaveBeenCalledWith("/api/faucet", FAUCET_CALL)
     // The changeTrust is signed in Freighter, for the connected account.
     expect(mocks.sign).toHaveBeenCalledWith("unsigned-change-trust", ADDRESS)
     expect(mocks.addTrustline).toHaveBeenCalledWith(
       expect.objectContaining({ account: ADDRESS, asset: expect.objectContaining({ code: "STA", issuer: ISSUER }) }),
     )
     expect(client.invalidateQueries).toHaveBeenCalledWith({ queryKey: ["account", "testnet"] })
+    expect(within(dialog).getAllByText("Done")).toHaveLength(3)
   })
 
   it("skips completed steps", async () => {
@@ -146,18 +169,61 @@ describe("onboarding dialog", () => {
     expect(within(dialog).getAllByText("Done")).toHaveLength(2)
     await user.click(within(dialog).getByRole("button", { name: "Start" }))
     await within(dialog).findByText(/your account is ready/i)
-    expect(mocks.order).toEqual([`faucet ${JSON.stringify({ account: ADDRESS })}`])
+    expect(mocks.order).toEqual([faucetText])
     expect(mocks.addTrustline).not.toHaveBeenCalled()
   })
 
   it("has nothing to run for an onboarded, funded account", () => {
-    mocks.account = ready()
+    onboarded()
     renderDialog()
     const dialog = screen.getByRole("dialog")
     expect(within(dialog).getAllByText("Done")).toHaveLength(3)
     expect(within(dialog).getByText(/nothing left to do/i)).toBeTruthy()
     expect(within(dialog).queryByRole("button", { name: "Start" })).toBeNull()
     expect(mocks.fetch).not.toHaveBeenCalled()
+  })
+
+  it("judges the grant step from every market, not only the opened one (R44)", async () => {
+    const user = userEvent.setup()
+    mocks.manifest.markets = [market("m1"), market("m2")]
+    // The opened market m1 is fully granted; m2's PT is not.
+    mocks.account = ready()
+    mocks.perms = [
+      { marketId: "m1", permPt: live(true), permYt: live(true) },
+      { marketId: "m2", permPt: live(false), permYt: live(true) },
+    ]
+    renderDialog({ marketId: "m1" })
+    const dialog = screen.getByRole("dialog")
+    expect(within(dialog).queryByText(/nothing left to do/i)).toBeNull()
+    expect(within(dialog).getAllByText("Done")).toHaveLength(2)
+    // After the run, done-ness comes from the refetched state only: m2 still shows ungranted.
+    mocks.afterFaucet = undefined
+    await user.click(within(dialog).getByRole("button", { name: "Start" }))
+    expect(await within(dialog).findByText(/does not show every change yet/i)).toBeTruthy()
+    expect(within(dialog).queryByText(/your account is ready/i)).toBeNull()
+    expect(within(dialog).getByText("Sent — confirming")).toBeTruthy()
+    expect(mocks.order).toEqual([faucetText])
+  })
+
+  it("refuses when the markets do not share one test asset (R44)", () => {
+    mocks.manifest.markets = [market("m1"), market("m2", "STB")]
+    renderDialog()
+    const dialog = screen.getByRole("dialog")
+    expect(within(dialog).getByText(/supports a single test asset/i)).toBeTruthy()
+    expect(within(dialog).queryByRole("button", { name: "Start" })).toBeNull()
+  })
+
+  it("starts one run on a double click (minor 4)", async () => {
+    renderDialog()
+    const dialog = screen.getByRole("dialog")
+    const start = within(dialog).getByRole("button", { name: "Start" })
+    // Both clicks land before React re-renders (one act): the disabled state cannot stop the second.
+    act(() => {
+      fireEvent.click(start)
+      fireEvent.click(start)
+    })
+    expect(await within(dialog).findByText(/your account is ready/i)).toBeTruthy()
+    expect(mocks.order).toEqual(["friendbot", "trustline", faucetText])
   })
 
   it("hides Friendbot when the network has none, and names the cause when the account is missing", async () => {
@@ -169,12 +235,13 @@ describe("onboarding dialog", () => {
     expect(within(dialog).queryByText(/friendbot/i)).toBeNull()
     await user.click(within(dialog).getByRole("button", { name: "Start" }))
     await within(dialog).findByText(/your account is ready/i)
-    expect(mocks.order).toEqual(["trustline", `faucet ${JSON.stringify({ account: ADDRESS })}`])
+    expect(mocks.order).toEqual(["trustline", faucetText])
     expect(first.onOpenChange).not.toHaveBeenCalled()
 
     cleanup()
     mocks.order = []
     mocks.account = fresh()
+    mocks.perms = perms(false)
     renderDialog()
     dialog = screen.getByRole("dialog")
     expect(within(dialog).getByText(/does not exist on this network yet/i)).toBeTruthy()
@@ -194,7 +261,7 @@ describe("onboarding dialog", () => {
     expect(client.invalidateQueries).toHaveBeenCalledWith({ queryKey: ["account", "testnet"] })
   })
 
-  it("explains a faucet refusal in plain words", async () => {
+  it("explains a faucet refusal in plain words, with its retry delay", async () => {
     const user = userEvent.setup()
     mocks.account = accountState({ accountExists: live(true), trustline: live("unauthorized"), permAllowed: live(false) })
     mocks.fetch.mockImplementation(async () =>
@@ -203,7 +270,24 @@ describe("onboarding dialog", () => {
     renderDialog()
     const dialog = screen.getByRole("dialog")
     await user.click(within(dialog).getByRole("button", { name: "Start" }))
-    expect(await within(dialog).findByText(/less than a minute ago/i)).toBeTruthy()
+    expect(await within(dialog).findByText(/less than a minute ago.*Try again in 60 seconds/i)).toBeTruthy()
+  })
+
+  it("names the step a failed faucet run stopped at, in neutral words, and explains busy (minor 6, R43)", async () => {
+    const user = userEvent.setup()
+    mocks.account = accountState({ accountExists: live(true), trustline: live("unauthorized"), permAllowed: live(false) })
+    mocks.fetch.mockImplementation(async () => Response.json({ error: "failed", step: "grant_pt" }, { status: 502 }))
+    renderDialog()
+    const dialog = screen.getByRole("dialog")
+    await user.click(within(dialog).getByRole("button", { name: "Start" }))
+    const failed = await within(dialog).findByRole("alert")
+    expect(failed.textContent).toMatch(/^The faucet could not finish — try again/)
+    expect(failed.textContent).toMatch(/allowing your account on PT/)
+    expect(failed.textContent).not.toMatch(/transaction/)
+
+    mocks.fetch.mockImplementation(async () => Response.json({ error: "busy", retryAfterSeconds: 60 }, { status: 503 }))
+    await user.click(within(dialog).getByRole("button", { name: "Try again" }))
+    expect(await within(dialog).findByText(/The faucet is busy — try again in a minute/)).toBeTruthy()
   })
 
   it("asks for a connected wallet, and waits for the account read", () => {
@@ -244,7 +328,7 @@ describe("wallet menu", () => {
 
   it("offers Get test tokens on testnet, which opens the dialog", async () => {
     const user = userEvent.setup()
-    mocks.account = ready()
+    onboarded()
     renderButton()
     await user.click(screen.getByRole("button", { name: /GBZX.*MADI/ }))
     await user.click(await screen.findByRole("menuitem", { name: "Get test tokens" }))

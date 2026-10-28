@@ -1,12 +1,13 @@
 "use client"
 
-import { useState } from "react"
+import { useRef, useState } from "react"
 import { useQueryClient } from "@tanstack/react-query"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Skeleton } from "@/components/ui/skeleton"
 import { networkLabel } from "@/components/app/shell/network"
 import { useAccountState } from "@/hooks/use-account-state"
+import { useMarketPermissions } from "@/hooks/use-market-permissions"
 import { useWallet } from "@/hooks/use-wallet"
 import { activeManifest } from "@/lib/protocol/manifest-source"
 import {
@@ -15,29 +16,62 @@ import {
   onboardingAvailable,
   onboardingSteps,
   requestTestTokens,
-  testAsset,
+  sharedTestAsset,
   TEST_TOKEN_AMOUNT,
   TEST_TOKEN_TOP_UP_BELOW,
   type FaucetErrorCode,
+  type FaucetResponse,
+  type FaucetStep,
   type OnboardingStepId,
 } from "@/lib/protocol/onboarding"
+import type { Live, Market } from "@/lib/protocol/types"
 
 /** The server's refusals, in plain words with their fix. */
 const REFUSAL_TEXT: Record<FaucetErrorCode, string> = {
-  rate_limited: "Get test tokens was used for this account or from this connection less than a minute ago, or is busy with other requests. Try again in a minute.",
+  rate_limited:
+    "Get test tokens was used for this account or from this connection less than a minute ago, or is busy with other requests. Try again in a minute.",
+  busy: "The faucet is busy — try again in a minute.",
   no_trustline: "The faucet found no trustline to the test asset on your account yet. Wait a few seconds, then try again.",
   network: "Get test tokens runs only on Testnet or a local network.",
   invalid_account: "The faucet refused the account address. Reconnect your wallet, then try again.",
+  invalid_content_type: "The faucet refused the request from this page. Reload the page, then try again.",
+  cross_site: "The faucet refused the request from this page. Reload the page, then try again.",
   request_too_large: "The faucet refused the request as too large. Reload the page, then try again.",
   not_configured: "Get test tokens is not set up on this server yet. Ask the Principal team.",
-  failed: "The faucet could not finish: a network transaction did not go through. Steps already done are kept; try again in a minute.",
+  // Neutral: the cause may be a read, a timeout or a transaction (minor 6).
+  failed: "The faucet could not finish — try again in a minute. Steps already done are kept.",
 }
 
+/** Where a failed faucet run stopped, in plain words. */
+const STEP_TEXT: Record<FaucetStep, string> = {
+  authorize: "authorizing your trustline",
+  grant_account: "allowing your account",
+  grant_pt: "allowing your account on PT",
+  grant_yt: "allowing your account on YT",
+  pay: "sending the test tokens",
+}
+
+function refusalText(r: Extract<FaucetResponse, { error: string }>): string {
+  if (r.error === "failed" && r.step) {
+    return `The faucet could not finish — try again in a minute. It stopped while ${STEP_TEXT[r.step]}; steps already done are kept.`
+  }
+  if (r.error === "rate_limited" && r.retryAfterSeconds) {
+    return `Get test tokens was used for this account or from this connection less than a minute ago, or is busy with other requests. Try again in ${r.retryAfterSeconds} seconds.`
+  }
+  return REFUSAL_TEXT[r.error]
+}
+
+/**
+ * `sent`: steps this run finished, shown as "Sent — confirming" until the refetched chain state
+ * shows them done. Done-ness itself only ever comes from that state (R44), never from here.
+ */
 type Run =
   | { phase: "idle" }
-  | { phase: "running"; step: OnboardingStepId; completed: OnboardingStepId[] }
-  | { phase: "failed"; step: OnboardingStepId; message: string; completed: OnboardingStepId[] }
-  | { phase: "finished"; completed: OnboardingStepId[] }
+  | { phase: "running"; step: OnboardingStepId; sent: OnboardingStepId[] }
+  | { phase: "failed"; step: OnboardingStepId; message: string; sent: OnboardingStepId[] }
+  | { phase: "finished"; sent: OnboardingStepId[] }
+
+const UNREAD: Live<boolean> = { status: "unavailable", error: "not read yet" }
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -48,7 +82,8 @@ const thousands = (n: bigint) => n.toLocaleString("en-US")
 /**
  * The Get test tokens checklist (spec §9) for the connected wallet: Friendbot, a trustline the user
  * signs, then the server faucet. Each step is skipped when already done; the account reads are
- * refreshed after a run. Offered on Testnet and a local network only.
+ * refreshed after every step. Offered on Testnet and a local network only, and only when every
+ * market shares one test asset (R44).
  */
 export function OnboardingDialog({
   open,
@@ -73,42 +108,62 @@ export function OnboardingDialog({
 
 function Body({ marketId }: { marketId?: string }) {
   const m = activeManifest()
-  const asset = testAsset(m)
+  const asset = sharedTestAsset(m)
+  const network = networkLabel(m.network)
   return (
     <>
       <DialogHeader>
         <DialogTitle>Get test tokens</DialogTitle>
         <DialogDescription>
-          Prepares your wallet for {networkLabel(m.network)}: it can then hold {asset.code} and use every market. Test
-          assets have no real value.
+          {asset
+            ? `Prepares your wallet for ${network}: it can then hold ${asset.code} and use every market. Test assets have no real value.`
+            : `Prepares your wallet for ${network}. Test assets have no real value.`}
         </DialogDescription>
       </DialogHeader>
-      <Checklist marketId={marketId ?? m.markets[0].marketId} />
+      {asset ? (
+        <Checklist marketId={marketId ?? m.markets[0].marketId} asset={asset} />
+      ) : (
+        <p role="alert" className="text-sm text-ink">
+          Get test tokens supports a single test asset, and the markets of this deployment use different underlying assets.
+          Ask the Principal team for access.
+        </p>
+      )}
     </>
   )
 }
 
-function Checklist({ marketId }: { marketId: string }) {
+function Checklist({ marketId, asset }: { marketId: string; asset: Market["underlying"] }) {
   const { state } = useWallet()
   const address = state.status === "connected" ? state.publicKey : null
   if (!address) {
     return <p className="text-sm text-ink">Connect Freighter on {networkLabel(activeManifest().network)} to get test tokens.</p>
   }
   // A new account starts a new checklist.
-  return <AccountChecklist key={address} marketId={marketId} address={address} />
+  return <AccountChecklist key={address} marketId={marketId} address={address} asset={asset} />
 }
 
-function AccountChecklist({ marketId, address }: { marketId: string; address: string }) {
+function AccountChecklist({ marketId, address, asset }: { marketId: string; address: string; asset: Market["underlying"] }) {
   const m = activeManifest()
-  const asset = testAsset(m)
   const { sign } = useWallet()
   const account = useAccountState(marketId)
+  const permissions = useMarketPermissions(address)
   const queryClient = useQueryClient()
   const [run, setRun] = useState<Run>({ phase: "idle" })
+  // A double click must not start two runs: state updates land too late to disable the button.
+  const starting = useRef(false)
 
-  const refresh = () => void queryClient.invalidateQueries({ queryKey: ["account", m.network] })
+  /** Refetches every account read, the permissions included; resolves once they are back. */
+  const refresh = async () => {
+    try {
+      await queryClient.invalidateQueries({ queryKey: ["account", m.network] })
+    } catch {
+      // A failed refetch shows as unavailable in the reads themselves.
+    }
+  }
 
-  if (account.isPending && !account.data) return <Skeleton className="h-32 w-full" />
+  if ((account.isPending && !account.data) || (permissions.isPending && !permissions.data)) {
+    return <Skeleton className="h-32 w-full" />
+  }
   const data = account.data
   if (!data || account.stale || data.accountExists.status === "unavailable" || data.trustline.status === "unavailable") {
     const cause =
@@ -120,12 +175,14 @@ function AccountChecklist({ marketId, address }: { marketId: string; address: st
     return <p className="text-sm text-ink">Your account could not be read right now{cause}. Try again in a moment.</p>
   }
 
+  // Every market's PT and YT (R44). Unread permissions are not granted: the step stays open.
+  const marketPerms =
+    permissions.data && !permissions.stale ? permissions.data : m.markets.map(() => ({ permPt: UNREAD, permYt: UNREAD }))
   const hasFriendbot = Boolean(m.friendbotUrl)
-  const completed = run.phase === "idle" ? [] : run.completed
-  const steps = onboardingSteps(data, asset.decimals)
+  const sent = run.phase === "idle" ? [] : run.sent
+  const steps = onboardingSteps(data, { decimals: asset.decimals, markets: marketPerms })
     // Without a Friendbot the funding step is not offered; a missing account is refused below.
     .filter((s) => s.id !== "fund" || hasFriendbot)
-    .map((s) => ({ ...s, done: s.done || completed.includes(s.id) }))
   const missingAccount = !hasFriendbot && data.accountExists.value === false
   const todo = steps.filter((s) => !s.done)
   const running = run.phase === "running"
@@ -137,25 +194,32 @@ function AccountChecklist({ marketId, address }: { marketId: string; address: st
       return
     }
     const result = await requestTestTokens({ account: address })
-    if ("error" in result) throw new Error(REFUSAL_TEXT[result.error])
+    if ("error" in result) throw new Error(refusalText(result))
   }
 
   async function start() {
-    const done: OnboardingStepId[] = [...completed]
-    for (const step of todo) {
-      setRun({ phase: "running", step: step.id, completed: [...done] })
-      try {
-        await perform(step.id)
-      } catch (error) {
-        setRun({ phase: "failed", step: step.id, message: errorText(error), completed: [...done] })
-        // Earlier steps (or part of the faucet run) may have landed: show what is true now.
-        refresh()
-        return
+    if (starting.current) return
+    starting.current = true
+    const done: OnboardingStepId[] = []
+    try {
+      for (const step of todo) {
+        setRun({ phase: "running", step: step.id, sent: [...done] })
+        try {
+          await perform(step.id)
+        } catch (error) {
+          setRun({ phase: "failed", step: step.id, message: errorText(error), sent: [...done] })
+          // Earlier steps (or part of the faucet run) may have landed: show what is true now.
+          await refresh()
+          return
+        }
+        done.push(step.id)
+        // Done-ness comes from the chain: refetch after every step (R44).
+        await refresh()
       }
-      done.push(step.id)
+      setRun({ phase: "finished", sent: done })
+    } finally {
+      starting.current = false
     }
-    setRun({ phase: "finished", completed: done })
-    refresh()
   }
 
   const TEXT: Record<OnboardingStepId, { title: string; detail: string }> = {
@@ -177,6 +241,7 @@ function AccountChecklist({ marketId, address }: { marketId: string; address: st
     if (done) return "Done"
     if (run.phase === "running" && run.step === id) return "Working…"
     if (run.phase === "failed" && run.step === id) return "Failed"
+    if (sent.includes(id)) return "Sent — confirming"
     return "To do"
   }
 
@@ -206,7 +271,11 @@ function AccountChecklist({ marketId, address }: { marketId: string; address: st
       ) : null}
       {run.phase === "failed" ? <p role="alert">{run.message}</p> : null}
       {run.phase === "finished" ? (
-        <p role="status">Your account is ready. Balances and checks update within a few seconds.</p>
+        todo.length === 0 ? (
+          <p role="status">Your account is ready. Balances and checks update within a few seconds.</p>
+        ) : (
+          <p role="status">Sent. The network does not show every change yet; this updates within a few seconds.</p>
+        )
       ) : todo.length === 0 && run.phase === "idle" ? (
         <p role="status">
           Nothing left to do: your account is set up and holds at least {thousands(TEST_TOKEN_TOP_UP_BELOW)} {asset.code}.
