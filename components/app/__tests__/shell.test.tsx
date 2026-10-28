@@ -97,6 +97,16 @@ describe("wallet button", () => {
     expect(link.getAttribute("href")).toBe("https://www.freighter.app")
   })
 
+  it("without Freighter, Connect says to install it and turns into the install link (I1)", async () => {
+    mocks.adapter.connect.mockResolvedValue({ status: "not_installed" } satisfies WalletState)
+    const user = userEvent.setup()
+    render(<Providers><WalletButton /></Providers>)
+    await user.click(await screen.findByRole("button", { name: /connect wallet/i }))
+    expect(await screen.findByText("Freighter is not installed. Install Freighter, then connect again.")).toBeTruthy()
+    expect((await screen.findByRole("link", { name: /install freighter/i })).getAttribute("href")).toBe("https://www.freighter.app")
+    expect(screen.queryByText(/locked/i)).toBeNull()
+  })
+
   it("shows Connect, then the short address once connected", async () => {
     const user = userEvent.setup()
     render(<Providers><WalletButton /></Providers>)

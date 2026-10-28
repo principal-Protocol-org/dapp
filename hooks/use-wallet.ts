@@ -12,7 +12,8 @@ export type WalletApi = {
   disconnect(): void
   /**
    * Signs for `expectedSigner` on the manifest network. Rejects, before Freighter opens, when not
-   * connected or when the connected account is another one; Freighter is told which signer to enforce.
+   * connected or when the connected account is another one. Freighter is told which account must
+   * sign (its `address` option), and the signed envelope is checked against that account afterwards.
    */
   sign(xdr: string, expectedSigner: string): Promise<string>
 }
