@@ -124,7 +124,7 @@ export function mintPanel(market: Market): PanelConfig {
     market: (ms, { inputs, account }) => [
       {
         label: "Oracle rate",
-        value: showLive(ms.oracleRate, (r) => `${formatRate(r)} notional per ${code}`),
+        value: showLive(ms.oracleRate, (r) => `${formatRate(r)} notional per SY share`),
         hint: "PT and YT are counted in notional units: (SY − fee) × oracle rate.",
       },
       { label: "Tokenization fee rate", value: showLive(ms.fees.tokenizationBps, formatBps) },

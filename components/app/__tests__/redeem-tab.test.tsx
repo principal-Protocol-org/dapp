@@ -50,6 +50,8 @@ import { claimPanel, recombinePanel, redeemPanel, RedeemTab } from "../actions/r
 const PT_50 = 500_000_000n
 const YT_30 = 300_000_000n
 const INDICATIVE_LABEL = "Indicative — settles at the oracle rate of your redemption."
+const UNSETTLED_NOTE =
+  "Until the market is settled, the PT amount depends on the oracle rate when your transaction lands; it can only be lower than shown."
 const i128 = (value: bigint) => ({ type: "i128", value })
 const fieldValue = (label: string) => (screen.getByLabelText(label) as HTMLInputElement).value
 const inlineError = (label: string) => document.getElementById(`${screen.getByLabelText(label).id}-error`)?.textContent ?? null
@@ -92,6 +94,39 @@ describe("ActionTabs — Redeem is registered", () => {
     await openTab("Redeem")
     const list = screen.getByRole("tablist", { name: "Redeem actions" })
     expect(within(list).getAllByRole("tab").map((t) => t.textContent)).toEqual(["Recombine", "Claim yield", "Redeem"])
+  })
+})
+
+describe("Default tabs (fix round 1)", () => {
+  const outer = (name: string) => within(screen.getByRole("tablist", { name: "Market actions" })).getByRole("tab", { name })
+  const inner = (tab: string, name: string) => within(screen.getByRole("tablist", { name: `${tab} actions` })).getByRole("tab", { name })
+
+  it("after maturity, the page opens on the Redeem tab and its Redeem panel", async () => {
+    afterMaturity()
+    mocks.fetchMarketState.mockResolvedValue(settled())
+    await renderUi(<ActionTabs marketId="m1" />)
+    expect(outer("Redeem").getAttribute("aria-selected")).toBe("true")
+    expect(inner("Redeem", "Redeem").getAttribute("aria-selected")).toBe("true")
+    expect(screen.getByRole("button", { name: "Review Redeem at maturity" })).toBeTruthy()
+  })
+
+  it("after maturity, a tab the user picks stays picked", async () => {
+    afterMaturity()
+    await renderUi(<ActionTabs marketId="m1" />)
+    await openTab("Mint")
+    expect(outer("Mint").getAttribute("aria-selected")).toBe("true")
+    expect(screen.getByRole("button", { name: "Review Deposit" })).toBeTruthy()
+    await openTab("Redeem")
+    await openTab("Claim yield")
+    expect(inner("Redeem", "Claim yield").getAttribute("aria-selected")).toBe("true")
+  })
+
+  it("before maturity, the page opens on Mint (Deposit), and the Redeem tab on Recombine", async () => {
+    await renderUi(<ActionTabs marketId="m1" />)
+    expect(outer("Mint").getAttribute("aria-selected")).toBe("true")
+    expect(inner("Mint", "Deposit").getAttribute("aria-selected")).toBe("true")
+    await openTab("Redeem")
+    expect(inner("Redeem", "Recombine").getAttribute("aria-selected")).toBe("true")
   })
 })
 
@@ -250,8 +285,39 @@ describe("Redeem tab — redeem at maturity", () => {
     await renderUi(<RedeemTab marketId="m1" />)
     await openTab("Redeem")
     await enter("PT to redeem", "10")
-    expect(within(gateList()).getByText(/The oracle price is stale.*The first redemption settles the market, which needs a fresh price\./)).toBeTruthy()
+    expect(
+      within(gateList()).getByText(/The oracle price is stale.*The first redemption settles the market at the current oracle price, so that price must be fresh\./),
+    ).toBeTruthy()
     expect(reviewButton("Redeem at maturity").disabled).toBe(true)
+  })
+
+  it("frozen but unsettled, a stale oracle does not block: the contract records the frozen rate (R40)", async () => {
+    mocks.fetchMarketState.mockResolvedValue(unsettled({ ytFrozen: live(true), ytAccruedIndex: live(indexFor(11_000_000n)), oracleFresh: live(false) }))
+    simulateReturns(mocks, { underlying_from_pt: 1n, underlying_from_yt: 0n })
+    await renderUi(<RedeemTab marketId="m1" />)
+    await openTab("Redeem")
+    await enter("PT to redeem", "10")
+    expect(screen.getByText("Every check passes.")).toBeTruthy()
+    expect(screen.getByText(/^Fixed: the YT yield index froze at maturity/)).toBeTruthy()
+    expect(screen.queryByText(/stale/)).toBeNull()
+    expect(reviewButton("Redeem at maturity").disabled).toBe(false)
+  })
+
+  it("before settlement, a connected user is told the exact PT amount can only be lower when it lands", async () => {
+    mocks.fetchMarketState.mockResolvedValue(unsettled())
+    simulateReturns(mocks, { underlying_from_pt: 47_727_272n, underlying_from_yt: 0n })
+    await renderUi(<RedeemTab marketId="m1" />)
+    await openTab("Redeem")
+    await enter("PT to redeem", "50")
+    expect(valueIn("Exact (simulated)", "From PT")).toBe("4.7727272 STA")
+    expect(screen.getByText(UNSETTLED_NOTE)).toBeTruthy()
+  })
+
+  it("settled, or frozen, the PT amount is fixed: no such note", async () => {
+    mocks.fetchMarketState.mockResolvedValue(settled())
+    await renderUi(<RedeemTab marketId="m1" />)
+    await openTab("Redeem")
+    expect(screen.queryByText(UNSETTLED_NOTE)).toBeNull()
   })
 
   it("a stale oracle once settled does not block: the rate is already fixed", async () => {

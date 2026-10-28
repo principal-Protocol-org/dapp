@@ -338,14 +338,22 @@ function oracleGate(input: ActionInput, ctx: GateContext, g: Gates): void {
   if (a === "claim_yield" || a === "redeem") {
     // claim: `assert_oracle_fresh_unless_frozen` (principal_manager:858-863) skips the check only
     // once the settlement rate is stored, which also freezes the YT index. A YT index frozen by an
-    // `update_yield_index` without settlement still needs a fresh oracle. redeem: the first
-    // redemption settles the market, which needs a fresh price (`settle`, :746, :851).
+    // `update_yield_index` without settlement still needs a fresh oracle.
+    // redeem (R40): the first redemption settles the market, and `settle` checks freshness only
+    // while the YT index is not frozen (principal_manager:755-759); once frozen it records
+    // `last_oracle_rate` as it is, and the YT leg's `advance` returns before its own check
+    // (yt_token:616-623). So redeem needs a fresh oracle only when unsettled and unfrozen.
     const settled = g.need(m.settledRate, "whether the market is settled")
     if (settled === undefined) return
     needsFresh = settled === null
+    if (needsFresh && a === "redeem") {
+      const frozen = g.need(m.ytFrozen, "whether the YT yield index is frozen")
+      if (frozen === undefined) return
+      needsFresh = !frozen
+    }
     why =
       a === "redeem"
-        ? " The first redemption settles the market, which needs a fresh price."
+        ? " The first redemption settles the market at the current oracle price, so that price must be fresh."
         : " Claiming needs a fresh price until the market is settled."
   }
   if (!needsFresh) return

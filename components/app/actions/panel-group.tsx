@@ -1,6 +1,6 @@
 "use client"
 
-import { useMemo } from "react"
+import { useMemo, useState } from "react"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { ActionPanel } from "@/components/app/actions/action-panel"
 import type { PanelConfig } from "@/components/app/actions/panel-config"
@@ -23,12 +23,25 @@ export function usePanels(marketId: string, build: (market: Market) => PanelEntr
 
 /**
  * The panels of one action tab, one at a time behind a row of sub-tabs. Only the selected panel is
- * mounted, so only it reads quotes and simulates.
+ * mounted, so only it reads quotes and simulates. `defaultId` (the first panel when absent or
+ * unknown) applies until the user picks a panel, and may change meanwhile (e.g. at maturity).
  */
-export function PanelGroup({ label, marketId, panels }: { label: string; marketId: string; panels: PanelEntry[] }) {
+export function PanelGroup({
+  label,
+  marketId,
+  panels,
+  defaultId,
+}: {
+  label: string
+  marketId: string
+  panels: PanelEntry[]
+  defaultId?: string
+}) {
+  const [chosen, setChosen] = useState<string | null>(null)
   if (panels.length === 0) return null
+  const fallback = panels.some((p) => p.id === defaultId) ? defaultId! : panels[0].id
   return (
-    <Tabs defaultValue={panels[0].id} className="gap-4">
+    <Tabs value={chosen ?? fallback} onValueChange={setChosen} className="gap-4">
       <TabsList variant="line" aria-label={`${label} actions`} className="max-w-full justify-start overflow-x-auto">
         {panels.map((p) => (
           <TabsTrigger key={p.id} value={p.id} className="flex-none">

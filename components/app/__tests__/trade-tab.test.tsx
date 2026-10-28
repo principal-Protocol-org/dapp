@@ -110,8 +110,10 @@ describe("Trade tab — buy PT", () => {
     await enter("SY to spend", "100")
     expect(mocks.read).toHaveBeenCalledWith({ contractId: "CPOOL", functionName: "quote_sy_for_pt", args: i128(1_000_000_000n) })
     expect(valueIn("Indicative", "PT received")).toBe("106.6000 PT")
-    expect(valueIn("Indicative", "Swap fee")).toBe("0.3000 SY")
     expect(valueIn("Indicative", "Price impact")).toBe("0.50%")
+    // One swap fee line, from swapFeeRate (fix round 1: the quote's own fee line was a duplicate).
+    expect(screen.getAllByText("Swap fee")).toHaveLength(1)
+    expect(valueIn("Market (indicative)", "Swap fee")).toBe("0.3000 SY")
     // The exact price impact needs the exact quote.
     expect(within(section("Market (indicative)")).queryByText("Price impact")).toBeNull()
     expect(mocks.simulateInvocation).not.toHaveBeenCalled()
