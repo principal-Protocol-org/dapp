@@ -162,8 +162,10 @@ export function ActionPanel({ config, marketId }: { config: PanelConfig; marketI
 
   if (!market) return null
   return (
-    <Card>
-      <CardHeader>
+    // A size container: the header stacks while the panel is narrow (375 px, or a desktop column),
+    // so a long title such as "Add liquidity (SY only)" is never squeezed beside its description.
+    <Card className="@container">
+      <CardHeader className="flex-col gap-1 @lg:flex-row @lg:gap-4">
         <CardTitle>{meta.label}</CardTitle>
         {config.description ? <CardDescription>{config.description}</CardDescription> : null}
       </CardHeader>
