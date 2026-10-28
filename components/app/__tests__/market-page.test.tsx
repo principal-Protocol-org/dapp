@@ -53,7 +53,9 @@ vi.mock("@/components/app/onboarding/onboarding-dialog", () => ({
     open ? <div role="dialog" aria-label={`Get test tokens for ${marketId}`} /> : null,
 }))
 
+import { isValidElement, Suspense } from "react"
 import MarketPage, { generateStaticParams } from "../../../app/app/markets/[marketId]/page"
+import { MarketRoute } from "../../../app/app/markets/[marketId]/market-route"
 import { ComplianceCard } from "../market/compliance-card"
 import { MarketHeader } from "../market/market-header"
 import { MarketView } from "../market/market-view"
@@ -84,12 +86,22 @@ describe("market page route", () => {
   it("prerenders every manifest market", () => {
     expect(generateStaticParams()).toEqual([{ marketId: "m1" }])
   })
+  it("keeps the market id out of the shared App Shell: params are read inside Suspense (V3)", () => {
+    // A params promise that never settles: the page must not wait for it.
+    const params = new Promise<{ marketId: string }>(() => {})
+    const el = MarketPage({ params })
+    expect(isValidElement(el)).toBe(true)
+    if (!isValidElement<{ children: React.ReactElement<{ params: unknown }> }>(el)) return
+    expect(el.type).toBe(Suspense)
+    expect(el.props.children.type).toBe(MarketRoute)
+    expect(el.props.children.props.params).toBe(params)
+  })
   it("calls notFound for an unknown market id", async () => {
-    await expect(MarketPage({ params: Promise.resolve({ marketId: "nope" }) })).rejects.toThrow("NEXT_NOT_FOUND")
+    await expect(MarketRoute({ params: Promise.resolve({ marketId: "nope" }) })).rejects.toThrow("NEXT_NOT_FOUND")
     expect(mocks.notFound).toHaveBeenCalled()
   })
   it("renders the market for a known id", async () => {
-    const el = await MarketPage({ params: Promise.resolve({ marketId: "m1" }) })
+    const el = await MarketRoute({ params: Promise.resolve({ marketId: "m1" }) })
     expect(el.props.marketId).toBe("m1")
   })
 })
