@@ -16,6 +16,9 @@ import type { WalletState } from "@/lib/protocol/types"
 
 export const STALE = "Unavailable — last update failed"
 
+/** The connected account's data: no wallet connected, still loading, unreadable or stale, or live. */
+export type AccountStatus = "disconnected" | "loading" | "unavailable" | "live"
+
 export type GateInputs = {
   /** Every `GateContext` field but the simulation; null while any of it cannot be trusted. */
   base: Omit<GateContext, "simulation"> | null
@@ -27,6 +30,8 @@ export type GateInputs = {
   marketStatus: "loading" | "live" | "stale" | "error"
   /** The connected account's state; undefined unless it was read for that address and is not stale. */
   account?: AccountState
+  /** Why `account` is absent, if it is: a line that needs it says "loading", never "connect" (V6). */
+  accountStatus: AccountStatus
   ledgerTime: number | null
 }
 
@@ -97,5 +102,6 @@ export function useGateContext(marketId: string): GateInputs {
   }
 
   const marketStatus = market.stale ? "stale" : market.data ? "live" : market.isError ? "error" : "loading"
-  return { base, unavailable, wallet, ms, marketStatus, account, ledgerTime }
+  const accountStatus: AccountStatus = !connected ? "disconnected" : account ? "live" : accountQuery.isError ? "unavailable" : "loading"
+  return { base, unavailable, wallet, ms, marketStatus, account, accountStatus, ledgerTime }
 }

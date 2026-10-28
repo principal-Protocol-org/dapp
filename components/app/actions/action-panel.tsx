@@ -134,7 +134,7 @@ export function ActionPanel({ config, marketId }: { config: PanelConfig; marketI
     canReview && simInput && guards && ledgerTime !== null ? { ...draft, source: simInput.source, guards, deadline: deadlineAt(ledgerTime) } : null
 
   // --- Previews: exact from the simulation, else indicative from on-chain views.
-  const ctx = { account, ledgerTime }
+  const ctx = { account, accountStatus: gate.accountStatus, ledgerTime }
   const quoteLines = useQuoteLines(config, ms, inputs, ctx)
   const output = sim.output
   // Shown only alongside live market data, but computed from the simulation and the input alone.

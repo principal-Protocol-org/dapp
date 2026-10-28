@@ -186,6 +186,13 @@ describe("Redeem tab — claim yield", () => {
     expect(valueIn("Your yield (indicative)", "Pending yield")).toBe("Connect a wallet to see it")
   })
 
+  it("with a wallet whose account is still loading, says so instead (V6)", async () => {
+    mocks.accounts[A] = "pending"
+    await renderUi(<RedeemTab marketId="m1" />)
+    await openTab("Claim yield")
+    expect(valueIn("Your yield (indicative)", "Pending yield")).toBe("Loading…")
+  })
+
   it("nothing to claim is refused before signing", async () => {
     mocks.accounts[A] = accountState({ permYt: live(true), yt: live(0n) })
     simulateReturns(mocks, 0n)
@@ -263,6 +270,15 @@ describe("Redeem tab — redeem at maturity", () => {
     await openTab("Redeem")
     await enter("YT to redeem", "104.9475")
     expect(valueIn("Indicative", "From YT (net of the YT fee)")).toBe("4.0888636 STA")
+  })
+
+  it("previews the YT leg as loading, not connect-a-wallet, while the account loads (V6)", async () => {
+    mocks.accounts[A] = "pending"
+    mocks.fetchMarketState.mockResolvedValue(settled())
+    await renderUi(<RedeemTab marketId="m1" />)
+    await openTab("Redeem")
+    await enter("YT to redeem", "1")
+    expect(valueIn("Indicative", "From YT (net of the YT fee)")).toBe("Loading…")
   })
 
   it("shows the exact PT and YT legs and their total", async () => {
