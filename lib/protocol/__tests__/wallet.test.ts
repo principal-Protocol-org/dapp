@@ -93,9 +93,28 @@ describe("freighterAdapter.restore", () => {
     await expect(freighterAdapter.restore(manifest)).resolves.toEqual({ status: "locked" });
   });
 
-  it("restore reports locked when the wallet is not connected", async () => {
+  // freighter-api 4.x: `isConnected` answers whether the extension is installed; a locked wallet is
+  // installed and is caught later, by the empty address (I1).
+  it("restore reports not_installed when the extension is absent (isConnected false, no error)", async () => {
     m.isConnected.mockResolvedValue({ isConnected: false });
+    await expect(freighterAdapter.restore(manifest)).resolves.toEqual({ status: "not_installed" });
+    expect(m.isAllowed).not.toHaveBeenCalled();
+  });
+
+  it("restore reports locked when the extension is installed but gives no address", async () => {
+    m.isConnected.mockResolvedValue({ isConnected: true });
+    m.isAllowed.mockResolvedValue({ isAllowed: true });
+    m.getAddress.mockResolvedValue({ address: "" });
     await expect(freighterAdapter.restore(manifest)).resolves.toEqual({ status: "locked" });
+    expect(m.getNetwork).not.toHaveBeenCalled();
+  });
+
+  it("restore asks an injected legacy API when the package finds no extension, and fails closed to locked", async () => {
+    m.isConnected.mockResolvedValue({ isConnected: false });
+    const isConnected = vi.fn(async () => false);
+    (window as { freighterApi?: unknown }).freighterApi = { isConnected };
+    await expect(freighterAdapter.restore(manifest)).resolves.toEqual({ status: "locked" });
+    expect(isConnected).toHaveBeenCalled();
   });
 
   it("restore yields wrong_network when the Freighter passphrase differs from the manifest (R27)", async () => {
@@ -170,6 +189,12 @@ describe("freighterAdapter.connect", () => {
     });
   });
 
+  it("connect reports not_installed when the extension is absent, without prompting", async () => {
+    m.isConnected.mockResolvedValue({ isConnected: false });
+    await expect(freighterAdapter.connect(manifest)).resolves.toEqual({ status: "not_installed" });
+    expect(m.requestAccess).not.toHaveBeenCalled();
+  });
+
   it("connect reports locked when no address can be read after requestAccess errors", async () => {
     m.isConnected.mockResolvedValue({ isConnected: true });
     m.requestAccess.mockResolvedValue({ error: { code: 4, message: "denied" } });
@@ -215,7 +240,8 @@ describe("freighterAdapter.sign", () => {
   it("sign verifies the signed envelope against the reviewed XDR and returns it", async () => {
     m.signTransaction.mockResolvedValue({ signedTxXdr: "SIGNED", signerAddress: "GME" });
     await expect(freighterAdapter.sign("XDR", PASS, "GME")).resolves.toBe("SIGNED");
-    expect(m.signTransaction).toHaveBeenCalledWith("XDR", { networkPassphrase: PASS });
+    // Freighter is told which account must sign (M2); the checks below still run on its answer.
+    expect(m.signTransaction).toHaveBeenCalledWith("XDR", { networkPassphrase: PASS, address: "GME" });
     expect(m.assertMatch).toHaveBeenCalledWith({
       unsignedXdr: "XDR",
       signedXdr: "SIGNED",

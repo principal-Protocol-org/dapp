@@ -71,12 +71,19 @@ async function resolveState(
   return { status: "connected", publicKey, networkPassphrase }
 }
 
-/** Returns "ok", or the terminal state to report when the wallet is absent or locked. */
+/**
+ * Returns "ok", or the terminal state to report when the wallet is absent or cannot be confirmed.
+ * In freighter-api 4.x `isConnected` answers whether the extension is installed: `false` with no
+ * error means there is none (I1). A locked wallet is installed; `resolveState` reports it from the
+ * empty address it gives.
+ */
 async function probe(api: FreighterLike | undefined): Promise<WalletState | "ok"> {
   const pkg = await isConnected()
-  if (pkg.error && !api) return { status: "not_installed" }
-  // Fail closed: if the package errored and the legacy API cannot confirm, treat as locked.
-  const connected = pkg.error ? (api?.isConnected ? await api.isConnected() : false) : pkg.isConnected
+  if (!pkg.error && pkg.isConnected) return "ok"
+  if (!api) return { status: "not_installed" }
+  // An injected legacy API means an extension is there, so it alone decides; fail closed to locked
+  // when it cannot confirm.
+  const connected = api.isConnected ? await api.isConnected() : false
   return connected ? "ok" : { status: "locked" }
 }
 
@@ -125,7 +132,8 @@ export const freighterAdapter: WalletAdapter = {
   },
 
   async sign(unsignedXdr, passphrase, expectedSigner) {
-    const signed = await signTransaction(unsignedXdr, { networkPassphrase: passphrase })
+    // Freighter refuses up front to sign with another account (M2); its answer is checked anyway.
+    const signed = await signTransaction(unsignedXdr, { networkPassphrase: passphrase, address: expectedSigner })
     let signedXdr: string
     if (!signed.error) {
       // Report a wrong-account signature clearly, before the hash/signature-hint checks.

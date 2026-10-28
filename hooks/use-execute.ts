@@ -40,8 +40,9 @@ export function useExecute(): Execute {
   const [inFlight, setInFlight] = useState(0)
 
   // The signer the transaction was prepared for goes to the wallet, which refuses another live
-  // account before Freighter opens and has Freighter enforce it; executeReview/executeRestore then
-  // check the signed envelope against it again. The passphrase is the manifest's, in the wallet.
+  // account before Freighter opens and tells Freighter which account must sign; executeReview and
+  // executeRestore then check the signed envelope against it again. The passphrase is the
+  // manifest's, in the wallet.
   const sign = useCallback<SignTransaction>((xdr, _networkPassphrase, expectedSigner) => walletSign(xdr, expectedSigner), [walletSign])
 
   const refresh = useCallback(() => {

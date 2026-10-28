@@ -77,7 +77,7 @@ export function WalletButton() {
     const next = await connect()
     if (next.status === "rejected") toast.error(`Wallet not connected: ${next.reason}`)
     else if (next.status === "locked") toast.error("Freighter is locked. Unlock it, then connect again.")
-    else if (next.status === "not_installed") toast.error("Freighter is not installed.")
+    else if (next.status === "not_installed") toast.error("Freighter is not installed. Install Freighter, then connect again.")
   }
 
   switch (state.status) {
