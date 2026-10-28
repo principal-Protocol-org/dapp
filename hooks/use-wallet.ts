@@ -56,6 +56,8 @@ export function useWalletController(): WalletApi {
   useEffect(() => {
     void restore()
     const stop = freighterAdapter.watch(({ address, networkPassphrase }) => {
+      // connect() owns the state until it settles; a restore now would race the session flag.
+      if (stateRef.current.status === "connecting") return
       if (!address) {
         void restore()
         return
@@ -70,7 +72,12 @@ export function useWalletController(): WalletApi {
   const connect = useCallback(async () => {
     const id = ++requestId.current
     apply({ status: "connecting" })
-    const next = await freighterAdapter.connect(activeManifest())
+    let next: WalletState
+    try {
+      next = await freighterAdapter.connect(activeManifest())
+    } catch (error) {
+      next = { status: "rejected", reason: error instanceof Error ? error.message : "Wallet request failed" }
+    }
     if (id === requestId.current) apply(next)
     return next
   }, [apply])
