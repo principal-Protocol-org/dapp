@@ -19,7 +19,7 @@ export function Compliance() {
   return (
     <Section id="compliance" aria-labelledby="comp-title" className="pt-0">
       <Container>
-        <SectionHead label="Compliance architecture" title="Compliance inherited by design" titleId="comp-title">
+        <SectionHead label="Compliance architecture" title="Compliance inherited by design." titleId="comp-title">
           <p className="lead">Principal extends the underlying RWA&apos;s native compliance controls to PT/YT markets.</p>
         </SectionHead>
         <div className="grid grid-cols-1 gap-6 min-[861px]:grid-cols-3">
