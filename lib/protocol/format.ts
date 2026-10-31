@@ -20,7 +20,7 @@ export function parseDecimalToRaw(value: string, decimals: number): bigint | nul
   return BigInt(`${whole}${fraction.padEnd(decimals, "0")}`);
 }
 
-function fixed(raw: bigint, decimals: number, fractionDigits: number, trim: boolean): string {
+function fixed(raw: bigint, decimals: number, fractionDigits: number, trim: boolean, group = false): string {
   const negative = raw < 0n;
   const abs = negative ? -raw : raw;
   const base = 10n ** BigInt(decimals);
@@ -29,7 +29,8 @@ function fixed(raw: bigint, decimals: number, fractionDigits: number, trim: bool
   // Truncate (never round up) so a displayed value never exceeds the real one.
   fraction = fraction.slice(0, fractionDigits).padEnd(fractionDigits, "0");
   if (trim) fraction = fraction.replace(/0+$/, "");
-  const body = fraction ? `${whole}.${fraction}` : `${whole}`;
+  const wholeText = group ? whole.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",") : `${whole}`;
+  const body = fraction ? `${wholeText}.${fraction}` : wholeText;
   // Avoid "-0" when the truncated magnitude is zero.
   const isZero = whole === 0n && !/[1-9]/.test(fraction);
   return negative && !isZero ? `-${body}` : body;
@@ -37,10 +38,16 @@ function fixed(raw: bigint, decimals: number, fractionDigits: number, trim: bool
 
 /**
  * Display-only amount: truncates (does not round) the fraction to `maxFraction` digits and
- * trims trailing zeros. Negative values get a leading "-". Never feeds math.
+ * trims trailing zeros. Negative values get a leading "-". Never feeds math. `group: true` adds
+ * English thousands separators ("194,898.9917"); the default is ungrouped.
  */
-export function formatAmount(raw: bigint, decimals: number, maxFraction = 4): string {
-  return fixed(raw, decimals, Math.min(maxFraction, decimals), true);
+export function formatAmount(
+  raw: bigint,
+  decimals: number,
+  maxFraction = 4,
+  options: { group?: boolean } = {},
+): string {
+  return fixed(raw, decimals, Math.min(maxFraction, decimals), true, options.group === true);
 }
 
 /**

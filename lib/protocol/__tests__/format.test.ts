@@ -27,6 +27,12 @@ describe("parseDecimalToRaw", () => {
 });
 
 describe("formatAmount", () => {
+  it("groups thousands", () => {
+    expect(formatAmount(1_948_989_917_000n, 7, 4, { group: true })).toBe("194,898.9917");
+    expect(formatAmount(-1_948_989_917_000n, 7, 4, { group: true })).toBe("-194,898.9917");
+    expect(formatAmount(10_000_000_000_000n, 7, 4, { group: true })).toBe("1,000,000");
+    expect(formatAmount(1_948_989_917_000n, 7)).toBe("194898.9917");
+  });
   it("formats and trims", () => {
     expect(formatAmount(1_049_475_000n, 7)).toBe("104.9475");
     expect(formatAmount(10_000_000n, 7)).toBe("1");
