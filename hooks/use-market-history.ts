@@ -1,11 +1,10 @@
 "use client"
 
 import { useQuery } from "@tanstack/react-query"
-import type { MarketHistory, Range, Spark } from "@/lib/server/history"
+import type { MarketHistory, Range, Spark } from "@/lib/app/history-types"
 
 export const HISTORY_SERIES_REFETCH_MS = 60_000
 
-// Types only: `lib/server/history` is never bundled into the browser (type imports are erased).
 export type { MarketHistory, Range, Spark }
 export type Sparks = { sparks: Record<string, Spark>; stale: boolean }
 

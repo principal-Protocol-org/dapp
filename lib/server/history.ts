@@ -20,19 +20,9 @@ import { poolValueInUnderlying } from "@/lib/protocol/yield"
 import type { Sql } from "./db"
 import { SLOT_SECONDS } from "./recorder"
 
-export type Range = "7d" | "30d" | "90d" | "all"
+import type { MarketHistory, Range, Series, Spark } from "@/lib/app/history-types"
+export type { MarketHistory, Range, Series, Spark }
 export const RANGES: readonly Range[] = ["7d", "30d", "90d", "all"]
-export type Series = { at: number; value: number | null }[]
-export type MarketHistory = {
-  fixedApy: Series
-  underlyingApy7d: Series
-  liquidity: Series
-  latestAt: number | null
-  stale: boolean
-  /** Window of the latest underlying-APY point (shorter than 7 d near the start of history); null without one. */
-  underlyingWindowSeconds: number | null
-}
-export type Spark = { points: Series; changePts: number | null; stale: boolean }
 
 /** A latest snapshot older than this (vs the server clock) marks the history stale. */
 export const STALE_SECONDS = 3600
