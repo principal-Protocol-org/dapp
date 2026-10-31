@@ -92,8 +92,8 @@ vi.mock("@/hooks/use-ledger-clock", () => ({
 }))
 vi.mock("@/hooks/use-manifest-findings", () => ({ useManifestFindings: () => mocks.findings }))
 // The action panels have their own tests (mint-tab, trade-tab, …); here only their mounting matters.
-vi.mock("@/components/app/actions/action-tabs", () => ({
-  ActionTabs: ({ marketId }: { marketId: string }) => <section aria-label={`Actions for ${marketId}`} />,
+vi.mock("@/components/app/trade/trade-panel", () => ({
+  TradePanel: ({ marketId }: { marketId: string }) => <section aria-label={`Actions for ${marketId}`} />,
 }))
 // The dialog has its own tests (onboarding.test.tsx); here only its wiring matters.
 vi.mock("@/components/app/onboarding/onboarding-dialog", () => ({

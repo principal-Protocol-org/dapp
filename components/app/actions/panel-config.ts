@@ -4,9 +4,13 @@ import type { AccountState } from "@/lib/protocol/account-state"
 import type { ActionId, ActionInput, GuardValues } from "@/lib/protocol/actions"
 import type { ActionOutput } from "@/lib/protocol/guards"
 import type { MarketState } from "@/lib/protocol/market-state"
+import type { ContractReader } from "@/lib/protocol/reader"
 import type { Live } from "@/lib/protocol/types"
 
 export type { FieldKey }
+
+/** The quote reads' RPC reader, built from the resolved manifest when a quote runs. */
+export type ReaderFor = () => ContractReader
 
 /** One amount input. Its value becomes `ActionInput.amount` or `ActionInput.secondaryAmount`. */
 export type FieldSpec = {

@@ -1,7 +1,7 @@
 "use client"
 
 import { showLive } from "@/components/app/live"
-import type { PanelConfig, PreviewLine } from "@/components/app/actions/panel-config"
+import type { PanelConfig, PreviewLine, ReaderFor } from "@/components/app/actions/panel-config"
 import { PanelGroup, usePanels, type PanelEntry } from "@/components/app/actions/panel-group"
 import { outputOf, plain, tokens } from "@/components/app/actions/panel-lines"
 import { formatFeeRate } from "@/lib/protocol/format"
@@ -9,7 +9,6 @@ import type { MarketState, PoolStateView } from "@/lib/protocol/market-state"
 import { previewAddLiquidity, previewAddLiquiditySingleSy, previewRemoveLiquidity } from "@/lib/protocol/previews"
 import { quoteSyForPt, zapSwapAmount } from "@/lib/protocol/quotes"
 import { allLive, createRpcReader } from "@/lib/protocol/reader"
-import type { ReaderFor } from "@/components/app/actions/trade-tab"
 import type { Manifest, Market } from "@/lib/protocol/types"
 
 /**

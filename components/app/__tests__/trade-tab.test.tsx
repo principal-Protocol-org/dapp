@@ -42,7 +42,6 @@ import {
   teardown,
   valueIn,
 } from "./panel-harness"
-import { ActionTabs } from "../actions/action-tabs"
 import { buyPtPanel, buyYtPanel, sellPtPanel, sellYtPanel, TradeTab } from "../actions/trade-tab"
 
 const SY_1000 = 10_000_000_000n
@@ -67,20 +66,6 @@ beforeEach(() => {
   mocks.fetchMarketState.mockResolvedValue(tradeMarket())
 })
 afterEach(teardown)
-
-describe("ActionTabs — Trade is registered", () => {
-  it("enables the Trade tab, which shows the four trade panels", async () => {
-    await renderUi(<ActionTabs marketId="m1" />)
-    await openTab("Trade")
-    expect(screen.getByRole("tablist", { name: "Trade actions" })).toBeTruthy()
-    expect(within(screen.getByRole("tablist", { name: "Trade actions" })).getAllByRole("tab").map((t) => t.textContent)).toEqual([
-      "Buy PT",
-      "Sell PT",
-      "Buy YT",
-      "Sell YT",
-    ])
-  })
-})
 
 describe("Trade tab — buy PT", () => {
   it("shows the price, the price impact against pt_price, the swap fee from swapFeeRate and the minimum PT", async () => {

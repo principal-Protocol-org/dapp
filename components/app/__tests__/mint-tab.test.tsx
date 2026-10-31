@@ -30,7 +30,6 @@ vi.mock("@/lib/protocol/review", async (orig) => ({
 
 import { A, MARKET } from "./panel-mocks"
 import { disconnect, enter, gateList, installDefaults, openTab, renderUi, reviewButton, simulateReturns, teardown, valueIn } from "./panel-harness"
-import { ActionTabs } from "../actions/action-tabs"
 import { depositPanel, mintPanel, MintTab, withdrawPanel } from "../actions/mint-tab"
 
 const STA_100 = 1_000_000_000n
@@ -45,17 +44,6 @@ function input(action: ActionInput["action"], amount: bigint): ActionInput {
 
 beforeEach(() => installDefaults(mocks))
 afterEach(teardown)
-
-describe("ActionTabs (R8)", () => {
-  it("groups the actions in Mint, Trade, Liquidity and Redeem, every one built (T15–T18), Mint first", async () => {
-    await renderUi(<ActionTabs marketId="m1" />)
-    const tabs = screen.getAllByRole("tab").filter((t) => t.closest("[aria-label='Market actions']"))
-    expect(tabs.map((t) => t.textContent)).toEqual(["Mint", "Trade", "Liquidity", "Redeem"])
-    expect(tabs.map((t) => (t as HTMLButtonElement).disabled)).toEqual([false, false, false, false])
-    expect(tabs[0].getAttribute("aria-selected")).toBe("true")
-    expect(screen.getByRole("button", { name: "Review Deposit" })).toBeTruthy()
-  })
-})
 
 describe("Mint tab — deposit", () => {
   it("offers deposit, withdraw and mint from the underlying only: there is no mint from SY", async () => {

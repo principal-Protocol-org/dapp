@@ -1,7 +1,7 @@
 "use client"
 
 import { showLive } from "@/components/app/live"
-import type { PanelConfig, PreviewLine } from "@/components/app/actions/panel-config"
+import type { PanelConfig, PreviewLine, ReaderFor } from "@/components/app/actions/panel-config"
 import { PanelGroup, usePanels, type PanelEntry } from "@/components/app/actions/panel-group"
 import { amountOf, outputOf, plain, tokens } from "@/components/app/actions/panel-lines"
 import { formatFeeRate, formatRate } from "@/lib/protocol/format"
@@ -10,7 +10,7 @@ import { FEE_RATE_SCALE, ceilDiv } from "@/lib/protocol/math"
 import { previewBuyYt, previewMint, previewSellYt } from "@/lib/protocol/previews"
 import { effectivePrice, formatImpact, priceImpactPpm, ptSpot, spotAtScale, ytSpot, type Spot } from "@/lib/protocol/prices"
 import { quoteBuyExactPt, quotePtForSy, quoteSyForPt } from "@/lib/protocol/quotes"
-import { allLive, createRpcReader, type ContractReader } from "@/lib/protocol/reader"
+import { allLive, createRpcReader } from "@/lib/protocol/reader"
 import type { Live, Manifest, Market } from "@/lib/protocol/types"
 
 /**
@@ -20,9 +20,6 @@ import type { Live, Manifest, Market } from "@/lib/protocol/types"
  */
 
 type Token = "PT" | "YT"
-
-/** The quote reads' RPC reader, built from the resolved manifest when a quote runs. */
-export type ReaderFor = () => ContractReader
 
 /** One PT or YT in SY at the pool's spot: `pt_price` at the rate the pool values SY with. */
 const spotOf = (ms: MarketState, token: Token): Live<Spot> =>

@@ -2,7 +2,7 @@
 
 import { useState } from "react"
 import { useManifestFindings } from "@/hooks/use-manifest-findings"
-import { ActionTabs } from "@/components/app/actions/action-tabs"
+import { TradePanel } from "@/components/app/trade/trade-panel"
 import { ComplianceCard } from "@/components/app/market/compliance-card"
 import { MarketChartBox } from "@/components/app/market/market-chart-box"
 import { MarketHeader } from "@/components/app/market/market-header"
@@ -32,9 +32,8 @@ export function MarketView({ marketId }: { marketId: string }) {
           <MarketStats marketId={marketId} />
           <MarketChartBox marketId={marketId} />
         </div>
-        {/* Placeholder until the trade panel replaces the action tabs (R2-7). */}
         <div data-testid="market-right" className="grid min-w-0 gap-6">
-          <ActionTabs marketId={marketId} />
+          <TradePanel marketId={marketId} />
           <ComplianceCard marketId={marketId} onGetTestTokens={openOnboarding} />
           <SafetyCard marketId={marketId} />
         </div>
