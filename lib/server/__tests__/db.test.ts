@@ -28,14 +28,21 @@ describe("toQuery", () => {
 })
 
 describe("the pool", () => {
-  it("bounds every wait: connecting, the query on the client, the statement on the server (R2-40)", async () => {
+  it("bounds connecting and each query on the client, with no startup-parameter timeouts (R2-40, R2-41)", async () => {
     process.env.DATABASE_URL = "postgres://u:p@localhost:5432/db"
     try {
       await sql`select 1`
     } finally {
       delete process.env.DATABASE_URL
     }
-    expect(pg.options[0]).toMatchObject({ connectionTimeoutMillis: 2_000, query_timeout: 5_000, statement_timeout: 5_000 })
+    // A Neon compute waking from scale-to-zero can take over 2 s; pages stay bounded by the 1.5 s
+    // registry race.
+    expect(pg.options[0]).toMatchObject({ connectionTimeoutMillis: 5_000, query_timeout: 5_000 })
+    // pg sends these in the startup packet, which Neon's pooler (PgBouncer) refuses.
+    expect(pg.options[0]).not.toHaveProperty("statement_timeout")
+    expect(pg.options[0]).not.toHaveProperty("options")
+    expect(pg.options[0]).not.toHaveProperty("idle_in_transaction_session_timeout")
+    expect(pg.options[0]).not.toHaveProperty("lock_timeout")
   })
 })
 

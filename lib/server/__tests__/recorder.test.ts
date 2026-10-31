@@ -219,6 +219,20 @@ describe("recordAll and the registry (R2-4)", () => {
     logged.mockRestore()
   })
 
+  it("a refresh that fails after its budget ran out is logged, not left as an unhandled rejection (R2-41)", async () => {
+    const { sql } = makeSql()
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {})
+    const result = await recordAll({
+      ...base(makeReader(), sql),
+      registryBudgetMs: 10,
+      refreshRegistry: () => new Promise((_, reject) => setTimeout(() => reject(new Error("getEvents: 503")), 40)),
+    })
+    expect(result).toEqual({ recorded: 1, failed: [] })
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    expect(logged.mock.calls.map((c) => String(c[0]))).toContainEqual(expect.stringMatching(/after its time budget.*getEvents: 503/))
+    logged.mockRestore()
+  })
+
   it("a missing DATABASE_URL during the refresh is thrown, not logged", async () => {
     const { sql } = makeSql()
     const refreshRegistry = async () => {

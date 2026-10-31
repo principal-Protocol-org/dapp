@@ -31,9 +31,11 @@ function getPool(): Pool {
   if (pool) return pool
   const connectionString = process.env.DATABASE_URL
   if (!connectionString) throw new DatabaseConfigError()
-  // Every wait is bounded (R2-40): pages fall back to the manifest seeds only if a slow database
-  // fails instead of hanging. The client gives up on a query after 5 s; the server ends it too.
-  pool = new Pool({ connectionString, max: 5, connectionTimeoutMillis: 2_000, query_timeout: 5_000, statement_timeout: 5_000 })
+  // Every wait is bounded on the client (R2-40, R2-41): connecting (5 s: a Neon compute waking from
+  // scale-to-zero can take over 2 s; pages are bounded anyway by the 1.5 s registry race) and each
+  // query (5 s). No server-side timeout: pg sends `statement_timeout` / `options` in the startup
+  // packet, and Neon's pooler (PgBouncer) refuses any startup parameter but a few session basics.
+  pool = new Pool({ connectionString, max: 5, connectionTimeoutMillis: 5_000, query_timeout: 5_000 })
   attachDatabasePool(pool)
   return pool
 }
