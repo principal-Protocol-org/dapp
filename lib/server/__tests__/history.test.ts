@@ -65,7 +65,14 @@ describe("getHistory", () => {
 
   it("empty history returns latestAt null", async () => {
     const h = await getHistory(fakeSql([]), POOL, "30d", opts)
-    expect(h).toEqual({ fixedApy: [], underlyingApy7d: [], liquidity: [], latestAt: null, stale: true })
+    expect(h).toEqual({
+      fixedApy: [],
+      underlyingApy7d: [],
+      liquidity: [],
+      latestAt: null,
+      stale: true,
+      underlyingWindowSeconds: null,
+    })
   })
 
   it("underlying APY uses only the preceding window and liquidity follows the pool value", async () => {
@@ -84,12 +91,47 @@ describe("getHistory", () => {
         sy_reserve: "20000000",
         sy_rate: "10000000",
         oracle_rate: i === 0 ? "10000000" : "10001000",
+        w_at: String(rows[0].at), // earliest snapshot within 7 days
+        w_rate: "10000000",
       }))) as unknown as Sql
     const h = await getHistory(sql, POOL, "7d", opts)
     expect(h.underlyingApy7d[0].value).toBeNull() // one point: no window yet
     const last = h.underlyingApy7d[h.underlyingApy7d.length - 1].value as number
     expect(last).toBeCloseTo(Math.pow(1.0001, 365) - 1, 6)
     expect(h.liquidity[0].value).toBe(3) // (2 + 1) underlying units
+    expect(h.underlyingWindowSeconds).toBe(DAY) // the window of the latest point, for the UI label
+  })
+
+  it("is linear and capped: 50 000 rows give at most 1 000 points per series, fast", async () => {
+    const start = Math.floor(NOW / SLOT_SECONDS) - 8640
+    const rows = Array.from({ length: 50_000 }, (_, i) => {
+      const slot = start + Math.floor((i * 8640) / 50_000)
+      return {
+        pool: POOL, slot: String(slot), at: String(slot * SLOT_SECONDS), implied_rate: "400000",
+        pt_price: "9500000", pt_reserve: "1000000000", sy_reserve: "2000000000", sy_rate: "10000000",
+        oracle_rate: "10000000", w_at: String(slot * SLOT_SECONDS - DAY), w_rate: "9999000",
+      }
+    })
+    const sql = (async () => rows) as unknown as Sql
+    const t0 = performance.now()
+    const h = await getHistory(sql, POOL, "90d", opts)
+    expect(performance.now() - t0).toBeLessThan(500)
+    for (const series of [h.fixedApy, h.underlyingApy7d, h.liquidity]) {
+      expect(series.length).toBeLessThanOrEqual(1000)
+      expect(series.length).toBeGreaterThan(500)
+    }
+  })
+
+  it("asks the database for buckets of k slots and the 7-day window start", async () => {
+    const calls: string[] = []
+    const sql = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
+      calls.push(strings.join("?") + "|" + values.join(","))
+      return []
+    }) as unknown as Sql
+    await getHistory(sql, POOL, "90d", opts)
+    expect(calls[0]).toContain("distinct on (pool, bucket)")
+    expect(calls[0]).toContain("lateral")
+    expect(calls[0].split("|")[1].startsWith("9,")).toBe(true) // k = ceil(8640 / 990) = 9
   })
 })
 
@@ -97,7 +139,7 @@ describe("getSparks", () => {
   it("30-day spark change in points", async () => {
     const rows = [
       row(0, { rate: "400000" }),
-      row(1, { rate: "500000" }),
+      row(3, { rate: "500000" }),
       row(0, { pool: "COTHER", rate: "400000" }),
     ]
     const sparks = await getSparks(fakeSql(rows), [POOL, "COTHER"], { [POOL]: MATURITY, COTHER: MATURITY }, opts.now)
@@ -109,8 +151,19 @@ describe("getSparks", () => {
     expect(sparks.COTHER.changePts).toBeNull() // one point
   })
 
+  it("stale is per pool, from that pool's latest snapshot", async () => {
+    const rows = [
+      { ...row(0, { at: NOW - 100 }), pool: POOL },
+      { ...row(0, { at: NOW - 7200 }), pool: "COTHER" },
+    ]
+    const sparks = await getSparks(fakeSql(rows), [POOL, "COTHER", "CNONE"], { [POOL]: MATURITY, COTHER: MATURITY, CNONE: MATURITY }, opts.now)
+    expect(sparks[POOL].stale).toBe(false)
+    expect(sparks.COTHER.stale).toBe(true)
+    expect(sparks.CNONE.stale).toBe(true)
+  })
+
   it("returns an empty spark for a pool with no rows", async () => {
     const sparks = await getSparks(fakeSql([]), [POOL], { [POOL]: MATURITY }, opts.now)
-    expect(sparks[POOL]).toEqual({ points: [], changePts: null })
+    expect(sparks[POOL]).toEqual({ points: [], changePts: null, stale: true })
   })
 })
