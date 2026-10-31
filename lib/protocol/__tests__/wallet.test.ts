@@ -233,7 +233,7 @@ describe("freighterAdapter.sign", () => {
 
   it("sign refuses a different signer", async () => {
     m.signTransaction.mockResolvedValue({ signedTxXdr: "SIGNED", signerAddress: "GOTHER" });
-    await expect(freighterAdapter.sign("XDR", PASS, "GEXPECTED")).rejects.toThrow("Freighter signed with");
+    await expect(freighterAdapter.sign("XDR", PASS, "GEXPECTED")).rejects.toThrow("Your wallet signed with");
     expect(m.assertMatch).not.toHaveBeenCalled();
   });
 

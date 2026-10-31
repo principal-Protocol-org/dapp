@@ -90,20 +90,20 @@ describe("testnet banner", () => {
 })
 
 describe("wallet button", () => {
-  it("links to Freighter when it is not installed", async () => {
+  it("links to Varial when it is not installed", async () => {
     mocks.adapter.restore.mockResolvedValue({ status: "not_installed" })
     render(<Providers><WalletButton /></Providers>)
-    const link = await screen.findByRole("link", { name: /install freighter/i })
-    expect(link.getAttribute("href")).toBe("https://www.freighter.app")
+    const link = await screen.findByRole("link", { name: /install varial/i })
+    expect(link.getAttribute("href")).toBe("https://varialwallet.com")
   })
 
-  it("without Freighter, Connect says to install it and turns into the install link (I1)", async () => {
+  it("without Varial, Connect says to install it and turns into the install link (I1)", async () => {
     mocks.adapter.connect.mockResolvedValue({ status: "not_installed" } satisfies WalletState)
     const user = userEvent.setup()
     render(<Providers><WalletButton /></Providers>)
     await user.click(await screen.findByRole("button", { name: /connect wallet/i }))
-    expect(await screen.findByText("Freighter is not installed. Install Freighter, then connect again.")).toBeTruthy()
-    expect((await screen.findByRole("link", { name: /install freighter/i })).getAttribute("href")).toBe("https://www.freighter.app")
+    expect(await screen.findByText("Varial is not installed. Install Varial, then connect again.")).toBeTruthy()
+    expect((await screen.findByRole("link", { name: /install varial/i })).getAttribute("href")).toBe("https://varialwallet.com")
     expect(screen.queryByText(/locked/i)).toBeNull()
   })
 

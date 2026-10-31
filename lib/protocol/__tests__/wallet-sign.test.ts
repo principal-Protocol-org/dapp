@@ -26,7 +26,7 @@ describe("freighterAdapter.sign with real transactions", () => {
     const expected = Keypair.random();
     const xdr = build(expected.publicKey()).toXDR();
     signTransactionMock.mockResolvedValue({ signedTxXdr: xdr, signerAddress: Keypair.random().publicKey() });
-    await expect(freighterAdapter.sign(xdr, PASS, expected.publicKey())).rejects.toThrow("Freighter signed with");
+    await expect(freighterAdapter.sign(xdr, PASS, expected.publicKey())).rejects.toThrow("Your wallet signed with");
   });
 
   it("accepts a matching signed transaction from the expected account", async () => {

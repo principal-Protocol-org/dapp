@@ -68,7 +68,7 @@ export function RestoreBanner({
               Cancel
             </Button>
           </div>
-          {flow.step === "signing" ? <p className="text-ink-muted">Waiting for Freighter…</p> : null}
+          {flow.step === "signing" ? <p className="text-ink-muted">Waiting for your wallet…</p> : null}
         </>
       ) : null}
       {flow.step === "failed" ? <TxNoticeView notice={flow.notice} /> : null}

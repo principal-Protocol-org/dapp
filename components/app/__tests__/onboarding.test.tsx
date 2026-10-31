@@ -295,7 +295,7 @@ describe("onboarding dialog", () => {
   it("asks for a connected wallet, and waits for the account read", () => {
     mocks.wallet = { status: "disconnected" }
     renderDialog()
-    expect(within(screen.getByRole("dialog")).getByText(/connect freighter/i)).toBeTruthy()
+    expect(within(screen.getByRole("dialog")).getByText(/connect your wallet/i)).toBeTruthy()
     cleanup()
     mocks.wallet = { status: "connected", publicKey: ADDRESS, networkPassphrase: mocks.manifest.networkPassphrase }
     mocks.account = undefined

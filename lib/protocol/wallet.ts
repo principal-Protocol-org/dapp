@@ -139,7 +139,7 @@ export const freighterAdapter: WalletAdapter = {
       // Report a wrong-account signature clearly, before the hash/signature-hint checks.
       if (signed.signerAddress !== expectedSigner) {
         throw new Error(
-          `Freighter signed with ${signed.signerAddress || "a different account"} instead of the connected wallet (${expectedSigner}). Refusing to submit.`,
+          `Your wallet signed with ${signed.signerAddress || "a different account"} instead of the connected account (${expectedSigner}). Refusing to submit.`,
         )
       }
       signedXdr = signed.signedTxXdr
