@@ -42,6 +42,7 @@ export function LineChart({
   latestAt,
   now,
   unit = "percent",
+  spread: spreadPair,
 }: {
   series: ChartSeries[]
   range: Range
@@ -50,6 +51,8 @@ export function LineChart({
   latestAt: number | null
   now: number
   unit?: "percent" | "amount"
+  /** Names the pair whose difference the tooltip shows as "Fixed premium" (APY charts only). */
+  spread?: { fixed: string; variable: string }
 }) {
   const tipId = useId()
   const [active, setActive] = useState<number | null>(null)
@@ -63,7 +66,14 @@ export function LineChart({
   let lo = Math.min(...all)
   let hi = Math.max(...all)
   if (unit === "amount") lo = Math.min(lo, 0)
-  if (hi === lo) hi = lo + 1
+  // A flat series is padded symmetrically for drawing only; the axis then shows just the real value.
+  const flat = hi === lo
+  if (flat) {
+    const pad = unit === "percent" ? 0.005 : Math.max(1, Math.abs(lo) * 0.01)
+    lo -= pad
+    hi += pad
+  }
+  const flatValue = (lo + hi) / 2
   const x = (at: number) => (t1 === t0 ? M.l : M.l + ((at - t0) / (t1 - t0)) * (W - M.l - M.r))
   const y = (v: number) => H - M.b - ((v - lo) / (hi - lo)) * (H - M.t - M.b)
 
@@ -85,16 +95,18 @@ export function LineChart({
         })
         .join(", ")}`
 
-  const first = series[0]
-  const second = series[1]
+  const fixedSeries = spreadPair && unit === "percent" ? series.find((s) => s.id === spreadPair.fixed) : undefined
+  const variableSeries = spreadPair && unit === "percent" ? series.find((s) => s.id === spreadPair.variable) : undefined
   const spread =
-    first && second && at !== undefined ? (() => {
-      const a = valueAt(first, at)
-      const b = valueAt(second, at)
-      return a === null || b === null ? null : (a - b) * 100
-    })() : null
+    fixedSeries && variableSeries && at !== undefined
+      ? (() => {
+          const a = valueAt(fixedSeries, at)
+          const b = valueAt(variableSeries, at)
+          return a === null || b === null ? null : (a - b) * 100
+        })()
+      : null
 
-  const ticks = [lo, (lo + hi) / 2, hi]
+  const ticks = flat ? [flatValue] : [lo, (lo + hi) / 2, hi]
   const tipLeft = at === undefined ? 0 : Math.min(Math.max(((x(at)) / W) * 100, 18), 82)
 
   return (
@@ -122,7 +134,7 @@ export function LineChart({
           ))}
         </div>
       </div>
-      {stale && !empty ? (
+      {stale && !empty && latestAt !== null ? (
         <p role="status" className="rounded-md bg-accent px-3 py-2 text-xs text-accent-foreground">
           {`History is ${ageH} h old`}
         </p>
