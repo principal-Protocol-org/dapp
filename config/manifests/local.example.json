@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "network": "local",
   "networkPassphrase": "Standalone Network ; February 2017",
   "rpcUrl": "http://localhost:8000/rpc",
@@ -8,9 +8,27 @@
   "generatedAt": "2026-01-01T00:00:00Z",
   "sourceCommit": "local-example",
   "shared": {
+    "router": "CAFAUCQKBIFAUCQKBIFAUCQKBIFAUCQKBIFAUCQKBIFAUCQKBIFAUTSM",
+    "oracle": "CAFQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQX4KO",
+    "permissioning": "CABAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAFNSZ",
     "riskControl": "CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526",
-    "permissioning": "CABAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAFNSZ"
+    "factory": "CAJRMFYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQXN2A"
   },
+  "wasmHashes": {},
+  "routerFunctions": [
+    "wrap_and_mint",
+    "unwrap",
+    "swap_sy_for_pt",
+    "swap_pt_for_sy",
+    "swap_sy_for_yt",
+    "swap_yt_for_sy",
+    "add_liquidity",
+    "add_liquidity_single_sy",
+    "remove_liquidity",
+    "recombine",
+    "redeem_at_maturity",
+    "claim_yield"
+  ],
   "markets": [
     {
       "marketId": "local-example",
