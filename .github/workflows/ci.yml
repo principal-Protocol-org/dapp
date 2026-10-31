@@ -20,6 +20,6 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm build
-      - name: Fail if faucet secrets reach the client bundle
+      - name: Fail if server secrets (faucet, database, cron, QStash) reach the client bundle
         # Fails when the client bundle is missing too, so the check can never pass vacuously (R12).
-        run: test -d .next/static && ! grep -rq FAUCET_ .next/static
+        run: test -d .next/static && ! grep -rqE 'FAUCET_|DATABASE_URL|CRON_SECRET|QSTASH_' .next/static
