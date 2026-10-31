@@ -44,3 +44,6 @@ next-env.d.ts
 
 # generated local manifest (scripts/ensure-local-manifest.mjs, scripts/dev-stack/deploy.sh)
 /config/manifests/local.json
+
+# superpowers workspaces (SDD ledgers, brainstorm mock-ups)
+.superpowers/
