@@ -77,7 +77,7 @@ export function AmountField({
         </Button>
       </div>
       {error ? (
-        <p id={errorId} className="text-sm text-negative">
+        <p id={errorId} className="text-sm text-negative wrap-anywhere">
           {error}
         </p>
       ) : null}

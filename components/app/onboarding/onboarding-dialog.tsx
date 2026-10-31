@@ -170,7 +170,7 @@ function AccountChecklist({ marketId, address, asset }: { marketId: string; addr
         : data?.trustline.status === "unavailable"
           ? ` (${data.trustline.error})`
           : ""
-    return <p className="text-sm text-ink">Your account could not be read right now{cause}. Try again in a moment.</p>
+    return <p className="text-sm text-ink wrap-anywhere">Your account could not be read right now{cause}. Try again in a moment.</p>
   }
 
   // Every market's PT and YT (R44). Like the account read, an unread or stale permission read

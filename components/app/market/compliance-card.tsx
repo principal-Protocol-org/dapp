@@ -37,7 +37,7 @@ function yesNo(v: boolean) {
 function MarketModel({ compliance }: { compliance: Live<MarketCompliance> | undefined }) {
   if (!compliance) return <Skeleton className="h-16 w-full" />
   if (compliance.status === "unavailable") {
-    return <p>{UNAVAILABLE}: the underlying asset&apos;s compliance model could not be read ({compliance.error}).</p>
+    return <p className="wrap-anywhere">{UNAVAILABLE}: the underlying asset&apos;s compliance model could not be read ({compliance.error}).</p>
   }
   const c = compliance.value
   if (c.kind === "sep57") {
@@ -110,7 +110,7 @@ export function ComplianceCard({
             <ul className="grid gap-3">
               {items.map((item) => (
                 <li key={item.id} className="grid gap-1 border-t border-line pt-3 first:border-t-0 first:pt-0">
-                  <p>
+                  <p className="wrap-anywhere">
                     <span className="font-semibold">{STATUS_TEXT[item.status]}.</span> {item.message}
                   </p>
                   {item.fix ? (
