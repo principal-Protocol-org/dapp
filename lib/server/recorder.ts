@@ -18,7 +18,7 @@ import "server-only"
 import { readLive, toBigint, type ContractReader } from "@/lib/protocol/reader"
 import { fetchMarketState } from "@/lib/protocol/market-state"
 import type { Live, Manifest, Market } from "@/lib/protocol/types"
-import type { Sql } from "./db"
+import { DatabaseConfigError, type Sql } from "./db"
 
 export const SLOT_SECONDS = 900
 const MAX_ATTEMPTS = 3
@@ -168,6 +168,8 @@ export async function recordAll(deps: RecordDeps): Promise<RecordResult> {
         returning pool`
       result.recorded += rows.length
     } catch (error) {
+      // Misconfiguration is not a per-market failure: the route answers 503 instead of 200.
+      if (error instanceof DatabaseConfigError) throw error
       const message = describeDbError(error)
       console.error(`recorder: ${pool} not recorded: ${message}`)
       result.failed.push({ pool, error: message })

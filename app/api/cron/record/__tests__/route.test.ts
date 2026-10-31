@@ -3,9 +3,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 vi.mock("server-only", () => ({}))
 
-const mocks = vi.hoisted(() => ({ recordAll: vi.fn(), verify: vi.fn() }))
+const mocks = vi.hoisted(() => ({
+  recordAll: vi.fn(),
+  verify: vi.fn(),
+  DatabaseConfigError: class DatabaseConfigError extends Error {},
+}))
 vi.mock("@/lib/server/recorder", () => ({ recordAll: mocks.recordAll }))
-vi.mock("@/lib/server/db", () => ({ sql: vi.fn(), DatabaseConfigError: class extends Error {} }))
+vi.mock("@/lib/server/db", () => ({ sql: vi.fn(), DatabaseConfigError: mocks.DatabaseConfigError }))
 vi.mock("@upstash/qstash", () => ({
   Receiver: class {
     verify = mocks.verify
@@ -31,6 +35,7 @@ describe("GET /api/cron/record", () => {
     process.env.CRON_SECRET = SECRET
     process.env.QSTASH_CURRENT_SIGNING_KEY = "current"
     process.env.QSTASH_NEXT_SIGNING_KEY = "next"
+    process.env.QSTASH_RECORD_URL = "https://app.example/api/cron/record"
     mocks.recordAll.mockResolvedValue({ recorded: 1, failed: [] })
     mocks.verify.mockReset()
     mocks.recordAll.mockClear()
@@ -39,6 +44,8 @@ describe("GET /api/cron/record", () => {
     delete process.env.CRON_SECRET
     delete process.env.QSTASH_CURRENT_SIGNING_KEY
     delete process.env.QSTASH_NEXT_SIGNING_KEY
+    delete process.env.QSTASH_RECORD_URL
+    delete process.env.VERCEL_PROJECT_PRODUCTION_URL
   })
 
   it("401 without credentials", async () => {
@@ -83,5 +90,46 @@ describe("GET /api/cron/record", () => {
   it("401 for a signature when the QStash keys are not configured", async () => {
     delete process.env.QSTASH_CURRENT_SIGNING_KEY
     expect((await call({ "upstash-signature": "sig" })).status).toBe(401)
+  })
+
+  it("verifies the signature against the configured URL", async () => {
+    mocks.verify.mockResolvedValue(true)
+    await call({ "upstash-signature": "sig" })
+    expect(mocks.verify).toHaveBeenCalledWith(expect.objectContaining({ url: "https://app.example/api/cron/record" }))
+  })
+
+  it("falls back to the Vercel production domain", async () => {
+    delete process.env.QSTASH_RECORD_URL
+    process.env.VERCEL_PROJECT_PRODUCTION_URL = "principal.example"
+    mocks.verify.mockResolvedValue(true)
+    expect((await call({ "upstash-signature": "sig" })).status).toBe(200)
+    expect(mocks.verify).toHaveBeenCalledWith(expect.objectContaining({ url: "https://principal.example/api/cron/record" }))
+  })
+
+  it("401 when the signature was issued for a different url", async () => {
+    mocks.verify.mockImplementation(async ({ url }: { url: string }) => url === "https://other.example/api/x")
+    expect((await call({ "upstash-signature": "sig" })).status).toBe(401)
+  })
+
+  it("401 on the QStash path when no url is configured (fails closed)", async () => {
+    delete process.env.QSTASH_RECORD_URL
+    mocks.verify.mockResolvedValue(true)
+    expect((await call({ "upstash-signature": "sig" })).status).toBe(401)
+    expect(mocks.verify).not.toHaveBeenCalled()
+  })
+
+  it("503 not_configured when the database is not configured", async () => {
+    mocks.recordAll.mockRejectedValue(new mocks.DatabaseConfigError())
+    const res = await call({ authorization: `Bearer ${SECRET}` })
+    expect(res.status).toBe(503)
+    expect(await res.json()).toEqual({ error: "not_configured" })
+  })
+
+  it("500 with the same body when any market failed", async () => {
+    const body = { recorded: 0, failed: [{ pool: "C1", error: "boom" }] }
+    mocks.recordAll.mockResolvedValue(body)
+    const res = await call({ authorization: `Bearer ${SECRET}` })
+    expect(res.status).toBe(500)
+    expect(await res.json()).toEqual(body)
   })
 })
