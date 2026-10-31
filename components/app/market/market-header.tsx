@@ -4,7 +4,7 @@ import { useLedgerClock } from "@/hooks/use-ledger-clock"
 import { useMarketState } from "@/hooks/use-market-state"
 import { formatAmount, formatBps, formatFeeRate, formatRate } from "@/lib/protocol/format"
 import { getMarket } from "@/lib/protocol/manifest"
-import { activeManifest } from "@/lib/protocol/manifest-source"
+import { useManifest } from "@/components/app/manifest-provider"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { formatDuration, showLive, UNAVAILABLE } from "@/components/app/live"
@@ -16,7 +16,7 @@ import { marketStatus } from "@/components/app/markets/markets-table"
 import { StatusBadge, type MarketStatus } from "@/components/app/markets/status-badge"
 
 export function MarketHeader({ marketId }: { marketId: string }) {
-  const market = getMarket(activeManifest(), marketId)
+  const market = getMarket(useManifest(), marketId)
   const { data, isPending, stale } = useMarketState(marketId)
   const ms = stale ? undefined : data
   const { ledgerTime, isError: clockFailed } = useLedgerClock()

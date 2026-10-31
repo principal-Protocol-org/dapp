@@ -17,7 +17,11 @@ vi.mock("@/hooks/use-route", () => ({
   },
 }))
 vi.mock("@/hooks/use-ledger-clock", () => ({ useLedgerClock: () => ({ ledgerTime: 1_800_000_000, sequence: 1, isError: false }) }))
-vi.mock("@/lib/protocol/manifest-source", () => ({ activeManifest: () => ({ network: "local" }) }))
+vi.mock("@/components/app/manifest-provider", () => {
+  // One object, as the provider gives: hooks depend on its identity.
+  const manifest = { network: "local" }
+  return { useManifest: () => manifest }
+})
 vi.mock("@/hooks/use-execute", () => ({ useExecute: () => exec }))
 vi.mock("@/components/app/actions/tx-feedback", () => ({ showTxToast: vi.fn(), TxNoticeView: () => null }))
 

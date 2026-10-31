@@ -34,8 +34,9 @@ vi.mock("@/hooks/use-execute", () => ({ useExecute: () => mocks.exec }))
 vi.mock("@/hooks/use-ledger-clock", () => ({
   useLedgerClock: () => ({ ledgerTime: mocks.ledgerTime, sequence: 1, isError: false }),
 }))
-vi.mock("@/lib/protocol/manifest-source", () => ({
-  activeManifest: () => ({
+vi.mock("@/components/app/manifest-provider", () => {
+  // One object, as the provider gives: hooks depend on its identity.
+  const manifest = {
     network: "testnet",
     rpcUrl: "https://rpc",
     networkPassphrase: "Test SDF Network ; September 2015",
@@ -47,8 +48,9 @@ vi.mock("@/lib/protocol/manifest-source", () => ({
         contracts: { router: "CROUTER", sy: "CSY", pool: "CPOOL", manager: "CMANAGER" },
       },
     ],
-  }),
-}))
+  }
+  return { useManifest: () => manifest }
+})
 vi.mock("@/lib/protocol/stellar", async (orig) => ({
   ...(await orig<object>()),
   simulateInvocation: mocks.simulateInvocation,

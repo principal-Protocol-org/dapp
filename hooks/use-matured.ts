@@ -2,7 +2,7 @@
 
 import { useLedgerClock } from "@/hooks/use-ledger-clock"
 import { getMarket } from "@/lib/protocol/manifest"
-import { activeManifest } from "@/lib/protocol/manifest-source"
+import { useManifest } from "@/components/app/manifest-provider"
 
 /**
  * Whether the market has matured by ledger time (never the browser clock), against the manifest's
@@ -11,7 +11,7 @@ import { activeManifest } from "@/lib/protocol/manifest-source"
  */
 export function useMatured(marketId: string): boolean | null {
   const { ledgerTime } = useLedgerClock()
-  const maturity = getMarket(activeManifest(), marketId)?.maturity
+  const maturity = getMarket(useManifest(), marketId)?.maturity
   if (ledgerTime === null || maturity === undefined) return null
   return ledgerTime >= maturity
 }

@@ -7,7 +7,7 @@ import { ACTION_META } from "@/lib/protocol/actions"
 import { readLog, subscribeLog, type LogEntry } from "@/lib/app/local-log"
 import { explorerTxUrl } from "@/lib/app/tx-notice"
 import { shorten } from "@/lib/protocol/format"
-import { activeManifest } from "@/lib/protocol/manifest-source"
+import { useManifest } from "@/components/app/manifest-provider"
 import { TX_TIMEOUT_SECONDS } from "@/lib/protocol/review"
 import type { Network } from "@/lib/protocol/types"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -71,7 +71,7 @@ function TxHash({ hash, network }: { hash: string; network: Network }) {
 type Row = { hash: string; when: string; label: string; lines: string[]; status: string; market: string }
 
 export function HistoryTable() {
-  const m = activeManifest()
+  const m = useManifest()
   const { state } = useWallet()
   const history = useHistory()
   const account = state.status === "connected" ? state.publicKey : null

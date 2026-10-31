@@ -9,14 +9,14 @@ import { networkLabel } from "@/components/app/shell/network"
 import { useAccountState } from "@/hooks/use-account-state"
 import { useMarketPermissions } from "@/hooks/use-market-permissions"
 import { useWallet } from "@/hooks/use-wallet"
-import { activeManifest } from "@/lib/protocol/manifest-source"
+import { useManifest } from "@/components/app/manifest-provider"
 import {
   addTrustline,
   fundWithFriendbot,
   onboardingAvailable,
   onboardingSteps,
   requestTestTokens,
-  sharedTestAsset,
+  testAssetOf,
   TEST_TOKEN_AMOUNT,
   TEST_TOKEN_TOP_UP_BELOW,
   type FaucetErrorCode,
@@ -93,7 +93,8 @@ export function OnboardingDialog({
   /** The market whose account reads are shown; the faucet itself onboards every market. */
   marketId?: string
 }) {
-  if (!onboardingAvailable(activeManifest())) return null
+  const manifest = useManifest()
+  if (!onboardingAvailable(manifest)) return null
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-md">
@@ -104,9 +105,21 @@ export function OnboardingDialog({
   )
 }
 
+/**
+ * The market whose account reads (trustline, balance, authorization) stand for the test asset: the
+ * requested one when it uses that asset, else the first that does (R2-14: the dialog reads the asset
+ * the faucet pays, also when the markets' underlyings differ from it).
+ */
+function readsMarket(markets: Market[], asset: Market["underlying"], marketId?: string): string | undefined {
+  const uses = (m: Market) => m.underlying.sac === asset.sac && m.underlying.code === asset.code && m.underlying.issuer === asset.issuer
+  const requested = markets.find((m) => m.marketId === marketId)
+  return requested && uses(requested) ? requested.marketId : markets.find(uses)?.marketId
+}
+
 function Body({ marketId }: { marketId?: string }) {
-  const m = activeManifest()
-  const asset = sharedTestAsset(m)
+  const m = useManifest()
+  const asset = testAssetOf(m)
+  const reads = asset ? readsMarket(m.markets, asset, marketId) : undefined
   const network = networkLabel(m.network)
   return (
     <>
@@ -118,8 +131,13 @@ function Body({ marketId }: { marketId?: string }) {
             : `Prepares your wallet for ${network}. Test assets have no real value.`}
         </DialogDescription>
       </DialogHeader>
-      {asset ? (
-        <Checklist marketId={marketId ?? m.markets[0].marketId} asset={asset} />
+      {asset && reads ? (
+        <Checklist marketId={reads} asset={asset} />
+      ) : asset ? (
+        <p role="alert" className="text-sm text-ink">
+          No market listed here uses the test asset ({asset.code}) yet, so your account cannot be checked for it. Ask the
+          Principal team for access.
+        </p>
       ) : (
         <p role="alert" className="text-sm text-ink">
           Get test tokens supports a single test asset, and the markets of this deployment use different underlying assets.
@@ -131,17 +149,18 @@ function Body({ marketId }: { marketId?: string }) {
 }
 
 function Checklist({ marketId, asset }: { marketId: string; asset: Market["underlying"] }) {
+  const { network } = useManifest()
   const { state } = useWallet()
   const address = state.status === "connected" ? state.publicKey : null
   if (!address) {
-    return <p className="text-sm text-ink">Connect your wallet on {networkLabel(activeManifest().network)} to get test tokens.</p>
+    return <p className="text-sm text-ink">Connect your wallet on {networkLabel(network)} to get test tokens.</p>
   }
   // A new account starts a new checklist.
   return <AccountChecklist key={address} marketId={marketId} address={address} asset={asset} />
 }
 
 function AccountChecklist({ marketId, address, asset }: { marketId: string; address: string; asset: Market["underlying"] }) {
-  const m = activeManifest()
+  const m = useManifest()
   const { sign } = useWallet()
   const account = useAccountState(marketId)
   const permissions = useMarketPermissions(address)

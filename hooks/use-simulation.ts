@@ -6,8 +6,9 @@ import { MARKET_REFETCH_MS } from "@/hooks/use-market-state"
 import { useSettings } from "@/hooks/use-settings"
 import { invocationFor, type ActionInput } from "@/lib/protocol/actions"
 import { guardsFrom, openGuards, parseOutput, type ActionOutput, type GuardResult } from "@/lib/protocol/guards"
-import { activeManifest } from "@/lib/protocol/manifest-source"
+import { useManifest } from "@/components/app/manifest-provider"
 import { simulateInvocation, type SimulationOutcome } from "@/lib/protocol/stellar"
+import type { Manifest } from "@/lib/protocol/types"
 
 export const SIMULATION_DEBOUNCE_MS = 400
 
@@ -34,9 +35,8 @@ function keyParts(input: ActionInput): string[] {
 export const withOpenGuards = (input: ActionInput): ActionInput => ({ ...input, guards: openGuards(input.action, input.amount) })
 
 /** One simulation of the real call as the user; a throw becomes an `rpc_error` outcome. Also used per route step. */
-export async function simulate(input: ActionInput): Promise<SimulationOutcome> {
+export async function simulate(m: Manifest, input: ActionInput): Promise<SimulationOutcome> {
   try {
-    const m = activeManifest()
     return await simulateInvocation({
       rpcUrl: m.rpcUrl,
       networkPassphrase: m.networkPassphrase,
@@ -69,7 +69,8 @@ export function derive(input: ActionInput, outcome: SimulationOutcome, slippageB
 export function useSimulation(input: ActionInput | null): Simulation {
   const { slippageBps } = useSettings()
   const queryClient = useQueryClient()
-  const network = activeManifest().network
+  const manifest = useManifest()
+  const network = manifest.network
   const key = input ? keyParts(input).join("|") : null
 
   const [settled, setSettled] = useState<string | null>(null)
@@ -84,7 +85,7 @@ export function useSimulation(input: ActionInput | null): Simulation {
   const query = useQuery({
     queryKey,
     // The latest render's input: its deadline is current when the outcome is re-read.
-    queryFn: () => (live ? simulate(withOpenGuards(live)) : Promise.reject(new Error("Nothing to simulate."))),
+    queryFn: () => (live ? simulate(manifest, withOpenGuards(live)) : Promise.reject(new Error("Nothing to simulate."))),
     enabled: live !== null,
     gcTime: 0,
     retry: false,

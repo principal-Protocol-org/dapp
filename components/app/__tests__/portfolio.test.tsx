@@ -18,7 +18,11 @@ const mocks = vi.hoisted(() => ({
   history: {} as { data?: HistoryData; isPending: boolean; isError: boolean; stale: boolean },
 }))
 
-vi.mock("@/lib/protocol/manifest-source", () => ({ activeManifest: () => ({ network: "testnet", markets: [MARKET] }) }))
+vi.mock("@/components/app/manifest-provider", () => {
+  // One object, as the provider gives: hooks depend on its identity.
+  let manifest: unknown
+  return { useManifest: () => (manifest ??= { network: "testnet", markets: [MARKET] }) }
+})
 vi.mock("@/hooks/use-market-state", () => ({ useMarketState: () => ({ data: mocks.ms, isPending: false, stale: mocks.msStale }) }))
 vi.mock("@/hooks/use-account-state", () => ({ useAccountState: () => ({ data: mocks.account, isPending: false, stale: mocks.accountStale }) }))
 vi.mock("@/hooks/use-wallet", () => ({ useWallet: () => ({ state: mocks.wallet }) }))

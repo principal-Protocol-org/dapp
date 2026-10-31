@@ -5,7 +5,7 @@ import { useQueryClient } from "@tanstack/react-query"
 import { useWallet } from "@/hooks/use-wallet"
 import { appendLog } from "@/lib/app/local-log"
 import type { ActionInput } from "@/lib/protocol/actions"
-import { activeManifest } from "@/lib/protocol/manifest-source"
+import { useManifest } from "@/components/app/manifest-provider"
 import {
   executeRestore as executeRestoreTx,
   executeReview,
@@ -35,6 +35,7 @@ export type Execute = {
  * A refusal before submission throws and is not logged: nothing reached the network.
  */
 export function useExecute(): Execute {
+  const manifest = useManifest()
   const queryClient = useQueryClient()
   const { sign: walletSign } = useWallet()
   const [inFlight, setInFlight] = useState(0)
@@ -46,10 +47,10 @@ export function useExecute(): Execute {
   const sign = useCallback<SignTransaction>((xdr, _networkPassphrase, expectedSigner) => walletSign(xdr, expectedSigner), [walletSign])
 
   const refresh = useCallback(() => {
-    const { network } = activeManifest()
+    const { network } = manifest
     void queryClient.invalidateQueries({ queryKey: ["market", network] })
     void queryClient.invalidateQueries({ queryKey: ["account", network] })
-  }, [queryClient])
+  }, [queryClient, manifest])
 
   const track = useCallback(async <T,>(run: () => Promise<T>): Promise<T> => {
     setInFlight((n) => n + 1)
@@ -60,12 +61,12 @@ export function useExecute(): Execute {
     }
   }, [])
 
-  const prepare = useCallback((input: ActionInput) => prepareReview({ manifest: activeManifest(), input }), [])
+  const prepare = useCallback((input: ActionInput) => prepareReview({ manifest, input }), [manifest])
 
   const execute = useCallback(
     (review: Review) =>
       track(async () => {
-        const result = await executeReview({ review, manifest: activeManifest(), sign })
+        const result = await executeReview({ review, manifest, sign })
         const { action, marketId, source } = review.input
         appendLog({
           hash: result.hash,
@@ -79,22 +80,22 @@ export function useExecute(): Execute {
         refresh()
         return result
       }),
-    [track, sign, refresh],
+    [track, sign, refresh, manifest],
   )
 
   const prepareRestore = useCallback(
-    (p: { source: string; invocation: ContractInvocation }) => prepareRestoreTx({ manifest: activeManifest(), ...p }),
-    [],
+    (p: { source: string; invocation: ContractInvocation }) => prepareRestoreTx({ manifest, ...p }),
+    [manifest],
   )
 
   const executeRestore = useCallback(
     (restore: RestoreReview) =>
       track(async () => {
-        const result = await executeRestoreTx({ restore, manifest: activeManifest(), sign })
+        const result = await executeRestoreTx({ restore, manifest, sign })
         refresh()
         return result
       }),
-    [track, sign, refresh],
+    [track, sign, refresh, manifest],
   )
 
   return { prepare, execute, prepareRestore, executeRestore, pending: inFlight > 0 }

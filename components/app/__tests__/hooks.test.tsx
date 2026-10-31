@@ -10,13 +10,15 @@ const mocks = vi.hoisted(() => ({
   fetchMarketCompliance: vi.fn(),
 }))
 
-vi.mock("@/lib/protocol/manifest-source", () => ({
-  activeManifest: () => ({
+vi.mock("@/components/app/manifest-provider", () => {
+  // One object, as the provider gives: hooks depend on its identity.
+  const manifest = {
     network: "testnet",
     horizonUrl: "https://h",
     markets: [{ marketId: "m1", displayName: "x", underlying: { code: "STA", decimals: 7 } }],
-  }),
-}))
+  }
+  return { useManifest: () => manifest }
+})
 vi.mock("@/lib/protocol/reader", () => ({ createRpcReader: () => ({}) }))
 vi.mock("@/lib/protocol/horizon", () => ({ createHorizon: () => ({}) }))
 vi.mock("@/lib/protocol/market-state", () => ({ fetchMarketState: mocks.fetchMarketState }))

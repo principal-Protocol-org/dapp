@@ -5,20 +5,22 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { ActionPanel } from "@/components/app/actions/action-panel"
 import type { PanelConfig } from "@/components/app/actions/panel-config"
 import { getMarket } from "@/lib/protocol/manifest"
-import { activeManifest } from "@/lib/protocol/manifest-source"
-import type { Market } from "@/lib/protocol/types"
+import { useManifest } from "@/components/app/manifest-provider"
+import type { Manifest, Market } from "@/lib/protocol/types"
 
 export type PanelEntry = { id: string; label: string; config: PanelConfig }
 
 /**
  * A tab's panel configs for one market, built once per market: configs must stay stable, since a
- * new config object re-reads its quotes (panel-config rule 1). `build` must be a module-level function.
+ * new config object re-reads its quotes (panel-config rule 1). `build` must be a module-level
+ * function; it gets the resolved manifest for the panels' RPC reads (quotes).
  */
-export function usePanels(marketId: string, build: (market: Market) => PanelEntry[]): PanelEntry[] {
+export function usePanels(marketId: string, build: (market: Market, manifest: Manifest) => PanelEntry[]): PanelEntry[] {
+  const manifest = useManifest()
   return useMemo(() => {
-    const market = getMarket(activeManifest(), marketId)
-    return market ? build(market) : []
-  }, [marketId, build])
+    const market = getMarket(manifest, marketId)
+    return market ? build(market, manifest) : []
+  }, [marketId, build, manifest])
 }
 
 /**

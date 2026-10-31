@@ -10,7 +10,7 @@ import type { AccountState } from "@/lib/protocol/account-state"
 import { evaluateAccountCompliance } from "@/lib/protocol/compliance"
 import type { Blocker, GateContext } from "@/lib/protocol/gates"
 import { getMarket } from "@/lib/protocol/manifest"
-import { activeManifest } from "@/lib/protocol/manifest-source"
+import { useManifest } from "@/components/app/manifest-provider"
 import type { MarketState } from "@/lib/protocol/market-state"
 import type { WalletState } from "@/lib/protocol/types"
 
@@ -41,13 +41,14 @@ export type GateInputs = {
  * read for another address is never returned for this one.
  */
 export function useGateContext(marketId: string): GateInputs {
+  const manifest = useManifest()
   const findings = useManifestFindings()
   const { state: wallet } = useWallet()
   const { ledgerTime } = useLedgerClock()
   const market = useMarketState(marketId)
   const accountQuery = useAccountState(marketId)
   const compliance = useMarketCompliance(marketId)
-  const managerId = getMarket(activeManifest(), marketId)?.contracts.manager
+  const managerId = getMarket(manifest, marketId)?.contracts.manager
 
   const ms = market.stale ? undefined : market.data
   const connected = wallet.status === "connected"

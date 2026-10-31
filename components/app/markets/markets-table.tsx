@@ -4,7 +4,7 @@ import Link from "next/link"
 import { useLedgerClock } from "@/hooks/use-ledger-clock"
 import { useMarketState } from "@/hooks/use-market-state"
 import { formatUnixTime } from "@/lib/protocol/format"
-import { activeManifest } from "@/lib/protocol/manifest-source"
+import { useManifest } from "@/components/app/manifest-provider"
 import type { MarketState } from "@/lib/protocol/market-state"
 import type { Market } from "@/lib/protocol/types"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -80,7 +80,7 @@ function MarketRow({ market, ledgerTime }: { market: Market; ledgerTime: number 
 }
 
 export function MarketsTable() {
-  const { markets } = activeManifest()
+  const { markets } = useManifest()
   const { ledgerTime } = useLedgerClock()
   return (
     <div className="min-w-0 rounded-lg border border-line bg-surface">

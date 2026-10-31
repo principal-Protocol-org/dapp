@@ -6,7 +6,7 @@ import { accountState, live, MATURITY, marketState } from "./fixtures"
 const mocks = await vi.hoisted(async () => (await import("./panel-mocks")).createPanelMocks())
 
 vi.mock("sonner", () => ({ toast: mocks.toast, Toaster: () => null }))
-vi.mock("@/lib/protocol/manifest-source", () => ({ activeManifest: () => mocks.manifest }))
+vi.mock("@/components/app/manifest-provider", () => ({ useManifest: () => mocks.manifest }))
 vi.mock("@/hooks/use-manifest-findings", () => ({ useManifestFindings: () => mocks.findings }))
 vi.mock("@/lib/protocol/wallet", () => ({ freighterAdapter: mocks.adapter }))
 vi.mock("@/lib/protocol/horizon", () => ({ createHorizon: () => ({}) }))
@@ -232,16 +232,16 @@ describe("Trade tab — after maturity", () => {
 
 describe("Trade tab — result messages", () => {
   it("say what happened, in plain words", () => {
-    expect(buyPtPanel(MARKET).result!({ kind: "amount", value: 1_066_000_000n }, { input: input("buy_pt", 1_000_000_000n) })).toBe(
+    expect(buyPtPanel(MARKET, () => mocks.read).result!({ kind: "amount", value: 1_066_000_000n }, { input: input("buy_pt", 1_000_000_000n) })).toBe(
       "You bought 106.6 PT for 100 SY.",
     )
-    expect(sellPtPanel(MARKET).result!({ kind: "amount", value: 930_000_000n }, { input: input("sell_pt", 1_000_000_000n) })).toBe(
+    expect(sellPtPanel(MARKET, () => mocks.read).result!({ kind: "amount", value: 930_000_000n }, { input: input("sell_pt", 1_000_000_000n) })).toBe(
       "You sold 100 PT for 93 SY.",
     )
     expect(
-      buyYtPanel(MARKET).result!({ kind: "buy_yt", yt_out: 1_050_000_000n, sy_back: 979_000_000n }, { input: input("buy_yt", 1_000_000_000n) }),
+      buyYtPanel(MARKET, () => mocks.read).result!({ kind: "buy_yt", yt_out: 1_050_000_000n, sy_back: 979_000_000n }, { input: input("buy_yt", 1_000_000_000n) }),
     ).toBe("You bought 105 YT for a net 2.1 SY (100 SY in, 97.9 SY returned).")
-    expect(sellYtPanel(MARKET).result!({ kind: "amount", value: 45_000_000n }, { input: input("sell_yt", 100_000_000n) })).toBe(
+    expect(sellYtPanel(MARKET, () => mocks.read).result!({ kind: "amount", value: 45_000_000n }, { input: input("sell_yt", 100_000_000n) })).toBe(
       "You sold 10 YT for 4.5 SY.",
     )
   })

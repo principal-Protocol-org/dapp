@@ -5,7 +5,7 @@ import { useMarketCompliance } from "@/hooks/use-market-compliance"
 import { useWallet } from "@/hooks/use-wallet"
 import { evaluateAccountCompliance, type ComplianceItem, type MarketCompliance } from "@/lib/protocol/compliance"
 import { shorten } from "@/lib/protocol/format"
-import { activeManifest } from "@/lib/protocol/manifest-source"
+import { useManifest } from "@/components/app/manifest-provider"
 import { onboardingAvailable } from "@/lib/protocol/onboarding"
 import type { Live } from "@/lib/protocol/types"
 import { Button } from "@/components/ui/button"
@@ -83,7 +83,7 @@ export function ComplianceCard({
   const compliance = useMarketCompliance(marketId)
   const account = useAccountState(marketId)
   const connected = state.status === "connected"
-  const testTokens = onboardingAvailable(activeManifest())
+  const testTokens = onboardingAvailable(useManifest())
   const marketCompliance = compliance.data
   const kind = marketCompliance?.status === "live" ? marketCompliance.value.kind : null
   const kindError = marketCompliance?.status === "unavailable" ? marketCompliance.error : undefined

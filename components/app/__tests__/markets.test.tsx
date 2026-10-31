@@ -10,12 +10,14 @@ const mocks = vi.hoisted(() => ({
   ledgerTime: null as number | null,
 }))
 
-vi.mock("@/lib/protocol/manifest-source", () => ({
-  activeManifest: () => ({
+vi.mock("@/components/app/manifest-provider", () => {
+  // One object, as the provider gives: hooks depend on its identity.
+  const manifest = {
     network: "testnet",
     markets: [{ marketId: "m1", displayName: "STA · test", underlying: { code: "STA", decimals: 7 } }],
-  }),
-}))
+  }
+  return { useManifest: () => manifest }
+})
 vi.mock("@/hooks/use-market-state", () => ({
   useMarketState: () => ({ data: mocks.ms, isPending: mocks.ms === undefined, stale: mocks.stale }),
 }))

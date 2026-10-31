@@ -3,7 +3,7 @@
 import { useQuery } from "@tanstack/react-query"
 import { useWallet } from "@/hooks/use-wallet"
 import { fetchAccountHistory, type HistoryEntry, type OracleUpdate } from "@/lib/protocol/events"
-import { activeManifest } from "@/lib/protocol/manifest-source"
+import { useManifest } from "@/components/app/manifest-provider"
 import { createRpcServer } from "@/lib/protocol/stellar"
 
 export const HISTORY_REFETCH_MS = 60_000
@@ -26,7 +26,7 @@ export type HistoryData = {
  * "no activity". After a failed refetch `stale` is true and callers must not show the old data.
  */
 export function useHistory() {
-  const m = activeManifest()
+  const m = useManifest()
   const { state } = useWallet()
   const address = state.status === "connected" ? state.publicKey : null
   const query = useQuery({
