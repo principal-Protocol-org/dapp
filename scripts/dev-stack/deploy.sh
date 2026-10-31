@@ -4,7 +4,7 @@
 # config/manifests/local.json and .env.local.
 #
 # Usage: [PRINCIPAL_REPO=../principal] [PRINCIPAL_REF=origin/feat/tranche-1-mvp] \
-#        [MATURITY_SECONDS=3600] scripts/dev-stack/deploy.sh
+#        [MATURITY_SECONDS=3600] [ASSET_CODE=USDY] scripts/dev-stack/deploy.sh
 set -euo pipefail
 # shellcheck source=common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
@@ -19,6 +19,9 @@ need shasum ""
 PRINCIPAL_REPO="${PRINCIPAL_REPO:-../principal}"
 PRINCIPAL_REF="${PRINCIPAL_REF:-origin/feat/tranche-1-mvp}"
 MATURITY_SECONDS="${MATURITY_SECONDS:-3600}"
+ASSET_CODE="${ASSET_CODE:-USDY}"
+[[ "$ASSET_CODE" =~ ^[A-Za-z0-9]{1,12}$ ]] || die "ASSET_CODE must be 1-12 letters or digits"
+ASSET_DISPLAY="$ASSET_CODE (test)"
 case "$MATURITY_SECONDS" in '' | *[!0-9]*) die "MATURITY_SECONDS must be a positive integer" ;; esac
 [ "$MATURITY_SECONDS" -gt 0 ] || die "MATURITY_SECONDS must be positive"
 case "$PRINCIPAL_REPO" in /*) ;; *) PRINCIPAL_REPO="$DAPP_DIR/$PRINCIPAL_REPO" ;; esac
@@ -40,7 +43,7 @@ COMMIT="$(git -C "$PRINCIPAL_REPO" rev-parse --verify "${PRINCIPAL_REF}^{commit}
   die "cannot resolve PRINCIPAL_REF '$PRINCIPAL_REF' in $PRINCIPAL_REPO"
 SRC_DIR="${TMPDIR:-/tmp}/principal-dev-stack/${COMMIT}"
 WASM_DIR="$SRC_DIR/target/wasm32v1-none/release"
-if [ ! -f "$WASM_DIR/principal_router.wasm" ]; then
+if [ ! -f "$WASM_DIR/principal_router.wasm" ] || [ ! -f "$WASM_DIR/principal_market_factory.wasm" ]; then
   log "Extracting $PRINCIPAL_REF ($COMMIT) to $SRC_DIR"
   rm -rf "$SRC_DIR"
   mkdir -p "$SRC_DIR"
@@ -75,24 +78,24 @@ adm() { invoke "$ADMIN_KEY" "$@" >/dev/null; } # adm <contract id> <fn> [args...
 scalar() { tr -d '"[:space:]'; }
 
 # ---------------------------------------------------------------------------------------------
-# Underlying: classic asset STA issued by the dev admin key (AUTH_REQUIRED | AUTH_REVOCABLE | AUTH_CLAWBACK_ENABLED)
+# Underlying: classic asset $ASSET_CODE (USDY) issued by the dev admin key (AUTH_REQUIRED | AUTH_REVOCABLE | AUTH_CLAWBACK_ENABLED)
 # and its Stellar Asset Contract. The dev admin key is the issuer, the SAC admin and the Permissioning admin.
 # ---------------------------------------------------------------------------------------------
-ASSET="STA:$ADMIN"
-log "Issuing STA with AUTH_REQUIRED, AUTH_REVOCABLE, AUTH_CLAWBACK_ENABLED"
+ASSET="$ASSET_CODE:$ADMIN"
+log "Issuing $ASSET_CODE with AUTH_REQUIRED, AUTH_REVOCABLE, AUTH_CLAWBACK_ENABLED"
 stellar tx new set-options --source "$ADMIN_KEY" --network "$NETWORK" \
   --set-required --set-revocable --set-clawback-enabled >/dev/null 2>&1 ||
   die "could not set the issuer flags on $ADMIN_KEY"
 SAC="$(stellar contract id asset --asset "$ASSET" --network "$NETWORK")"
 if ! stellar contract asset deploy --asset "$ASSET" --source "$ADMIN_KEY" --network "$NETWORK" >/dev/null 2>&1; then
   # Already deployed by an earlier run: fine as long as the contract answers.
-  invoke "$ADMIN_KEY" "$SAC" admin >/dev/null 2>&1 || die "could not deploy the STA Stellar Asset Contract"
+  invoke "$ADMIN_KEY" "$SAC" admin >/dev/null 2>&1 || die "could not deploy the $ASSET_CODE Stellar Asset Contract"
 fi
-log "STA SAC ${SAC:0:6}..."
+log "$ASSET_CODE SAC ${SAC:0:6}..."
 
 # The treasury receives fee shares, so it holds the underlying: open a trustline (issuer authorizes below).
 stellar tx new change-trust --source "$TREASURY_KEY" --line "$ASSET" --network "$NETWORK" >/dev/null 2>&1 ||
-  die "could not open the STA trustline for $TREASURY_KEY"
+  die "could not open the $ASSET_CODE trustline for $TREASURY_KEY"
 
 # Maturity is fixed at initialization for PT, YT, MarketConfig and PrincipalManager.
 NOW="$(ledger_close_time)"
@@ -130,11 +133,11 @@ log "5. PTToken and YTToken"
 deploy_contract pt principal_pt_token.wasm
 PT="$LAST_ID"
 adm "$PT" initialize --admin "$ADMIN" --permissioning "$PERMISSIONING" --underlying "$SAC" \
-  --maturity "$MATURITY" --name "Principal Token STA" --symbol "PT-STA" --decimals 7
+  --maturity "$MATURITY" --name "Principal Token $ASSET_CODE" --symbol "PT-$ASSET_CODE" --decimals 7
 deploy_contract yt principal_yt_token.wasm
 YT="$LAST_ID"
 adm "$YT" initialize --admin "$ADMIN" --permissioning "$PERMISSIONING" --underlying "$SAC" \
-  --oracle "$ORACLE" --maturity "$MATURITY" --name "Yield Token STA" --symbol "YT-STA" --decimals 7
+  --oracle "$ORACLE" --maturity "$MATURITY" --name "Yield Token $ASSET_CODE" --symbol "YT-$ASSET_CODE" --decimals 7
 
 log "6. MarketConfig (fees 5 / 1000 / 10 bps, protocol share 2000 bps)"
 deploy_contract config principal_market_config.wasm
@@ -175,6 +178,19 @@ ROUTER="$LAST_ID"
 adm "$ROUTER" initialize --admin "$ADMIN"
 adm "$ROUTER" register_market --caller "$ADMIN" --pool "$POOL"
 
+log "10b. MarketFactory (stateless: no initialize; its wasm hash is recorded for market creation)"
+deploy_contract factory principal_market_factory.wasm
+FACTORY="$LAST_ID"
+# The factory deploys the market contracts from already-uploaded wasm: they were all uploaded above.
+for k in sy pt yt config manager pool recoveryEscrow; do
+  jq -e --arg k "$k" 'has($k)' <<<"$HASHES_JSON" >/dev/null || die "wasm hash for $k was not recorded"
+done
+# Router functions the deployed wasm exposes (user flows only), read from its interface.
+ROUTER_FUNCTIONS="$(stellar contract info interface --wasm "$WASM_DIR/principal_router.wasm" --output json 2>/dev/null |
+  jq -c '[.[] | select(has("function_v0")) | .function_v0.name] - ["bump","initialize","register_market","unregister_market","is_registered","market","get_admin","transfer_admin"]')" ||
+  die "could not read the router interface"
+[ "$(jq 'length' <<<"$ROUTER_FUNCTIONS")" -gt 0 ] || die "router interface listed no user functions"
+
 # ---------------------------------------------------------------------------------------------
 # Step 11: compliance standing. Both layers: SAC authorization and Permissioning grants.
 # The Router holds nothing and gets none. The dev admin key trades too (seeding), so it gets grants as well;
@@ -194,7 +210,7 @@ adm "$PERMISSIONING" grant_account --caller "$ADMIN" --account "$ADMIN"
 
 # ---------------------------------------------------------------------------------------------
 # Seed the pool from the dev admin key.
-#   deposit 200_000 STA -> 200_000 SY (first deposit is 1:1)
+#   deposit 200_000 underlying -> 200_000 SY (first deposit is 1:1)
 #   mint with 100_000 SY -> notional PT = YT = (SY - 5 bps fee) * oracle rate / 1e7
 #   add_liquidity(all PT, 95 % of its SY value)
 # First add_liquidity rule (market_pool add_liquidity): sy * rate / 1e7 must not exceed pt
@@ -203,7 +219,7 @@ adm "$PERMISSIONING" grant_account --caller "$ADMIN" --account "$ADMIN"
 # and isqrt(~0.97e12) is far above 1000. 100_000 SY are left over for the sy side (needs ~95_000).
 # ---------------------------------------------------------------------------------------------
 log "Seeding the pool"
-DEPOSIT=2000000000000 # 200_000 STA at 7 decimals
+DEPOSIT=2000000000000 # 200_000 $ASSET_CODE at 7 decimals
 MINT_SY=1000000000000 # 100_000 SY
 adm "$SY" deposit --from "$ADMIN" --amount "$DEPOSIT" --min_shares_out 0
 MINT_OUT="$(invoke "$ADMIN_KEY" "$MANAGER" mint --from "$ADMIN" --sy_shares "$MINT_SY")"
@@ -216,7 +232,7 @@ adm "$POOL" add_liquidity --from "$ADMIN" --pt_desired "$PT_MINTED" --sy_desired
 # ---------------------------------------------------------------------------------------------
 # Outputs
 # ---------------------------------------------------------------------------------------------
-MARKET_ID="local-sta-$MATURITY"
+MARKET_ID="local-$(tr "[:upper:]" "[:lower:]" <<<"$ASSET_CODE")-$MATURITY"
 MANIFEST="$DAPP_DIR/config/manifests/local.json"
 ENV_FILE="$DAPP_DIR/.env.local"
 mkdir -p "$(dirname "$MANIFEST")"
@@ -224,36 +240,48 @@ mkdir -p "$(dirname "$MANIFEST")"
 jq -n \
   --arg passphrase "$NETWORK_PASSPHRASE" --arg rpc "$RPC_URL" --arg horizon "$HORIZON_URL" \
   --arg friendbot "$FRIENDBOT_URL" --arg generatedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  --arg commit "$COMMIT" --arg risk "$RISK_CONTROL" --arg perm "$PERMISSIONING" \
+  --arg commit "$COMMIT" --arg risk "$RISK_CONTROL" --arg perm "$PERMISSIONING" --arg factory "$FACTORY" \
   --arg id "$MARKET_ID" --arg issuer "$ADMIN" --arg sac "$SAC" --argjson maturity "$MATURITY" \
+  --arg code "$ASSET_CODE" --arg display "$ASSET_DISPLAY" --argjson fns "$ROUTER_FUNCTIONS" \
   --arg router "$ROUTER" --arg oracle "$ORACLE" --arg sy "$SY" --arg pt "$PT" --arg yt "$YT" \
   --arg config "$CONFIG" --arg manager "$MANAGER" --arg pool "$POOL" --arg escrow "$ESCROW" \
   --argjson hashes "$HASHES_JSON" '{
-    schemaVersion: 1, network: "local", networkPassphrase: $passphrase,
+    schemaVersion: 2, network: "local", networkPassphrase: $passphrase,
     rpcUrl: $rpc, horizonUrl: $horizon, friendbotUrl: $friendbot,
     generatedAt: $generatedAt, sourceCommit: $commit,
-    shared: { riskControl: $risk, permissioning: $perm },
+    shared: { router: $router, oracle: $oracle, permissioning: $perm, riskControl: $risk, factory: $factory },
+    wasmHashes: $hashes,
+    routerFunctions: $fns,
+    testAsset: { code: $code, issuer: $issuer, sac: $sac, decimals: 7, displayName: $display },
     markets: [{
-      marketId: $id, displayName: "STA (local)",
-      underlying: { code: "STA", issuer: $issuer, sac: $sac, decimals: 7 },
+      marketId: $id, displayName: ($display),
+      underlying: { code: $code, issuer: $issuer, sac: $sac, decimals: 7 },
       maturity: $maturity,
       contracts: { router: $router, oracle: $oracle, sy: $sy, pt: $pt, yt: $yt, config: $config,
-                   manager: $manager, pool: $pool, recoveryEscrow: $escrow },
-      wasmHashes: $hashes
+                   manager: $manager, pool: $pool, recoveryEscrow: $escrow }
     }]
   }' >"$MANIFEST"
 
-# .env.local: set (or replace) the two keys, keep anything else already in the file. Local only; git-ignored.
+# .env.local: set (or replace) the three keys, keep anything else already in the file. Local only; git-ignored.
 touch "$ENV_FILE"
 chmod 600 "$ENV_FILE"
 tmp="$(mktemp)"
-grep -v -e '^FAUCET_ISSUER_SECRET=' -e '^NEXT_PUBLIC_PRINCIPAL_NETWORK=' "$ENV_FILE" >"$tmp" || true
+grep -v -e '^FAUCET_ISSUER_SECRET=' -e '^NEXT_PUBLIC_PRINCIPAL_NETWORK=' -e '^DATABASE_URL=' "$ENV_FILE" >"$tmp" || true
 {
   cat "$tmp"
   echo "NEXT_PUBLIC_PRINCIPAL_NETWORK=local"
   echo "FAUCET_ISSUER_SECRET=$(stellar keys secret "$ADMIN_KEY")"
+  echo "DATABASE_URL=postgres://principal:principal@localhost:5432/principal"
 } >"$ENV_FILE"
 rm -f "$tmp"
+
+if [ -f "$DAPP_DIR/scripts/db-migrate.mjs" ]; then
+  log "Migrating the local database"
+  (cd "$DAPP_DIR" && DATABASE_URL="postgres://principal:principal@localhost:5432/principal" node scripts/db-migrate.mjs) ||
+    die "database migration failed. Is Postgres up? scripts/dev-stack/up.sh"
+else
+  log "scripts/db-migrate.mjs not present yet: skipping the database migration"
+fi
 
 log "Wrote $MANIFEST and $ENV_FILE"
 log "Market $MARKET_ID matures at $MATURITY. Keep the oracle fresh: scripts/dev-stack/oracle-tick.sh (every 30 minutes)."

@@ -80,7 +80,7 @@ const ready = () =>
     permAllowed: live(true),
     permPt: live(true),
     permYt: live(true),
-    underlying: live(5_000n * 10n ** 7n),
+    underlying: live(50_000n * 10n ** 7n),
   })
 const perms = (granted: boolean, marketIds = (mocks.manifest.markets as TestMarket[]).map((m) => m.marketId)): MarketPermission[] =>
   marketIds.map((marketId) => ({ marketId, permPt: live(granted), permYt: live(granted) }))

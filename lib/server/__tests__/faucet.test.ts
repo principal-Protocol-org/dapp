@@ -145,7 +145,7 @@ describe("runFaucet", () => {
   it("never spends a global slot on a no_trustline or nothing-to-do request (R42b)", async () => {
     const junk = fakeChain({ account: { exists: true, trustline: null } })
     const missing = fakeChain({ account: { exists: false } })
-    const idle = fakeChain({ account: { exists: true, trustline: { authorized: true, balance: 5_000n * UNITS } }, allowed: true, assets: granted(manifest) })
+    const idle = fakeChain({ account: { exists: true, trustline: { authorized: true, balance: 50_000n * UNITS } }, allowed: true, assets: granted(manifest) })
     const n = FAUCET_RUNS_PER_MINUTE * 2
     for (let i = 0; i < n; i += 1) {
       await expect(runFaucet({ account: user(), manifest, ip: `10.1.0.${i}`, now: T0, chain: junk.chain })).resolves.toEqual({ error: "no_trustline" })
@@ -314,6 +314,18 @@ describe("runFaucet", () => {
     }
   })
 
+  it("pays manifest.testAsset when present, even if the markets' underlyings differ", async () => {
+    const { chain } = fakeChain()
+    const test = { ...market.underlying, code: "USDY", sac: contract() }
+    const mixed: Manifest = {
+      ...twoMarkets,
+      testAsset: { ...test, displayName: "USDY (test)" },
+      markets: [market, { ...twoMarkets.markets[1], underlying: { ...market.underlying, code: "STB" } }],
+    }
+    await runFaucet({ account: user(), manifest: mixed, ip: "1.1.1.1", now: T0, chain })
+    expect(chain.pay).toHaveBeenCalledWith(expect.any(String), test, 100_000n * UNITS)
+  })
+
   it("refuses a manifest whose markets do not share one underlying, before any read (R44)", async () => {
     const { chain } = fakeChain()
     const mixed: Manifest = {
@@ -338,7 +350,7 @@ describe("runFaucet", () => {
       `pay ${a} ${FAUCET_AMOUNT * UNITS}`,
     ])
     expect(chain.setAuthorized).toHaveBeenCalledWith(a, market.underlying)
-    expect(chain.pay).toHaveBeenCalledWith(a, market.underlying, 10_000n * UNITS)
+    expect(chain.pay).toHaveBeenCalledWith(a, market.underlying, 100_000n * UNITS)
   })
 
   it("is idempotent", async () => {
@@ -346,16 +358,16 @@ describe("runFaucet", () => {
     const empty = fakeChain({ account: authorized(0n), allowed: true, assets: granted(manifest) })
     await expect(runFaucet({ account: user(), manifest, ip: "1.1.1.1", now: T0, chain: empty.chain })).resolves.toEqual({ performed: ["pay"] })
 
-    const below = fakeChain({ account: authorized(1_000n * UNITS - 1n), allowed: true, assets: granted(manifest) })
+    const below = fakeChain({ account: authorized(10_000n * UNITS - 1n), allowed: true, assets: granted(manifest) })
     await expect(runFaucet({ account: user(), manifest, ip: "2.2.2.2", now: T0, chain: below.chain })).resolves.toEqual({ performed: ["pay"] })
 
-    const funded = fakeChain({ account: authorized(1_000n * UNITS), allowed: true, assets: granted(manifest) })
+    const funded = fakeChain({ account: authorized(10_000n * UNITS), allowed: true, assets: granted(manifest) })
     await expect(runFaucet({ account: user(), manifest, ip: "3.3.3.3", now: T0, chain: funded.chain })).resolves.toEqual({ performed: [] })
     expect(funded.calls).toEqual([])
   })
 
   it("grants PT and YT for every market", async () => {
-    const { chain, calls } = fakeChain({ account: { exists: true, trustline: { authorized: true, balance: 5_000n * UNITS } }, allowed: true })
+    const { chain, calls } = fakeChain({ account: { exists: true, trustline: { authorized: true, balance: 50_000n * UNITS } }, allowed: true })
     const a = user()
     await expect(runFaucet({ account: a, manifest: twoMarkets, ip: "1.1.1.1", now: T0, chain })).resolves.toEqual({
       performed: ["grant_pt", "grant_yt", "grant_pt", "grant_yt"],
@@ -371,7 +383,7 @@ describe("runFaucet", () => {
   it("skips a grant already present on one market only", async () => {
     const second = twoMarkets.markets[1].contracts
     const { chain } = fakeChain({
-      account: { exists: true, trustline: { authorized: true, balance: 5_000n * UNITS } },
+      account: { exists: true, trustline: { authorized: true, balance: 50_000n * UNITS } },
       allowed: true,
       assets: new Set([market.contracts.pt, market.contracts.yt, second.pt]),
     })
@@ -526,6 +538,13 @@ describe("the Stellar faucet chain", () => {
     expect(() => createStellarFaucetChain(mixed, { env })).toThrow(FaucetConfigError)
   })
 
+  it("takes the issuer check from manifest.testAsset when present", () => {
+    const other = Keypair.random()
+    const withTest: Manifest = { ...onIssuer, testAsset: { ...asset, issuer: other.publicKey(), displayName: "USDY (test)" } }
+    expect(() => createStellarFaucetChain(withTest, { env })).toThrow(FaucetConfigError)
+    expect(() => createStellarFaucetChain(withTest, { env: { FAUCET_ISSUER_SECRET: other.secret() } })).not.toThrow()
+  })
+
   it("refuses an issuer key that is not the test asset's issuer", () => {
     const other = Keypair.random()
     expect(() => createStellarFaucetChain(onIssuer, { env: { FAUCET_ISSUER_SECRET: other.secret() } })).toThrow(FaucetConfigError)
@@ -599,7 +618,7 @@ describe("the Stellar faucet chain", () => {
       type: "payment",
       destination: a,
       asset: { code: asset.code, issuer: asset.issuer },
-      amount: "10000.0000000",
+      amount: "100000.0000000",
     })
     expect(server.prepareTransaction).not.toHaveBeenCalled()
     expect(signedBy(tx, issuer)).toBe(true)

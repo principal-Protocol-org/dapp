@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Start the local Stellar network (quickstart container) and prepare the dev keys.
+# Start the local Stellar network (quickstart container), a Postgres container and prepare the dev keys.
 # Usage: scripts/dev-stack/up.sh
 set -euo pipefail
 # shellcheck source=common.sh
@@ -22,8 +22,10 @@ if command -v podman >/dev/null 2>&1; then
   sock="$(podman machine inspect --format '{{.ConnectionInfo.PodmanSocket.Path}}' 2>/dev/null | head -n1 || true)"
   [ -n "$sock" ] && [ -S "$sock" ] || die "Podman socket not found ('${sock:-unset}'). Run: podman machine start"
   export DOCKER_HOST="unix://$sock"
+  ENGINE=podman
 elif command -v docker >/dev/null 2>&1; then
   docker info >/dev/null 2>&1 || die "Docker is installed but not running. Start Docker Desktop."
+  ENGINE=docker
 else
   die "neither Podman nor Docker is installed. Install one, then run: podman machine init && podman machine start"
 fi
@@ -43,6 +45,29 @@ else
   echo
   rpc_healthy || die "RPC at $RPC_URL did not become healthy within 6 minutes. Check: stellar container logs local"
 fi
+
+# --- Postgres (rate recorder) --------------------------------------------------------------------
+# Idempotent: reuse the container if it exists (start it if stopped), else create it. Dev-only credentials.
+if "$ENGINE" container exists principal-pg >/dev/null 2>&1 || "$ENGINE" inspect principal-pg >/dev/null 2>&1; then
+  if [ "$("$ENGINE" inspect -f '{{.State.Running}}' principal-pg 2>/dev/null)" != "true" ]; then
+    echo "Starting the existing principal-pg container..."
+    "$ENGINE" start principal-pg >/dev/null || die "could not start principal-pg. Check: $ENGINE logs principal-pg"
+  fi
+else
+  echo "Creating the principal-pg Postgres container (port 5432)..."
+  "$ENGINE" run -d --name principal-pg -p 5432:5432 \
+    -e POSTGRES_USER=principal -e POSTGRES_PASSWORD=principal -e POSTGRES_DB=principal \
+    postgres:17 >/dev/null || die "could not create principal-pg (is port 5432 in use?)"
+fi
+echo -n "Waiting for Postgres"
+pg_ok=""
+for _ in $(seq 1 60); do
+  if "$ENGINE" exec principal-pg pg_isready -U principal -d principal >/dev/null 2>&1; then pg_ok=1; break; fi
+  echo -n "."
+  sleep 1
+done
+echo
+[ -n "$pg_ok" ] || die "Postgres did not become ready. Check: $ENGINE logs principal-pg"
 
 # --- Keys ------------------------------------------------------------------------------------
 for key in "$ADMIN_KEY" "$TREASURY_KEY"; do

@@ -111,9 +111,9 @@ describe("onboarding steps", () => {
     expect(all([granted, { permPt: down, permYt: live(true) }])).toBe(false)
   })
 
-  it("uses the faucet constants of the plan: 10 000 units, topped up below 1 000", () => {
-    expect(TEST_TOKEN_AMOUNT).toBe(10_000n)
-    expect(TEST_TOKEN_TOP_UP_BELOW).toBe(1_000n)
+  it("uses the faucet constants of spec 0002: 100 000 units, topped up below 10 000", () => {
+    expect(TEST_TOKEN_AMOUNT).toBe(100_000n)
+    expect(TEST_TOKEN_TOP_UP_BELOW).toBe(10_000n)
   })
 })
 
