@@ -127,6 +127,25 @@ describe("runFaucet", () => {
     await expect(runFaucet({ account: b, manifest, ip: "1.1.1.1", now: T0 + 60_000, chain })).resolves.toHaveProperty("performed")
   })
 
+  it("resolves the market list only after the rate limit admits the request (R2-40 M4)", async () => {
+    const { chain, calls } = fakeChain()
+    const a = user()
+    const markets = vi.fn(async () => twoMarkets.markets)
+    await expect(runFaucet({ account: a, manifest, markets, ip: "3.3.3.3", now: T0, chain })).resolves.toHaveProperty("performed")
+    // The resolved list is what gets granted: the second market's PT and YT too.
+    expect(calls.filter((c) => c.startsWith("grant_asset")).length).toBe(4)
+    await expect(runFaucet({ account: a, manifest, markets, ip: "3.3.3.3", now: T0 + 1, chain })).resolves.toEqual({ error: "rate_limited" })
+    expect(markets).toHaveBeenCalledTimes(1)
+  })
+
+  it("a market list that cannot be read frees the request's keys", async () => {
+    const { chain } = fakeChain()
+    const a = user()
+    const failing = async () => Promise.reject(new Error("registry down"))
+    await expect(runFaucet({ account: a, manifest, markets: failing, ip: "4.4.4.4", now: T0, chain })).rejects.toThrow("registry down")
+    await expect(runFaucet({ account: a, manifest, ip: "4.4.4.4", now: T0 + 1, chain })).resolves.toHaveProperty("performed")
+  })
+
   it("caps the instance at 4 real runs per rolling minute, whatever the address (R42, R43)", async () => {
     // Each run has work to do (a top-up), so each takes a global slot.
     const { chain } = fakeChain({ account: { exists: true, trustline: { authorized: true, balance: 0n } }, allowed: true, assets: granted(manifest) })

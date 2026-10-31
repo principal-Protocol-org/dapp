@@ -77,10 +77,12 @@ export async function GET(request: Request) {
       reader,
       sql,
       manifest,
-      // Spec §1 / R2-36: discover new markets, re-validate the rest, then record what is listed.
-      refreshRegistry: async () => {
-        const found = await discover(registry)
-        await revalidate(registry, { skip: new Set(found.checked) })
+      // Spec §1 / R2-36: discover new markets, re-validate the listed ones, then record what is
+      // listed. Each stops at its deadline and resumes next run (R2-40); discovery gets 60 % of the
+      // budget, so a flood of new pools never starves the re-check of the listed markets.
+      refreshRegistry: async (deadline) => {
+        const found = await discover(registry, { deadline: Date.now() + (deadline - Date.now()) * 0.6 })
+        await revalidate(registry, { skip: new Set(found.checked), deadline })
       },
       markets: () => resolvedMarkets({ store, manifest }),
       now: () => Date.now(),

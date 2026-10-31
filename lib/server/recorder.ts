@@ -12,9 +12,11 @@ import "server-only"
  * rows are never written, and a gap is left as a gap (never interpolated).
  *
  * The registry (R2-4, R2-36): each run first refreshes it (`refreshRegistry`: discovery from the
- * Router and factory events, then re-validation of every seed and registry market), then records
- * the markets it resolves (`markets`). A failed refresh is logged and the run goes on with the
- * cached verdicts; a missing database is not a per-market failure and is thrown.
+ * Router and factory events, then re-validation of the listed markets), then records the markets
+ * it resolves (`markets`). The refresh has a time budget (R2-40): it is given the deadline, stops
+ * starting new checks there and saves its place, and recording starts at the deadline whatever it
+ * is still doing, so a long scan never costs a snapshot. A failed refresh is logged and the run
+ * goes on with the cached verdicts; a missing database is not a per-market failure and is thrown.
  */
 import { readLive, toBigint, type ContractReader } from "@/lib/protocol/reader"
 import { fetchMarketState } from "@/lib/protocol/market-state"
@@ -22,6 +24,8 @@ import type { Live, Manifest, Market } from "@/lib/protocol/types"
 import { DatabaseConfigError, type Sql } from "./db"
 
 export const SLOT_SECONDS = 900
+/** The registry refresh's share of the route's 60 s (maxDuration); recording gets the rest. */
+export const REGISTRY_BUDGET_MS = 20_000
 const MAX_ATTEMPTS = 3
 /** A ledger older than this behind the clock means the RPC node is stale: record nothing. */
 const MAX_CLOSE_TIME_AGE_SECONDS = 3600
@@ -32,8 +36,10 @@ export type RecordDeps = {
   reader: ContractReader
   sql: Sql
   manifest: Manifest
-  /** Discovers and re-validates registry markets before they are listed (see above). */
-  refreshRegistry?: () => Promise<unknown>
+  /** Discovers and re-validates registry markets before they are listed, until `deadline` (ms). */
+  refreshRegistry?: (deadline: number) => Promise<unknown>
+  /** The refresh's time budget; REGISTRY_BUDGET_MS by default. */
+  registryBudgetMs?: number
   /** The markets to record: the seeds and valid registry markets (`resolvedMarkets`). */
   markets: () => Promise<Market[]>
   /** Wall clock in ms. */
@@ -132,11 +138,19 @@ function describeDbError(error: unknown): string {
 export async function recordAll(deps: RecordDeps): Promise<RecordResult> {
   const { reader, sql, now, ledgerCloseTime } = deps
   if (deps.refreshRegistry) {
+    const budget = deps.registryBudgetMs ?? REGISTRY_BUDGET_MS
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const late = new Promise<"late">((resolve) => {
+      timer = setTimeout(() => resolve("late"), budget)
+    })
     try {
-      await deps.refreshRegistry()
+      const outcome = await Promise.race([deps.refreshRegistry(now() + budget).then(() => "done" as const), late])
+      if (outcome === "late") console.error("recorder: the registry refresh ran past its time budget; recording the markets listed so far")
     } catch (error) {
       if (error instanceof DatabaseConfigError) throw error
       console.error(`recorder: registry refresh failed: ${describeError(error)}`)
+    } finally {
+      clearTimeout(timer)
     }
   }
   const markets = await deps.markets()

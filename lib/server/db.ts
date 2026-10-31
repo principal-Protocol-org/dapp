@@ -31,7 +31,9 @@ function getPool(): Pool {
   if (pool) return pool
   const connectionString = process.env.DATABASE_URL
   if (!connectionString) throw new DatabaseConfigError()
-  pool = new Pool({ connectionString, max: 5 })
+  // Every wait is bounded (R2-40): pages fall back to the manifest seeds only if a slow database
+  // fails instead of hanging. The client gives up on a query after 5 s; the server ends it too.
+  pool = new Pool({ connectionString, max: 5, connectionTimeoutMillis: 2_000, query_timeout: 5_000, statement_timeout: 5_000 })
   attachDatabasePool(pool)
   return pool
 }

@@ -2,8 +2,18 @@
 import { describe, expect, it, vi } from "vitest"
 
 vi.mock("server-only", () => ({}))
+const pg = vi.hoisted(() => ({ options: [] as Record<string, unknown>[] }))
+vi.mock("pg", () => ({
+  Pool: class {
+    constructor(options: Record<string, unknown>) {
+      pg.options.push(options)
+    }
+    query = async () => ({ rows: [] })
+  },
+}))
+vi.mock("@vercel/functions", () => ({ attachDatabasePool: () => {} }))
 
-import { toQuery } from "@/lib/server/db"
+import { sql, toQuery } from "@/lib/server/db"
 import { directUrl } from "../../../scripts/db-migrate.mjs"
 
 describe("toQuery", () => {
@@ -14,6 +24,18 @@ describe("toQuery", () => {
     expect(q.text).toBe("select * from t where a = $1 and b = $2")
     expect(q.text).not.toContain("drop")
     expect(q.values).toEqual([evil, 42])
+  })
+})
+
+describe("the pool", () => {
+  it("bounds every wait: connecting, the query on the client, the statement on the server (R2-40)", async () => {
+    process.env.DATABASE_URL = "postgres://u:p@localhost:5432/db"
+    try {
+      await sql`select 1`
+    } finally {
+      delete process.env.DATABASE_URL
+    }
+    expect(pg.options[0]).toMatchObject({ connectionTimeoutMillis: 2_000, query_timeout: 5_000, statement_timeout: 5_000 })
   })
 })
 
