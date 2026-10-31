@@ -50,9 +50,17 @@ Copy `.env.example` to `.env.local`. Never commit real keys.
 | `NEXT_PUBLIC_PRINCIPAL_NETWORK` | Browser and server | `testnet` (default) or `local`. |
 | `FAUCET_ISSUER_SECRET` | Server only | Required for "Get test tokens". Secret key of the test asset issuer. |
 | `FAUCET_PERMISSIONING_ADMIN_SECRET` | Server only | Optional. Defaults to the issuer key. |
+| `DATABASE_URL` | Server only | Postgres for the market recorder (pooled string on Neon; the local stack writes one for `principal-pg`). |
+| `DATABASE_URL_UNPOOLED` | Server only | Optional. Direct connection for migrations; else `DATABASE_URL` with `-pooler` removed from the host. |
+| `CRON_SECRET` | Server only | Bearer secret Vercel Cron sends to `GET /api/cron/record`. |
+| `QSTASH_CURRENT_SIGNING_KEY`, `QSTASH_NEXT_SIGNING_KEY` | Server only | Verify Upstash QStash signatures on the same route. |
 
-The `FAUCET_*` secrets are read only in files that start with `import "server-only"`. CI fails the
-build if `FAUCET_` appears in `.next/static`. The local stack writes its own throwaway secret to
+`pnpm db:migrate [--env-file .env.testnet]` applies `db/migrations/*.sql` over a direct connection and
+never prints the connection string.
+
+The `FAUCET_*`, `DATABASE_URL`, `CRON_SECRET` and `QSTASH_*` secrets are read only in files that start
+with `import "server-only"`. CI fails the build if `FAUCET_`, `DATABASE_URL`, `CRON_SECRET` or `QSTASH_`
+appears in `.next/static`. The local stack writes its own throwaway secret to
 `.env.local`, which is git-ignored.
 
 ## Local network
@@ -86,7 +94,7 @@ If the network is not reachable, the suite skips and says why. When the market i
 deploys a new one with `MATURITY_SECONDS=600`. A full run takes about 10 minutes.
 
 CI (`.github/workflows/ci.yml`) runs lint, typecheck, test and build on pull requests, then the
-`FAUCET_` bundle check.
+server-secret bundle check.
 
 ## Design system
 
