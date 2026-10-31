@@ -23,8 +23,22 @@ export function liveValue<T>(value: T, ledger: number): Live<T> {
   return { status: "live", value, ledger }
 }
 
+const MAX_ERROR_LENGTH = 160
+
+/**
+ * The failure as shown to the user: its first line, capped. A Soroban simulation error carries the
+ * whole diagnostic event log after its `HostError: Error(...)` line; that log is for debugging and,
+ * shown in a panel, floods it with long unbreakable contract IDs. `isContractError` reads only the
+ * first line, so it still works on the summary.
+ */
+function summarizeError(error: unknown): string {
+  const text = error instanceof Error ? error.message : String(error)
+  const first = text.split("\n").map((line) => line.trim()).find((line) => line !== "") ?? "unknown error"
+  return first.length <= MAX_ERROR_LENGTH ? first : `${first.slice(0, MAX_ERROR_LENGTH - 1)}…`
+}
+
 export function unavailable(error: unknown): Live<never> {
-  return { status: "unavailable", error: error instanceof Error ? error.message : String(error) }
+  return { status: "unavailable", error: summarizeError(error) }
 }
 
 /**
