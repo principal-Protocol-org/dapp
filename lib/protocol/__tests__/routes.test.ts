@@ -162,8 +162,8 @@ describe("route holdings (spec §4 interruption)", () => {
     const r = { ...base, kind: "buy_pt" as const, amount: 1_000n * S }
     const h = routeHoldings(r, plan(r), [{ kind: "amount", value: 1_000n * S }], 1)
     expect(h).toEqual({ sy: 1_000n * S })
-    expect(describeHoldings(h!, usdy)).toBe("You hold 1000 SY")
-    expect(describeHoldings(h!, usdy, "held")).toBe("You held 1000 SY")
+    expect(describeHoldings(h!, usdy)).toBe("You hold 1,000 SY")
+    expect(describeHoldings(h!, usdy, "held")).toBe("You held 1,000 SY")
     expect(unwindFrom(h)).toEqual({
       available: true,
       amount: 1_000n * S,
@@ -200,7 +200,7 @@ describe("route holdings (spec §4 interruption)", () => {
     ]
     const h = routeHoldings(r, plan(r), outs, 2)
     expect(h).toEqual({ sy: 5n * S, underlying: 1000n * S })
-    expect(describeHoldings(h!, usdy)).toBe("You hold 5 SY and 1000 USDY")
+    expect(describeHoldings(h!, usdy)).toBe("You hold 5 SY and 1,000 USDY")
     expect(unwindFrom(h)).toMatchObject({ available: true, amount: 5n * S })
   })
 

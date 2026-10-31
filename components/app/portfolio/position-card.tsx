@@ -1,13 +1,13 @@
 "use client"
 
 import Link from "next/link"
-import { useEffect } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { useAccountState } from "@/hooks/use-account-state"
 import { useLedgerClock } from "@/hooks/use-ledger-clock"
 import { useMarketState } from "@/hooks/use-market-state"
 import type { HistoryData } from "@/hooks/use-history"
 import type { AccountState } from "@/lib/protocol/account-state"
-import { formatPercent, formatRate } from "@/lib/protocol/format"
+import { formatPercent, formatRate, formatTokenAmount } from "@/lib/protocol/format"
 import { getMarket } from "@/lib/protocol/manifest"
 import { useManifest } from "@/components/app/manifest-provider"
 import type { MarketState } from "@/lib/protocol/market-state"
@@ -20,7 +20,10 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { formatDuration, showLive, UNAVAILABLE } from "@/components/app/live"
 import { Metric } from "@/components/app/market/metric"
-import { tokens } from "@/components/app/actions/panel-lines"
+import { groupedTokens as tokens } from "@/components/app/actions/panel-lines"
+import { ActionPanel } from "@/components/app/actions/action-panel"
+import { claimPanel, recombinePanel } from "@/components/app/actions/redeem-tab"
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 
 export const STALE = "Unavailable — last update failed"
 
@@ -37,8 +40,12 @@ function holdsAnything(a: AccountState): boolean {
 const liveBalance = (v: Live<bigint>): bigint => (v.status === "live" ? v.value : 0n)
 const day = (iso: string) => iso.slice(0, 10)
 
-/** A market page link that opens the given tab and panel (read by `TradePanel`). */
-const shortcut = (marketId: string, tab: string, panel: string) => `/app/markets/${marketId}?tab=${tab}&panel=${panel}`
+/** A market page link that opens the given tab and side (read by `TradePanel`). */
+const shortcut = (marketId: string, tab: "pt" | "yt" | "lp", side?: "buy" | "sell" | "deposit" | "withdraw") =>
+  `/app/markets/${marketId}?tab=${tab}${side ? `&side=${side}` : ""}`
+
+/** PT amounts are oracle units, which are US dollars: a fixed figure is shown as USD. */
+const usd = (raw: bigint) => `$${formatTokenAmount(raw, 7, true)}`
 
 function Tip({ children, tip }: { children: React.ReactNode; tip: string }) {
   return (
@@ -119,6 +126,11 @@ function Position({
   const unknownBalance = BALANCES.some((k) => account[k].status === "unavailable")
   const secondsToMaturity: bigint | null =
     ms.maturity.status === "live" && ledgerTime !== null ? ms.maturity.value - BigInt(Math.floor(ledgerTime)) : null
+  const matured = secondsToMaturity === null ? null : secondsToMaturity <= 0n
+  const [dialog, setDialog] = useState<"claim" | "recombine" | null>(null)
+  // Built once per market: panel configs must stay stable (panel-config rule 1).
+  const panels = useMemo(() => ({ claim: claimPanel(market), recombine: recombinePanel() }), [market])
+  const showClaim = yt > 0n || liveBalance(account.ytPendingClaim) > 0n || unknownBalance
 
   return (
     <section aria-label={market.displayName} className="grid gap-5 rounded-lg border border-line bg-surface p-5">
@@ -146,14 +158,47 @@ function Position({
 
       {pt > 0n || yt > 0n ? <EntryLine marketId={marketId} ms={ms} account={account} history={history} /> : null}
 
-      <nav aria-label={`${market.displayName} shortcuts`} className="flex flex-wrap gap-x-5 gap-y-2 text-sm">
-        {yt > 0n || unknownBalance ? <ShortcutLink href={shortcut(marketId, "redeem", "claim_yield")}>Claim yield</ShortcutLink> : null}
-        {(pt > 0n && yt > 0n) || unknownBalance ? <ShortcutLink href={shortcut(marketId, "redeem", "recombine")}>Exit (recombine PT + YT)</ShortcutLink> : null}
-        {pt > 0n || yt > 0n || unknownBalance ? <ShortcutLink href={shortcut(marketId, "redeem", "redeem")}>Redeem at maturity</ShortcutLink> : null}
-        {lp > 0n || unknownBalance ? <ShortcutLink href={shortcut(marketId, "liquidity", "remove_liquidity")}>Remove liquidity</ShortcutLink> : null}
+      <nav aria-label={`${market.displayName} shortcuts`} className="flex flex-wrap items-center gap-x-5 gap-y-2 text-sm">
+        {showClaim ? <ShortcutButton onClick={() => setDialog("claim")}>Claim yield</ShortcutButton> : null}
+        {(pt > 0n && yt > 0n) || unknownBalance ? <ShortcutButton onClick={() => setDialog("recombine")}>Exit (recombine PT + YT)</ShortcutButton> : null}
+        {matured === true ? (
+          pt > 0n || yt > 0n || unknownBalance ? <ShortcutLink href={shortcut(marketId, "pt")}>Redeem at maturity</ShortcutLink> : null
+        ) : (
+          <>
+            {pt > 0n || unknownBalance ? <ShortcutLink href={shortcut(marketId, "pt", "sell")}>Sell PT</ShortcutLink> : null}
+            {yt > 0n || unknownBalance ? <ShortcutLink href={shortcut(marketId, "yt", "sell")}>Sell YT</ShortcutLink> : null}
+          </>
+        )}
+        {lp > 0n || unknownBalance ? <ShortcutLink href={shortcut(marketId, "lp", "withdraw")}>Withdraw liquidity</ShortcutLink> : null}
         <ShortcutLink href={`/app/markets/${marketId}`}>Open market</ShortcutLink>
       </nav>
+
+      <Dialog open={dialog !== null} onOpenChange={(o) => !o && setDialog(null)}>
+        <DialogContent className="max-h-[90dvh] overflow-y-auto sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>{dialog === "recombine" ? "Exit (recombine PT + YT)" : "Claim yield"}</DialogTitle>
+            <DialogDescription>
+              {dialog === "recombine"
+                ? `Give back equal amounts of PT and YT for ${code}, before maturity.`
+                : `Collect the yield your YT has earned on ${market.displayName}.`}
+            </DialogDescription>
+          </DialogHeader>
+          {dialog ? <ActionPanel config={dialog === "recombine" ? panels.recombine : panels.claim} marketId={marketId} /> : null}
+        </DialogContent>
+      </Dialog>
     </section>
+  )
+}
+
+function ShortcutButton({ onClick, children }: { onClick: () => void; children: React.ReactNode }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="text-ink underline underline-offset-4 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+    >
+      {children}
+    </button>
   )
 }
 
@@ -258,15 +303,18 @@ function FixedReturn({
     basis: s.basis,
   }))
   const noPrice = poolEmpty ? "No pool price yet (no liquidity)" : UNAVAILABLE
-  const face = pt.status === "live" ? `${tokens(pt.value, "notional")}` : UNAVAILABLE
+  const face = pt.status === "live" ? usd(pt.value) : UNAVAILABLE
   return (
     <dl className="grid grid-cols-1 gap-x-8 gap-y-4 min-[600px]:grid-cols-2">
       <div className="min-[600px]:col-span-2">
         <p className="label">Fixed return if held to maturity</p>
       </div>
-      <Metric label="Face value at maturity (notional)">{face}</Metric>
-      <Metric label="Current value (notional, at the pool price)">
-        {matured ? "Matured" : fixed.status === "live" ? tokens(fixed.value.valueNow, "notional") : ms.ptPrice.status === "unavailable" ? noPrice : UNAVAILABLE}
+      <Metric label="Face value at maturity (USD)">{face}</Metric>
+      <Metric label="Current value (USD, at the pool price)">
+        {matured ? "Matured" : fixed.status === "live" ? usd(fixed.value.valueNow) : ms.ptPrice.status === "unavailable" ? noPrice : UNAVAILABLE}
+      </Metric>
+      <Metric label="Projected fixed return at maturity">
+        {matured ? "Matured" : fixed.status === "live" ? `+${usd(fixed.value.faceAtMaturity - fixed.value.valueNow)}` : ms.ptPrice.status === "unavailable" ? noPrice : UNAVAILABLE}
       </Metric>
       <Metric label="Fixed APY from now">
         {matured ? "Matured" : fixed.status === "live" ? <Tip tip="Negative when PT trades above par: holding to maturity returns less than the price now.">{formatPercent(fixed.value.apy)}</Tip> : ms.ptPrice.status === "unavailable" ? noPrice : UNAVAILABLE}

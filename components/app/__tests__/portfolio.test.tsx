@@ -26,6 +26,9 @@ vi.mock("@/components/app/manifest-provider", () => {
 vi.mock("@/hooks/use-market-state", () => ({ useMarketState: () => ({ data: mocks.ms, isPending: false, stale: mocks.msStale }) }))
 vi.mock("@/hooks/use-account-state", () => ({ useAccountState: () => ({ data: mocks.account, isPending: false, stale: mocks.accountStale }) }))
 vi.mock("@/hooks/use-wallet", () => ({ useWallet: () => ({ state: mocks.wallet }) }))
+vi.mock("@/components/app/actions/action-panel", () => ({
+  ActionPanel: ({ marketId }: { marketId: string }) => <div data-testid="action-panel">{marketId}</div>,
+}))
 vi.mock("@/hooks/use-history", () => ({ useHistory: () => mocks.history }))
 vi.mock("@/hooks/use-ledger-clock", () => ({ useLedgerClock: () => ({ ledgerTime: LEDGER_TIME, sequence: 1, isError: false }) }))
 
@@ -116,12 +119,14 @@ describe("portfolio", () => {
     expect(lines.find((l) => l.label === "YT fee")?.value).toBe("0.2380953 STA")
   })
 
-  it("shows the fixed return in notional units, the APY, and the underlying paid apart", () => {
+  it("shows the fixed return in USD, the APY, and the underlying paid apart as indicative", () => {
     wrap()
     const card = screen.getByRole("region", { name: "STA · test" })
-    expect(within(card).getByText("Face value at maturity (notional)")).toBeTruthy()
-    expect(within(card).getByText("100.0000 notional")).toBeTruthy() // 100 PT
-    expect(within(card).getByText("98.0000 notional")).toBeTruthy() // 100 * 0.98
+    expect(within(card).getByText("Face value at maturity (USD)")).toBeTruthy()
+    expect(within(card).getByText("$100.0000")).toBeTruthy() // 100 PT
+    expect(within(card).getByText("$98.0000")).toBeTruthy() // 100 * 0.98
+    expect(within(card).getByText("Projected fixed return at maturity")).toBeTruthy()
+    expect(within(card).getByText("+$2.0000")).toBeTruthy()
     // 10 days left, price 0.98: positive APY, shown as a percent
     expect(within(card).getByText("109.05%")).toBeTruthy()
     // 100 PT / oracle 1.05 at exchange rate 1.0 = 95.2380952 STA, indicative before settlement
@@ -139,7 +144,7 @@ describe("portfolio", () => {
     mocks.ms = marketState({ settledRate: live<bigint | null>(10_500_000n), maturity: live(BigInt(LEDGER_TIME - 1)) })
     wrap()
     const card = screen.getByRole("region", { name: "STA · test" })
-    expect(within(card).getAllByText("Matured")).toHaveLength(2)
+    expect(within(card).getAllByText("Matured")).toHaveLength(3)
     expect(within(card).getByText("Redeems for (STA)")).toBeTruthy()
     expect(within(card).getByText("95.2380952 STA")).toBeTruthy()
   })
@@ -226,11 +231,51 @@ describe("portfolio", () => {
     expect(screen.queryByText("100.0000 PT")).toBeNull()
   })
 
-  it("links the shortcuts to the right tab and panel", () => {
+  it("portfolio keeps claim yield and the funded fields", async () => {
+    wrap()
+    const card = screen.getByRole("region", { name: "STA · test" })
+    // balances, current oracle rate, locked initial rate (accruing since), projected fixed return in USD
+    expect(within(card).getByText("100.0000 PT")).toBeTruthy()
+    expect(within(card).getByText("50.0000 YT")).toBeTruthy()
+    expect(within(card).getByText(/1\.0500 · fresh/)).toBeTruthy()
+    expect(within(card).getByText("Accruing since rate 1.0000")).toBeTruthy()
+    expect(within(card).getByText("+$2.0000")).toBeTruthy()
+    // Claim yield opens 0001's claim panel in a dialog
+    expect(screen.queryByTestId("action-panel")).toBeNull()
+    await userEvent.click(within(card).getByRole("button", { name: /claim yield/i }))
+    expect(await screen.findByRole("dialog", { name: /claim yield/i })).toBeTruthy()
+    expect(screen.getByTestId("action-panel").textContent).toBe("m1")
+  })
+
+  it("offers no Claim action without YT", () => {
+    mocks.account = accountState({ pt: live(100n * E7) })
+    wrap()
+    expect(screen.queryByRole("button", { name: /claim yield/i })).toBeNull()
+  })
+
+  it("amounts are grouped", () => {
+    mocks.account = accountState({ pt: live(1234n * E7), underlying: live(5_000_000n * E7) })
+    wrap()
+    const card = screen.getByRole("region", { name: "STA · test" })
+    expect(within(card).getByText("1,234.0000 PT")).toBeTruthy()
+    expect(within(card).getByText("5,000,000.0000 STA")).toBeTruthy()
+    expect(within(card).getByText("+$24.6800")).toBeTruthy() // 1234 * 0.02
+  })
+
+  it("links the shortcuts to the new tab and side scheme", () => {
+    mocks.account = accountState({ pt: live(100n * E7), yt: live(50n * E7), lp: live(1n * E7), ytLastClaimedIndex: live(indexFor(10_000_000n)) })
     wrap()
     const href = (name: RegExp) => screen.getByRole("link", { name }).getAttribute("href")
-    expect(href(/claim yield/i)).toBe("/app/markets/m1?tab=redeem&panel=claim_yield")
-    expect(href(/exit/i)).toBe("/app/markets/m1?tab=redeem&panel=recombine")
-    expect(href(/redeem at maturity/i)).toBe("/app/markets/m1?tab=redeem&panel=redeem")
+    expect(href(/sell pt/i)).toBe("/app/markets/m1?tab=pt&side=sell")
+    expect(href(/sell yt/i)).toBe("/app/markets/m1?tab=yt&side=sell")
+    expect(href(/withdraw liquidity/i)).toBe("/app/markets/m1?tab=lp&side=withdraw")
+    expect(href(/open market/i)).toBe("/app/markets/m1")
+  })
+
+  it("a matured market's redeem link lands on the PT tab", () => {
+    mocks.ms = marketState({ settledRate: live<bigint | null>(10_500_000n), maturity: live(BigInt(LEDGER_TIME - 1)) })
+    wrap()
+    expect(screen.getByRole("link", { name: /redeem/i }).getAttribute("href")).toBe("/app/markets/m1?tab=pt")
+    expect(screen.queryByRole("link", { name: /sell pt/i })).toBeNull()
   })
 })

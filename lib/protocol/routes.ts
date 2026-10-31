@@ -386,7 +386,7 @@ export function describeHoldings(
     if (v === undefined || v <= 0n) return []
     const decimals = token === "underlying" ? underlying.decimals : PRINCIPAL_DECIMALS
     const unit = token === "underlying" ? underlying.code : HOLDING_LABEL[token]
-    return [`${formatAmount(v, decimals, decimals)} ${unit}`]
+    return [`${formatAmount(v, decimals, decimals, { group: true })} ${unit}`]
   })
   return parts.length === 0 ? undefined : `You ${verb} ${listWords(parts)}`
 }

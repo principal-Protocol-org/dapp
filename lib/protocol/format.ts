@@ -56,9 +56,9 @@ export function formatAmount(
  * previewed amount reads the same as the raw value. 1_000_000_000n (7) -> "100.0000",
  * 45_431_818n -> "4.5431818".
  */
-export function formatTokenAmount(raw: bigint, decimals: number): string {
+export function formatTokenAmount(raw: bigint, decimals: number, group = false): string {
   const min = Math.min(4, decimals);
-  const exact = fixed(raw, decimals, decimals, true);
+  const exact = fixed(raw, decimals, decimals, true, group);
   const [whole, fraction = ""] = exact.split(".");
   const padded = fraction.padEnd(min, "0");
   return padded ? `${whole}.${padded}` : whole;
