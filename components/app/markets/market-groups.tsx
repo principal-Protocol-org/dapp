@@ -21,6 +21,7 @@ import { StatusBadge, type MarketStatus } from "@/components/app/markets/status-
 export type { MarketStatus }
 
 const WEEK_SECONDS = 7 * 86_400
+const SPARK_WINDOW_SECONDS = 30 * 86_400
 const TEST_NOTE = "Test token issued by Principal for Stellar Testnet, not Ondo's USDY"
 /** One grid for the asset row and the maturity rows, so their columns line up from `md` up. */
 const COLUMNS =
@@ -151,7 +152,7 @@ function tvlOf(ms: MarketState) {
 
 function chipClass(kind: "yt" | "pt") {
   return [
-    "flex w-full items-center justify-between gap-4 rounded-md border px-3 py-2 font-mono text-sm font-semibold tabular-nums",
+    "ml-auto flex w-40 items-center justify-between gap-4 rounded-md md:w-full border px-3 py-2 font-mono text-sm font-semibold tabular-nums",
     "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus",
     kind === "yt"
       ? "border-coupon bg-coupon-wash text-coupon-ink hover:bg-coupon/25"
@@ -205,9 +206,13 @@ function SparkCell({ spark, isPending, failed }: { spark: Spark | undefined; isP
   if (failed) return <Unavailable reason="History could not be read right now." />
   const points = spark?.points ?? []
   const change = spark?.changePts ?? null
+  const dated = points.filter((p) => p.value !== null)
+  // A spark that starts later than its 30-day window says so; nothing is stretched to fill it.
+  const short = dated.length > 0 && dated[dated.length - 1].at - dated[0].at < SPARK_WINDOW_SECONDS - 3600
   return (
-    <div className="flex items-center gap-2">
+    <div className="flex flex-wrap items-center gap-2">
       <SparkLine points={points} changePts={change} />
+      {short && <span className="text-xs text-ink-muted">{`since ${SHORT_DATE.format(new Date(dated[0].at * 1000))}`}</span>}
       {change !== null && points.length > 0 && (
         <span className={`font-mono text-xs ${change > 0 ? "text-positive" : change < 0 ? "text-negative" : "text-ink-muted"}`}>
           {`${change >= 0 ? "+" : "−"}${Math.abs(change).toFixed(2)} pt`}
@@ -325,6 +330,8 @@ function total(parts: ({ kind: "value"; value: bigint } | { kind: "none" } | { k
     if (p === undefined || p.kind === "unavailable") return { kind: "unavailable" } as const
     if (p.kind === "value") sum += p.value
   }
+  // Every pool unseeded: no liquidity yet, not a zero.
+  if (parts.length > 0 && parts.every((p) => p?.kind === "none")) return { kind: "none" } as const
   return { kind: "value", value: sum } as const
 }
 
@@ -374,7 +381,7 @@ function AssetGroup({
             </span>
             {group.note && <span className="mt-1 block text-xs text-ink-muted">{group.note}</span>}
           </span>
-          <span aria-hidden className="ml-auto text-ink-muted md:hidden">{open ? "▴" : "▾"}</span>
+          <span aria-hidden data-testid="chevron" className="ml-auto text-ink-muted">{open ? "▴" : "▾"}</span>
         </span>
         {loading ? (
           <span className="md:col-span-4">
@@ -384,7 +391,7 @@ function AssetGroup({
           <>
             <span className="flex items-baseline justify-between gap-3 md:block">
               <span className="text-xs text-ink-muted md:hidden">Liquidity / TVL</span>
-              <LiquidityTvl liquidity={liquidity} tvl={tvl} decimals={group.decimals} unit={group.code} />
+              <LiquidityTvl liquidity={liquidity} tvl={tvl.kind === "value" ? tvl : ({ kind: "unavailable" } as const)} decimals={group.decimals} unit={group.code} />
             </span>
             <span className="hidden md:block" />
             <span className="hidden md:block" />

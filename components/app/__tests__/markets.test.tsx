@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react"
+import { cleanup, render, screen, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import { TooltipProvider } from "@/components/ui/tooltip"
@@ -72,6 +72,7 @@ vi.mock("@/hooks/use-ledger-clock", () => ({
 import { MarketGroups, marketStatus } from "../markets/market-groups"
 
 const DAY = 86_400
+const SHORT = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", timeZone: "UTC" })
 const NOW = LEDGER_TIME
 const emptyHistory: MarketHistory = {
   fixedApy: [],
@@ -357,6 +358,35 @@ describe("MarketGroups", () => {
     expect(card.className).toContain("flex-col")
     expect(card.className).toContain("md:grid")
     expect(card.parentElement?.parentElement?.parentElement?.parentElement?.className).toContain("min-w-0")
+  })
+
+  it("shows the chevron on the asset row at every width", () => {
+    renderList()
+    const chevron = within(assetRow()).getByTestId("chevron")
+    expect(chevron.className).not.toContain("hidden")
+  })
+
+  it("spark says since <date> when its history is younger than 30 days, and not for a full window", () => {
+    renderList()
+    const since = SHORT.format(new Date((NOW - 2 * DAY) * 1000))
+    const card = marketCard("m1")
+    expect(within(card).getByText(`since ${since}`)).toBeTruthy()
+    mocks.sparks = {
+      sparks: { [POOL1]: spark({ points: [{ at: NOW - 30 * DAY, value: 0.05 }, { at: NOW, value: 0.052 }] }), [POOL2]: spark({ points: [], changePts: null }) },
+      stale: false,
+    }
+    cleanup()
+    renderList()
+    expect(within(marketCard("m1")).queryByText(/^since /)).toBeNull()
+  })
+
+  it("asset row says No liquidity yet, not 0, when every pool is unseeded", () => {
+    setMarket("m1", marketState({ poolSeeded: live(false) }))
+    setMarket("m2", marketState({ poolSeeded: live(false) }))
+    renderList()
+    const row = assetRow()
+    expect(within(row).getByText("No liquidity yet")).toBeTruthy()
+    expect(within(row).queryByText(/^0 /)).toBeNull()
   })
 
   it("shows a skeleton while a market loads", () => {
