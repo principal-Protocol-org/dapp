@@ -12,7 +12,7 @@ import { Countdown } from "@/components/app/market/countdown"
 import { FixedApy } from "@/components/app/market/fixed-apy"
 import { liquidityText } from "@/components/app/market/liquidity"
 import { Metric } from "@/components/app/market/metric"
-import { marketStatus } from "@/components/app/markets/markets-table"
+import { marketStatus } from "@/components/app/markets/market-groups"
 import { StatusBadge, type MarketStatus } from "@/components/app/markets/status-badge"
 
 export function MarketHeader({ marketId }: { marketId: string }) {

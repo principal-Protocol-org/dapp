@@ -1,4 +1,4 @@
-import { MarketsTable } from "@/components/app/markets/markets-table"
+import { MarketGroups } from "@/components/app/markets/market-groups"
 
 export default function AppPage() {
   return (
@@ -11,7 +11,7 @@ export default function AppPage() {
           Each market splits one yield-bearing asset into a principal token (PT) and a yield token (YT).
         </p>
       </div>
-      <MarketsTable />
+      <MarketGroups />
     </section>
   )
 }
