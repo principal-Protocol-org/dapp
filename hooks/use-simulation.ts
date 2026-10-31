@@ -30,9 +30,11 @@ function keyParts(input: ActionInput): string[] {
   return [input.action, input.marketId, input.source, input.amount.toString(), input.secondaryAmount?.toString() ?? ""]
 }
 
-const withOpenGuards = (input: ActionInput): ActionInput => ({ ...input, guards: openGuards(input.action, input.amount) })
+/** The input with zero floors (and Buy YT's full max_net_cost): what is simulated. */
+export const withOpenGuards = (input: ActionInput): ActionInput => ({ ...input, guards: openGuards(input.action, input.amount) })
 
-async function simulate(input: ActionInput): Promise<SimulationOutcome> {
+/** One simulation of the real call as the user; a throw becomes an `rpc_error` outcome. Also used per route step. */
+export async function simulate(input: ActionInput): Promise<SimulationOutcome> {
   try {
     const m = activeManifest()
     return await simulateInvocation({
@@ -46,7 +48,8 @@ async function simulate(input: ActionInput): Promise<SimulationOutcome> {
   }
 }
 
-function derive(input: ActionInput, outcome: SimulationOutcome, slippageBps: bigint): { output?: ActionOutput; guards?: GuardResult } {
+/** The validated output and the floors at `slippageBps`; an unreadable result is a refusal. Also used per route step. */
+export function derive(input: ActionInput, outcome: SimulationOutcome, slippageBps: bigint): { output?: ActionOutput; guards?: GuardResult } {
   if (!outcome.ok) return {}
   try {
     const output = parseOutput(input.action, outcome.retval)

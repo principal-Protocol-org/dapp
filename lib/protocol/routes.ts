@@ -1,4 +1,5 @@
 import { ACTION_META, type ActionId } from "./actions"
+import { formatAmount } from "./format"
 import type { ActionOutput } from "./guards"
 
 /**
@@ -275,4 +276,141 @@ export function resolveStep(
   const amount = resolveSource(plan.amount, input, outputs)
   if (!plan.secondaryAmount) return { amount }
   return { amount, secondaryAmount: resolveSource(plan.secondaryAmount, input, outputs) }
+}
+
+// --- What an interrupted route leaves with the user (spec §4 "Interruption") ---
+
+/** A token a route step hands over or receives. `underlying` is the market's USDY. */
+export type Holding = "underlying" | "sy" | "pt" | "yt" | "lp"
+/** Net amounts the route's confirmed steps left with the user, positive only. */
+export type Holdings = Partial<Record<Holding, bigint>>
+
+/** Every Principal token (SY, PT, YT, LP) has 7 decimals. */
+const PRINCIPAL_DECIMALS = 7
+const HOLDING_ORDER: Holding[] = ["pt", "yt", "lp", "sy", "underlying"]
+const HOLDING_LABEL: Record<Exclude<Holding, "underlying">, string> = { sy: "SY", pt: "PT", yt: "YT", lp: "LP" }
+
+/**
+ * What one confirmed step moved, per token: negative is handed over, positive received. Amounts are
+ * the ones the step was signed with (resolved again from the same plan and outputs) and its decoded
+ * output. Undefined if the output does not belong to the action.
+ */
+function moved(action: ActionId, a: { amount: bigint; secondaryAmount?: bigint }, out: ActionOutput): [Holding, bigint][] | undefined {
+  const value = out.kind === "amount" ? out.value : undefined
+  switch (action) {
+    case "deposit":
+      return value === undefined ? undefined : [["underlying", -a.amount], ["sy", value]]
+    case "withdraw":
+      return value === undefined ? undefined : [["sy", -a.amount], ["underlying", value]]
+    case "buy_pt":
+      return value === undefined ? undefined : [["sy", -a.amount], ["pt", value]]
+    case "sell_pt":
+      return value === undefined ? undefined : [["pt", -a.amount], ["sy", value]]
+    case "sell_yt":
+      return value === undefined ? undefined : [["yt", -a.amount], ["sy", value]]
+    case "recombine":
+      return value === undefined ? undefined : [["pt", -a.amount], ["yt", -a.amount], ["sy", value]]
+    case "claim_yield":
+      return value === undefined ? undefined : [["sy", value]]
+    case "mint":
+      return out.kind !== "mint" ? undefined : [["underlying", -a.amount], ["pt", out.pt_minted], ["yt", out.yt_minted]]
+    case "buy_yt":
+      return out.kind !== "buy_yt" ? undefined : [["sy", out.sy_back - a.amount], ["yt", out.yt_out]]
+    case "add_liquidity":
+      // The pool takes only what it uses; the rest stays with the user.
+      return out.kind !== "add_liquidity" ? undefined : [["pt", -out.pt_used], ["sy", -out.sy_used], ["lp", out.lp]]
+    case "add_liquidity_sy":
+      return out.kind !== "add_liquidity" ? undefined : [["sy", -a.amount], ["lp", out.lp]]
+    case "remove_liquidity":
+      return out.kind !== "remove_liquidity" ? undefined : [["lp", -a.amount], ["pt", out.pt], ["sy", out.sy]]
+    case "redeem":
+      return out.kind !== "redeem"
+        ? undefined
+        : [["pt", -a.amount], ["yt", -(a.secondaryAmount ?? 0n)], ["underlying", out.underlying_from_pt + out.underlying_from_yt]]
+  }
+}
+
+/**
+ * What the first `confirmed` steps left with the user, net of what later confirmed steps consumed:
+ * a matured LP withdraw interrupted after the redeem still holds the SY its first step removed.
+ * Only tokens with a positive net amount are listed; what the user paid in is not. Undefined when a
+ * confirmed step's result could not be read: the holdings are then unknown, never guessed.
+ */
+export function routeHoldings(
+  req: RouteRequest,
+  plans: StepPlan[],
+  outputs: (ActionOutput | null | undefined)[],
+  confirmed: number,
+): Holdings | undefined {
+  const net: Holdings = {}
+  const known: ActionOutput[] = []
+  for (let i = 0; i < confirmed; i++) {
+    const out = outputs[i]
+    const plan = plans[i]
+    if (!out || !plan) return undefined
+    known.push(out)
+    let flows: [Holding, bigint][] | undefined
+    try {
+      const amount = resolveSource(plan.amount, req, known)
+      const secondaryAmount = plan.secondaryAmount ? resolveSource(plan.secondaryAmount, req, known) : undefined
+      flows = moved(plan.action, { amount, secondaryAmount }, out)
+    } catch {
+      return undefined
+    }
+    if (!flows) return undefined
+    for (const [token, delta] of flows) net[token] = (net[token] ?? 0n) + delta
+  }
+  const held: Holdings = {}
+  for (const token of HOLDING_ORDER) {
+    const v = net[token]
+    if (v !== undefined && v > 0n) held[token] = v
+  }
+  return held
+}
+
+function listWords(parts: string[]): string {
+  return parts.length <= 1 ? (parts[0] ?? "") : `${parts.slice(0, -1).join(", ")} and ${parts.at(-1)}`
+}
+
+/** "You hold 1000 SY", exact to the last digit (a small amount is never shown as 0). Undefined if nothing is held. */
+export function describeHoldings(h: Holdings, underlying: { code: string; decimals: number }): string | undefined {
+  const parts = HOLDING_ORDER.flatMap((token) => {
+    const v = h[token]
+    if (v === undefined || v <= 0n) return []
+    const decimals = token === "underlying" ? underlying.decimals : PRINCIPAL_DECIMALS
+    const unit = token === "underlying" ? underlying.code : HOLDING_LABEL[token]
+    return [`${formatAmount(v, decimals, decimals)} ${unit}`]
+  })
+  return parts.length === 0 ? undefined : `You hold ${listWords(parts)}`
+}
+
+export type Unwind = { available: true; amount: bigint; plan: StepPlan } | { available: false; reason: string }
+
+/**
+ * The single call back to USDY from what an interrupted route left, where one exists: SY is
+ * unwrapped by `withdraw` (Router.unwrap). PT, YT or LP need more than one call (a sale, then a
+ * withdraw), so there is no single call back from them.
+ */
+export function unwindFrom(h: Holdings | undefined): Unwind {
+  if (h === undefined) {
+    return {
+      available: false,
+      reason: "This app could not read what the last step produced, so it cannot build the call back to USDY. Check your balances in the Portfolio.",
+    }
+  }
+  const others = (["pt", "yt", "lp"] as const).filter((t) => (h[t] ?? 0n) > 0n).map((t) => HOLDING_LABEL[t])
+  if (others.length > 0) {
+    const what = listWords(others)
+    return {
+      available: false,
+      reason: `Going back to USDY in one call works only from SY, and you also hold ${what}. Continue the route, or sell the ${what} from the Trade tab.`,
+    }
+  }
+  const sy = h.sy ?? 0n
+  if (sy <= 0n) {
+    return h.underlying !== undefined
+      ? { available: false, reason: "You already hold USDY from this route: there is nothing to turn back." }
+      : { available: false, reason: "Nothing has moved, so there is nothing to turn back into USDY." }
+  }
+  return { available: true, amount: sy, plan: WITHDRAW({ from: "value", value: sy }) }
 }
