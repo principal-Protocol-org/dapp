@@ -12,6 +12,23 @@ export type MarketContracts = {
   recoveryEscrow: string
 }
 
+export type MarketContractName = "sy" | "pt" | "yt" | "config" | "manager" | "pool" | "recoveryEscrow"
+
+/** Keys a pinned Wasm hash may carry: a market contract kind or a shared contract. */
+export type WasmHashKey = MarketContractName | "router" | "oracle" | "permissioning" | "riskControl" | "factory"
+
+/** Contracts shared by every market. `router` and `oracle` are the ones each market is wired to. */
+export type SharedContracts = {
+  router: string
+  oracle: string
+  permissioning: string
+  riskControl: string
+  factory?: string
+}
+
+/** The test underlying (USDY on local and Testnet); optional until a deploy emits it. */
+export type TestAsset = { code: string; issuer: string; sac: string; decimals: number; displayName: string }
+
 export type Market = {
   marketId: string
   displayName: string
@@ -23,7 +40,7 @@ export type Market = {
 }
 
 export type Manifest = {
-  schemaVersion: 1
+  schemaVersion: 2
   network: Network
   networkPassphrase: string
   rpcUrl: string
@@ -31,7 +48,12 @@ export type Manifest = {
   friendbotUrl?: string
   generatedAt: string
   sourceCommit: string
-  shared: { riskControl: string; permissioning: string }
+  shared: SharedContracts
+  /** Pinned Wasm hash (hex) per market contract kind; the trust anchor for restoring code (R29b). */
+  wasmHashes: Partial<Record<WasmHashKey, string>>
+  /** Router functions the dApp may call in user flows. */
+  routerFunctions: string[]
+  testAsset?: TestAsset
   markets: Market[]
 }
 

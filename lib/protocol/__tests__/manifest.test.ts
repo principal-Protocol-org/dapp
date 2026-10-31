@@ -56,7 +56,7 @@ describe("manifest v1", () => {
 
   it("rejects a wrong schema version and missing shared contracts", () => {
     const raw = structuredClone(testnetJson) as Raw
-    Reflect.set(raw, "schemaVersion", 2)
+    Reflect.set(raw, "schemaVersion", 3)
     expect(() => parseManifest(raw)).toThrow(/schemaVersion/)
     const raw2 = structuredClone(testnetJson) as Raw
     Reflect.deleteProperty(raw2.shared, "riskControl")
@@ -69,10 +69,9 @@ describe("manifest v1", () => {
     expect(errors(dup).some((f) => f.message.includes("Duplicate marketId"))).toBe(true)
   })
 
-  it("requires at least one market", () => {
+  it("requires at least one market in a v1 file (v2 allows none)", () => {
     const raw = { ...structuredClone(testnetJson), markets: [] }
     expect(() => parseManifest(raw)).toThrow(/markets/)
-    expect(errors({ ...testnet(), markets: [] }).length).toBeGreaterThan(0)
   })
 
   it("requires https rpc on testnet and mainnet, allows http on local", () => {
@@ -96,5 +95,88 @@ describe("manifest v1", () => {
     const m = testnet()
     expect(getMarket(m, "nope")).toBeUndefined()
     expect(getMarket(m, "sta-2026-10-03")?.displayName).toContain("STA")
+  })
+})
+
+const ROUTER_FUNCTIONS = [
+  "wrap_and_mint",
+  "unwrap",
+  "swap_sy_for_pt",
+  "swap_pt_for_sy",
+  "swap_sy_for_yt",
+  "swap_yt_for_sy",
+  "add_liquidity",
+  "add_liquidity_single_sy",
+  "remove_liquidity",
+  "recombine",
+  "redeem_at_maturity",
+  "claim_yield",
+]
+
+describe("manifest v2", () => {
+  const v2Raw = () => structuredClone(parseManifest(localExample)) as Manifest
+
+  it("upgrades the committed v1 testnet file", () => {
+    const m = parseManifest(testnetJson)
+    expect(m.schemaVersion).toBe(2)
+    expect(m.shared.router).toBe(m.markets[0].contracts.router)
+    expect(m.shared.oracle).toBe(m.markets[0].contracts.oracle)
+    expect(m.shared.riskControl).toBe(testnetJson.shared.riskControl)
+    expect(m.shared.permissioning).toBe(testnetJson.shared.permissioning)
+    expect(m.wasmHashes).toEqual(m.markets[0].wasmHashes ?? {})
+    expect(m.routerFunctions).toEqual(ROUTER_FUNCTIONS)
+    expect(m.testAsset).toBeUndefined()
+    expect(errors(m)).toEqual([])
+  })
+
+  it("parses a v2 file with zero markets", () => {
+    const m = parseManifest({ ...v2Raw(), markets: [] })
+    expect(m.markets).toEqual([])
+    expect(errors(m)).toEqual([])
+  })
+
+  it("keeps the v2 local example as v2 with testAsset optional", () => {
+    const m = parseManifest(localExample)
+    expect(m.schemaVersion).toBe(2)
+    expect(m.testAsset).toBeUndefined()
+    expect(m.shared.factory).toBeDefined()
+  })
+
+  it("accepts a testAsset", () => {
+    const raw = v2Raw()
+    raw.testAsset = {
+      code: "USDY",
+      issuer: testnetJson.markets[0].underlying.issuer,
+      sac: testnetJson.markets[0].contracts.router,
+      decimals: 7,
+      displayName: "USDY (test)",
+    }
+    expect(parseManifest(raw).testAsset?.displayName).toBe("USDY (test)")
+  })
+
+  it("rejects a non-hex wasm hash", () => {
+    const raw = v2Raw()
+    raw.wasmHashes = { manager: "zz".repeat(32) }
+    expect(() => parseManifest(raw)).toThrow(/wasmHashes\.manager/)
+    raw.wasmHashes = { manager: "ab".repeat(31) }
+    expect(() => parseManifest(raw)).toThrow(/wasmHashes\.manager/)
+    raw.wasmHashes = { manager: "AB".repeat(32) }
+    expect(parseManifest(raw).wasmHashes.manager).toBe("AB".repeat(32))
+  })
+
+  it("rejects an unknown wasm hash contract name", () => {
+    const raw = v2Raw() as unknown as { wasmHashes: Record<string, string> }
+    raw.wasmHashes = { nope: "ab".repeat(32) }
+    expect(() => parseManifest(raw)).toThrow(/wasmHashes/)
+  })
+
+  it("validateManifest flags a market whose router or oracle differs from shared", () => {
+    const m = testnet()
+    expect(errors(m)).toEqual([])
+    const other = testnetJson.shared.riskControl
+    const badRouter = { ...m, markets: [{ ...m.markets[0], contracts: { ...m.markets[0].contracts, router: other } }] }
+    expect(errors(badRouter).some((f) => f.message.includes("router"))).toBe(true)
+    const badOracle = { ...m, markets: [{ ...m.markets[0], contracts: { ...m.markets[0].contracts, oracle: other } }] }
+    expect(errors(badOracle).some((f) => f.message.includes("oracle"))).toBe(true)
   })
 })
