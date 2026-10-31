@@ -12,9 +12,13 @@ import { getHistory, RANGES, type MarketHistory, type Range } from "@/lib/server
 
 const POOL = /^C[A-Z2-7]{55}$/
 
-const json = (body: unknown, status = 200) => Response.json(body, { status, headers: { "cache-control": "no-store" } })
+const CACHED = "public, s-maxage=60, stale-while-revalidate=300"
 
-const EMPTY: MarketHistory = { fixedApy: [], underlyingApy7d: [], liquidity: [], latestAt: null, stale: true }
+/** Only a real answer from the database is cached; errors and the database-down fallback are not. */
+const json = (body: unknown, status = 200, cache = "no-store") =>
+  Response.json(body, { status, headers: { "cache-control": cache } })
+
+const EMPTY: MarketHistory = { fixedApy: [], underlyingApy7d: [], liquidity: [], latestAt: null, stale: true, underlyingWindowSeconds: null }
 
 export async function GET(request: Request, { params }: { params: Promise<{ pool: string }> }) {
   const { pool } = await params
@@ -26,7 +30,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ pool
   if (!market) return json({ error: "unknown_market" }, 404)
 
   try {
-    return json(await getHistory(sql, pool, range as Range, { maturity: market.maturity }))
+    return json(await getHistory(sql, pool, range as Range, { maturity: market.maturity }), 200, CACHED)
   } catch (error) {
     console.error("history route:", error instanceof Error ? error.name : "unknown")
     return json(EMPTY)

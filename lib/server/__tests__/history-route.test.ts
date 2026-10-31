@@ -31,7 +31,8 @@ describe("history route", () => {
     state.fail = Object.assign(new Error("connect ECONNREFUSED host"), { code: "ECONNREFUSED" })
     const res = await call(pool, "?range=7d")
     expect(res.status).toBe(200)
-    expect(await res.json()).toEqual({ fixedApy: [], underlyingApy7d: [], liquidity: [], latestAt: null, stale: true })
+    expect(res.headers.get("cache-control")).toBe("no-store") // the fallback is never cached
+    expect(await res.json()).toEqual({ fixedApy: [], underlyingApy7d: [], liquidity: [], latestAt: null, stale: true, underlyingWindowSeconds: null })
   })
 
   it("also when the database is not configured", async () => {
@@ -52,12 +53,22 @@ describe("history route", () => {
   })
 })
 
+describe("cache headers", () => {
+  it("a database answer is cached 60 s with stale-while-revalidate", async () => {
+    const want = "public, s-maxage=60, stale-while-revalidate=300"
+    expect((await call(pool, "?range=7d")).headers.get("cache-control")).toBe(want)
+    const res = await sparks(new Request(`http://x/api/markets/sparks?pools=${pool}`))
+    expect(res.headers.get("cache-control")).toBe(want)
+    expect(res.status).toBe(200)
+  })
+})
+
 describe("sparks route", () => {
   it("answers empty sparks when the database is down", async () => {
     state.fail = new Error("down")
     const res = await sparks(new Request(`http://x/api/markets/sparks?pools=${pool}`))
     expect(res.status).toBe(200)
-    expect(await res.json()).toEqual({ sparks: { [pool]: { points: [], changePts: null } }, stale: true })
+    expect(await res.json()).toEqual({ sparks: { [pool]: { points: [], changePts: null, stale: true } }, stale: true })
   })
 
   it("rejects a bad pool list", async () => {
