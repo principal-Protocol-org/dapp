@@ -241,7 +241,16 @@ export function ActionPanel({ config, marketId }: { config: PanelConfig; marketI
           describeResult={describeResult}
           restoreCall={restoreCall}
           onRestored={sim.refresh}
-          onNotice={(notice) => setLast({ owner, notice })}
+          onNotice={(notice) => {
+            setLast({ owner, notice })
+            // Once a transaction reached the network (confirmed, or result not known yet) the form
+            // starts over as on first load: the old amounts would fail against the new balances, and
+            // must not be sent twice. A refused or failed attempt keeps them, to correct and retry.
+            if (notice.tone !== "error") {
+              setTexts({})
+              setTouched({})
+            }
+          }}
           ledgerTime={ledgerTime}
           network={manifest.network}
         />
