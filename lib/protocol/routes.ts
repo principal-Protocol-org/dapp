@@ -99,17 +99,49 @@ function disabledIf(reason: string): RouteDisabled {
   return { disabled: reason }
 }
 
+/** Kinds paid for with `pay`; `receive` is ignored for them. The others ignore `pay`. */
+const BUY_KINDS: RouteKind[] = ["buy_pt", "buy_yt", "split", "lp_keep_yt", "lp_only"]
+const GIVES: Record<RouteKind, string> = {
+  buy_pt: "USDY",
+  buy_yt: "USDY",
+  split: "USDY",
+  lp_keep_yt: "USDY",
+  lp_only: "USDY",
+  sell_pt: "PT",
+  sell_yt: "YT",
+  lp_withdraw: "LP",
+  recombine: "PT + YT",
+}
+const TAKES: Record<RouteKind, string> = {
+  buy_pt: "PT",
+  buy_yt: "YT",
+  split: "PT + YT",
+  lp_keep_yt: "LP + YT",
+  lp_only: "LP",
+  sell_pt: "USDY",
+  sell_yt: "USDY",
+  lp_withdraw: "USDY",
+  recombine: "USDY",
+}
+
 export function planRoute(req: RouteRequest, ctx: RouteContext): StepPlan[] | RouteDisabled {
   const payUnderlying = req.pay === "underlying"
   const recvUnderlying = req.receive === "underlying"
 
-  // Single-step Router function, when one ships and the manifest lists it.
+  // Single-step Router function, when one ships and the manifest lists it. For buy kinds the
+  // payment token decides (`receive` is ignored); for sell kinds the receive token decides (`pay`
+  // is ignored).
   const single = (ctx.singleStep ?? SINGLE_STEP)[req.kind]
-  if (single && payUnderlying && ctx.routerFunctions.includes(single.fn)) {
-    const natural = req.kind === "buy_pt" || req.kind === "buy_yt" || req.kind === "split" || req.kind === "lp_keep_yt"
-    if (natural || recvUnderlying) {
-      return [{ action: single.action, amount: input, gives: "USDY", takes: recvUnderlying ? "USDY" : "PT/YT" }]
-    }
+  const isBuy = BUY_KINDS.includes(req.kind)
+  if (single && (isBuy ? payUnderlying : recvUnderlying) && ctx.routerFunctions.includes(single.fn)) {
+    return [
+      {
+        action: single.action,
+        amount: input,
+        gives: isBuy ? "USDY" : GIVES[req.kind],
+        takes: isBuy ? TAKES[req.kind] : "USDY",
+      },
+    ]
   }
 
   switch (req.kind) {
@@ -145,7 +177,7 @@ export function planRoute(req: RouteRequest, ctx: RouteContext): StepPlan[] | Ro
             }
           : {}),
       })
-      const tail = (idx: number): StepPlan[] => (recvUnderlying ? [WITHDRAW(step(idx, "sy_back"))] : [])
+      const tail = (idx: number): StepPlan[] => (payUnderlying ? [WITHDRAW(step(idx, "sy_back"))] : [])
       if (!payUnderlying) return [buy(0), ...tail(0)]
       const dep = ctx.buyYt?.depositUnderlying
       if (dep === undefined) return disabledIf("Buy YT with USDY needs the amount of USDY to deposit first.")
@@ -188,10 +220,10 @@ export function planRoute(req: RouteRequest, ctx: RouteContext): StepPlan[] | Ro
           amount: step(0, "pt"),
           secondaryAmount: { from: "value", value: 0n },
           gives: "PT",
-          takes: "USDY",
+          takes: "USDY (paid out as USDY even when you receive SY)",
         }
-        const out: AmountSource = { from: "sum", parts: [step(0, "sy"), step(1, "underlying_from_pt"), step(1, "underlying_from_yt")] }
-        return recvUnderlying ? [remove, redeem, WITHDRAW(out)] : [remove, redeem]
+        // redeem_at_maturity pays underlying directly; only the SY removed from the pool is unwrapped.
+        return recvUnderlying ? [remove, redeem, WITHDRAW(step(0, "sy"))] : [remove, redeem]
       }
       const sell: StepPlan = { action: "sell_pt", amount: step(0, "pt"), gives: "PT", takes: "SY" }
       const out: AmountSource = { from: "sum", parts: [step(0, "sy"), step(1, "value")] }
