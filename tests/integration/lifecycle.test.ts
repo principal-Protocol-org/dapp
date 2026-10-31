@@ -542,7 +542,7 @@ describe.skipIf(skip !== null)("protocol layer on the local network", () => {
       (a) => a.trustline.status === "live" && a.trustline.value === "authorized",
       "the authorized trustline on Horizon",
     )
-    expect(onboarded.underlying).toMatchObject({ status: "live", value: 10_000n * U })
+    expect(onboarded.underlying).toMatchObject({ status: "live", value: 100_000n * U })
     expect(evaluateAccountCompliance(onboarded, kind).map((i) => [i.id, i.status])).toEqual([
       ["account", "ok"],
       ["trustline", "ok"],

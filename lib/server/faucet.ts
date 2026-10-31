@@ -43,6 +43,12 @@ import {
 import type { Manifest, Market } from "@/lib/protocol/types"
 
 /** Whole test tokens paid per top-up. */
+/** The asset the faucet pays: the manifest's `testAsset` (USDY) when set, else the markets' one shared underlying. */
+function faucetAsset(manifest: Manifest): Market["underlying"] | null {
+  const t = manifest.testAsset
+  return t ? { code: t.code, issuer: t.issuer, sac: t.sac, decimals: t.decimals } : sharedTestAsset(manifest)
+}
+
 export const FAUCET_AMOUNT = TEST_TOKEN_AMOUNT
 /** Whole test tokens below which the faucet pays. */
 export const FAUCET_TOP_UP_BELOW = TEST_TOKEN_TOP_UP_BELOW
@@ -238,7 +244,7 @@ export async function runFaucet(p: {
   // The route validates the body; this is the last line before anything is signed.
   if (!StrKey.isValidEd25519PublicKey(account)) throw new Error("runFaucet needs a G… account address")
   // Onboarding trusts, authorizes and pays one asset: every market must share it (R44).
-  const asset = sharedTestAsset(manifest)
+  const asset = faucetAsset(manifest)
   if (!asset) return { error: "not_configured" }
   const chain = p.chain ?? createStellarFaucetChain(manifest)
 
@@ -375,7 +381,7 @@ export function createStellarFaucetChain(
   const admin = env.FAUCET_PERMISSIONING_ADMIN_SECRET?.trim()
     ? keypairFrom(env.FAUCET_PERMISSIONING_ADMIN_SECRET, "FAUCET_PERMISSIONING_ADMIN_SECRET")
     : issuer
-  const asset = sharedTestAsset(manifest)
+  const asset = faucetAsset(manifest)
   if (!asset) throw new FaucetConfigError("The manifest's markets do not share one test asset; onboarding supports a single one.")
   if (issuer.publicKey() !== asset.issuer) {
     throw new FaucetConfigError("FAUCET_ISSUER_SECRET is not the key of the test asset issuer named in the manifest.")

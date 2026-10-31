@@ -17,10 +17,10 @@ import {
 } from "./stellar"
 import type { Live, Manifest, Market, Network } from "./types"
 
-/** Whole tokens of the test asset the faucet pays (plan: 10 000 units). */
-export const TEST_TOKEN_AMOUNT = 10_000n
-/** The faucet pays only while the balance is below this many whole tokens (plan: 1 000). */
-export const TEST_TOKEN_TOP_UP_BELOW = 1_000n
+/** Whole tokens of the test asset the faucet pays (spec 0002: 100 000 units). */
+export const TEST_TOKEN_AMOUNT = 100_000n
+/** The faucet pays only while the balance is below this many whole tokens (spec 0002: 10 000). */
+export const TEST_TOKEN_TOP_UP_BELOW = 10_000n
 
 /** Every token this app knows has 7 decimals (shared context). */
 const DEFAULT_DECIMALS = 7
