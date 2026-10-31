@@ -15,12 +15,12 @@ import { Badge } from "@/components/ui/badge"
 import { Skeleton } from "@/components/ui/skeleton"
 import { SparkLine } from "@/components/app/charts/spark-line"
 import { liquidityOf, type Liquidity } from "@/components/app/market/liquidity"
+import { underlyingApyOf } from "@/components/app/market/underlying-apy"
 import { UNAVAILABLE } from "@/components/app/live"
 import { StatusBadge, type MarketStatus } from "@/components/app/markets/status-badge"
 
 export type { MarketStatus }
 
-const WEEK_SECONDS = 7 * 86_400
 const SPARK_WINDOW_SECONDS = 30 * 86_400
 const TEST_NOTE = "Test token issued by Principal for Stellar Testnet, not Ondo's USDY"
 /** One grid for the asset row and the maturity rows, so their columns line up from `md` up. */
@@ -177,26 +177,16 @@ function Chip({ kind, marketId, figure, text }: { kind: "yt" | "pt"; marketId: s
   )
 }
 
-/** The 7-day underlying APY with the window it covers (R2-44): "since <date>" under 7 days, never extrapolated. */
+/** The 7-day underlying APY with the window it covers (R2-44). */
 function UnderlyingApy({ pool }: { pool: string }) {
   const { data, isPending } = useMarketHistory(pool, "7d")
   if (isPending) return <Skeleton className="ml-auto h-5 w-16" />
-  if (!data) return <div data-cell="underlying-apy" title="History could not be read right now.">{UNAVAILABLE}</div>
-  const last = [...data.underlyingApy7d].reverse().find((p) => p.value !== null)
-  if (!last || last.value === null || data.underlyingWindowSeconds === null) {
-    return (
-      <div data-cell="underlying-apy" title="No oracle snapshots yet: the 7-day average needs at least two.">
-        {UNAVAILABLE}
-      </div>
-    )
-  }
-  const short = data.underlyingWindowSeconds < WEEK_SECONDS
+  const f = underlyingApyOf(data)
+  if (f.kind === "none") return <div data-cell="underlying-apy" title={f.reason}>{UNAVAILABLE}</div>
   return (
     <div data-cell="underlying-apy" className="flex flex-col items-end">
-      <span>{formatPercent(last.value)}</span>
-      <span className="text-xs text-ink-muted">
-        {short ? `since ${SHORT_DATE.format(new Date((last.at - data.underlyingWindowSeconds) * 1000))}` : "7-day average"}
-      </span>
+      <span>{formatPercent(f.value)}</span>
+      <span className="text-xs text-ink-muted">{f.caption}</span>
     </div>
   )
 }
