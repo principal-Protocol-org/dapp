@@ -16,8 +16,10 @@ import { createRpcReader } from "@/lib/protocol/reader"
 import { createRpcServer } from "@/lib/protocol/stellar"
 import { DatabaseConfigError, sql } from "@/lib/server/db"
 import { recordAll } from "@/lib/server/recorder"
+import { discover, resolvedMarkets, revalidate, sqlRegistryStore } from "@/lib/server/registry"
 
-// ~30 simulations per market, a few attempts, one insert.
+// Discovery (a few getEvents pages), ~40 validation reads per market, then ~30 simulations per
+// market, a few attempts, one insert.
 export const maxDuration = 60
 
 const sha256 = (value: string) => createHash("sha256").update(value).digest()
@@ -68,11 +70,19 @@ export async function GET(request: Request) {
   const manifest = activeManifest()
   try {
     const server = createRpcServer(manifest.rpcUrl)
+    const reader = createRpcReader(manifest)
+    const store = sqlRegistryStore(sql)
+    const registry = { store, reader, rpc: server, manifest }
     const result = await recordAll({
-      reader: createRpcReader(manifest),
+      reader,
       sql,
       manifest,
-      markets: manifest.markets,
+      // Spec §1 / R2-36: discover new markets, re-validate the rest, then record what is listed.
+      refreshRegistry: async () => {
+        const found = await discover(registry)
+        await revalidate(registry, { skip: new Set(found.checked) })
+      },
+      markets: () => resolvedMarkets({ store, manifest }),
       now: () => Date.now(),
       ledgerCloseTime: async (ledger) => {
         const page = await server.getLedgers({ startLedger: ledger, pagination: { limit: 1 } })

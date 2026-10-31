@@ -1,6 +1,6 @@
 import { allLive, readLive, toBigint, toBool, unavailable, type ContractReader } from "./reader"
 import { getMarket } from "./manifest"
-import type { Live, Manifest } from "./types"
+import type { Live, Manifest, Market } from "./types"
 
 /** The oracle freshness window the protocol hardcodes on-chain (seconds). */
 export const ORACLE_MAX_STALE_SECONDS = 3600
@@ -84,11 +84,7 @@ function parseSettledRate(raw: unknown): bigint | null {
 }
 
 /** Router.market(pool) is the on-chain record of the market's contract set; compare it with the manifest. */
-function compareTopology(
-  market: ReturnType<typeof getMarketOrThrow>,
-  info: Live<MarketInfo>,
-  maturity: Live<bigint>,
-): Live<Topology> {
+function compareTopology(market: Market, info: Live<MarketInfo>, maturity: Live<bigint>): Live<Topology> {
   return allLive([info, maturity] as const, ([onChain, onChainMaturity]) => {
     const checks: [string, unknown, unknown][] = [
       ["pool", onChain.pool, market.contracts.pool],
@@ -110,6 +106,26 @@ function getMarketOrThrow(m: Manifest, marketId: string) {
   return market
 }
 
+const readRouterInfo = (reader: ContractReader, market: Market) =>
+  readLive<unknown, MarketInfo>(
+    reader,
+    { contractId: market.contracts.router, functionName: "market", args: [{ type: "address", value: market.contracts.pool }] },
+    (v) => asObject<MarketInfo>(v, "Router.market"),
+  )
+
+/**
+ * 0001's topology rule on its own, for a market that need not be in the manifest (the registry
+ * validates discovered markets with it): `Router.market(pool)` and the manager's maturity must
+ * match the market's contracts, underlying and maturity.
+ */
+export async function fetchTopology(reader: ContractReader, market: Market): Promise<Live<Topology>> {
+  const [info, maturity] = await Promise.all([
+    readRouterInfo(reader, market),
+    readLive<unknown, bigint>(reader, { contractId: market.contracts.manager, functionName: "maturity" }, toBigint),
+  ])
+  return compareTopology(market, info, maturity)
+}
+
 export async function fetchMarketState(reader: ContractReader, m: Manifest, marketId: string): Promise<MarketState> {
   const market = getMarketOrThrow(m, marketId)
   const c = market.contracts
@@ -124,11 +140,7 @@ export async function fetchMarketState(reader: ContractReader, m: Manifest, mark
   const poolStateRead = readLive<unknown, PoolStateView>(reader, { contractId: c.pool, functionName: "pool_state" }, parsePoolState)
   const reservesRead = readLive<unknown, [bigint, bigint]>(reader, { contractId: c.pool, functionName: "reserves" }, parseReserves)
   const maturity = big(c.manager, "maturity")
-  const routerInfo = readLive<unknown, MarketInfo>(
-    reader,
-    { contractId: c.router, functionName: "market", args: [{ type: "address", value: c.pool }] },
-    (v) => asObject<MarketInfo>(v, "Router.market"),
-  )
+  const routerInfo = readRouterInfo(reader, market)
 
   // Price and implied rate panic on an empty pool, so they are read only once both reserves are > 0.
   const seededChain = reservesRead.then(async (reserves) => {

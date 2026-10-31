@@ -168,6 +168,13 @@ export function validateManifest(m: Manifest): Finding[] {
   return findings
 }
 
+/** One market record (e.g. a registry row's), checked against the manifest's market schema. */
+export function parseMarket(json: unknown): Market {
+  const parsed = marketSchema.safeParse(json)
+  if (!parsed.success) throw new Error(`Invalid market: ${describe(parsed.error)}`)
+  return parsed.data
+}
+
 export function getMarket(m: Manifest, marketId: string): Market | undefined {
   return m.markets.find((x) => x.marketId === marketId)
 }

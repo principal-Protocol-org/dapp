@@ -6,7 +6,11 @@ import { parseManifest } from "@/lib/protocol/manifest"
 
 vi.mock("server-only", () => ({}))
 
-const mocks = vi.hoisted(() => ({ runFaucet: vi.fn() }))
+const mocks = vi.hoisted(() => ({ runFaucet: vi.fn(), registry: [] as Record<string, unknown>[] }))
+vi.mock("@/lib/server/db", () => ({
+  sql: async () => mocks.registry,
+  DatabaseConfigError: class DatabaseConfigError extends Error {},
+}))
 vi.mock("@/lib/server/faucet", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/server/faucet")>()),
   runFaucet: mocks.runFaucet,
@@ -50,6 +54,21 @@ describe("POST /api/faucet", () => {
     expect(res.status).toBe(200)
     expect(await res.json()).toEqual({ performed: ["pay"] })
     expect(res.headers.get("cache-control")).toContain("no-store")
+  })
+
+  it("grants over the resolved markets: seeds plus valid registry markets", async () => {
+    const pool = "C" + "B".repeat(55)
+    const market = { ...manifest.markets[0], marketId: "testnet-sta-discovered", contracts: { ...manifest.markets[0].contracts, pool } }
+    mocks.registry = [{ pool, market_id: market.marketId, source: "discovered", valid: true, reason: null, market }]
+    try {
+      await post(JSON.stringify({ account: ACCOUNT }))
+      expect(mocks.runFaucet.mock.calls[0][0].manifest.markets.map((m: { marketId: string }) => m.marketId)).toEqual([
+        manifest.markets[0].marketId,
+        "testnet-sta-discovered",
+      ])
+    } finally {
+      mocks.registry = []
+    }
   })
 
   it("passes the account, the client key, the manifest and the time", async () => {

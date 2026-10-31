@@ -12,7 +12,10 @@ import "server-only"
 import { StrKey } from "@stellar/stellar-sdk"
 import { activeManifest } from "@/lib/protocol/manifest-source"
 import type { FaucetErrorCode, FaucetResponse, FaucetStep } from "@/lib/protocol/onboarding"
+import { sql } from "@/lib/server/db"
 import { FAUCET_RATE_LIMIT_MS, FaucetConfigError, FaucetStepError, runFaucet } from "@/lib/server/faucet"
+import { resolvedMarkets, sqlRegistryStore } from "@/lib/server/registry"
+import { clientIp, isCrossSite, isJson, readBody, redact } from "@/lib/server/request"
 
 // No `runtime` export: Cache Components runs route handlers on the default Node.js runtime and
 // refuses the option. Up to five transactions, each confirmed before the next: allow for a slow ledger.
@@ -20,7 +23,6 @@ export const maxDuration = 120
 
 /** `{ "account": "G…" }` is about 70 bytes; anything much larger is not a faucet request. */
 const MAX_BODY_BYTES = 1_024
-const FALLBACK_IP = "unknown"
 const RETRY_AFTER_SECONDS = FAUCET_RATE_LIMIT_MS / 1_000
 
 const STATUS: Record<FaucetErrorCode, number> = {
@@ -62,44 +64,6 @@ function refuse(error: FaucetErrorCode, extra: { step?: FaucetStep } = {}): Resp
   return reply(body, STATUS[error])
 }
 
-/**
- * The body as text, read as a stream: bytes are counted as they arrive and the stream is cancelled
- * as soon as the total passes `MAX_BODY_BYTES`, so an oversized or endless body is never buffered
- * (R42). A declared oversize `content-length` is refused before reading anything.
- */
-async function readBody(request: Request): Promise<{ text: string } | "too_large" | "unreadable"> {
-  if (Number(request.headers.get("content-length") ?? 0) > MAX_BODY_BYTES) return "too_large"
-  if (!request.body) return { text: "" }
-  const reader = request.body.getReader()
-  const chunks: Uint8Array[] = []
-  let total = 0
-  try {
-    for (;;) {
-      const { done, value } = await reader.read()
-      if (done) break
-      total += value.byteLength
-      if (total > MAX_BODY_BYTES) {
-        await reader.cancel().catch(() => undefined)
-        return "too_large"
-      }
-      chunks.push(value)
-    }
-  } catch {
-    return "unreadable"
-  }
-  const bytes = new Uint8Array(total)
-  let offset = 0
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset)
-    offset += chunk.byteLength
-  }
-  try {
-    return { text: new TextDecoder("utf-8", { fatal: true }).decode(bytes) }
-  } catch {
-    return "unreadable"
-  }
-}
-
 /** The account from a small JSON body, or null for anything else. */
 function accountFrom(text: string): string | null {
   let body: unknown
@@ -113,56 +77,20 @@ function accountFrom(text: string): string | null {
   return typeof account === "string" && StrKey.isValidEd25519PublicKey(account) ? account : null
 }
 
-/** The rightmost non-empty entry of a comma-separated header: the hop the nearest proxy added. */
-function lastHop(value: string | null): string | undefined {
-  const hops = (value ?? "").split(",").map((hop) => hop.trim()).filter(Boolean)
-  return hops.at(-1)?.slice(0, 64)
-}
-
-/**
- * The rate-limit key for the client (R42). Trust assumption: the app is deployed on Vercel (Task 25),
- * whose edge sets `x-vercel-forwarded-for` and `x-real-ip` itself, so a client cannot choose them.
- * Behind another proxy, that proxy must overwrite these headers; the rightmost `x-forwarded-for`
- * hop is then the one the nearest proxy appended (the leftmost is whatever the client sent). With
- * none of them, every request shares one fallback key. The per-instance global cap in `runFaucet`
- * bounds the damage of a spoofed key either way.
- */
-function clientIp(request: Request): string {
-  const h = request.headers
-  return lastHop(h.get("x-vercel-forwarded-for")) ?? lastHop(h.get("x-real-ip")) ?? lastHop(h.get("x-forwarded-for")) ?? FALLBACK_IP
-}
-
-/** Server logs only: a Stellar secret key (S…) is never written, whatever an error carries. */
-function redact(text: string): string {
-  return text.replace(/S[A-Z2-7]{55}/g, "[redacted]")
-}
-
-/** Only `application/json` (parameters such as a charset allowed): a plain HTML form cannot send it. */
-function isJson(request: Request): boolean {
-  const type = request.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase()
-  return type === "application/json"
-}
-
-/**
- * Browsers send `Sec-Fetch-Site`; anything but `same-origin` is another site (or a typed URL)
- * driving the visitor's browser. Clients without the header (scripts, tests) are not browsers and
- * meet every other check.
- */
-function isCrossSite(request: Request): boolean {
-  const site = request.headers.get("sec-fetch-site")
-  return site !== null && site !== "same-origin"
-}
-
 export async function POST(request: Request): Promise<Response> {
   if (isCrossSite(request)) return refuse("cross_site")
   if (!isJson(request)) return refuse("invalid_content_type")
-  const body = await readBody(request)
+  const body = await readBody(request, MAX_BODY_BYTES)
   if (body === "too_large") return refuse("request_too_large")
   const account = body === "unreadable" ? null : accountFrom(body.text)
   if (!account) return refuse("invalid_account")
 
   try {
-    const result = await runFaucet({ account, manifest: activeManifest(), ip: clientIp(request), now: Date.now() })
+    // The faucet grants every listed market's PT and YT, and the dialog checks every listed market
+    // (R44): both read the same resolved list (seeds when the database is down).
+    const manifest = activeManifest()
+    const markets = await resolvedMarkets({ store: sqlRegistryStore(sql), manifest })
+    const result = await runFaucet({ account, manifest: { ...manifest, markets }, ip: clientIp(request), now: Date.now() })
     if ("error" in result) return refuse(result.error)
     return reply({ performed: result.performed })
   } catch (error) {

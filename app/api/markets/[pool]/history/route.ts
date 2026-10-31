@@ -4,11 +4,13 @@ import "server-only"
  * `GET /api/markets/[pool]/history?range=7d|30d|90d|all`: the market's fixed APY, 7-day underlying
  * APY and liquidity series (spec 0002 §6). Pages must never break: when the database is down or
  * not configured the answer is 200 with an empty history and `stale: true`. Bad input is 400, a
- * pool that is not a known market is 404. Params are async in this Next; the route is dynamic.
+ * pool that is not a known market (a seed or a valid registry market, R2-33) is 404. Params are
+ * async in this Next; the route is dynamic.
  */
 import { activeManifest } from "@/lib/protocol/manifest-source"
 import { sql } from "@/lib/server/db"
 import { getHistory, RANGES, type MarketHistory, type Range } from "@/lib/server/history"
+import { resolvedMarkets, sqlRegistryStore } from "@/lib/server/registry"
 
 const POOL = /^C[A-Z2-7]{55}$/
 
@@ -26,7 +28,8 @@ export async function GET(request: Request, { params }: { params: Promise<{ pool
   if (!POOL.test(pool)) return json({ error: "invalid_pool" }, 400)
   if (!RANGES.includes(range as Range)) return json({ error: "invalid_range" }, 400)
 
-  const market = activeManifest().markets.find((m) => m.contracts.pool === pool)
+  const markets = await resolvedMarkets({ store: sqlRegistryStore(sql), manifest: activeManifest() })
+  const market = markets.find((m) => m.contracts.pool === pool)
   if (!market) return json({ error: "unknown_market" }, 404)
 
   try {

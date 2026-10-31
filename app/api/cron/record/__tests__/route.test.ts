@@ -66,6 +66,15 @@ describe("GET /api/cron/record", () => {
     expect(await res.json()).toEqual({ recorded: 1, failed: [] })
   })
 
+  it("each run refreshes the registry and records its resolved markets (R2-4)", async () => {
+    await call({ authorization: `Bearer ${SECRET}` })
+    const deps = mocks.recordAll.mock.calls[0][0]
+    expect(typeof deps.refreshRegistry).toBe("function")
+    // With the database unreadable (the sql mock answers nothing), the seeds are recorded.
+    vi.spyOn(console, "error").mockImplementation(() => {})
+    expect(await deps.markets()).toEqual(deps.manifest.markets)
+  })
+
   it("never authorizes an empty bearer when CRON_SECRET is unset", async () => {
     delete process.env.CRON_SECRET
     expect((await call({ authorization: "Bearer " })).status).toBe(401)

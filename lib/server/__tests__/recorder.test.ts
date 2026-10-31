@@ -68,7 +68,7 @@ const base = (reader: ContractReader, sql: Sql) => ({
   reader,
   sql,
   manifest,
-  markets: [market],
+  markets: async () => [market],
   now: () => CLOSE_TIME * 1000,
   ledgerCloseTime: async () => CLOSE_TIME,
 })
@@ -163,5 +163,49 @@ describe("recordAll", () => {
       throw new DatabaseConfigError()
     }) as unknown as Sql
     await expect(recordAll(base(makeReader(), sql))).rejects.toBeInstanceOf(DatabaseConfigError)
+  })
+})
+
+describe("recordAll and the registry (R2-4)", () => {
+  it("refreshes the registry first, then records the markets it resolves, a discovered one included", async () => {
+    const { sql, rows } = makeSql()
+    const order: string[] = []
+    // A market the static manifest does not list: found by discovery, served by `markets`.
+    const discovered = { ...market, marketId: "testnet-sta-discovered" }
+    const result = await recordAll({
+      ...base(makeReader(), sql),
+      refreshRegistry: async () => {
+        order.push("refresh")
+      },
+      markets: async () => {
+        order.push("markets")
+        return [discovered]
+      },
+    })
+    expect(order).toEqual(["refresh", "markets"])
+    expect(result).toEqual({ recorded: 1, failed: [] })
+    expect([...rows.values()][0][0]).toBe(c.pool)
+  })
+
+  it("a failed refresh is logged and the run goes on with the cached verdicts", async () => {
+    const { sql } = makeSql()
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {})
+    const result = await recordAll({
+      ...base(makeReader(), sql),
+      refreshRegistry: async () => {
+        throw new Error("getEvents: 503")
+      },
+    })
+    expect(result).toEqual({ recorded: 1, failed: [] })
+    expect(String(logged.mock.calls[0][0])).toMatch(/registry refresh failed: getEvents: 503/)
+    logged.mockRestore()
+  })
+
+  it("a missing DATABASE_URL during the refresh is thrown, not logged", async () => {
+    const { sql } = makeSql()
+    const refreshRegistry = async () => {
+      throw new DatabaseConfigError()
+    }
+    await expect(recordAll({ ...base(makeReader(), sql), refreshRegistry })).rejects.toBeInstanceOf(DatabaseConfigError)
   })
 })

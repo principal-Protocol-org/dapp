@@ -136,7 +136,7 @@ export const MAX_PAGES = 60
 /** Ledgers per scanned window (about 14 hours at 5 s per ledger). */
 export const WINDOW_LEDGERS = 10_000
 
-type RawEvent = {
+export type RawEvent = {
   id: string
   ledger: number
   ledgerClosedAt: string
@@ -158,7 +158,8 @@ export type EventsRpcServer = {
   getEvents(req: EventsRequest): Promise<{ events: RawEvent[]; cursor: string }>
 }
 
-function idOf(c: RawEvent["contractId"]): string | undefined {
+/** The emitting contract's id, whichever shape the RPC client gives it. */
+export function idOf(c: RawEvent["contractId"]): string | undefined {
   if (!c) return undefined
   if (typeof c === "string") return c
   if ("contractId" in c && typeof c.contractId === "function") return c.contractId()
@@ -166,7 +167,7 @@ function idOf(c: RawEvent["contractId"]): string | undefined {
 }
 
 /** The ledger a Soroban event id / cursor points at (TOID: ledger in the high 32 bits); NaN if unreadable. */
-function cursorLedger(cursor: string): number {
+export function cursorLedger(cursor: string): number {
   try {
     return Number(BigInt(cursor.split("-")[0]) >> 32n)
   } catch {
