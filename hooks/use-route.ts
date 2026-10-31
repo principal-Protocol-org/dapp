@@ -48,7 +48,10 @@ export type RouteState = {
   step: number
   /** Number of steps; 0 when idle. */
   of: number
-  /** Interrupted: what the confirmed steps left with the user, in plain words ("You hold 1000 SY"). */
+  /**
+   * Interrupted: what the confirmed steps left with the user, in plain words ("You hold 1000 SY").
+   * Waiting: what they had left before the step whose result is unknown ("You held 1000 SY before step 2. …").
+   */
   holdings?: string
   /** Why the route stopped, or what it waits for, in plain words. */
   error?: string
@@ -148,6 +151,16 @@ const neverLanded = (n: number) =>
 const unreadable = (n: number, why?: string) =>
   `Step ${n} went through, but its result could not be read${why ? ` (${why})` : ""}, so this app does not know the amount step ${n + 1} should use. Check your balances in the Portfolio.`
 
+/**
+ * A ledger close time as RPC passes it through from its JSON: a number or a decimal string (as
+ * `getLedgerClock` reads `closeTime`). Anything else is unknown, so it can never prove a step lost.
+ */
+function closeTimeOf(value: unknown): number | undefined {
+  if (typeof value === "string" ? value.trim() === "" : typeof value !== "number") return undefined
+  const n = Number(value)
+  return Number.isFinite(n) && n > 0 ? n : undefined
+}
+
 const isDone = (run: RouteRun) => run.steps.every((s) => s.status === "confirmed")
 /** Funds may sit between steps, or a step's fate is unknown: the route stays until resolved or closed. */
 const holdsFunds = (run: RouteRun) =>
@@ -170,6 +183,19 @@ function withStep(run: RouteRun, i: number, step: RouteStep, output?: ActionOutp
 const holdingsOf = (run: RouteRun): Holdings | undefined =>
   routeHoldings(run.request, run.plans, run.outputs, firstOpen(run))
 
+/**
+ * Waiting on step `n`: what the confirmed steps left before it, said as such, since the unknown step
+ * may have changed it (ruling R2-24: shown before a lost step can be closed).
+ */
+function waitingHoldings(run: RouteRun, n: number, underlying: { code: string; decimals: number }): string {
+  const unknown = `Its result is not known yet: if it went through, your balances have changed.`
+  if (firstOpen(run) === 0) return `Nothing had moved before step ${n}. ${unknown}`
+  const h = holdingsOf(run)
+  if (!h) return UNREADABLE_HOLDINGS
+  const held = describeHoldings(h, underlying, "held")
+  return held ? `${held} before step ${n}. ${unknown}` : `${NOTHING_LEFT} ${unknown}`
+}
+
 /** What the confirmed steps left with the user, in words, and the single call back to USDY from it. */
 function interruption(run: RouteRun, underlying: { code: string; decimals: number }): { holdings: string; unwind: Unwind } {
   if (firstOpen(run) === 0) return { holdings: NOTHING_MOVED, unwind: unwindFrom({}) }
@@ -191,7 +217,7 @@ async function lookup(action: ActionId, step: RouteStep): Promise<Lookup> {
   const server: PollServer = {
     getTransaction: async (hash) => {
       const res = await rpc.getTransaction(hash)
-      window = { latest: res.latestLedgerCloseTime, oldest: res.oldestLedgerCloseTime }
+      window = { latest: closeTimeOf(res.latestLedgerCloseTime), oldest: closeTimeOf(res.oldestLedgerCloseTime) }
       return res
     },
   }
@@ -207,8 +233,8 @@ async function lookup(action: ActionId, step: RouteStep): Promise<Lookup> {
   }
   if (polled.status === "FAILED") return { status: "FAILED", reason: failedTransactionReason(polled.failure) }
   const { latest, oldest } = window
-  const pastLimit = step.validUntil !== undefined && typeof latest === "number" && latest > step.validUntil
-  const covered = step.sentAt !== undefined && typeof oldest === "number" && oldest <= step.sentAt - CLOCK_SLACK_S
+  const pastLimit = step.validUntil !== undefined && latest !== undefined && latest > step.validUntil
+  const covered = step.sentAt !== undefined && oldest !== undefined && oldest <= step.sentAt - CLOCK_SLACK_S
   const final = pastLimit && covered
   return { status: "NOT_FOUND", final, lost: !final && (step.validUntil === undefined || pastLimit) }
 }
@@ -375,7 +401,6 @@ export function useRoute(opts: UseRouteOptions): RouteControls {
           interrupt(g, i, `Step ${i + 1} was not sent: ${text(error)}`)
         }
         if (result) {
-          if (result.status !== "FAILED") latest.current.opts.onReachedNetwork?.({ step: i + 1, status: result.status, hash: result.hash })
           if (result.status === "SUCCESS") {
             const output = result.output ?? null
             const done = withStep(cur, i, { action: before.action, status: "confirmed", hash: result.hash }, output)
@@ -388,6 +413,15 @@ export function useRoute(opts: UseRouteOptions): RouteControls {
           } else {
             save(g, withStep(cur, i, { ...sent, hash: result.hash }))
             show(g, { phase: "waiting", index: i, error: result.pollError ?? notKnown(i + 1) })
+          }
+          // Only once the result is logged, and only to the panel still showing this route: a
+          // callback that throws must not interrupt a route whose step is already settled.
+          if (result.status !== "FAILED" && live(g)) {
+            try {
+              latest.current.opts.onReachedNetwork?.({ step: i + 1, status: result.status, hash: result.hash })
+            } catch {
+              // the panel's reset failed; the route state and the log stand
+            }
           }
         }
       } catch (error) {
@@ -407,7 +441,13 @@ export function useRoute(opts: UseRouteOptions): RouteControls {
         found = await lookup(step.action, step)
       } catch (error) {
         release(g)
-        return show(g, { phase: "waiting", index: i, error: `Step ${i + 1}'s result could not be checked (${text(error)}). Check again in a moment.` })
+        return show(g, {
+          phase: "waiting",
+          index: i,
+          error: `Step ${i + 1}'s result could not be checked (${text(error)}). Check again in a moment.`,
+          // One failed look does not undo what an earlier one established.
+          ...(lost ? { lost } : {}),
+        })
       }
       release(g)
       const hash = step.hash
@@ -562,12 +602,14 @@ export function useRoute(opts: UseRouteOptions): RouteControls {
   const n = run?.steps.length ?? 0
   const idle = view.phase === "idle" || run === null
   const stop = view.phase === "interrupted" && run ? interruption(run, underlying) : undefined
+  const pending = view.phase === "waiting" && run ? waitingHoldings(run, view.index + 1, underlying) : undefined
   const shown = view.phase === "reviewing" || view.phase === "signing" ? view.review : undefined
   const state: RouteState = {
     phase: idle ? "idle" : view.phase,
     step: idle ? 0 : Math.min(view.index + 1, n),
     of: idle ? 0 : n,
     ...(stop ? { holdings: stop.holdings, unwind: stop.unwind.available ? { available: true, amount: stop.unwind.amount } : stop.unwind } : {}),
+    ...(pending ? { holdings: pending } : {}),
     ...(view.error && !idle ? { error: view.error } : {}),
     ...(view.blockers && !idle ? { blockers: view.blockers } : {}),
     ...(run && !idle ? { run } : {}),

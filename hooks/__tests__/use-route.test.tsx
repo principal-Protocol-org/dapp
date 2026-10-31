@@ -301,6 +301,143 @@ describe("useRoute", () => {
     expect(mocks.exec.execute).toHaveBeenCalledTimes(1)
   })
 
+  it("reads ledger close times passed through as strings (fix round 1, Important)", async () => {
+    mocks.exec.execute.mockImplementation(async (review: Review): Promise<TxResult> => ({ hash: hashOf(review), status: "NOT_FOUND" }))
+    const { result } = setup()
+    act(() => result.current.start(buyPt, plansFor(buyPt)))
+    await untilReview(result, 1)
+    act(() => result.current.sign())
+    await waitFor(() => expect(result.current.state.phase).toBe("waiting"))
+
+    // Past the time limit, history too short: lost, so it can be closed.
+    mocks.getTransaction.mockResolvedValueOnce({ status: "NOT_FOUND", latestLedgerCloseTime: String(LEDGER + 400), oldestLedgerCloseTime: String(LEDGER + 100) })
+    act(() => result.current.continue())
+    await waitFor(() => expect(result.current.state.canDismiss).toBe(true))
+    expect(result.current.state.error).toMatch(/cannot tell whether it went through/)
+
+    // Past the time limit, history covering the window: it never landed.
+    mocks.getTransaction.mockResolvedValueOnce({ status: "NOT_FOUND", latestLedgerCloseTime: String(LEDGER + 400), oldestLedgerCloseTime: String(LEDGER - 3600) })
+    act(() => result.current.continue())
+    await waitFor(() => expect(result.current.state.phase).toBe("interrupted"))
+    expect(result.current.state.error).toMatch(/time limit/)
+    expect(loggedRun()?.steps[0].status).toBe("failed")
+  })
+
+  it("unreadable close times leave a step unknown, never lost", async () => {
+    mocks.exec.execute.mockImplementation(async (review: Review): Promise<TxResult> => ({ hash: hashOf(review), status: "NOT_FOUND" }))
+    const { result } = setup()
+    act(() => result.current.start(buyPt, plansFor(buyPt)))
+    await untilReview(result, 1)
+    act(() => result.current.sign())
+    await waitFor(() => expect(result.current.state.phase).toBe("waiting"))
+    for (const [latest, oldest] of [["soon", "long ago"], ["", ""], [null, undefined], [Number.NaN, -1]]) {
+      mocks.getTransaction.mockResolvedValueOnce({ status: "NOT_FOUND", latestLedgerCloseTime: latest, oldestLedgerCloseTime: oldest })
+      const calls = mocks.getTransaction.mock.calls.length
+      act(() => result.current.continue())
+      await waitFor(() => expect(mocks.getTransaction).toHaveBeenCalledTimes(calls + 1))
+      await waitFor(() => expect(result.current.state.checking).toBeUndefined())
+      expect(result.current.state).toMatchObject({ phase: "waiting", canDismiss: false })
+      expect(result.current.state.error).toMatch(/still not found/)
+    }
+    act(() => result.current.dismiss())
+    expect(result.current.state.phase).toBe("waiting")
+    expect(loggedRun()?.steps[0].status).toBe("unknown")
+
+    // An unreadable history start never proves the step did not land (Number("") would be 0).
+    for (const oldest of ["", null]) {
+      mocks.getTransaction.mockResolvedValueOnce({ status: "NOT_FOUND", latestLedgerCloseTime: LEDGER + 400, oldestLedgerCloseTime: oldest })
+      const calls = mocks.getTransaction.mock.calls.length
+      act(() => result.current.continue())
+      await waitFor(() => expect(mocks.getTransaction).toHaveBeenCalledTimes(calls + 1))
+      await waitFor(() => expect(result.current.state.checking).toBeUndefined())
+      expect(result.current.state.phase).toBe("waiting")
+      expect(loggedRun()?.steps[0].status).toBe("unknown")
+    }
+  })
+
+  it("a failed re-check keeps a lost step closable (M1)", async () => {
+    mocks.exec.execute.mockImplementation(async (review: Review): Promise<TxResult> => ({ hash: hashOf(review), status: "NOT_FOUND" }))
+    const { result } = setup()
+    act(() => result.current.start(buyPt, plansFor(buyPt)))
+    await untilReview(result, 1)
+    act(() => result.current.sign())
+    await waitFor(() => expect(result.current.state.phase).toBe("waiting"))
+    mocks.getTransaction.mockResolvedValueOnce({ status: "NOT_FOUND", latestLedgerCloseTime: LEDGER + 400, oldestLedgerCloseTime: LEDGER + 100 })
+    act(() => result.current.continue())
+    await waitFor(() => expect(result.current.state.canDismiss).toBe(true))
+
+    mocks.getTransaction.mockRejectedValueOnce(new Error("503 Service Unavailable"))
+    act(() => result.current.continue())
+    await waitFor(() => expect(result.current.state.error).toMatch(/could not be checked \(503/))
+    expect(result.current.state).toMatchObject({ phase: "waiting", canDismiss: true })
+  })
+
+  it("while waiting, says what the confirmed steps had left before the unknown step (M3)", async () => {
+    mocks.exec.execute.mockImplementation(async (review: Review): Promise<TxResult> =>
+      review.input.action === "deposit" ? success(review, amountOut(998n * S)) : { hash: hashOf(review), status: "NOT_FOUND" },
+    )
+    const { result } = setup()
+    act(() => result.current.start(buyPt, plansFor(buyPt)))
+    await untilReview(result, 1)
+    act(() => result.current.sign())
+    await untilReview(result, 2)
+    act(() => result.current.sign())
+    await waitFor(() => expect(result.current.state.phase).toBe("waiting"))
+    expect(result.current.state.step).toBe(2)
+    expect(result.current.state.holdings).toBe(
+      "You held 998 SY before step 2. Its result is not known yet: if it went through, your balances have changed.",
+    )
+    expect(result.current.state.unwind).toBeUndefined()
+  })
+
+  it("while step 1 is unknown, says nothing had moved before it (M3)", async () => {
+    mocks.exec.execute.mockImplementation(async (review: Review): Promise<TxResult> => ({ hash: hashOf(review), status: "NOT_FOUND" }))
+    const { result } = setup()
+    act(() => result.current.start(buyPt, plansFor(buyPt)))
+    await untilReview(result, 1)
+    act(() => result.current.sign())
+    await waitFor(() => expect(result.current.state.phase).toBe("waiting"))
+    expect(result.current.state.holdings).toMatch(/^Nothing had moved before step 1\. Its result is not known yet/)
+  })
+
+  it("tells the panel only after the result is logged, and a throwing callback does not stop the route (M2)", async () => {
+    mocks.exec.execute.mockImplementation(async (review: Review) => success(review, amountOut(998n * S)))
+    const seen: string[] = []
+    const onReachedNetwork = vi.fn(() => {
+      seen.push(loggedRun()?.steps[0].status ?? "none")
+      throw new Error("panel reset failed")
+    })
+    const { result } = renderHook(() => useRoute({ account: A, marketId: "m1", gate: () => [], onReachedNetwork }), { wrapper })
+    act(() => result.current.start(buyPt, plansFor(buyPt)))
+    await untilReview(result, 1)
+    act(() => result.current.sign())
+    await untilReview(result, 2)
+    expect(seen).toEqual(["confirmed"])
+    expect(result.current.state.error).toBeUndefined()
+  })
+
+  it("never tells another market's panel that a step reached the network (M2)", async () => {
+    const step1 = deferred<TxResult>()
+    mocks.exec.execute.mockImplementation(() => step1.promise)
+    const onReachedNetwork = vi.fn()
+    const { result, rerender } = renderHook(
+      ({ marketId }: { marketId: string }) => useRoute({ account: A, marketId, gate: () => [], onReachedNetwork }),
+      { wrapper, initialProps: { marketId: "m1" } },
+    )
+    act(() => result.current.start(buyPt, plansFor(buyPt)))
+    await untilReview(result, 1)
+    act(() => result.current.sign())
+    await waitFor(() => expect(result.current.state.phase).toBe("signing"))
+    const review = mocks.exec.execute.mock.calls[0][0] as Review
+    rerender({ marketId: "m2" })
+    await act(async () => step1.resolve(success(review, amountOut(998n * S))))
+    await new Promise((r) => setTimeout(r, 20))
+    expect(onReachedNetwork).not.toHaveBeenCalled()
+    // The step is still logged as confirmed for the market it ran on.
+    expect(loggedRun()?.steps[0].status).toBe("confirmed")
+    expect(result.current.state.phase).toBe("idle")
+  })
+
   it("reload resumes from log", async () => {
     const plans = plansFor(buyPt)
     writeRoute({
