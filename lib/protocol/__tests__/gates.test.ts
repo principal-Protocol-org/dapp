@@ -63,6 +63,7 @@ function healthyMarket(): MarketState {
     fees: { tokenizationBps: live(10n), ytBps: live(20n), swapTierBps: live(30n), protocolShareBps: live(40n) },
     swapFeeRate: live(3n),
     exchangeRate: live(SCALE),
+    managerSy: live(0n),
     syPaused: live(false),
     poolPaused: live(false),
     riskPaused: live(false),
