@@ -43,6 +43,8 @@ export type MarketState = {
   }
   swapFeeRate: Live<bigint>
   exchangeRate: Live<bigint>
+  /** SY shares the PrincipalManager holds (`SYWrapper.balance_of(manager)`), for TVL. */
+  managerSy: Live<bigint>
   syPaused: Live<boolean>
   poolPaused: Live<boolean>
   riskPaused: Live<boolean>
@@ -152,7 +154,7 @@ export async function fetchMarketState(reader: ContractReader, m: Manifest, mark
   const [
     oracleRate, oracleTimestamp, oracleFresh, settledRate, ytFrozen, ytAccruedIndex, totalPt, totalYt,
     lpTotalSupply, tokenizationBps, ytBps, swapTierBps, protocolShareBps, exchangeRate, syPaused, poolPaused,
-    riskPaused, cbLimit, cbVolume, assetLimit, assetVolume, poolState, seeded, swapFeeRate, info, matured,
+    riskPaused, cbLimit, cbVolume, assetLimit, assetVolume, poolState, seeded, swapFeeRate, info, matured, managerSy,
   ] = await Promise.all([
     big(c.oracle, "get_reference_value"),
     big(c.oracle, "get_reference_timestamp"),
@@ -184,6 +186,7 @@ export async function fetchMarketState(reader: ContractReader, m: Manifest, mark
     swapFeeChain,
     routerInfo,
     maturity,
+    big(c.sy, "balance_of", [{ type: "address", value: c.manager }]),
   ])
 
   return {
@@ -204,6 +207,7 @@ export async function fetchMarketState(reader: ContractReader, m: Manifest, mark
     fees: { tokenizationBps, ytBps, swapTierBps, protocolShareBps },
     swapFeeRate,
     exchangeRate,
+    managerSy,
     syPaused,
     poolPaused,
     riskPaused,

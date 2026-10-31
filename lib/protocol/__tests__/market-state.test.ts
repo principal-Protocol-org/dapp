@@ -61,6 +61,7 @@ function healthy(): Record<string, Handler> {
     [`${c.config}.swap_fee_rate`]: 123n,
     [`${c.sy}.exchange_rate`]: 10_000_000n,
     [`${c.sy}.is_paused`]: false,
+    [`${c.sy}.balance_of`]: 700n,
     [`${manifest.shared.riskControl}.is_paused`]: false,
     [`${manifest.shared.riskControl}.get_cb_limit`]: 1_000n,
     [`${manifest.shared.riskControl}.get_cb_volume`]: 100n,
@@ -100,6 +101,20 @@ describe("fetchMarketState", () => {
     expect(s.cb.limit).toMatchObject({ value: 1_000n })
     expect(s.cb.assetVolume).toMatchObject({ value: 200n })
     expect(s.topology).toMatchObject({ status: "live", value: { matches: true, mismatches: [] } })
+  })
+
+  it("reads the SY the PrincipalManager holds, via balance_of(manager)", async () => {
+    const calls: Calls = []
+    const s = await fetchMarketState(fakeReader(healthy(), calls), manifest, market.marketId)
+    expect(s.managerSy).toMatchObject({ status: "live", value: 700n })
+    expect(calls.find((x) => x.key === `${c.sy}.balance_of`)?.args).toEqual([{ type: "address", value: c.manager }])
+  })
+
+  it("an unreadable manager SY balance is unavailable, not zero", async () => {
+    const table = healthy()
+    table[`${c.sy}.balance_of`] = new Error("rpc 429")
+    const s = await fetchMarketState(fakeReader(table), manifest, market.marketId)
+    expect(s.managerSy).toEqual({ status: "unavailable", error: "rpc 429" })
   })
 
   it("passes is_fresh(3600) as u64 and the underlying SAC as the risk-control asset key", async () => {

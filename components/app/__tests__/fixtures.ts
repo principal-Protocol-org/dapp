@@ -35,6 +35,7 @@ export function marketState(over: Partial<MarketState> = {}): MarketState {
     fees: { tokenizationBps: live(0n), ytBps: live(0n), swapTierBps: live(0n), protocolShareBps: live(0n) },
     swapFeeRate: live(0n),
     exchangeRate: live(10_000_000n),
+    managerSy: live(60_000_000_000n),
     syPaused: live(false),
     poolPaused: live(false),
     riskPaused: live(false),
