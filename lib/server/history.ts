@@ -41,7 +41,6 @@ export const MAX_POINTS = 1000
 // Bucket sizes aim a little under the cap so a partial bucket at each end still fits.
 const TARGET_POINTS = 990
 const DAY = 86_400
-const WEEK = 7 * DAY
 /** A 7-day window spans 672 slots; the SQL bound is looser than that to be safe, the time test is exact. */
 const WINDOW_SLOT_BOUND = 700
 const RANGE_DAYS: Record<Exclude<Range, "all">, number> = { "7d": 7, "30d": 30, "90d": 90 }
