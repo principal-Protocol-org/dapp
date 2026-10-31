@@ -19,7 +19,8 @@ const mocks = vi.hoisted(() => ({
   getLedgerClock: vi.fn(),
 }))
 
-vi.mock("@/lib/protocol/manifest-source", () => ({ activeManifest: () => mocks.manifest }))
+vi.mock("@/lib/protocol/manifest-source", () => ({ activeManifest: () => mocks.manifest }))  // TestnetBanner (a server component)
+vi.mock("@/components/app/manifest-provider", () => ({ useManifest: () => mocks.manifest }))
 vi.mock("@/lib/protocol/wallet", () => ({ freighterAdapter: mocks.adapter }))
 vi.mock("@/lib/protocol/stellar", () => ({
   createRpcServer: () => ({}),

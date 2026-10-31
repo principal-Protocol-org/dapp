@@ -5,12 +5,12 @@ import type { PanelConfig, PreviewLine } from "@/components/app/actions/panel-co
 import { PanelGroup, usePanels, type PanelEntry } from "@/components/app/actions/panel-group"
 import { outputOf, plain, tokens } from "@/components/app/actions/panel-lines"
 import { formatFeeRate } from "@/lib/protocol/format"
-import { activeManifest } from "@/lib/protocol/manifest-source"
 import type { MarketState, PoolStateView } from "@/lib/protocol/market-state"
 import { previewAddLiquidity, previewAddLiquiditySingleSy, previewRemoveLiquidity } from "@/lib/protocol/previews"
 import { quoteSyForPt, zapSwapAmount } from "@/lib/protocol/quotes"
 import { allLive, createRpcReader } from "@/lib/protocol/reader"
-import type { Market } from "@/lib/protocol/types"
+import type { ReaderFor } from "@/components/app/actions/trade-tab"
+import type { Manifest, Market } from "@/lib/protocol/types"
 
 /**
  * The Liquidity tab (spec §6): add PT + SY in the pool's ratio, add from SY alone (the pool swaps
@@ -21,8 +21,6 @@ export const LP_NOTE = "LPs earn PT convergence; swap fees go to the protocol an
 
 const LEFTOVER = "Leftover (stays in your wallet)"
 const LEFTOVER_HINT = "Only the amounts matching the pool's ratio are taken; the rest never leaves your wallet."
-
-const reader = () => createRpcReader(activeManifest())
 
 /** Reserves and LP supply from one `pool_state` read, so they are consistent with each other. */
 const reservesOf = (p: PoolStateView) => ({ pt: p.ptReserve, sy: p.syReserve })
@@ -78,7 +76,7 @@ export function addLiquidityPanel(): PanelConfig {
   }
 }
 
-export function addLiquiditySyPanel(market: Market): PanelConfig {
+export function addLiquiditySyPanel(market: Market, reader: ReaderFor): PanelConfig {
   const pool = market.contracts.pool
   return {
     action: "add_liquidity_sy",
@@ -155,9 +153,9 @@ export function removeLiquidityPanel(): PanelConfig {
   }
 }
 
-const liquidityPanels = (market: Market): PanelEntry[] => [
+const liquidityPanels = (market: Market, manifest: Manifest): PanelEntry[] => [
   { id: "add_liquidity", label: "Add PT + SY", config: addLiquidityPanel() },
-  { id: "add_liquidity_sy", label: "Add SY only", config: addLiquiditySyPanel(market) },
+  { id: "add_liquidity_sy", label: "Add SY only", config: addLiquiditySyPanel(market, () => createRpcReader(manifest)) },
   { id: "remove_liquidity", label: "Remove", config: removeLiquidityPanel() },
 ]
 

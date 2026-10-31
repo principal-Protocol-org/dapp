@@ -6,7 +6,7 @@ import { accountState, live, marketState } from "./fixtures"
 const mocks = await vi.hoisted(async () => (await import("./panel-mocks")).createPanelMocks())
 
 vi.mock("sonner", () => ({ toast: mocks.toast, Toaster: () => null }))
-vi.mock("@/lib/protocol/manifest-source", () => ({ activeManifest: () => mocks.manifest }))
+vi.mock("@/components/app/manifest-provider", () => ({ useManifest: () => mocks.manifest }))
 vi.mock("@/hooks/use-manifest-findings", () => ({ useManifestFindings: () => mocks.findings }))
 vi.mock("@/lib/protocol/wallet", () => ({ freighterAdapter: mocks.adapter }))
 vi.mock("@/lib/protocol/horizon", () => ({ createHorizon: () => ({}) }))

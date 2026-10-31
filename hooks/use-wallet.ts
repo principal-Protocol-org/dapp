@@ -1,7 +1,7 @@
 "use client"
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react"
-import { activeManifest } from "@/lib/protocol/manifest-source"
+import { useManifest } from "@/components/app/manifest-provider"
 import type { WalletState } from "@/lib/protocol/types"
 import { freighterAdapter } from "@/lib/protocol/wallet"
 
@@ -33,8 +33,9 @@ function observed(state: WalletState): { address: string; passphrase: string } |
   return null
 }
 
-/** Owns the wallet state. Mounted once by `<Providers>`. */
+/** Owns the wallet state. Mounted once by `<Providers>`, below the `<ManifestProvider>`. */
 export function useWalletController(): WalletApi {
+  const manifest = useManifest()
   const [state, setState] = useState<WalletState>({ status: "disconnected" })
   const stateRef = useRef(state)
   // Only the latest request may write: a slow restore must not overwrite a newer connect.
@@ -55,7 +56,7 @@ export function useWalletController(): WalletApi {
     [apply],
   )
 
-  const restore = useCallback(() => run(() => freighterAdapter.restore(activeManifest())), [run])
+  const restore = useCallback(() => run(() => freighterAdapter.restore(manifest)), [run, manifest])
 
   useEffect(() => {
     void restore()
@@ -78,13 +79,13 @@ export function useWalletController(): WalletApi {
     apply({ status: "connecting" })
     let next: WalletState
     try {
-      next = await freighterAdapter.connect(activeManifest())
+      next = await freighterAdapter.connect(manifest)
     } catch (error) {
       next = { status: "rejected", reason: error instanceof Error ? error.message : "Wallet request failed" }
     }
     if (id === requestId.current) apply(next)
     return next
-  }, [apply])
+  }, [apply, manifest])
 
   const disconnect = useCallback(() => {
     requestId.current++
@@ -99,8 +100,8 @@ export function useWalletController(): WalletApi {
     if (current.publicKey !== expectedSigner) {
       throw new Error("The account connected in your wallet is not the one this was prepared for. Nothing was signed; review it again.")
     }
-    return freighterAdapter.sign(xdr, activeManifest().networkPassphrase, expectedSigner)
-  }, [])
+    return freighterAdapter.sign(xdr, manifest.networkPassphrase, expectedSigner)
+  }, [manifest])
 
   return useMemo(() => ({ state, connect, disconnect, sign }), [state, connect, disconnect, sign])
 }

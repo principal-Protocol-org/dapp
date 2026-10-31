@@ -14,7 +14,7 @@ import { noticeForError, noticeForResult, type TxNotice } from "@/lib/app/tx-not
 import type { Blocker } from "@/lib/protocol/gates"
 import type { RestoreReview } from "@/lib/protocol/review"
 import type { RouteKind, RouteRequest, StepPlan } from "@/lib/protocol/routes"
-import { activeManifest } from "@/lib/protocol/manifest-source"
+import { useManifest } from "@/components/app/manifest-provider"
 
 export type RouteFlowProps = {
   /** Connected account, market and the per-step gate; handed to `useRoute`. */
@@ -56,8 +56,7 @@ const LABELS: Record<RouteKind, string> = {
 }
 
 export function RouteFlow(props: RouteFlowProps) {
-  // Today's manifest; a later task moves client code to useManifest().
-  const network = activeManifest().network
+  const network = useManifest().network
   const { ledgerTime } = useLedgerClock()
   const route = useRoute({ account: props.account, marketId: props.marketId, gate: props.gate, onReachedNetwork: props.onReachedNetwork })
   const exec = useExecute()

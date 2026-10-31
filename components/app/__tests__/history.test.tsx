@@ -17,9 +17,17 @@ const mocks = vi.hoisted(() => ({
   history: {} as { data?: unknown; isPending: boolean; isError: boolean; stale: boolean },
 }))
 
-vi.mock("@/lib/protocol/manifest-source", () => ({
-  activeManifest: () => ({ network: mocks.network, markets: [{ marketId: "m1", displayName: "STA", underlying: { code: "STA", decimals: 7 } }] }),
-}))
+vi.mock("@/components/app/manifest-provider", () => {
+  // One object per network, as the provider gives: hooks depend on its identity.
+  const byNetwork = new Map<string, unknown>()
+  const make = (network: string) => ({ network, markets: [{ marketId: "m1", displayName: "STA", underlying: { code: "STA", decimals: 7 } }] })
+  return {
+    useManifest: () => {
+      if (!byNetwork.has(mocks.network)) byNetwork.set(mocks.network, make(mocks.network))
+      return byNetwork.get(mocks.network)
+    },
+  }
+})
 vi.mock("@/hooks/use-wallet", () => ({ useWallet: () => ({ state: mocks.wallet }) }))
 vi.mock("@/hooks/use-history", () => ({ useHistory: () => mocks.history }))
 

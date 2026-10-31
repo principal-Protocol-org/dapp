@@ -4,7 +4,7 @@ import Link from "next/link"
 import { useCallback, useState } from "react"
 import { useHistory } from "@/hooks/use-history"
 import { useWallet } from "@/hooks/use-wallet"
-import { activeManifest } from "@/lib/protocol/manifest-source"
+import { useManifest } from "@/components/app/manifest-provider"
 import { PositionCard, type CardStatus } from "@/components/app/portfolio/position-card"
 
 /**
@@ -22,7 +22,7 @@ export function PortfolioView() {
 }
 
 function Positions() {
-  const m = activeManifest()
+  const m = useManifest()
   const history = useHistory()
   const [statuses, setStatuses] = useState<Record<string, CardStatus>>({})
   const report = useCallback((marketId: string, status: CardStatus) => {

@@ -6,7 +6,7 @@ import { accountState, live, MATURITY, marketState } from "./fixtures"
 const mocks = await vi.hoisted(async () => (await import("./panel-mocks")).createPanelMocks())
 
 vi.mock("sonner", () => ({ toast: mocks.toast, Toaster: () => null }))
-vi.mock("@/lib/protocol/manifest-source", () => ({ activeManifest: () => mocks.manifest }))
+vi.mock("@/components/app/manifest-provider", () => ({ useManifest: () => mocks.manifest }))
 vi.mock("@/hooks/use-manifest-findings", () => ({ useManifestFindings: () => mocks.findings }))
 vi.mock("@/lib/protocol/wallet", () => ({ freighterAdapter: mocks.adapter }))
 vi.mock("@/lib/protocol/horizon", () => ({ createHorizon: () => ({}) }))
@@ -125,7 +125,7 @@ describe("Liquidity tab — add (SY only)", () => {
 
   it("would quote the zap swap amount, then the LP from a quote of that swap (kept for when it is offered again)", async () => {
     zapReads()
-    const lines = await addLiquiditySyPanel(MARKET).quote!(poolMarket(), { amount: 1_000_000_000n }, { ledgerTime: null })
+    const lines = await addLiquiditySyPanel(MARKET, () => mocks.read).quote!(poolMarket(), { amount: 1_000_000_000n }, { ledgerTime: null })
     expect(mocks.read).toHaveBeenCalledWith({ contractId: "CPOOL", functionName: "zap_swap_amount", args: i128(1_000_000_000n) })
     // Hand-computed from market_pool:456-508 (see previews.test.ts).
     expect(lines.map((l) => [l.label, l.value])).toEqual([
@@ -159,7 +159,7 @@ describe("Liquidity tab — add (SY only)", () => {
   })
 
   it("would show the exact LP and SY used from a simulated output (kept for when it is offered again)", () => {
-    const lines = addLiquiditySyPanel(MARKET).exact(
+    const lines = addLiquiditySyPanel(MARKET, () => mocks.read).exact(
       { kind: "add_liquidity", pt_used: 237_944_239n, sy_used: 999_999_999n, lp: 243_920_286n },
       { inputs: { amount: 1_000_000_000n } },
     )
@@ -235,7 +235,7 @@ describe("Liquidity tab — result messages", () => {
       ),
     ).toBe("You added 100 PT and 200 SY and received 100 LP.")
     expect(
-      addLiquiditySyPanel(MARKET).result!(
+      addLiquiditySyPanel(MARKET, () => mocks.read).result!(
         { kind: "add_liquidity", pt_used: 237_944_239n, sy_used: 999_999_999n, lp: 243_920_286n },
         { input: input("add_liquidity_sy", 1_000_000_000n) },
       ),

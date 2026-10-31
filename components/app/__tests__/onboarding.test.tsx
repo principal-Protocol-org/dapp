@@ -42,7 +42,7 @@ const mocks = vi.hoisted(() => ({
   afterFaucet: undefined as (() => void) | undefined,
 }))
 
-vi.mock("@/lib/protocol/manifest-source", () => ({ activeManifest: () => mocks.manifest }))
+vi.mock("@/components/app/manifest-provider", () => ({ useManifest: () => mocks.manifest }))
 vi.mock("@/hooks/use-wallet", () => ({
   useWallet: () => ({ state: mocks.wallet, sign: mocks.sign, connect: vi.fn(), disconnect: vi.fn() }),
 }))

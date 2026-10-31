@@ -5,7 +5,7 @@ import { useMarketCompliance } from "@/hooks/use-market-compliance"
 import { useWallet } from "@/hooks/use-wallet"
 import { fetchAccountState } from "@/lib/protocol/account-state"
 import { createHorizon } from "@/lib/protocol/horizon"
-import { activeManifest } from "@/lib/protocol/manifest-source"
+import { useManifest } from "@/components/app/manifest-provider"
 import { createRpcReader } from "@/lib/protocol/reader"
 import { MARKET_REFETCH_MS } from "@/hooks/use-market-state"
 
@@ -15,7 +15,7 @@ import { MARKET_REFETCH_MS } from "@/hooks/use-market-state"
  * reads apply). `kind` is null when that read is unavailable: nothing is assumed.
  */
 export function useAccountState(marketId: string) {
-  const m = activeManifest()
+  const m = useManifest()
   const { state } = useWallet()
   const address = state.status === "connected" ? state.publicKey : null
   const compliance = useMarketCompliance(marketId)

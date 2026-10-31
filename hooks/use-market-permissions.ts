@@ -2,7 +2,7 @@
 
 import { useQuery } from "@tanstack/react-query"
 import { MARKET_REFETCH_MS } from "@/hooks/use-market-state"
-import { activeManifest } from "@/lib/protocol/manifest-source"
+import { useManifest } from "@/components/app/manifest-provider"
 import { fetchMarketPermissions } from "@/lib/protocol/onboarding"
 import { createRpcReader } from "@/lib/protocol/reader"
 
@@ -11,7 +11,7 @@ import { createRpcReader } from "@/lib/protocol/reader"
  * all of them are granted. Keyed under `account`, so refreshing the account reads refreshes these.
  */
 export function useMarketPermissions(address: string | null) {
-  const m = activeManifest()
+  const m = useManifest()
   const query = useQuery({
     queryKey: ["account", m.network, "permissions", address],
     queryFn: () => fetchMarketPermissions(createRpcReader(m), m, address as string),

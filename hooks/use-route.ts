@@ -12,7 +12,7 @@ import { invocationFor, type ActionId, type ActionInput } from "@/lib/protocol/a
 import type { Blocker } from "@/lib/protocol/gates"
 import { openGuards, parseOutput, type ActionOutput } from "@/lib/protocol/guards"
 import { getMarket } from "@/lib/protocol/manifest"
-import { activeManifest } from "@/lib/protocol/manifest-source"
+import { useManifest } from "@/components/app/manifest-provider"
 import { isExpired, type Review, type TxResult, type TxStatus } from "@/lib/protocol/review"
 import {
   describeHoldings,
@@ -32,6 +32,7 @@ import {
   type ContractInvocation,
   type SimulationOutcome,
 } from "@/lib/protocol/stellar"
+import type { Manifest } from "@/lib/protocol/types"
 
 /**
  * The 0001 gates for one step, from the panel's live context: `evaluateGates(input, { ...base,
@@ -210,8 +211,8 @@ function interruption(run: RouteRun, underlying: { code: string; decimals: numbe
  * and RPC's history reaches back to before it was sent; `lost` when the time bound passed but the
  * history does not reach that far.
  */
-async function lookup(action: ActionId, step: RouteStep): Promise<Lookup> {
-  const { rpcUrl } = activeManifest()
+async function lookup(manifest: Manifest, action: ActionId, step: RouteStep): Promise<Lookup> {
+  const { rpcUrl } = manifest
   const rpc = createRpcServer(rpcUrl)
   let window: { latest?: number; oldest?: number } = {}
   const server: PollServer = {
@@ -256,6 +257,7 @@ async function lookup(action: ActionId, step: RouteStep): Promise<Lookup> {
  */
 export function useRoute(opts: UseRouteOptions): RouteControls {
   const { account, marketId } = opts
+  const manifest = useManifest()
   const exec = useExecute()
   const queryClient = useQueryClient()
   const { ledgerTime } = useLedgerClock()
@@ -265,10 +267,10 @@ export function useRoute(opts: UseRouteOptions): RouteControls {
   const [run, setRun] = useState<RouteRun | null>(null)
   const [nowMs, setNowMs] = useState<number | null>(null)
 
-  const latest = useRef({ opts, exec, ledgerTime, slippageBps, deadlineSeconds })
+  const latest = useRef({ opts, exec, ledgerTime, slippageBps, deadlineSeconds, manifest })
   // A layout effect: current right after the commit, before a step resumes after its refetch.
   useLayoutEffect(() => {
-    latest.current = { opts, exec, ledgerTime, slippageBps, deadlineSeconds }
+    latest.current = { opts, exec, ledgerTime, slippageBps, deadlineSeconds, manifest }
   })
   const gen = useRef(0)
   const busy = useRef(false)
@@ -299,7 +301,7 @@ export function useRoute(opts: UseRouteOptions): RouteControls {
 
     /** Refetches the account and market reads, then lets the panel render them so `gate` sees them. */
     async function refreshReads() {
-      const { network } = activeManifest()
+      const { network } = latest.current.manifest
       try {
         await Promise.all([
           queryClient.refetchQueries({ queryKey: ["account", network] }),
@@ -340,10 +342,10 @@ export function useRoute(opts: UseRouteOptions): RouteControls {
           guards: openGuards(plan.action, amounts.amount),
           deadline: BigInt(ledgerAt + latest.current.deadlineSeconds),
         }
-        const outcome = await simulate(draft)
+        const outcome = await simulate(latest.current.manifest, draft)
         if (!live(g)) return
         const restore =
-          !outcome.ok && outcome.kind === "restore_required" ? { source: r.account, invocation: invocationFor(activeManifest(), draft) } : undefined
+          !outcome.ok && outcome.kind === "restore_required" ? { source: r.account, invocation: invocationFor(latest.current.manifest, draft) } : undefined
         const blockers = latest.current.opts.gate(draft, outcome)
         if (blockers.length > 0) return interrupt(g, i, blockers[0].message, { blockers, ...(restore ? { restore } : {}) })
         const { guards } = derive(draft, outcome, latest.current.slippageBps)
@@ -387,7 +389,7 @@ export function useRoute(opts: UseRouteOptions): RouteControls {
       let then: (() => void) | undefined
       try {
         // Logged before the wallet sees it: a reload now re-checks this hash rather than signing again.
-        const hash = transactionEnvelopeHash(p.review.unsignedXdr, activeManifest().networkPassphrase)
+        const hash = transactionEnvelopeHash(p.review.unsignedXdr, latest.current.manifest.networkPassphrase)
         const sent: RouteStep = { action: before.action, status: "unknown", hash, validUntil: p.review.summary.validUntil, sentAt: p.ledgerAt }
         const cur = withStep(r, i, sent)
         save(g, cur)
@@ -438,7 +440,7 @@ export function useRoute(opts: UseRouteOptions): RouteControls {
       show(g, { phase: "waiting", index: i, checking: true, ...(error ? { error } : {}), ...(lost ? { lost } : {}) })
       let found: Lookup
       try {
-        found = await lookup(step.action, step)
+        found = await lookup(latest.current.manifest, step.action, step)
       } catch (error) {
         release(g)
         return show(g, {
@@ -597,7 +599,7 @@ export function useRoute(opts: UseRouteOptions): RouteControls {
     return () => clearInterval(id)
   }, [view, engine])
 
-  const market = getMarket(activeManifest(), marketId)
+  const market = getMarket(manifest, marketId)
   const underlying = market ? { code: market.underlying.code, decimals: market.underlying.decimals } : { code: "USDY", decimals: 7 }
   const n = run?.steps.length ?? 0
   const idle = view.phase === "idle" || run === null

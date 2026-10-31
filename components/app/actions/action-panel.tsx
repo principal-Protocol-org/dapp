@@ -20,7 +20,7 @@ import { formatAmount, formatBps } from "@/lib/protocol/format"
 import { BLOCKER_ORDER, evaluateGates, type Blocker } from "@/lib/protocol/gates"
 import type { ActionOutput } from "@/lib/protocol/guards"
 import { getMarket } from "@/lib/protocol/manifest"
-import { activeManifest } from "@/lib/protocol/manifest-source"
+import { useManifest } from "@/components/app/manifest-provider"
 import type { MarketState } from "@/lib/protocol/market-state"
 
 /** Every Principal token has 7 decimals; the underlying's are read from the manifest. */
@@ -72,7 +72,7 @@ function configNotes(config: PanelConfig, ms: MarketState | undefined, account: 
  */
 export function ActionPanel({ config, marketId }: { config: PanelConfig; marketId: string }) {
   const baseId = useId()
-  const manifest = activeManifest()
+  const manifest = useManifest()
   const market = getMarket(manifest, marketId)
   const meta = ACTION_META[config.action]
   const { slippageBps, deadlineSeconds } = useSettings()

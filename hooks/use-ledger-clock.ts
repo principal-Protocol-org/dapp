@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react"
 import { useQuery } from "@tanstack/react-query"
-import { activeManifest } from "@/lib/protocol/manifest-source"
+import { useManifest } from "@/components/app/manifest-provider"
 import { createRpcServer, getLedgerClock } from "@/lib/protocol/stellar"
 
 const REFETCH_MS = 6_000
@@ -19,7 +19,7 @@ export function useLedgerClock(): {
   sequence: number | null
   isError: boolean
 } {
-  const { rpcUrl } = activeManifest()
+  const { rpcUrl } = useManifest()
   const query = useQuery({
     queryKey: ["ledger-clock", rpcUrl],
     queryFn: () => getLedgerClock(createRpcServer(rpcUrl)),

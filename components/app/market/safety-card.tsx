@@ -6,7 +6,7 @@ import { useMarketState } from "@/hooks/use-market-state"
 import { useWallet } from "@/hooks/use-wallet"
 import { formatAmount } from "@/lib/protocol/format"
 import { getMarket } from "@/lib/protocol/manifest"
-import { activeManifest } from "@/lib/protocol/manifest-source"
+import { useManifest } from "@/components/app/manifest-provider"
 import type { Live } from "@/lib/protocol/types"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -32,7 +32,7 @@ function roomLeft(limit: Live<bigint>, volume: Live<bigint>, amount: (v: bigint)
 }
 
 export function SafetyCard({ marketId }: { marketId: string }) {
-  const market = getMarket(activeManifest(), marketId)
+  const market = getMarket(useManifest(), marketId)
   const { data, isPending, stale } = useMarketState(marketId)
   const ms = stale ? undefined : data
   const { ledgerTime } = useLedgerClock()

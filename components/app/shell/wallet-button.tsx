@@ -13,7 +13,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { useWallet } from "@/hooks/use-wallet"
-import { activeManifest } from "@/lib/protocol/manifest-source"
+import { useManifest } from "@/components/app/manifest-provider"
 import { onboardingAvailable } from "@/lib/protocol/onboarding"
 import { OnboardingDialog } from "@/components/app/onboarding/onboarding-dialog"
 import { networkLabel } from "./network"
@@ -68,7 +68,7 @@ function AccountMenu({
 
 export function WalletButton() {
   const { state, connect, disconnect } = useWallet()
-  const manifest = activeManifest()
+  const manifest = useManifest()
   const label = networkLabel(manifest.network)
   const testTokens = onboardingAvailable(manifest)
   const [onboarding, setOnboarding] = useState(false)

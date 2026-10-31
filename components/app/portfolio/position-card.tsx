@@ -9,7 +9,7 @@ import type { HistoryData } from "@/hooks/use-history"
 import type { AccountState } from "@/lib/protocol/account-state"
 import { formatPercent, formatRate } from "@/lib/protocol/format"
 import { getMarket } from "@/lib/protocol/manifest"
-import { activeManifest } from "@/lib/protocol/manifest-source"
+import { useManifest } from "@/components/app/manifest-provider"
 import type { MarketState } from "@/lib/protocol/market-state"
 import { lpShare, entryFor, pendingOf, settlementOf } from "@/lib/protocol/position"
 import { previewRedeemPt } from "@/lib/protocol/previews"
@@ -62,7 +62,7 @@ export function PositionCard({
   history: CardHistory
   onStatus: (marketId: string, status: CardStatus) => void
 }) {
-  const market = getMarket(activeManifest(), marketId)
+  const market = getMarket(useManifest(), marketId)
   const marketQuery = useMarketState(marketId)
   const accountQuery = useAccountState(marketId)
   const { ledgerTime } = useLedgerClock()

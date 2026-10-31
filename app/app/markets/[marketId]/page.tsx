@@ -3,9 +3,11 @@ import { activeManifest } from "@/lib/protocol/manifest-source"
 import { Skeleton } from "@/components/ui/skeleton"
 import { MarketRoute } from "./market-route"
 
-// Cache Components needs at least one prerendered param; other ids render on request.
+// Cache Components needs at least one prerendered param; other ids (registry markets) render on
+// request. A manifest without seeds still builds: its placeholder id is not a market (404).
 export function generateStaticParams() {
-  return activeManifest().markets.map((m) => ({ marketId: m.marketId }))
+  const seeds = activeManifest().markets.map((m) => ({ marketId: m.marketId }))
+  return seeds.length > 0 ? seeds : [{ marketId: "no-seed-market" }]
 }
 
 function MarketFallback() {
