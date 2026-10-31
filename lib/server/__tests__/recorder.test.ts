@@ -7,7 +7,7 @@ import type { ContractReader } from "@/lib/protocol/reader"
 vi.mock("server-only", () => ({}))
 
 import { recordAll, SLOT_SECONDS } from "@/lib/server/recorder"
-import type { Sql } from "@/lib/server/db"
+import { DatabaseConfigError, type Sql } from "@/lib/server/db"
 
 const manifest = parseManifest(testnetJson)
 const market = manifest.markets[0]
@@ -156,5 +156,12 @@ describe("recordAll", () => {
     const result = await recordAll(base(makeReader(), sql))
     expect(result.failed[0].error).toContain("ECONNREFUSED")
     expect(JSON.stringify(result)).not.toContain("secret")
+  })
+
+  it("rethrows a missing DATABASE_URL instead of reporting it as a failed market", async () => {
+    const sql = vi.fn(async () => {
+      throw new DatabaseConfigError()
+    }) as unknown as Sql
+    await expect(recordAll(base(makeReader(), sql))).rejects.toBeInstanceOf(DatabaseConfigError)
   })
 })

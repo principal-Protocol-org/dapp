@@ -29,15 +29,30 @@ function bearerMatches(header: string | null): boolean {
   return timingSafeEqual(sha256(header.slice("Bearer ".length)), sha256(secret))
 }
 
+/**
+ * The URL QStash signs for this route: `QSTASH_RECORD_URL`, else the production domain Vercel
+ * provides. Without either the QStash path refuses (fail closed): a signature issued for another
+ * destination of the same QStash account must not be accepted here.
+ */
+function expectedUrl(): string | null {
+  const configured = process.env.QSTASH_RECORD_URL
+  if (configured) return configured
+  const host = process.env.VERCEL_PROJECT_PRODUCTION_URL
+  return host ? `https://${host}/api/cron/record` : null
+}
+
 async function signatureValid(request: Request): Promise<boolean> {
   const signature = request.headers.get("upstash-signature")
   const currentSigningKey = process.env.QSTASH_CURRENT_SIGNING_KEY
   const nextSigningKey = process.env.QSTASH_NEXT_SIGNING_KEY
-  if (!signature || !currentSigningKey || !nextSigningKey) return false
+  const url = expectedUrl()
+  if (!signature || !currentSigningKey || !nextSigningKey || !url) return false
   try {
-    // The `url` claim is not pinned: behind Vercel's proxy the public URL differs from `request.url`.
-    // The signing keys already scope the signature to this QStash account.
-    return await new Receiver({ currentSigningKey, nextSigningKey }).verify({ signature, body: await request.text() })
+    return await new Receiver({ currentSigningKey, nextSigningKey }).verify({
+      signature,
+      body: await request.text(),
+      url,
+    })
   } catch {
     return false
   }
@@ -66,7 +81,8 @@ export async function GET(request: Request) {
         return Number(found.ledgerCloseTime)
       },
     })
-    return json(result, 200)
+    // Non-2xx when any market failed, so a scheduler alerts instead of seeing success.
+    return json(result, result.failed.length > 0 ? 500 : 200)
   } catch (error) {
     if (error instanceof DatabaseConfigError) return json({ error: "not_configured" }, 503)
     console.error("recorder route failed:", error instanceof Error ? error.name : "unknown")
