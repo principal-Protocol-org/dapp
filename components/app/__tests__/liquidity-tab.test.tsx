@@ -30,7 +30,6 @@ vi.mock("@/lib/protocol/review", async (orig) => ({
 
 import { A, MARKET } from "./panel-mocks"
 import { disconnect, enter, gateList, installDefaults, openTab, renderUi, reviewButton, simulateReturns, teardown, valueIn } from "./panel-harness"
-import { ActionTabs } from "../actions/action-tabs"
 import { addLiquidityPanel, addLiquiditySyPanel, LiquidityTab, removeLiquidityPanel } from "../actions/liquidity-tab"
 
 const LP_NOTE = "LPs earn PT convergence; swap fees go to the protocol and the market creator."
@@ -60,15 +59,6 @@ beforeEach(() => {
   mocks.fetchMarketState.mockResolvedValue(poolMarket())
 })
 afterEach(teardown)
-
-describe("ActionTabs — Liquidity is registered", () => {
-  it("enables the Liquidity tab, with add, single-sided add and remove", async () => {
-    await renderUi(<ActionTabs marketId="m1" />)
-    await openTab("Liquidity")
-    const list = screen.getByRole("tablist", { name: "Liquidity actions" })
-    expect(within(list).getAllByRole("tab").map((t) => t.textContent)).toEqual(["Add PT + SY", "Add SY only", "Remove"])
-  })
-})
 
 describe("Liquidity tab — add (PT + SY)", () => {
   it("shows the LP received, the amounts used and the leftover, in proportion to the reserves", async () => {

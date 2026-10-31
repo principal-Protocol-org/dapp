@@ -44,7 +44,6 @@ import {
   user,
   valueIn,
 } from "./panel-harness"
-import { ActionTabs } from "../actions/action-tabs"
 import { claimPanel, recombinePanel, redeemPanel, RedeemTab } from "../actions/redeem-tab"
 
 const PT_50 = 500_000_000n
@@ -87,48 +86,6 @@ beforeEach(() => {
   mocks.accounts[A] = accountState({ permYt: live(true), pt: live(PT_50), yt: live(YT_30) })
 })
 afterEach(teardown)
-
-describe("ActionTabs — Redeem is registered", () => {
-  it("enables the Redeem tab, with recombine, claim and redeem", async () => {
-    await renderUi(<ActionTabs marketId="m1" />)
-    await openTab("Redeem")
-    const list = screen.getByRole("tablist", { name: "Redeem actions" })
-    expect(within(list).getAllByRole("tab").map((t) => t.textContent)).toEqual(["Recombine", "Claim yield", "Redeem"])
-  })
-})
-
-describe("Default tabs (fix round 1)", () => {
-  const outer = (name: string) => within(screen.getByRole("tablist", { name: "Market actions" })).getByRole("tab", { name })
-  const inner = (tab: string, name: string) => within(screen.getByRole("tablist", { name: `${tab} actions` })).getByRole("tab", { name })
-
-  it("after maturity, the page opens on the Redeem tab and its Redeem panel", async () => {
-    afterMaturity()
-    mocks.fetchMarketState.mockResolvedValue(settled())
-    await renderUi(<ActionTabs marketId="m1" />)
-    expect(outer("Redeem").getAttribute("aria-selected")).toBe("true")
-    expect(inner("Redeem", "Redeem").getAttribute("aria-selected")).toBe("true")
-    expect(screen.getByRole("button", { name: "Review Redeem at maturity" })).toBeTruthy()
-  })
-
-  it("after maturity, a tab the user picks stays picked", async () => {
-    afterMaturity()
-    await renderUi(<ActionTabs marketId="m1" />)
-    await openTab("Mint")
-    expect(outer("Mint").getAttribute("aria-selected")).toBe("true")
-    expect(screen.getByRole("button", { name: "Review Deposit" })).toBeTruthy()
-    await openTab("Redeem")
-    await openTab("Claim yield")
-    expect(inner("Redeem", "Claim yield").getAttribute("aria-selected")).toBe("true")
-  })
-
-  it("before maturity, the page opens on Mint (Deposit), and the Redeem tab on Recombine", async () => {
-    await renderUi(<ActionTabs marketId="m1" />)
-    expect(outer("Mint").getAttribute("aria-selected")).toBe("true")
-    expect(inner("Mint", "Deposit").getAttribute("aria-selected")).toBe("true")
-    await openTab("Redeem")
-    expect(inner("Redeem", "Recombine").getAttribute("aria-selected")).toBe("true")
-  })
-})
 
 describe("Redeem tab — exit before maturity (recombine)", () => {
   it("needs equal PT and YT: MAX is min(PT, YT), and more is refused", async () => {

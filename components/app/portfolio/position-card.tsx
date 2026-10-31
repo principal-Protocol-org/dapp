@@ -37,7 +37,7 @@ function holdsAnything(a: AccountState): boolean {
 const liveBalance = (v: Live<bigint>): bigint => (v.status === "live" ? v.value : 0n)
 const day = (iso: string) => iso.slice(0, 10)
 
-/** A market page link that opens the given tab and panel (read by `ActionTabs`). */
+/** A market page link that opens the given tab and panel (read by `TradePanel`). */
 const shortcut = (marketId: string, tab: string, panel: string) => `/app/markets/${marketId}?tab=${tab}&panel=${panel}`
 
 function Tip({ children, tip }: { children: React.ReactNode; tip: string }) {
