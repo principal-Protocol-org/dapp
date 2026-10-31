@@ -32,6 +32,9 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+# Neon database credentials per network (Tranche 2 testnet, Tranche 3 mainnet); never commit
+.env.testnet
+.env.mainnet
 # the documented template holds no secrets (R9)
 !.env.example
 
