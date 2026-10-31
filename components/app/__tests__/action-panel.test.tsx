@@ -832,6 +832,37 @@ describe("ActionPanel — results", () => {
     expect(readLog(A)[0]).toEqual(expect.objectContaining({ hash: HASH, status: "FAILED" }))
   })
 
+  it("a confirmed transaction clears the form, as on first load: no amount, no inline error", async () => {
+    await renderPanel()
+    await openReview()
+    await user().click(signButton())
+    await settle()
+    expect(screen.getByText("Buy PT confirmed.")).toBeTruthy()
+    expect((screen.getByLabelText("SY to spend") as HTMLInputElement).value).toBe("")
+    expect(inlineError("SY to spend")).toBeNull()
+    expect(screen.getByLabelText("SY to spend").getAttribute("aria-invalid")).toBeNull()
+  })
+
+  it("a submitted transaction whose result is not known yet clears the form too, so it is not sent twice", async () => {
+    mocks.executeReview.mockResolvedValue({ hash: HASH, status: "NOT_FOUND" })
+    await renderPanel()
+    await openReview()
+    await user().click(signButton())
+    await settle()
+    expect(screen.getByText("Buy PT: result not known yet.")).toBeTruthy()
+    expect((screen.getByLabelText("SY to spend") as HTMLInputElement).value).toBe("")
+  })
+
+  it("a failed transaction keeps the amounts, so they can be corrected and sent again", async () => {
+    mocks.executeReview.mockResolvedValue({ hash: HASH, status: "FAILED" })
+    await renderPanel()
+    await openReview()
+    await user().click(signButton())
+    await settle()
+    expect(screen.getByText("Buy PT failed on-chain.")).toBeTruthy()
+    expect((screen.getByLabelText("SY to spend") as HTMLInputElement).value).toBe("10")
+  })
+
   it("a failed transaction shows its cause, and logs it (R49)", async () => {
     const reason = "Cause: the contract call failed. Nothing was taken except the network fee."
     mocks.executeReview.mockResolvedValue({ hash: HASH, status: "FAILED", reason })
