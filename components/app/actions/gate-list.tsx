@@ -10,7 +10,7 @@ export function GateList({ blockers, className }: { blockers: Blocker[]; classNa
       {blockers.length === 0 ? (
         <p className="text-sm text-positive">Every check passes.</p>
       ) : (
-        <div className="grid gap-2 rounded-lg border border-line bg-surface-sunk p-3 text-sm text-ink">
+        <div className="grid gap-2 rounded-lg border border-line bg-surface-sunk p-3 text-sm text-ink wrap-anywhere">
           <p className="label">Signing is off</p>
           <ul className="grid gap-2">
             {blockers.map((b, i) => (
