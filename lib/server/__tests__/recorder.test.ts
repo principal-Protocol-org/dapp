@@ -201,6 +201,24 @@ describe("recordAll and the registry (R2-4)", () => {
     logged.mockRestore()
   })
 
+  it("a refresh past its time budget does not hold up recording; the refresh is given the deadline", async () => {
+    const { sql } = makeSql()
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {})
+    let deadline = 0
+    const result = await recordAll({
+      ...base(makeReader(), sql),
+      registryBudgetMs: 20,
+      refreshRegistry: (d: number) => {
+        deadline = d
+        return new Promise(() => {})
+      },
+    })
+    expect(result).toEqual({ recorded: 1, failed: [] })
+    expect(deadline).toBe(CLOSE_TIME * 1000 + 20)
+    expect(String(logged.mock.calls[0][0])).toMatch(/time budget/)
+    logged.mockRestore()
+  })
+
   it("a missing DATABASE_URL during the refresh is thrown, not logged", async () => {
     const { sql } = makeSql()
     const refreshRegistry = async () => {

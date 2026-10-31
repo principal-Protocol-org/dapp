@@ -6,9 +6,12 @@ import { parseManifest } from "@/lib/protocol/manifest"
 
 vi.mock("server-only", () => ({}))
 
-const mocks = vi.hoisted(() => ({ runFaucet: vi.fn(), registry: [] as Record<string, unknown>[] }))
+const mocks = vi.hoisted(() => ({ runFaucet: vi.fn(), registry: [] as Record<string, unknown>[], dbReads: 0 }))
 vi.mock("@/lib/server/db", () => ({
-  sql: async () => mocks.registry,
+  sql: async () => {
+    mocks.dbReads++
+    return mocks.registry
+  },
   DatabaseConfigError: class DatabaseConfigError extends Error {},
 }))
 vi.mock("@/lib/server/faucet", async (importOriginal) => ({
@@ -62,18 +65,23 @@ describe("POST /api/faucet", () => {
     mocks.registry = [{ pool, market_id: market.marketId, source: "discovered", valid: true, reason: null, market }]
     try {
       await post(JSON.stringify({ account: ACCOUNT }))
-      expect(mocks.runFaucet.mock.calls[0][0].manifest.markets.map((m: { marketId: string }) => m.marketId)).toEqual([
-        manifest.markets[0].marketId,
-        "testnet-sta-discovered",
-      ])
+      const { markets } = mocks.runFaucet.mock.calls[0][0]
+      expect((await markets()).map((m: { marketId: string }) => m.marketId)).toEqual([manifest.markets[0].marketId, "testnet-sta-discovered"])
     } finally {
       mocks.registry = []
     }
   })
 
+  it("the route reads no database before the faucet's rate limit admits the request (R2-40 M4)", async () => {
+    mocks.dbReads = 0
+    mocks.runFaucet.mockResolvedValue({ error: "rate_limited" })
+    expect((await post(JSON.stringify({ account: ACCOUNT }))).status).toBe(429)
+    expect(mocks.dbReads).toBe(0)
+  })
+
   it("passes the account, the client key, the manifest and the time", async () => {
     await post(JSON.stringify({ account: ACCOUNT }), { "x-vercel-forwarded-for": "198.51.100.7" })
-    expect(mocks.runFaucet).toHaveBeenCalledWith({ account: ACCOUNT, ip: "198.51.100.7", manifest, now: expect.any(Number) })
+    expect(mocks.runFaucet).toHaveBeenCalledWith({ account: ACCOUNT, ip: "198.51.100.7", manifest, markets: expect.any(Function), now: expect.any(Number) })
   })
 
   const ipOf = async (headers: Record<string, string>) => {

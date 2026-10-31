@@ -225,6 +225,12 @@ async function send(step: FaucetStep, write: () => Promise<void>): Promise<void>
 export async function runFaucet(p: {
   account: string
   manifest: Manifest
+  /**
+   * The markets whose PT and YT are granted (the resolved list: seeds and registry markets), read
+   * only once the request is admitted by the limits below, so refused requests never wait on the
+   * database (R2-40). Without it, the manifest's own markets.
+   */
+  markets?: () => Promise<Market[]>
   ip: string
   /** The request's time, for the per-minute windows. */
   now: number
@@ -255,9 +261,24 @@ export async function runFaucet(p: {
   }
   readTimes = reads
 
+  let scope = manifest
+  if (p.markets) {
+    try {
+      scope = { ...manifest, markets: await p.markets() }
+    } catch (error) {
+      releaseKeySlots(account, ip)
+      throw error
+    }
+    // The listed markets must still share the asset this run pays (R44).
+    if (faucetAsset(scope)?.sac !== asset.sac) {
+      releaseKeySlots(account, ip)
+      return { error: "not_configured" }
+    }
+  }
+
   const assetGrants = [
     ...new Map(
-      manifest.markets.flatMap((m) => [
+      scope.markets.flatMap((m) => [
         [m.contracts.pt, "grant_pt"],
         [m.contracts.yt, "grant_yt"],
       ] as const),

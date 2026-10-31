@@ -75,6 +75,8 @@ class Chain {
     set(c.sy, "recovery_escrow", c.recoveryEscrow)
     set(c.pt, "permissioning_address", SHARED.permissioning)
     set(c.pt, "recovery_escrow", c.recoveryEscrow)
+    set(c.pt, "minter", c.manager)
+    set(c.yt, "minter", c.manager)
     set(c.yt, "permissioning_address", SHARED.permissioning)
     set(c.yt, "oracle_address", SHARED.oracle)
     set(c.yt, "recovery_escrow", c.recoveryEscrow)
@@ -87,7 +89,11 @@ class Chain {
     return c
   }
 
+  /** Every view call, as `id.fn`. */
+  reads: string[] = []
+
   reader: ContractReader = (async <T,>(call: { contractId: string; functionName: string; args?: { type: string; value: unknown }[] }) => {
+    this.reads.push(`${call.contractId}.${call.functionName}`)
     if (this.down.has(call.contractId)) throw new Error("fetch failed: ECONNRESET")
     const key = `${call.contractId}.${call.functionName}`
     if (!this.views.has(key)) throw new Error(`HostError: Error(WasmVm, MissingValue) ${key}`)
@@ -204,6 +210,8 @@ import {
 function memoryStore() {
   const rows = new Map<string, RegistryRow>()
   const cursors = new Map<string, { ledger: number; cursor: string | null }>()
+  let clock = 0
+  const stamp = () => new Date(Date.UTC(2026, 9, 1) + ++clock * 1000).toISOString()
   const rank = { discovered: 0, published: 1, seed: 2 } as const
   const store: RegistryStore & { rowsMap: typeof rows; cursors: typeof cursors; writes: number; fail?: Error } = {
     rowsMap: rows,
@@ -218,7 +226,7 @@ function memoryStore() {
       const prev = rows.get(row.pool)
       const source = prev && rank[prev.source] > rank[row.source] ? prev.source : row.source
       if (row.valid === null && prev) {
-        rows.set(row.pool, { ...prev, source, reason: row.reason })
+        rows.set(row.pool, { ...prev, source, reason: row.reason, updatedAt: stamp() })
         return
       }
       rows.set(row.pool, {
@@ -228,6 +236,7 @@ function memoryStore() {
         reason: row.reason,
         market: row.market ?? prev?.market ?? null,
         marketId: ((row.market ?? prev?.market) as Market | null | undefined)?.marketId ?? null,
+        updatedAt: stamp(),
       })
     },
     async cursor(name) {
@@ -350,6 +359,47 @@ describe("validateMarket", () => {
     const v = await validateMarket(chain.reader, chain.rpc, manifestWith([foreign]), foreign)
     expect(v.valid).toBe(false)
     expect(v.reason).toMatch(/oracle/i)
+  })
+
+  it("wrong wiring hides market: PT or YT minted by another contract than the manager (R2-40)", async () => {
+    const c = chain.deploy(10)
+    chain.views.set(`${c.pt}.minter`, cid(81))
+    chain.views.set(`${c.yt}.minter`, cid(82))
+    const market = seedMarket(c)
+    const v = await validateMarket(chain.reader, chain.rpc, manifestWith([market]), market)
+    expect(v.valid).toBe(false)
+    expect(v.reason).toMatch(/pt minter/)
+    expect(v.reason).toMatch(/yt minter/)
+  })
+
+  it("a market on foreign infrastructure is refused without a single read", async () => {
+    const market = seedMarket(chain.deploy(10))
+    const foreign = { ...market, contracts: { ...market.contracts, router: cid(91) } }
+    chain.reads = []
+    const v = await validateMarket(chain.reader, chain.rpc, manifestWith([foreign]), foreign)
+    expect(v.valid).toBe(false)
+    expect(chain.reads).toEqual([])
+  })
+
+  it("a manager on another Permissioning stops the check before the long reads", async () => {
+    const c = chain.deploy(10)
+    chain.views.set(`${c.manager}.permissioning_address`, cid(77))
+    const market = seedMarket(c)
+    chain.reads = []
+    await validateMarket(chain.reader, chain.rpc, manifestWith([market]), market)
+    expect(chain.reads.length).toBeLessThanOrEqual(4)
+    expect(chain.reads).not.toContain(`${c.yt}.oracle_address`)
+  })
+
+  it("a refusal never carries RPC text in its reason; the detail is kept apart for logs", async () => {
+    const c = chain.deploy(10)
+    chain.views.delete(`${c.yt}.recovery_escrow`)
+    chain.down.add(c.config)
+    const market = seedMarket(c)
+    const v = await validateMarket(chain.reader, chain.rpc, manifestWith([market]), market)
+    expect(v.valid).toBe(false)
+    expect(v.reason).toMatch(/yt recovery_escrow/)
+    expect(v.reason).not.toMatch(/HostError|MissingValue|ECONNRESET|fetch failed/)
   })
 
   it("0001's topology rule: the Router must list the same contracts for the pool", async () => {
@@ -522,13 +572,79 @@ describe("discover and resolvedMarkets", () => {
     expect(restart.startLedger).toBeGreaterThanOrEqual(5_000)
   })
 
+  it("a scan past its deadline stops between pools, saves its place, and the next run resumes there", async () => {
+    const a = chain.deploy(20)
+    const b = chain.deploy(30)
+    const c = chain.deploy(40)
+    chain.events = [reg(a.pool, 300), reg(b.pool, 301), reg(c.pool, 302)]
+    const manifest = manifestWith([])
+    // The clock is read before each getEvents page and before each pool: page, a, b, then c is late.
+    const times = [0, 0, 0, 100]
+    const first = await discover({ ...depsFor(manifest), now: () => times.shift() ?? 100 }, { deadline: 50 })
+    expect(first).toMatchObject({ checked: [a.pool, b.pool], complete: false })
+    expect(store.cursors.get(`markets:${SHARED.router}`)).toEqual({ ledger: 301, cursor: eventId(301) })
+    expect(await resolvedMarkets({ store, manifest })).toHaveLength(2)
+
+    const second = await discover(depsFor(manifest))
+    expect(second).toMatchObject({ checked: [c.pool], complete: true })
+    expect(chain.getEventsCalls.at(-1)).toMatchObject({ cursor: eventId(301) })
+    expect(await resolvedMarkets({ store, manifest })).toHaveLength(3)
+  })
+
+  it("a factory pool the Router does not list costs one read, not a full check", async () => {
+    const c = chain.deploy(20, { register: false })
+    chain.events = [mktNew(c.pool, c.recoveryEscrow, 300)]
+    chain.reads = []
+    await discover(depsFor(manifestWith([])))
+    expect(chain.reads).toEqual([`${SHARED.router}.is_registered`])
+    expect(store.rowsMap.get(c.pool)).toMatchObject({ valid: false, reason: expect.stringMatching(/not registered with the Router/) })
+  })
+
+  it("invalid rows are not re-validated every run: a small batch, oldest first, after the listed ones", async () => {
+    const manifest = manifestWith([])
+    const good = chain.deploy(20)
+    chain.events = [reg(good.pool, 300)]
+    await discover(depsFor(manifest))
+    const junk = [50, 60, 70, 80, 90].map((n) => chain.deploy(n, { register: false }).pool)
+    for (const pool of junk) await store.record({ pool, source: "discovered", valid: false, reason: "the pool is not registered with the Router", market: null })
+
+    const run1 = await revalidate(depsFor(manifest))
+    expect(run1.checked).toEqual([good.pool, junk[0], junk[1]])
+    const run2 = await revalidate(depsFor(manifest))
+    expect(run2.checked).toEqual([good.pool, junk[2], junk[3]])
+  })
+
+  it("rows left by another Router are never re-checked", async () => {
+    const manifest = manifestWith([])
+    const old = { ...seedMarket(contractsOf(30)), marketId: "local-usdy-old", contracts: { ...seedMarket(contractsOf(30)).contracts, router: cid(90) } }
+    store.rowsMap.set(old.contracts.pool, { pool: old.contracts.pool, source: "discovered", valid: true, reason: null, market: old, marketId: old.marketId, updatedAt: null })
+    expect((await revalidate(depsFor(manifest))).checked).toEqual([])
+  })
+
+  it("a database that does not answer falls back to the seeds within the timeout", async () => {
+    const seed = seedMarket(chain.deploy(10))
+    const hanging: RegistryStore = { ...store, rows: () => new Promise(() => {}) }
+    const started = Date.now()
+    expect(await resolvedMarkets({ store: hanging, manifest: manifestWith([seed]), timeoutMs: 30 })).toEqual([seed])
+    expect(Date.now() - started).toBeLessThan(1_000)
+    expect(String(error.mock.calls.at(-1)?.[0])).toMatch(/timed out/)
+  })
+
+  it("a listed market carries the manifest's current pins, never the stored ones (R2-40, R29b)", async () => {
+    const manifest = manifestWith([])
+    const stored = { ...seedMarket(contractsOf(20)), marketId: "local-usdy-x", wasmHashes: { ...PINS, pool: hash(55), router: hash(56) } }
+    store.rowsMap.set(stored.contracts.pool, { pool: stored.contracts.pool, source: "discovered", valid: true, reason: null, market: stored, marketId: stored.marketId, updatedAt: null })
+    const [listed] = await resolvedMarkets({ store, manifest })
+    expect(listed.wasmHashes).toEqual(PINS)
+  })
+
   it("resolvedMarkets drops rows from another Router or oracle, and rows whose market does not parse", async () => {
     const manifest = manifestWith([])
     const good = { ...seedMarket(contractsOf(20)), marketId: "local-usdy-good" }
     const stale = { ...seedMarket(contractsOf(30)), marketId: "local-usdy-stale", contracts: { ...seedMarket(contractsOf(30)).contracts, router: cid(90) } }
     const broken = { ...seedMarket(contractsOf(40)), marketId: "" }
     for (const m of [good, stale, broken]) {
-      store.rowsMap.set(m.contracts.pool, { pool: m.contracts.pool, source: "discovered", valid: true, reason: null, market: m, marketId: m.marketId })
+      store.rowsMap.set(m.contracts.pool, { pool: m.contracts.pool, source: "discovered", valid: true, reason: null, market: m, marketId: m.marketId, updatedAt: null })
     }
     expect((await resolvedMarkets({ store, manifest })).map((m) => m.marketId)).toEqual(["local-usdy-good"])
   })
@@ -592,7 +708,7 @@ describe("POST /api/markets", () => {
     routeMocks.sql.mockResolvedValue([])
   })
 
-  const writes = () => routeMocks.sql.mock.calls.filter(([strings]) => /insert|update|delete/i.test((strings as string[]).join("")))
+  const writes = () => routeMocks.sql.mock.calls.filter(([strings]) => /^\s*(insert|update|delete)\b/i.test((strings as string[]).join("")))
 
   it("POST validates before writing: an invalid pool is refused (422) and nothing is written", async () => {
     const c = chain.deploy(20)
@@ -611,6 +727,18 @@ describe("POST /api/markets", () => {
     const [insert] = writes()
     expect((insert[0] as string[]).join("?")).toMatch(/insert into market_registry/)
     expect(insert.slice(1)).toContain("published")
+  })
+
+  it("an unverifiable pool answers 503 with a fixed reason; the RPC detail goes to the server log only (R2-40)", async () => {
+    const c = chain.deploy(20)
+    chain.down.add(c.yt)
+    const res = await post({ pool: c.pool })
+    expect(res.status).toBe(503)
+    const text = await res.text()
+    expect(JSON.parse(text)).toMatchObject({ error: "unverified", reason: "The market could not be checked right now; try again later." })
+    expect(text).not.toMatch(/ECONNRESET|fetch failed/)
+    expect(JSON.stringify(error.mock.calls)).toMatch(/ECONNRESET/)
+    expect(writes()).toEqual([])
   })
 
   it("a body that is not { pool: C… } is refused before any read", async () => {

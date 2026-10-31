@@ -7,8 +7,9 @@ import "server-only"
  *   alone when the database is down. Read from the cached verdicts, never validated inline (R2-36).
  * - `POST { pool }`: the wizard's step 7. The pool is validated first (topology, wiring, pinned
  *   Wasm); only a valid market is written, as `published`, so it lists at the next page load. An
- *   invalid pool is 422 with the reason, an unverifiable one (the RPC failed) 503; nothing is
- *   written for either. Same-origin JSON only, a 1 KiB body, rate-limited per IP and per instance
+ *   invalid pool is 422 with the reason (this app's own words), an unverifiable one (the RPC
+ *   failed) 503 with a fixed reason, the RPC's detail logged only (R2-40); nothing is written for
+ *   either. Same-origin JSON only, a 1 KiB body, rate-limited per IP and per instance
  *   (the faucet's approach, R42/R42c).
  *
  * `connection()` keeps GET out of the build's prerender: without it a database that is down at
@@ -21,7 +22,7 @@ import { createRpcReader } from "@/lib/protocol/reader"
 import { createRpcServer } from "@/lib/protocol/stellar"
 import { DatabaseConfigError, sql } from "@/lib/server/db"
 import { PUBLISH_WINDOW_MS, publishMarket, resolvedMarkets, sqlRegistryStore, takePublishSlot } from "@/lib/server/registry"
-import { clientIp, isCrossSite, isJson, readBody } from "@/lib/server/request"
+import { clientIp, isCrossSite, isJson, readBody, redact } from "@/lib/server/request"
 
 // ~40 simulations and ledger-entry reads for one pool.
 export const maxDuration = 30
@@ -64,6 +65,9 @@ const MESSAGES: Record<ErrorCode, string> = {
   not_configured: "Publishing markets is not set up on this server (no database).",
   failed: "Publishing failed. Try again in a minute.",
 }
+
+/** The only reason an unverifiable pool gets: what the RPC said is logged, never echoed (R2-40). */
+const UNVERIFIED_REASON = "The market could not be checked right now; try again later."
 
 const json = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
   Response.json(body, { status, headers: { "cache-control": "no-store", ...headers } })
@@ -110,7 +114,8 @@ export async function POST(request: Request): Promise<Response> {
     )
     if (outcome.status === "valid") return json({ market: outcome.market })
     if (outcome.status === "invalid") return refuse("invalid_market", { reason: outcome.reason })
-    return refuse("unverified", { reason: outcome.reason })
+    console.error(`markets route: ${pool} could not be checked: ${redact(outcome.detail ?? outcome.reason)}`)
+    return refuse("unverified", { reason: UNVERIFIED_REASON })
   } catch (error) {
     if (error instanceof DatabaseConfigError) return refuse("not_configured")
     console.error("markets route: publish failed:", error instanceof Error ? error.name : "unknown")

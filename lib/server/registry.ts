@@ -15,6 +15,11 @@ import "server-only"
  * Verdicts are three-state: `valid = true` lists a market, `false` hides it (a seed too), and
  * `null` means the check could not finish (the RPC failed, which is not an answer): an existing
  * verdict is kept and only the reason is updated, so a flaky RPC never hides a trusted market.
+ * Reasons are this module's own words, addresses and hashes: RPC text goes to the server log only.
+ *
+ * Every wait is bounded (R2-40): discovery and re-validation stop at a deadline and save their
+ * place, re-validation re-checks the listed markets each run and invalid ones a few at a time, and
+ * reading the list gives up on a slow database and lists the seeds.
  */
 import { Asset, StrKey, scValToNative, type xdr } from "@stellar/stellar-sdk"
 import { cursorLedger, idOf, type RawEvent } from "@/lib/protocol/events"
@@ -24,7 +29,7 @@ import { isContractError, readLive, toBool, type ContractReader } from "@/lib/pr
 import type { Manifest, Market, MarketContractName } from "@/lib/protocol/types"
 import { contractWasmHash, WasmReadError, type LedgerEntriesRpc } from "@/lib/protocol/wasm"
 import { DatabaseConfigError, type Sql } from "./db"
-import { createRollingLimiter } from "./request"
+import { createRollingLimiter, redact } from "./request"
 
 export const MARKET_KINDS: readonly MarketContractName[] = ["sy", "pt", "yt", "config", "manager", "pool", "recoveryEscrow"]
 
@@ -38,6 +43,8 @@ export type Validation = {
   reason?: string
   /** The check could not finish (an RPC failure, not an answer from the chain). */
   unreadable?: true
+  /** What the RPC said about the reads that failed: for server logs only, never shown or stored. */
+  detail?: string
 }
 
 type EventsRequest =
@@ -60,6 +67,8 @@ export type RegistryRow = {
   valid: boolean | null
   reason: string | null
   market: unknown
+  /** ISO time of the last write; re-checks of invalid rows go oldest first. */
+  updatedAt: string | null
 }
 
 export type RegistryWrite = {
@@ -81,7 +90,14 @@ export type RegistryStore = {
   saveCursor(name: string, ledger: number, cursor: string | null): Promise<void>
 }
 
-export type RegistryDeps = { store: RegistryStore; reader: ContractReader; rpc: RegistryRpc; manifest: Manifest }
+export type RegistryDeps = {
+  store: RegistryStore
+  reader: ContractReader
+  rpc: RegistryRpc
+  manifest: Manifest
+  /** Wall clock (ms) for deadlines; `Date.now` by default. */
+  now?: () => number
+}
 
 // ---------------------------------------------------------------- reads
 
@@ -90,6 +106,8 @@ export class PoolReadError extends Error {
   constructor(
     message: string,
     readonly unreadable: boolean,
+    /** The RPC's own words, for the server log only. */
+    readonly detail?: string,
   ) {
     super(message)
     this.name = "PoolReadError"
@@ -138,9 +156,13 @@ function text(v: unknown): string {
   throw new Error("expected a string")
 }
 
+/** A failed read in this module's words: what was read and whether the contract refused it. */
+const failure = (what: string, r: { unreadable: boolean }) => (r.unreadable ? what : `${what} was refused by the contract`)
+
 function value<T>(r: Read<T>, what: string): T {
   if (r.ok) return r.value
-  throw new PoolReadError(`${what} could not be read: ${r.error}`, r.unreadable)
+  const message = r.unreadable ? `could not be checked: ${what}` : `${failure(what, r)}.`
+  throw new PoolReadError(message, r.unreadable, `${what}: ${r.error}`)
 }
 
 /** The pinned hash for a kind, lower-case, or undefined when the manifest pins none. */
@@ -152,7 +174,7 @@ async function checkCode(
   manifest: Manifest,
   kind: MarketContractName,
   contractId: string,
-): Promise<{ problem?: string; unread?: string }> {
+): Promise<{ problem?: string; unread?: string; detail?: string }> {
   const pinned = pinOf(manifest, kind)
   if (!pinned) return { problem: `the manifest pins no Wasm for ${kind}, so ${contractId} cannot be trusted` }
   try {
@@ -161,7 +183,7 @@ async function checkCode(
     return {}
   } catch (error) {
     if (error instanceof WasmReadError) return { problem: `${kind}: ${error.message}` }
-    return { unread: `${kind} code (${error instanceof Error ? error.message.split("\n")[0] : String(error)})` }
+    return { unread: `${kind} code`, detail: `${kind} code: ${error instanceof Error ? error.message.split("\n")[0] : String(error)}` }
   }
 }
 
@@ -180,7 +202,7 @@ export async function marketFromPool(reader: ContractReader, rpc: LedgerEntriesR
   if (!isContract(pool)) throw new PoolReadError(`${pool} is not a contract address.`, false)
   const code = await checkCode(rpc, manifest, "pool", pool)
   if (code.problem) throw new PoolReadError(code.problem.replace(/^pool: /, ""), false)
-  if (code.unread) throw new PoolReadError(`The pool could not be read: ${code.unread}.`, true)
+  if (code.unread) throw new PoolReadError("could not be checked: the pool's code", true, code.detail)
 
   const [config, escrow, sy, pt, yt, manager, maturity] = await Promise.all([
     read(reader, pool, "config_address", address),
@@ -221,7 +243,7 @@ export async function marketFromPool(reader: ContractReader, rpc: LedgerEntriesR
   const marketId = existing?.marketId ?? (taken ? `${base}-${pool.slice(1, 7).toLowerCase()}` : base)
   const t = manifest.testAsset
   const isTest = t !== undefined && t.code === assetCode && t.issuer === issuer && t.sac === underlyingSac
-  const wasmHashes = Object.fromEntries(MARKET_KINDS.flatMap((k) => (manifest.wasmHashes[k] ? [[k, manifest.wasmHashes[k]]] : [])))
+  const wasmHashes = currentPins(manifest) ?? {}
 
   try {
     return parseMarket({
@@ -242,35 +264,85 @@ export async function marketFromPool(reader: ContractReader, rpc: LedgerEntriesR
 /** `[contract kind, view, expected value]`; `Option<Address>` views read None as "unset". */
 type Wire = [MarketContractName, string, string | bigint, "option"?]
 
+/** Problems (answers from the chain), unread notes (RPC failures) and their RPC detail. */
+type Findings = { problems: string[]; unread: string[]; detail: string[] }
+
+function readWires(reader: ContractReader, c: Market["contracts"], wires: Wire[]) {
+  return Promise.all(
+    wires.map(([kind, fn, expected, option]) =>
+      read<string | bigint | null>(reader, c[kind], fn, (v) => (typeof expected === "bigint" ? u64(v) : option ? optionalAddress(v) : address(v))),
+    ),
+  )
+}
+
+function judgeWires(f: Findings, wires: Wire[], results: Read<string | bigint | null>[]): void {
+  results.forEach((r, i) => {
+    const [kind, fn, expected] = wires[i]
+    if (!r.ok) {
+      ;(r.unreadable ? f.unread : f.problems).push(failure(`${kind} ${fn}`, r))
+      f.detail.push(`${kind} ${fn}: ${r.error}`)
+    } else if (r.value !== expected) {
+      f.problems.push(`${kind} ${fn} is ${r.value === null ? "unset" : String(r.value)}, not ${String(expected)}`)
+    }
+  })
+}
+
+function verdict(f: Findings): Validation | null {
+  const detail = f.detail.length > 0 ? { detail: f.detail.join("; ") } : {}
+  if (f.problems.length > 0) return { valid: false, reason: cap(f.problems.join("; ")), ...detail }
+  if (f.unread.length > 0) return { valid: false, unreadable: true, reason: cap(`could not be checked: ${f.unread.join(", ")}`), ...detail }
+  return null
+}
+
 /**
  * 0001's topology rule (`Router.market(pool)` and the manager's maturity) plus: the market is
  * registered with this network's Router; each contract is wired to this network's oracle,
- * Permissioning and RiskControl and to the market's own config and recovery escrow; the underlying
- * is the Stellar asset contract of its code and issuer; and every market contract runs the Wasm the
- * manifest pins for its kind. A market wired to foreign infrastructure is invalid.
+ * Permissioning and RiskControl and to the market's own config, recovery escrow and manager (PT
+ * and YT are minted by the manager only); the underlying is the Stellar asset contract of its code
+ * and issuer; and every market contract runs the Wasm the manifest pins for its kind. A market
+ * wired to foreign infrastructure is invalid.
+ *
+ * In three steps, each returning early on a definite problem (R2-40): what needs no read (the
+ * market's Router and oracle, its underlying); then the Router registration and the manager's
+ * shared contracts (four reads); then the rest (about 25 reads).
  */
 export async function validateMarket(reader: ContractReader, rpc: LedgerEntriesRpc, manifest: Manifest, market: Market): Promise<Validation> {
-  const problems: string[] = []
-  const unread: string[] = []
+  const f: Findings = { problems: [], unread: [], detail: [] }
   const c = market.contracts
   const s = manifest.shared
   const sac = market.underlying.sac
 
-  if (c.router !== s.router) problems.push(`its Router (${c.router}) is not this network's Router`)
-  if (c.oracle !== s.oracle) problems.push(`its oracle (${c.oracle}) is not this network's oracle`)
+  if (c.router !== s.router) f.problems.push(`its Router (${c.router}) is not this network's Router`)
+  if (c.oracle !== s.oracle) f.problems.push(`its oracle (${c.oracle}) is not this network's oracle`)
   try {
     const derived = new Asset(market.underlying.code, market.underlying.issuer).contractId(manifest.networkPassphrase)
-    if (derived !== sac) problems.push(`its underlying ${sac} is not the asset contract of ${market.underlying.code}:${market.underlying.issuer}`)
+    if (derived !== sac) f.problems.push(`its underlying ${sac} is not the asset contract of ${market.underlying.code}:${market.underlying.issuer}`)
   } catch {
-    problems.push(`its underlying ${market.underlying.code}:${market.underlying.issuer} is not a valid asset`)
+    f.problems.push(`its underlying ${market.underlying.code}:${market.underlying.issuer} is not a valid asset`)
   }
+  if (f.problems.length > 0) return verdict(f) as Validation
+
+  const shared: Wire[] = [
+    ["manager", "oracle_address", s.oracle],
+    ["manager", "permissioning_address", s.permissioning],
+    ["manager", "risk_control", s.riskControl, "option"],
+  ]
+  const [registered, sharedReads] = await Promise.all([
+    read(reader, s.router, "is_registered", toBool, [{ type: "address", value: c.pool }]),
+    readWires(reader, c, shared),
+  ])
+  if (!registered.ok) {
+    ;(registered.unreadable ? f.unread : f.problems).push(failure("Router is_registered", registered))
+    f.detail.push(`Router is_registered: ${registered.error}`)
+  } else if (!registered.value) {
+    f.problems.push("the pool is not registered with the Router")
+  }
+  judgeWires(f, shared, sharedReads)
+  if (f.problems.length > 0) return verdict(f) as Validation
 
   const wires: Wire[] = [
     ["pool", "config_address", c.config],
     ["pool", "recovery_escrow", c.recoveryEscrow, "option"],
-    ["manager", "oracle_address", s.oracle],
-    ["manager", "permissioning_address", s.permissioning],
-    ["manager", "risk_control", s.riskControl, "option"],
     ["manager", "config_address", c.config],
     ["sy", "underlying_address", sac],
     ["sy", "permissioning_address", s.permissioning],
@@ -278,48 +350,34 @@ export async function validateMarket(reader: ContractReader, rpc: LedgerEntriesR
     ["sy", "recovery_escrow", c.recoveryEscrow],
     ["pt", "permissioning_address", s.permissioning],
     ["pt", "recovery_escrow", c.recoveryEscrow],
+    ["pt", "minter", c.manager],
     ["yt", "permissioning_address", s.permissioning],
     ["yt", "oracle_address", s.oracle],
     ["yt", "recovery_escrow", c.recoveryEscrow],
+    ["yt", "minter", c.manager],
     ["config", "underlying", sac],
     ["config", "maturity", BigInt(market.maturity)],
     ["recoveryEscrow", "underlying_address", sac],
   ]
-
-  const [registered, topology, wired, code] = await Promise.all([
-    read(reader, s.router, "is_registered", toBool, [{ type: "address", value: c.pool }]),
+  const [topology, wired, code] = await Promise.all([
     fetchTopology(reader, market),
-    Promise.all(
-      wires.map(([kind, fn, expected, option]) =>
-        read<string | bigint | null>(reader, c[kind], fn, (v) => (typeof expected === "bigint" ? u64(v) : option ? optionalAddress(v) : address(v))),
-      ),
-    ),
+    readWires(reader, c, wires),
     Promise.all(MARKET_KINDS.map((kind) => checkCode(rpc, manifest, kind, c[kind]))),
   ])
-
-  if (!registered.ok) {
-    ;(registered.unreadable ? unread : problems).push(`Router.is_registered: ${registered.error}`)
-  } else if (!registered.value) {
-    problems.push("the pool is not registered with the Router")
-  } else if (topology.status === "unavailable") {
-    ;(isContractError(topology.error) ? problems : unread).push(`Router.market: ${topology.error}`)
+  if (topology.status === "unavailable") {
+    const refused = isContractError(topology.error)
+    ;(refused ? f.problems : f.unread).push(failure("Router market", { unreadable: !refused }))
+    f.detail.push(`Router market: ${topology.error}`)
   } else if (!topology.value.matches) {
-    problems.push(`the Router lists different contracts for this pool: ${topology.value.mismatches.join(", ")}`)
+    f.problems.push(`the Router lists different contracts for this pool: ${topology.value.mismatches.join(", ")}`)
   }
-
-  wired.forEach((r, i) => {
-    const [kind, fn, expected] = wires[i]
-    if (!r.ok) (r.unreadable ? unread : problems).push(`${kind} ${fn}: ${r.error}`)
-    else if (r.value !== expected) problems.push(`${kind} ${fn} is ${r.value === null ? "unset" : String(r.value)}, not ${String(expected)}`)
-  })
+  judgeWires(f, wires, wired)
   for (const r of code) {
-    if (r.problem) problems.push(r.problem)
-    if (r.unread) unread.push(r.unread)
+    if (r.problem) f.problems.push(r.problem)
+    if (r.unread) f.unread.push(r.unread)
+    if (r.detail) f.detail.push(r.detail)
   }
-
-  if (problems.length > 0) return { valid: false, reason: cap(problems.join("; ")) }
-  if (unread.length > 0) return { valid: false, unreadable: true, reason: cap(`could not be checked: ${unread.join("; ")}`) }
-  return { valid: true }
+  return verdict(f) ?? { valid: true }
 }
 
 const cap = (reason: string) => (reason.length <= MAX_REASON ? reason : `${reason.slice(0, MAX_REASON - 1)}…`)
@@ -340,33 +398,57 @@ function knownMarkets(manifest: Manifest, rows: RegistryRow[]): Market[] {
   return [...manifest.markets, ...rows.flatMap((r) => (seeds.has(r.pool) ? [] : (storedMarket(r.market) ?? [])))]
 }
 
-type Outcome = { status: "valid"; market: Market } | { status: "invalid" | "unreadable"; reason: string; market: Market | null }
+/** A stored market wired to another Router or oracle: never listed under this manifest, never re-checked. */
+const isForeign = (manifest: Manifest, market: Market | null) =>
+  market !== null && (market.contracts.router !== manifest.shared.router || market.contracts.oracle !== manifest.shared.oracle)
 
-/** Builds (unless known) and validates one pool; writes nothing. */
+export type Outcome =
+  | { status: "valid"; market: Market }
+  | { status: "invalid" | "unreadable"; reason: string; market: Market | null; detail?: string }
+
+const unreadableReason = (what: string) => cap(what.startsWith("could not be checked") ? what : `could not be checked: ${what}`)
+
+/**
+ * Builds (unless known) and validates one pool; writes nothing. A pool not built yet must first be
+ * registered with the Router: one read, so a flood of factory markets nobody registered stays cheap.
+ */
 async function check(deps: RegistryDeps, pool: string, known: Market[], stored: Market | null): Promise<Outcome> {
   const { reader, rpc, manifest } = deps
   let market = manifest.markets.find((m) => m.contracts.pool === pool) ?? stored
   if (!market) {
+    if (!isContract(pool)) return { status: "invalid", reason: `${pool} is not a contract address.`, market: null }
+    const registered = await read(reader, manifest.shared.router, "is_registered", toBool, [{ type: "address", value: pool }])
+    if (!registered.ok) {
+      const reason = registered.unreadable ? unreadableReason("Router is_registered") : `${failure("Router is_registered", registered)}.`
+      return { status: registered.unreadable ? "unreadable" : "invalid", reason, market: null, detail: `Router is_registered: ${registered.error}` }
+    }
+    if (!registered.value) return { status: "invalid", reason: "the pool is not registered with the Router", market: null }
     try {
       market = await marketFromPool(reader, rpc, { ...manifest, markets: known }, pool)
     } catch (error) {
-      const unreadable = !(error instanceof PoolReadError) || error.unreadable
-      const reason = cap(unreadable ? `could not be checked: ${error instanceof Error ? error.message : String(error)}` : (error as Error).message)
-      return { status: unreadable ? "unreadable" : "invalid", reason, market: null }
+      const ours = error instanceof PoolReadError
+      const unreadable = !ours || error.unreadable
+      const message = error instanceof Error ? error.message : String(error)
+      // An unexpected error's text is not this module's: it goes to the log, not into the reason.
+      const reason = ours ? (unreadable ? unreadableReason(message) : cap(message)) : unreadableReason("the pool")
+      return { status: unreadable ? "unreadable" : "invalid", reason, market: null, detail: ours ? error.detail : message }
     }
   }
   const v = await validateMarket(reader, rpc, manifest, market)
   if (v.valid) return { status: "valid", market }
-  return { status: v.unreadable ? "unreadable" : "invalid", reason: v.reason ?? "invalid", market }
+  return { status: v.unreadable ? "unreadable" : "invalid", reason: v.reason ?? "invalid", market, ...(v.detail ? { detail: v.detail } : {}) }
 }
 
 function write(store: RegistryStore, pool: string, source: RegistrySource, outcome: Outcome): Promise<void> {
   if (outcome.status === "valid") return store.record({ pool, source, valid: true, reason: null, market: outcome.market })
+  if (outcome.status === "unreadable") console.error(`registry: ${pool} could not be checked: ${redact(outcome.detail ?? outcome.reason)}`)
   return store.record({ pool, source, valid: outcome.status === "unreadable" ? null : false, reason: outcome.reason, market: outcome.market })
 }
 
 const sourceFor = (manifest: Manifest, pool: string): RegistrySource =>
   manifest.markets.some((m) => m.contracts.pool === pool) ? "seed" : "discovered"
+
+const late = (deps: RegistryDeps, deadline?: number) => deadline !== undefined && (deps.now ?? Date.now)() >= deadline
 
 // ---------------------------------------------------------------- discovery
 
@@ -375,10 +457,12 @@ const EVENTS_PAGE = 200
 const MAX_EVENT_PAGES = 40
 
 export type DiscoverResult = {
-  /** Pools seen in this run's events, in ledger order; each was checked (or marked unregistered). */
+  /** Pools named by the events applied this run, in event order; each was checked or marked. */
   checked: string[]
   /** True when the stored cursor was older than the RPC's retention: events in between are lost. */
   gap: boolean
+  /** False when the scan stopped at its deadline (or page cap); the next run resumes at the cursor. */
+  complete: boolean
 }
 
 /** The cursor row: one per Router, so a redeploy with a new Router scans afresh. */
@@ -401,15 +485,45 @@ function native(v: xdr.ScVal): unknown {
   }
 }
 
+type Step = { pool: string; action: "check" | "unregistered"; at: string }
+
+/** One page's events as steps: the last event per pool wins, in the order of those last events. */
+function stepsOf(manifest: Manifest, events: RawEvent[]): Step[] {
+  const router = manifest.shared.router
+  const factory = manifest.shared.factory
+  const steps = new Map<string, Step>()
+  for (const e of [...events].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))) {
+    if (e.inSuccessfulContractCall === false) continue
+    const from = idOf(e.contractId)
+    const topic = symbol(e.topic[0])
+    const data = native(e.value)
+    let step: Step | null = null
+    if (from === router && topic === "mkt_reg" && isContract(data)) step = { pool: data, action: "check", at: e.id }
+    else if (from === router && topic === "mkt_unreg" && isContract(data)) step = { pool: data, action: "unregistered", at: e.id }
+    else if (factory && from === factory && topic === "mkt_new" && Array.isArray(data) && isContract(data[1])) {
+      const pending = steps.get(data[1])
+      step = { pool: data[1], action: pending?.action ?? "check", at: e.id }
+    }
+    if (step) {
+      steps.delete(step.pool)
+      steps.set(step.pool, step)
+    }
+  }
+  return [...steps.values()]
+}
+
 /**
  * Scans the Router's and the factory's events since the stored cursor (`ingest_cursor`) and checks
  * every pool they name: `mkt_reg` and the factory's `mkt_new` (pool, escrow) are checked;
- * `mkt_unreg` marks the pool invalid. Events are applied in id order, so the last one wins. If the
- * cursor is older than the RPC's oldest ledger the scan restarts there and the gap is logged and
- * reported; markets are never invented to fill it. The cursor is saved after the checks are
- * written, so a failed run is repeated, not skipped.
+ * `mkt_unreg` marks the pool invalid. Events are applied page by page in id order, so the last one
+ * wins. If the cursor is older than the RPC's oldest ledger the scan restarts there and the gap is
+ * logged and reported; markets are never invented to fill it.
+ *
+ * Bounded (R2-40): the cursor is saved after each pool (at that pool's event) and after each page,
+ * so a run cut short is resumed, never repeated; with `deadline` (ms) the scan starts no new page or
+ * pool after it and returns `complete: false`.
  */
-export async function discover(deps: RegistryDeps): Promise<DiscoverResult> {
+export async function discover(deps: RegistryDeps, opts: { deadline?: number } = {}): Promise<DiscoverResult> {
   const { store, rpc, manifest } = deps
   const router = manifest.shared.router
   const factory = manifest.shared.factory
@@ -434,9 +548,13 @@ export async function discover(deps: RegistryDeps): Promise<DiscoverResult> {
     request = { startLedger: health.oldestLedger, filters, limit: EVENTS_PAGE }
   }
 
-  const events: RawEvent[] = []
-  let last: { cursor: string; latestLedger: number } | null = null
+  const checked: string[] = []
+  let rows: RegistryRow[] | null = null
+  let known: Market[] = []
+  const save = (cursor: string, latestLedger: number) => store.saveCursor(name, Math.min(cursorLedger(cursor) || latestLedger, latestLedger), cursor)
+
   for (let page = 0; page < MAX_EVENT_PAGES; page++) {
+    if (late(deps, opts.deadline)) return { checked, gap, complete: false }
     let res: Awaited<ReturnType<RegistryRpc["getEvents"]>>
     try {
       res = await rpc.getEvents(request)
@@ -447,97 +565,134 @@ export async function discover(deps: RegistryDeps): Promise<DiscoverResult> {
       request = { startLedger: now.oldestLedger + 1, filters, limit: EVENTS_PAGE }
       res = await rpc.getEvents(request)
     }
-    events.push(...res.events)
-    last = res
+
+    for (const step of stepsOf(manifest, res.events)) {
+      if (late(deps, opts.deadline)) return { checked, gap, complete: false }
+      if (!rows) {
+        rows = await store.rows()
+        known = knownMarkets(manifest, rows)
+      }
+      const source = sourceFor(manifest, step.pool)
+      if (step.action === "unregistered") {
+        await store.record({ pool: step.pool, source, valid: false, reason: "Unregistered from the Router.", market: null })
+      } else {
+        const stored = storedMarket(rows.find((r) => r.pool === step.pool)?.market)
+        const outcome = await check(deps, step.pool, known, stored)
+        // A market built in this run holds its id for the next one (R2-37 collisions).
+        if (outcome.market && !known.some((m) => m.contracts.pool === step.pool)) known.push(outcome.market)
+        await write(store, step.pool, source, outcome)
+      }
+      checked.push(step.pool)
+      await save(step.at, res.latestLedger)
+    }
+    await save(res.cursor, res.latestLedger)
+
     const previous = request.cursor
     // An empty page is not the end: the RPC caps the ledgers scanned per call and hands back an
     // advanced cursor. The scan is done when the cursor reaches the tip or stops moving.
-    if (res.events.length < EVENTS_PAGE && (res.cursor === previous || cursorLedger(res.cursor) >= res.latestLedger)) break
-    if (res.cursor === previous) break
+    if (res.events.length < EVENTS_PAGE && (res.cursor === previous || cursorLedger(res.cursor) >= res.latestLedger)) {
+      return { checked, gap, complete: true }
+    }
+    if (res.cursor === previous) return { checked, gap, complete: true }
     request = { cursor: res.cursor, filters, limit: EVENTS_PAGE }
   }
-
-  const actions = new Map<string, "check" | "unregistered">()
-  const set = (pool: string, action: "check" | "unregistered") => {
-    actions.delete(pool)
-    actions.set(pool, action)
-  }
-  for (const e of [...events].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))) {
-    if (e.inSuccessfulContractCall === false) continue
-    const from = idOf(e.contractId)
-    const topic = symbol(e.topic[0])
-    const data = native(e.value)
-    if (from === router && topic === "mkt_reg" && isContract(data)) set(data, "check")
-    else if (from === router && topic === "mkt_unreg" && isContract(data)) set(data, "unregistered")
-    else if (factory && from === factory && topic === "mkt_new" && Array.isArray(data) && isContract(data[1]) && !actions.has(data[1])) {
-      set(data[1], "check")
-    }
-  }
-
-  if (actions.size > 0) {
-    const rows = await store.rows()
-    const known = knownMarkets(manifest, rows)
-    for (const [pool, action] of actions) {
-      const source = sourceFor(manifest, pool)
-      if (action === "unregistered") {
-        await store.record({ pool, source, valid: false, reason: "Unregistered from the Router.", market: null })
-        continue
-      }
-      const stored = storedMarket(rows.find((r) => r.pool === pool)?.market)
-      const outcome = await check(deps, pool, known, stored)
-      // A market built in this batch holds its id for the next one (R2-37 collisions).
-      if (outcome.market && !known.some((m) => m.contracts.pool === pool)) known.push(outcome.market)
-      await write(store, pool, source, outcome)
-    }
-  }
-  if (last) await store.saveCursor(name, Math.min(cursorLedger(last.cursor) || last.latestLedger, last.latestLedger), last.cursor)
-  return { checked: [...actions.keys()], gap }
+  return { checked, gap, complete: false }
 }
 
+/** Invalid rows re-checked per run, oldest first: they are re-checked at once when an event names them. */
+export const INVALID_RECHECKS_PER_RUN = 2
+
 /**
- * Re-validates every seed and every registry row (R2-36: on every recorder run), so a market that
- * turns invalid drops off and a factory market the Router has since registered appears. Stored
- * markets are re-checked as stored; `skip` names pools this run already checked.
+ * Re-validates the listed markets each recorder run (R2-36): every seed and every row whose
+ * verdict is `valid = true` or not known yet (`null`), so a market that turns invalid drops off.
+ * Invalid rows are re-checked a few per run, oldest first (R2-40), so a factory market the Router
+ * has since registered appears without every junk row costing reads each run; rows of another
+ * Router or oracle are skipped. Stored markets are re-checked as stored; `skip` names pools this
+ * run already checked; nothing new starts after `deadline` (ms).
  */
-export async function revalidate(deps: RegistryDeps, opts: { skip?: ReadonlySet<string> } = {}): Promise<void> {
+export async function revalidate(
+  deps: RegistryDeps,
+  opts: { skip?: ReadonlySet<string>; deadline?: number } = {},
+): Promise<{ checked: string[]; complete: boolean }> {
   const { store, manifest } = deps
   const rows = await store.rows()
   const known = knownMarkets(manifest, rows)
-  const pools = new Map<string, { source: RegistrySource; stored: Market | null }>()
-  for (const seed of manifest.markets) pools.set(seed.contracts.pool, { source: "seed", stored: null })
-  for (const row of rows) if (!pools.has(row.pool)) pools.set(row.pool, { source: row.source, stored: storedMarket(row.market) })
-  for (const [pool, { source, stored }] of pools) {
+  const seedPools = new Set(manifest.markets.map((m) => m.contracts.pool))
+  const queue: { pool: string; source: RegistrySource; stored: Market | null }[] = manifest.markets.map((m) => ({
+    pool: m.contracts.pool,
+    source: "seed",
+    stored: null,
+  }))
+  const others = rows
+    .filter((r) => !seedPools.has(r.pool))
+    .map((r) => ({ row: r, stored: storedMarket(r.market) }))
+    .filter(({ stored }) => !isForeign(manifest, stored))
+  for (const { row, stored } of others) if (row.valid !== false) queue.push({ pool: row.pool, source: row.source, stored })
+  const oldest = others
+    .filter(({ row }) => row.valid === false)
+    .sort((a, b) => (a.row.updatedAt ?? "").localeCompare(b.row.updatedAt ?? ""))
+    .slice(0, INVALID_RECHECKS_PER_RUN)
+  for (const { row, stored } of oldest) queue.push({ pool: row.pool, source: row.source, stored })
+
+  const checked: string[] = []
+  for (const { pool, source, stored } of queue) {
     if (opts.skip?.has(pool)) continue
+    if (late(deps, opts.deadline)) return { checked, complete: false }
     const outcome = await check(deps, pool, known, stored)
     if (outcome.market && !known.some((m) => m.contracts.pool === pool)) known.push(outcome.market)
     await write(store, pool, source, outcome)
+    checked.push(pool)
   }
+  return { checked, complete: true }
 }
 
 // ---------------------------------------------------------------- reading the list
 
 let loggedNotConfigured = false
 
+/** How long a page waits for the registry before it lists the seeds (R2-40). */
+export const ROWS_TIMEOUT_MS = 1_500
+
+class RegistryTimeout extends Error {}
+
+function within<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new RegistryTimeout()), ms)
+  })
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer))
+}
+
+/** The manifest's current pins for the market kinds (R2-12), or undefined when it pins none. */
+function currentPins(manifest: Manifest): Record<string, string> | undefined {
+  const pins = Object.fromEntries(MARKET_KINDS.flatMap((k) => (manifest.wasmHashes[k] ? [[k, manifest.wasmHashes[k]]] : [])))
+  return Object.keys(pins).length > 0 ? pins : undefined
+}
+
 /**
  * The markets clients see: the manifest seeds, minus those whose cached verdict is `valid = false`,
  * then every other registry row with `valid = true` whose market parses and is wired to this
  * manifest's Router and oracle (a row left from another deployment is not listed). Ids are unique,
- * seeds first. With the database down or not configured, the seeds alone (R2-36).
+ * seeds first. A registry market carries the manifest's current pins, never stored ones: the
+ * restore path trusts them (R29b, R2-40). With the database down, not configured, or slower than
+ * `timeoutMs`, the seeds alone (R2-36, R2-40).
  */
-export async function resolvedMarkets(deps: { store: RegistryStore; manifest: Manifest }): Promise<Market[]> {
+export async function resolvedMarkets(deps: { store: RegistryStore; manifest: Manifest; timeoutMs?: number }): Promise<Market[]> {
   const { store, manifest } = deps
   const seeds = manifest.markets
   let rows: RegistryRow[]
   try {
-    rows = await store.rows()
+    rows = await within(store.rows(), deps.timeoutMs ?? ROWS_TIMEOUT_MS)
   } catch (error) {
-    if (!(error instanceof DatabaseConfigError)) console.error(`registry: markets could not be read (${dbCode(error)}); listing the manifest seeds`)
+    if (error instanceof RegistryTimeout) console.error("registry: the markets read timed out; listing the manifest seeds")
+    else if (!(error instanceof DatabaseConfigError)) console.error(`registry: markets could not be read (${dbCode(error)}); listing the manifest seeds`)
     else if (!loggedNotConfigured) {
       loggedNotConfigured = true
       console.error("registry: DATABASE_URL is not set; listing the manifest seeds")
     }
     return seeds
   }
+  const pins = currentPins(manifest)
   const verdicts = new Map(rows.map((r) => [r.pool, r.valid]))
   const seedPools = new Set(seeds.map((m) => m.contracts.pool))
   const listed = seeds.filter((m) => verdicts.get(m.contracts.pool) !== false)
@@ -552,10 +707,13 @@ export async function resolvedMarkets(deps: { store: RegistryStore; manifest: Ma
       continue
     }
     const c = market.contracts
-    if (c.pool !== row.pool || c.router !== manifest.shared.router || c.oracle !== manifest.shared.oracle) continue
+    if (c.pool !== row.pool || isForeign(manifest, market)) continue
     if (ids.has(market.marketId)) continue
     ids.add(market.marketId)
-    listed.push(market)
+    const current: Market = { ...market }
+    delete current.wasmHashes
+    if (pins) current.wasmHashes = pins
+    listed.push(current)
   }
   return listed
 }
@@ -596,9 +754,25 @@ export const resetPublishLimitsForTests = (): void => publishLimiter.reset()
 export function sqlRegistryStore(sql: Sql): RegistryStore {
   return {
     async rows() {
-      const rows = await sql<{ pool: string; market_id: string | null; source: RegistrySource; valid: boolean | null; reason: string | null; market: unknown }>`
-        select pool, market_id, source, valid, reason, market from market_registry order by market_id nulls last, pool`
-      return rows.map((r) => ({ pool: r.pool, marketId: r.market_id, source: r.source, valid: r.valid, reason: r.reason, market: r.market }))
+      const rows = await sql<{
+        pool: string
+        market_id: string | null
+        source: RegistrySource
+        valid: boolean | null
+        reason: string | null
+        market: unknown
+        updated_at: Date | string | null
+      }>`
+        select pool, market_id, source, valid, reason, market, updated_at from market_registry order by market_id nulls last, pool`
+      return rows.map((r) => ({
+        pool: r.pool,
+        marketId: r.market_id,
+        source: r.source,
+        valid: r.valid,
+        reason: r.reason,
+        market: r.market,
+        updatedAt: r.updated_at == null ? null : new Date(r.updated_at).toISOString(),
+      }))
     },
     async record(row) {
       const market = row.market ? JSON.stringify(row.market) : null

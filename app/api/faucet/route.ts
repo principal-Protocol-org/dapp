@@ -87,10 +87,11 @@ export async function POST(request: Request): Promise<Response> {
 
   try {
     // The faucet grants every listed market's PT and YT, and the dialog checks every listed market
-    // (R44): both read the same resolved list (seeds when the database is down).
+    // (R44): both read the same resolved list (seeds when the database is down). The faucet reads
+    // it only after its rate limit admits the request (R2-40).
     const manifest = activeManifest()
-    const markets = await resolvedMarkets({ store: sqlRegistryStore(sql), manifest })
-    const result = await runFaucet({ account, manifest: { ...manifest, markets }, ip: clientIp(request), now: Date.now() })
+    const markets = () => resolvedMarkets({ store: sqlRegistryStore(sql), manifest })
+    const result = await runFaucet({ account, manifest, markets, ip: clientIp(request), now: Date.now() })
     if ("error" in result) return refuse(result.error)
     return reply({ performed: result.performed })
   } catch (error) {
