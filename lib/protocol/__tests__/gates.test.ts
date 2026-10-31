@@ -223,7 +223,7 @@ const MATRIX: Row[] = [
       c.wallet = { status: "disconnected" }
     },
     code: "wallet",
-    message: /connect freighter/i,
+    message: /connect your wallet/i,
     blocks: ALL,
   },
   {
@@ -232,7 +232,7 @@ const MATRIX: Row[] = [
       c.wallet = { status: "wrong_network", publicKey: USER, actualPassphrase: "Public Global Stellar Network ; September 2015", expectedPassphrase: TESTNET }
     },
     code: "network",
-    message: /switch freighter/i,
+    message: /switch it to the network/i,
     blocks: ALL,
   },
   {
@@ -846,6 +846,15 @@ describe("gate matrix", () => {
         expect(codes(blockers)).toEqual([code])
         expect(blockers[0].message.length).toBeGreaterThan(20)
       }
+    })
+
+    it.each(states)("%s: the message names no retired wallet brand; only an install prompt names Varial", (status, wallet) => {
+      const [blocker] = gates("deposit", (c) => {
+        c.wallet = wallet
+      })
+      expect(blocker.message).not.toMatch(/freighter/i)
+      if (status === "not_installed") expect(blocker.message).toMatch(/Varial/)
+      else expect(blocker.message).not.toMatch(/Varial/)
     })
 
     it("without a connected wallet the account-dependent gates are not reported (no account to check)", () => {

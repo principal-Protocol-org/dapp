@@ -215,33 +215,33 @@ function walletGate(input: ActionInput, ctx: GateContext, g: Gates): boolean {
       if (w.publicKey !== input.source) {
         g.block(
           "wallet",
-          "This action was prepared for a different account than the one connected in Freighter. Enter it again so it is prepared for the connected account.",
+          "This action was prepared for a different account than the one connected in your wallet. Enter it again so it is prepared for the connected account.",
         )
       }
       return true
     case "wrong_network":
       g.block(
         "network",
-        `Freighter is on a different network from this market. Switch Freighter to the network "${w.expectedPassphrase}", then try again.`,
+        `Your wallet is on a different network from this market. Switch it to the network "${w.expectedPassphrase}", then try again.`,
       )
       return false
     case "unverified_network":
-      g.block("wallet", `Freighter's network could not be verified (${w.reason}). Reconnect Freighter to sign.`)
+      g.block("wallet", `Your wallet's network could not be verified (${w.reason}). Reconnect your wallet to sign.`)
       return false
     case "not_installed":
-      g.block("wallet", "Freighter is not installed. Install the Freighter browser extension, then connect it to sign.")
+      g.block("wallet", "Varial is not installed. Install the Varial browser extension, then connect it to sign.")
       return false
     case "locked":
-      g.block("wallet", "Freighter is locked. Unlock it, then connect to sign.")
+      g.block("wallet", "Your wallet is locked. Unlock it, then connect to sign.")
       return false
     case "connecting":
-      g.block("wallet", "Freighter is still connecting. Approve the connection in Freighter to sign.")
+      g.block("wallet", "Your wallet is still connecting. Approve the connection in your wallet to sign.")
       return false
     case "rejected":
-      g.block("wallet", `Freighter did not connect (${w.reason}). Connect Freighter to sign.`)
+      g.block("wallet", `Your wallet did not connect (${w.reason}). Connect your wallet to sign.`)
       return false
     case "disconnected":
-      g.block("wallet", "No wallet is connected. Connect Freighter to sign.")
+      g.block("wallet", "No wallet is connected. Connect your wallet to sign.")
       return false
   }
 }

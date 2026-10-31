@@ -18,7 +18,7 @@ import { onboardingAvailable } from "@/lib/protocol/onboarding"
 import { OnboardingDialog } from "@/components/app/onboarding/onboarding-dialog"
 import { networkLabel } from "./network"
 
-const FREIGHTER_URL = "https://www.freighter.app"
+const VARIAL_URL = "https://varialwallet.com"
 
 export function shortAddress(address: string): string {
   return address.length > 12 ? `${address.slice(0, 4)}…${address.slice(-4)}` : address
@@ -76,16 +76,16 @@ export function WalletButton() {
   async function onConnect() {
     const next = await connect()
     if (next.status === "rejected") toast.error(`Wallet not connected: ${next.reason}`)
-    else if (next.status === "locked") toast.error("Freighter is locked. Unlock it, then connect again.")
-    else if (next.status === "not_installed") toast.error("Freighter is not installed. Install Freighter, then connect again.")
+    else if (next.status === "locked") toast.error("Your wallet is locked. Unlock it, then connect again.")
+    else if (next.status === "not_installed") toast.error("Varial is not installed. Install Varial, then connect again.")
   }
 
   switch (state.status) {
     case "not_installed":
       return (
         <Button asChild variant="secondary" size="toggle">
-          <a href={FREIGHTER_URL} target="_blank" rel="noopener noreferrer">
-            Install Freighter
+          <a href={VARIAL_URL} target="_blank" rel="noopener noreferrer">
+            Install Varial
           </a>
         </Button>
       )
@@ -120,7 +120,7 @@ export function WalletButton() {
           <TriangleAlert aria-hidden="true" className="size-3.5" />
           <span>
             {state.status === "wrong_network" ? "Wrong network" : "Network unverified"}
-            <span className="max-[520px]:hidden"> · switch Freighter to {label.replace("Stellar ", "")}</span>
+            <span className="max-[520px]:hidden"> · switch your wallet to {label.replace("Stellar ", "")}</span>
           </span>
         </AccountMenu>
       )

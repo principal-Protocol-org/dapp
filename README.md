@@ -1,7 +1,7 @@
 # Principal dApp
 
-The browser app for the Principal PT/YT yield-tokenization protocol on Stellar. With a Freighter
-wallet you can split a yield-bearing asset into a principal token (PT) and a yield token (YT),
+The browser app for the Principal PT/YT yield-tokenization protocol on Stellar. With a Varial
+wallet (formerly Freighter) you can split a yield-bearing asset into a principal token (PT) and a yield token (YT),
 trade them, provide liquidity, claim yield and redeem at maturity. It runs on Stellar Testnet and
 on a local network. It is Deliverable 2 of Tranche 2 of SCF #45.
 
@@ -23,7 +23,7 @@ Current state and known limits in full: [`.rness/docs/dapp.md`](../../.rness/doc
 
 `NEXT_PUBLIC_PRINCIPAL_NETWORK` selects the network: `testnet` (the default) or `local`. It is read
 at build time, so set it before `pnpm dev` or `pnpm build`. Both manifests are imported statically
-by `lib/protocol/manifest-source.ts`. The app refuses to sign when Freighter is on another network.
+by `lib/protocol/manifest-source.ts`. The app refuses to sign when the wallet is on another network.
 
 ## Manifest
 

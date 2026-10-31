@@ -146,7 +146,7 @@ export function ReviewDialog({
         <DialogHeader>
           <DialogTitle>Review: {title}</DialogTitle>
           <DialogDescription>
-            Freighter asks you to sign exactly this transaction. Check what you give and the least you get.
+            Your wallet asks you to sign exactly this transaction. Check what you give and the least you get.
           </DialogDescription>
         </DialogHeader>
         {phase === "preparing" ? <p className="text-sm text-ink">Preparing the transaction with the network…</p> : null}
@@ -158,12 +158,12 @@ export function ReviewDialog({
         {review && (phase === "review" || signing) ? <Body review={review} ledgerTime={ledgerTime} secondsLeft={secondsLeft} /> : null}
         {blockers.length > 0 ? <GateList blockers={blockers} /> : null}
         <DialogFooter className="items-center">
-          {signing ? <p className="text-sm text-ink-muted sm:mr-auto">Waiting for Freighter…</p> : null}
+          {signing ? <p className="text-sm text-ink-muted sm:mr-auto">Waiting for your wallet…</p> : null}
           <Button type="button" variant="secondary" onClick={onClose} disabled={signing}>
             Cancel
           </Button>
           <Button type="button" onClick={onSign} disabled={signing || !canSign || phase !== "review" || review === null || blockers.length > 0}>
-            Sign with Freighter
+            Sign transaction
           </Button>
         </DialogFooter>
       </DialogContent>

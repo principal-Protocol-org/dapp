@@ -206,7 +206,7 @@ async function settle(ms = 0) {
 
 const user = () => userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
 const reviewButton = (label = "Buy PT") => screen.getByRole("button", { name: `Review ${label}` }) as HTMLButtonElement
-const signButton = () => screen.getByRole("button", { name: "Sign with Freighter" }) as HTMLButtonElement
+const signButton = () => screen.getByRole("button", { name: "Sign transaction" }) as HTMLButtonElement
 /** The inline message under a field, or null. */
 const inlineError = (label: string) => document.getElementById(`${screen.getByLabelText(label).id}-error`)?.textContent ?? null
 /** The panel's "Signing is off" list (scoped to `root`, e.g. the dialog). */

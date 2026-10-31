@@ -97,7 +97,7 @@ export function useWalletController(): WalletApi {
     const current = stateRef.current
     if (current.status !== "connected") throw new Error("Wallet is not connected on the right network.")
     if (current.publicKey !== expectedSigner) {
-      throw new Error("The account connected in Freighter is not the one this was prepared for. Nothing was signed; review it again.")
+      throw new Error("The account connected in your wallet is not the one this was prepared for. Nothing was signed; review it again.")
     }
     return freighterAdapter.sign(xdr, activeManifest().networkPassphrase, expectedSigner)
   }, [])

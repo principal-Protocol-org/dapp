@@ -134,7 +134,7 @@ function Checklist({ marketId, asset }: { marketId: string; asset: Market["under
   const { state } = useWallet()
   const address = state.status === "connected" ? state.publicKey : null
   if (!address) {
-    return <p className="text-sm text-ink">Connect Freighter on {networkLabel(activeManifest().network)} to get test tokens.</p>
+    return <p className="text-sm text-ink">Connect your wallet on {networkLabel(activeManifest().network)} to get test tokens.</p>
   }
   // A new account starts a new checklist.
   return <AccountChecklist key={address} marketId={marketId} address={address} asset={asset} />
@@ -230,7 +230,7 @@ function AccountChecklist({ marketId, address, asset }: { marketId: string; addr
     },
     trustline: {
       title: `Add a trustline to ${asset.code}`,
-      detail: `You sign one transaction in Freighter so your account can hold ${asset.code}.`,
+      detail: `You sign one transaction in your wallet so your account can hold ${asset.code}.`,
     },
     grant: {
       title: `Get access and ${asset.code}`,
