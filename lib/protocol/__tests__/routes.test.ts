@@ -40,8 +40,9 @@ describe("routes match spec §4", () => {
   })
   it("paying in SY skips the deposit, and receiving SY skips the withdraw", () => {
     expect(actions({ ...base, kind: "buy_pt", pay: "sy" })).toEqual(["buy_pt"])
-    expect(actions({ ...base, kind: "buy_yt", pay: "sy" })).toEqual(["buy_yt", "withdraw"])
-    expect(actions({ ...base, kind: "buy_yt", pay: "sy", receive: "sy" })).toEqual(["buy_yt"])
+    expect(actions({ ...base, kind: "buy_yt", pay: "sy" })).toEqual(["buy_yt"])
+    expect(actions({ ...base, kind: "buy_yt", pay: "sy", receive: "underlying" })).toEqual(["buy_yt"])
+    expect(actions({ ...base, kind: "buy_yt", pay: "underlying", receive: "sy" })).toEqual(["deposit", "buy_yt", "withdraw"])
     expect(actions({ ...base, kind: "sell_pt", receive: "sy" })).toEqual(["sell_pt"])
     expect(actions({ ...base, kind: "lp_withdraw", receive: "sy" })).toEqual(["remove_liquidity", "sell_pt"])
     expect(actions({ ...base, kind: "recombine", receive: "sy" })).toEqual(["recombine"])
@@ -96,10 +97,21 @@ describe("resolveStep", () => {
     expect(() => resolveStep(plan[1], base, [])).toThrow(/has not run/)
     expect(() => resolveStep(plan[1], base, [out({ kind: "remove_liquidity", pt: 1n, sy: 1n })])).toThrow(/did not report/)
   })
+  it("matured LP withdraw unwraps only the removed SY", () => {
+    const plan = planRoute({ ...base, kind: "lp_withdraw", matured: true }, ctx) as StepPlan[]
+    const outs = [
+      out({ kind: "remove_liquidity", pt: 10n, sy: 5n }),
+      out({ kind: "redeem", underlying_from_pt: 1000n, underlying_from_yt: 7n }),
+    ]
+    expect(resolveStep(plan[2], base, outs)).toEqual({ amount: 5n })
+  })
   it("plans are serializable data", () => {
-    const plan = planRoute({ ...base, kind: "lp_withdraw" }, ctx) as StepPlan[]
-    const json = JSON.stringify(plan, (_, v) => (typeof v === "bigint" ? `${v}n` : v))
-    expect(json).toContain("sum")
+    const enc = (v: unknown) => JSON.stringify(v, (_, x) => (typeof x === "bigint" ? { $big: String(x) } : x))
+    const dec = (j: string) => JSON.parse(j, (_, x) => (x && typeof x === "object" && "$big" in x ? BigInt(x.$big) : x))
+    for (const kind of ["buy_pt", "buy_yt", "lp_keep_yt", "lp_withdraw", "recombine"] as const) {
+      const plan = planRoute({ ...base, kind }, ctx) as StepPlan[]
+      expect(dec(enc(plan))).toEqual(plan)
+    }
   })
 })
 
