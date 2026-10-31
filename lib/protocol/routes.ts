@@ -372,8 +372,15 @@ function listWords(parts: string[]): string {
   return parts.length <= 1 ? (parts[0] ?? "") : `${parts.slice(0, -1).join(", ")} and ${parts.at(-1)}`
 }
 
-/** "You hold 1000 SY", exact to the last digit (a small amount is never shown as 0). Undefined if nothing is held. */
-export function describeHoldings(h: Holdings, underlying: { code: string; decimals: number }): string | undefined {
+/**
+ * "You hold 1000 SY", exact to the last digit (a small amount is never shown as 0); "You held …" with
+ * `verb: "held"`, for holdings before a step whose result is not known. Undefined if nothing is held.
+ */
+export function describeHoldings(
+  h: Holdings,
+  underlying: { code: string; decimals: number },
+  verb: "hold" | "held" = "hold",
+): string | undefined {
   const parts = HOLDING_ORDER.flatMap((token) => {
     const v = h[token]
     if (v === undefined || v <= 0n) return []
@@ -381,7 +388,7 @@ export function describeHoldings(h: Holdings, underlying: { code: string; decima
     const unit = token === "underlying" ? underlying.code : HOLDING_LABEL[token]
     return [`${formatAmount(v, decimals, decimals)} ${unit}`]
   })
-  return parts.length === 0 ? undefined : `You hold ${listWords(parts)}`
+  return parts.length === 0 ? undefined : `You ${verb} ${listWords(parts)}`
 }
 
 export type Unwind = { available: true; amount: bigint; plan: StepPlan } | { available: false; reason: string }

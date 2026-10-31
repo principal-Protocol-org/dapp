@@ -163,6 +163,7 @@ describe("route holdings (spec §4 interruption)", () => {
     const h = routeHoldings(r, plan(r), [{ kind: "amount", value: 1_000n * S }], 1)
     expect(h).toEqual({ sy: 1_000n * S })
     expect(describeHoldings(h!, usdy)).toBe("You hold 1000 SY")
+    expect(describeHoldings(h!, usdy, "held")).toBe("You held 1000 SY")
     expect(unwindFrom(h)).toEqual({
       available: true,
       amount: 1_000n * S,
