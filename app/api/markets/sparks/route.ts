@@ -9,6 +9,7 @@ import "server-only"
 import { activeManifest } from "@/lib/protocol/manifest-source"
 import { sql } from "@/lib/server/db"
 import { getSparks, type Spark } from "@/lib/server/history"
+import { resolvedMarkets, sqlRegistryStore } from "@/lib/server/registry"
 
 const POOL = /^C[A-Z2-7]{55}$/
 const MAX_POOLS = 50
@@ -26,8 +27,9 @@ export async function GET(request: Request) {
     return json({ error: "invalid_pools" }, 400)
   }
 
+  // Seeds and valid registry markets (R2-33): a discovered pool has a maturity too.
   const maturities: Record<string, number> = {}
-  for (const m of activeManifest().markets) maturities[m.contracts.pool] = m.maturity
+  for (const m of await resolvedMarkets({ store: sqlRegistryStore(sql), manifest: activeManifest() })) maturities[m.contracts.pool] = m.maturity
 
   try {
     const sparks = await getSparks(sql, pools, maturities)

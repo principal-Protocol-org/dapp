@@ -11,9 +11,10 @@ import "server-only"
  * that never settles on one ledger stores nothing this run and is reported as failed. Mixed-ledger
  * rows are never written, and a gap is left as a gap (never interpolated).
  *
- * Seam for Tranche 3 / Task 11: `recordAll` takes the `markets` to record. Today the caller passes
- * the manifest's `markets[]`; the registry (with discovery) replaces that argument later, nothing
- * else here changes.
+ * The registry (R2-4, R2-36): each run first refreshes it (`refreshRegistry`: discovery from the
+ * Router and factory events, then re-validation of every seed and registry market), then records
+ * the markets it resolves (`markets`). A failed refresh is logged and the run goes on with the
+ * cached verdicts; a missing database is not a per-market failure and is thrown.
  */
 import { readLive, toBigint, type ContractReader } from "@/lib/protocol/reader"
 import { fetchMarketState } from "@/lib/protocol/market-state"
@@ -31,8 +32,10 @@ export type RecordDeps = {
   reader: ContractReader
   sql: Sql
   manifest: Manifest
-  /** The markets to record (today the manifest's; later the registry's). */
-  markets: Market[]
+  /** Discovers and re-validates registry markets before they are listed (see above). */
+  refreshRegistry?: () => Promise<unknown>
+  /** The markets to record: the seeds and valid registry markets (`resolvedMarkets`). */
+  markets: () => Promise<Market[]>
   /** Wall clock in ms. */
   now: () => number
   /** Close time (unix seconds) of the given ledger sequence. */
@@ -127,7 +130,18 @@ function describeDbError(error: unknown): string {
 }
 
 export async function recordAll(deps: RecordDeps): Promise<RecordResult> {
-  const { reader, sql, manifest, markets, now, ledgerCloseTime } = deps
+  const { reader, sql, now, ledgerCloseTime } = deps
+  if (deps.refreshRegistry) {
+    try {
+      await deps.refreshRegistry()
+    } catch (error) {
+      if (error instanceof DatabaseConfigError) throw error
+      console.error(`recorder: registry refresh failed: ${describeError(error)}`)
+    }
+  }
+  const markets = await deps.markets()
+  // `fetchMarketState` finds each market by id: a discovered market is not in the static manifest.
+  const manifest = { ...deps.manifest, markets }
   const result: RecordResult = { recorded: 0, failed: [] }
   const closeTimes = new Map<number, Promise<number>>()
 

@@ -25,7 +25,7 @@ import {
   TEST_TOKEN_AMOUNT,
   TEST_TOKEN_TOP_UP_BELOW,
   onboardingAvailable,
-  sharedTestAsset,
+  testAssetOf,
   wholeTokens,
   type FaucetStep,
 } from "@/lib/protocol/onboarding"
@@ -42,13 +42,10 @@ import {
 } from "@/lib/protocol/stellar"
 import type { Manifest, Market } from "@/lib/protocol/types"
 
-/** Whole test tokens paid per top-up. */
-/** The asset the faucet pays: the manifest's `testAsset` (USDY) when set, else the markets' one shared underlying. */
-function faucetAsset(manifest: Manifest): Market["underlying"] | null {
-  const t = manifest.testAsset
-  return t ? { code: t.code, issuer: t.issuer, sac: t.sac, decimals: t.decimals } : sharedTestAsset(manifest)
-}
+/** The asset the faucet pays: the same one the onboarding dialog trusts and reads (R2-14). */
+const faucetAsset = (manifest: Manifest): Market["underlying"] | null => testAssetOf(manifest)
 
+/** Whole test tokens paid per top-up. */
 export const FAUCET_AMOUNT = TEST_TOKEN_AMOUNT
 /** Whole test tokens below which the faucet pays. */
 export const FAUCET_TOP_UP_BELOW = TEST_TOKEN_TOP_UP_BELOW

@@ -16,6 +16,7 @@ import {
   requestTestTokens,
   sharedTestAsset,
   testAsset,
+  testAssetOf,
   TEST_TOKEN_AMOUNT,
   TEST_TOKEN_TOP_UP_BELOW,
 } from "../onboarding"
@@ -138,6 +139,14 @@ describe("onboarding availability", () => {
     ]) {
       expect(sharedTestAsset({ markets: [manifest.markets[0], { ...second, underlying: other }] })).toBeNull()
     }
+  })
+
+  it("testAssetOf names the manifest's testAsset first, else the one underlying every market shares (R2-14)", () => {
+    const declared = { code: "USDY", issuer: Keypair.random().publicKey(), sac: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", decimals: 7 }
+    expect(testAssetOf({ ...manifest, testAsset: { ...declared, displayName: "USDY (test)" } })).toEqual(declared)
+    expect(testAssetOf({ ...manifest, testAsset: undefined })).toEqual(asset)
+    const mixed = [manifest.markets[0], { ...manifest.markets[0], marketId: "b", underlying: { ...asset, code: "STB" } }]
+    expect(testAssetOf({ ...manifest, testAsset: undefined, markets: mixed })).toBeNull()
   })
 })
 

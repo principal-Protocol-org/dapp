@@ -54,6 +54,16 @@ export function sharedTestAsset(m: Pick<Manifest, "markets">): Market["underlyin
   return same ? first.underlying : null
 }
 
+/**
+ * The asset onboarding trusts, reads and the faucet pays (R2-14): the manifest's `testAsset`, else
+ * the one underlying every market shares (R44), else null. The faucet and the dialog both use it,
+ * so they always name the same asset, also once registry markets differ from the seeds.
+ */
+export function testAssetOf(m: Pick<Manifest, "markets" | "testAsset">): Market["underlying"] | null {
+  const t = m.testAsset
+  return t ? { code: t.code, issuer: t.issuer, sac: t.sac, decimals: t.decimals } : sharedTestAsset(m)
+}
+
 /** Whether the account may hold one market's PT and YT (`Permissioning.is_allowed_for_asset`). */
 export type MarketPermission = { marketId: string; permPt: Live<boolean>; permYt: Live<boolean> }
 
