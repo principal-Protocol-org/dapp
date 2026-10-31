@@ -42,24 +42,34 @@ describe("effective APYs", () => {
       ptOut: 110_5263157n,
       secondsToMaturity: 31_536_000n,
     })
-    expect(Math.abs(apy - 0.0526)).toBeLessThan(1e-4)
+    expect(Math.abs(apy! - 0.0526)).toBeLessThan(1e-4)
   })
 
-  it("effective implied APY is the break-even underlying rate of the YT cost", () => {
-    // YT at 0.0221 per unit over 150 days: break-even about 5.5 % APY
+  it("effective implied APY solves YT price = 1 - (1 + r)^-t (R2-17)", () => {
+    // PT price 0.977857 -> YT price 0.022143 = c, over 150 days
+    const c = Number(ytPrice(9_778_570n)) / Number(SCALE)
+    const years = 150 / 365
+    const expected = Math.pow(1 / (1 - c), 1 / years) - 1
     const apy = effectiveImpliedApy({
-      spentUnderlying: 100_0000000n,
+      spentUnderlying: 221_430_000n,
       oracleRate: SCALE,
-      ytOut: 4515_0000000n,
+      ytOut: 10_000_000_000n,
       secondsToMaturity: 150n * BigInt(DAY),
-    })
-    expect(apy).toBeGreaterThan(0.054)
-    expect(apy).toBeLessThan(0.057)
+    })!
+    expect(Math.abs(apy - expected)).toBeLessThan(1e-6)
+    expect(apy).toBeCloseTo(0.056, 3)
   })
 
-  it("is 0 when nothing was paid or no time is left", () => {
-    expect(effectiveFixedApy({ paidUnderlying: 0n, oracleRate: SCALE, ptOut: 1n, secondsToMaturity: 1000n })).toBe(0)
-    expect(effectiveImpliedApy({ spentUnderlying: 1n, oracleRate: SCALE, ytOut: 1n, secondsToMaturity: 0n })).toBe(0)
+  it("is undefined when c >= 1", () => {
+    const p = { spentUnderlying: 100n, oracleRate: SCALE, secondsToMaturity: 1000n }
+    expect(effectiveImpliedApy({ ...p, ytOut: 100n })).toBeUndefined()
+    expect(effectiveImpliedApy({ ...p, ytOut: 50n })).toBeUndefined()
+  })
+
+  it("is undefined, not 0, when it cannot be computed", () => {
+    expect(effectiveFixedApy({ paidUnderlying: 0n, oracleRate: SCALE, ptOut: 1n, secondsToMaturity: 1000n })).toBeUndefined()
+    expect(effectiveFixedApy({ paidUnderlying: 1n, oracleRate: SCALE, ptOut: 0n, secondsToMaturity: 1000n })).toBeUndefined()
+    expect(effectiveImpliedApy({ spentUnderlying: 1n, oracleRate: SCALE, ytOut: 1n, secondsToMaturity: 0n })).toBeUndefined()
   })
 })
 
@@ -101,6 +111,12 @@ describe("underlyingApy7d", () => {
       { at: 13 * DAY, rate: 1_0000000n },
     ])!
     expect(r.windowSeconds).toBe(7 * DAY)
+  })
+
+  it("a point exactly 7 days old is inside the window", () => {
+    const r = underlyingApy7d([{ at: 0, rate: 1_0000000n }, { at: 7 * DAY, rate: 1_0009357n }])
+    expect(r?.windowSeconds).toBe(7 * DAY)
+    expect(underlyingApy7d([{ at: 0, rate: 1_0000000n }, { at: 7 * DAY + 1, rate: 1_0009357n }])).toBeUndefined()
   })
 
   it("7-day APY undefined with fewer than 2 points", () => {
