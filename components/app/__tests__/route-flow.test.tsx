@@ -16,6 +16,8 @@ vi.mock("@/hooks/use-route", () => ({
     return controls
   },
 }))
+vi.mock("@/hooks/use-ledger-clock", () => ({ useLedgerClock: () => ({ ledgerTime: 1_800_000_000, sequence: 1, isError: false }) }))
+vi.mock("@/lib/protocol/manifest-source", () => ({ activeManifest: () => ({ network: "local" }) }))
 vi.mock("@/hooks/use-execute", () => ({ useExecute: () => exec }))
 vi.mock("@/components/app/actions/tx-feedback", () => ({ showTxToast: vi.fn(), TxNoticeView: () => null }))
 
@@ -76,8 +78,6 @@ const base = {
   plans: PLANS,
   canStart: true,
   blockers: [],
-  network: "local" as const,
-  label: "Buy YT",
   onNotice: vi.fn(),
 }
 
@@ -92,6 +92,23 @@ describe("RouteFlow", () => {
     expect(list.textContent).toContain("Its minimum is set from a fresh quote once step 1 is confirmed")
     expect(list.textContent).toContain("once step 2 is confirmed")
     expect(controls.sign).not.toHaveBeenCalled()
+  })
+
+  it("the step review shows 0001's technical details and time limit", () => {
+    setup({ phase: "reviewing", step: 1, of: 3, run: run(["pending", "pending", "pending"]), review: review() })
+    render(<RouteFlow {...base} />)
+    const dialog = screen.getByRole("dialog").textContent ?? ""
+    expect(dialog).toContain("Technical details")
+    expect(dialog).toContain("sha256:00")
+    expect(dialog).toContain("by ledger time")
+    expect(dialog).toContain("Valid until")
+  })
+
+  it("blockers disable Sign, and an unprepared step shows Preparing", () => {
+    setup({ phase: "reviewing", step: 2, of: 3, run: run(["confirmed", "pending", "pending"]), blockers: [{ code: "x", message: "Nope" } as never] })
+    render(<RouteFlow {...base} />)
+    expect(screen.getByText("Preparing step 2 with the network…")).toBeTruthy()
+    expect((screen.getByRole("button", { name: "Sign step 2 of 3" }) as HTMLButtonElement).disabled).toBe(true)
   })
 
   it("idle: Review starts the route", () => {
