@@ -20,6 +20,7 @@ function chart(over: Partial<React.ComponentProps<typeof LineChart>> = {}) {
       stale={false}
       latestAt={T0 + 3 * 900}
       now={NOW_MS}
+      spread={{ fixed: "fixed", variable: "underlying" }}
       {...over}
     />,
   )
@@ -79,6 +80,53 @@ describe("LineChart", () => {
     fireEvent.click(screen.getByRole("button", { name: "90 d" }))
     expect(onRangeChange).toHaveBeenCalledWith("90d")
     expect(screen.getByRole("button", { name: "30 d" }).getAttribute("aria-pressed")).toBe("true")
+  })
+
+  it("a flat series shows only its own value on the axis", () => {
+    const { container } = chart({
+      series: [{ id: "fixed", label: "Fixed APY", color: "pt", points: mk([0.05, 0.05, 0.05]) }],
+    })
+    const labels = [...container.querySelectorAll("text")].map((t) => t.textContent)
+    expect(labels).toEqual(["5.00%"])
+  })
+
+  it("a single point still renders without invented axis figures", () => {
+    const { container } = chart({
+      series: [{ id: "fixed", label: "Fixed APY", color: "pt", points: mk([0.05]) }],
+    })
+    expect([...container.querySelectorAll("text")].map((t) => t.textContent)).toEqual(["5.00%"])
+    expect(container.querySelectorAll("circle")).toHaveLength(1)
+  })
+
+  it("a flat amount series keeps its zero baseline and never exceeds its value", () => {
+    const { container } = chart({
+      unit: "amount",
+      series: [{ id: "liq", label: "Liquidity", color: "pt", points: mk([1000, 1000]) }],
+    })
+    expect([...container.querySelectorAll("text")].map((t) => t.textContent)).toEqual(["0", "500", "1,000"])
+  })
+
+  it("the liquidity chart shows no spread", () => {
+    chart({
+      unit: "amount",
+      series: [
+        { id: "fixed", label: "A", color: "pt", points: mk([10, 20]) },
+        { id: "underlying", label: "B", color: "yt", points: mk([5, 6]) },
+      ],
+    })
+    fireEvent.focus(screen.getByTestId("chart-plot"))
+    expect(screen.getByRole("tooltip").textContent).not.toContain("Fixed premium")
+  })
+
+  it("no spread without a named pair", () => {
+    chart({ spread: undefined })
+    fireEvent.focus(screen.getByTestId("chart-plot"))
+    expect(screen.getByRole("tooltip").textContent).not.toContain("Fixed premium")
+  })
+
+  it("hides the stale banner when latestAt is unknown", () => {
+    chart({ stale: true, latestAt: null })
+    expect(screen.queryByText(/History is/)).toBeNull()
   })
 
   it("formats amounts with grouping", () => {
