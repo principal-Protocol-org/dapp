@@ -37,33 +37,37 @@ function usdValue(underlying: bigint, oracleRate: bigint): bigint {
 
 /**
  * Effective fixed APY of a PT buy: `(ptOut / (paid x oracleRate))^(1 / years) - 1`. Both sides are
- * in oracle units. 0 when nothing was paid or no time is left.
+ * in oracle units. Undefined when it cannot be computed (nothing paid or received, no time left):
+ * never a zero (spec 0002 §3, ruling R2-18).
  */
 export function effectiveFixedApy(p: {
   paidUnderlying: bigint
   oracleRate: bigint
   ptOut: bigint
   secondsToMaturity: bigint
-}): number {
+}): number | undefined {
   const paidUsd = usdValue(p.paidUnderlying, p.oracleRate)
-  if (paidUsd <= 0n || p.ptOut <= 0n || p.secondsToMaturity <= 0n) return 0
+  if (paidUsd <= 0n || p.ptOut <= 0n || p.secondsToMaturity <= 0n) return undefined
   return Math.pow(Number(p.ptOut) / Number(paidUsd), 1 / years(p.secondsToMaturity)) - 1
 }
 
 /**
- * Effective implied APY of a YT buy: the underlying APY at which the YT's yield exactly repays its
- * cost (break-even). YT of face `ytOut` earns `ytOut x ((1 + a)^years - 1)`; setting that equal to
- * the cost in USD gives `a = (1 + cost / ytOut)^(1 / years) - 1`. 0 when it cannot be computed.
+ * Effective implied APY of a YT buy (ruling R2-17): the rate r at which the YT's cost is fair.
+ * With c = cost in USD per YT = spent x oracleRate / ytOut, the YT price is 1 - (1 + r)^(-years),
+ * so r = (1 / (1 - c))^(1 / years) - 1. Undefined when c <= 0 or c >= 1, or no time is left
+ * (never a zero, ruling R2-18).
  */
 export function effectiveImpliedApy(p: {
   spentUnderlying: bigint
   oracleRate: bigint
   ytOut: bigint
   secondsToMaturity: bigint
-}): number {
+}): number | undefined {
   const spentUsd = usdValue(p.spentUnderlying, p.oracleRate)
-  if (spentUsd <= 0n || p.ytOut <= 0n || p.secondsToMaturity <= 0n) return 0
-  return Math.pow(1 + Number(spentUsd) / Number(p.ytOut), 1 / years(p.secondsToMaturity)) - 1
+  if (spentUsd <= 0n || p.ytOut <= 0n || p.secondsToMaturity <= 0n) return undefined
+  const c = Number(spentUsd) / Number(p.ytOut)
+  if (c >= 1) return undefined
+  return Math.pow(1 / (1 - c), 1 / years(p.secondsToMaturity)) - 1
 }
 
 /** Fixed payoff at maturity in USD: `ptOut` minus the USD value of what was paid, and as a ratio. */
