@@ -10,6 +10,7 @@ const MARKET = {
   marketId: "m1",
   displayName: "STA · test",
   underlying: { code: "STA", decimals: 7 },
+  contracts: { pool: "POOL1" },
 }
 const mocks = vi.hoisted(() => ({
   ms: undefined as unknown,
@@ -21,6 +22,8 @@ const mocks = vi.hoisted(() => ({
   findings: [] as { severity: string; message: string }[],
   network: "testnet" as "testnet" | "local" | "mainnet",
   pending: false,
+  history: "ok" as "ok" | "pending" | "error" | "short" | "empty",
+  historyRanges: [] as string[],
   clock: { ledgerTime: null as number | null, isError: false },
   notFound: vi.fn(() => {
     throw new Error("NEXT_NOT_FOUND")
@@ -47,6 +50,36 @@ vi.mock("next/navigation", () => ({ notFound: mocks.notFound }))
 vi.mock("@/hooks/use-market-state", () => ({
   useMarketState: () => ({ data: mocks.ms, isPending: mocks.pending, stale: mocks.stale }),
 }))
+const DAY = 86_400
+const HIST_NOW = LEDGER_TIME
+const HIST = {
+  fixedApy: [
+    { at: HIST_NOW - 2 * DAY, value: 0.05 },
+    { at: HIST_NOW - DAY, value: 0.052 },
+  ],
+  underlyingApy7d: [
+    { at: HIST_NOW - 2 * DAY, value: 0.04 },
+    { at: HIST_NOW - DAY, value: 0.0498 },
+  ],
+  liquidity: [
+    { at: HIST_NOW - 2 * DAY, value: 4000 },
+    { at: HIST_NOW - DAY, value: 4520 },
+  ],
+  latestAt: HIST_NOW - DAY,
+  stale: false,
+  underlyingWindowSeconds: 7 * DAY,
+}
+vi.mock("@/hooks/use-market-history", () => ({
+  useMarketHistory: (_pool: string, range: string) => {
+    mocks.historyRanges.push(range)
+    if (mocks.history === "pending") return { data: undefined, isPending: true, isError: false }
+    if (mocks.history === "error") return { data: undefined, isPending: false, isError: true }
+    if (mocks.history === "empty")
+      return { data: { ...HIST, fixedApy: [], underlyingApy7d: [], liquidity: [], latestAt: null, underlyingWindowSeconds: null }, isPending: false, isError: false }
+    if (mocks.history === "short") return { data: { ...HIST, underlyingWindowSeconds: 2 * DAY }, isPending: false, isError: false }
+    return { data: HIST, isPending: false, isError: false }
+  },
+}))
 vi.mock("@/hooks/use-market-compliance", () => ({
   useMarketCompliance: () => ({ data: mocks.compliance, isPending: false }),
 }))
@@ -72,7 +105,10 @@ import { isValidElement, Suspense } from "react"
 import MarketPage, { generateStaticParams } from "../../../app/app/markets/[marketId]/page"
 import { MarketRoute } from "../../../app/app/markets/[marketId]/market-route"
 import { ComplianceCard } from "../market/compliance-card"
+import { MarketChartBox } from "../market/market-chart-box"
+import { MarketDetails } from "../market/market-details"
 import { MarketHeader } from "../market/market-header"
+import { MarketStats } from "../market/market-stats"
 import { MarketView } from "../market/market-view"
 import { SafetyCard } from "../market/safety-card"
 
@@ -96,6 +132,8 @@ beforeEach(() => {
   mocks.network = "testnet"
   mocks.notFound.mockClear()
   mocks.pending = false
+  mocks.history = "ok"
+  mocks.historyRanges = []
   mocks.clock = { ledgerTime: LEDGER_TIME, isError: false }
 })
 
@@ -130,6 +168,13 @@ describe("market page route", () => {
 
 describe("MarketHeader", () => {
   const badge = () => document.querySelector('[data-slot="badge"]')?.textContent
+  it("shows asset, maturity, status and countdown", () => {
+    wrap(<MarketHeader marketId="m1" />)
+    expect(screen.getByRole("heading", { name: "STA · test" })).toBeTruthy()
+    expect(badge()).toBe("Live")
+    expect(screen.getByText("Matures in 10d 0h 0m")).toBeTruthy()
+    expect(screen.getByText(/Jan 15, 2027/)).toBeTruthy()
+  })
   it("says Loading, not Unavailable, in the status badge while the ledger clock loads (V6)", () => {
     mocks.clock = { ledgerTime: null, isError: false }
     wrap(<MarketHeader marketId="m1" />)
@@ -146,68 +191,129 @@ describe("MarketHeader", () => {
     wrap(<MarketHeader marketId="m1" />)
     expect(badge()).toBe("Unavailable")
   })
-  it("shows the market's status once both have loaded", () => {
-    wrap(<MarketHeader marketId="m1" />)
-    expect(badge()).toBe("Live")
+})
+
+describe("MarketStats", () => {
+  const stat = (label: string) => screen.getByText(label).nextSibling
+  it("shows five stats: liquidity, TVL, underlying APY 7 d, PT fixed APY, YT leverage", () => {
+    wrap(<MarketStats marketId="m1" />)
+    expect(stat("Liquidity")?.textContent).toBe("≈ 4,520 STA")
+    expect(stat("TVL")?.textContent).toBe("≈ 9,400 STA")
+    expect(stat("Underlying APY (7 d)")?.textContent).toContain("4.98%")
+    expect(stat("PT fixed APY")?.textContent).toMatch(/^\d+\.\d\d%$/)
+    expect(stat("YT leverage")?.textContent).toBe("50x")
   })
-  it("defines the oracle rate as the mint panel does: notional per SY share (M4)", async () => {
-    // Radix positions the tooltip with a ResizeObserver, which jsdom lacks.
+  it("labels a short underlying window 'since <date>' and never extrapolates (R2-44)", () => {
+    mocks.history = "short"
+    wrap(<MarketStats marketId="m1" />)
+    expect(stat("Underlying APY (7 d)")?.textContent).toMatch(/4\.98%.*since Jan \d+/)
+  })
+  it("says Unavailable with a reason when there is no history (R2-44)", () => {
+    mocks.history = "empty"
+    wrap(<MarketStats marketId="m1" />)
+    const v = stat("Underlying APY (7 d)") as HTMLElement
+    expect(v?.textContent).toBe("Unavailable")
+    expect(v?.querySelector("[title]")?.getAttribute("title")).toMatch(/No oracle snapshots/)
+  })
+  it("says No liquidity yet for an unseeded pool", () => {
+    mocks.ms = marketState({ poolSeeded: live(false) })
+    wrap(<MarketStats marketId="m1" />)
+    expect(stat("Liquidity")?.textContent).toBe("No liquidity yet")
+    expect(stat("YT leverage")?.textContent).toBe("No liquidity yet")
+  })
+  it("hides old values after a failed refresh", () => {
+    mocks.stale = true
+    wrap(<MarketStats marketId="m1" />)
+    expect(screen.getByRole("alert").textContent).toMatch(/Unavailable — last update failed/)
+    expect(screen.queryByText("YT leverage")).toBeNull()
+  })
+})
+
+describe("MarketChartBox", () => {
+  it("has tabs APY, Liquidity, Market details and ranges 7 d, 30 d, 90 d, All", () => {
+    wrap(<MarketChartBox marketId="m1" />)
+    expect(screen.getAllByRole("tab").map((t) => t.textContent)).toEqual(["APY", "Liquidity", "Market details"])
+    const group = screen.getByRole("group", { name: "Range" })
+    expect(within(group).getAllByRole("button").map((b) => b.textContent)).toEqual(["7 d", "30 d", "90 d", "All"])
+  })
+  it("plots the fixed and the underlying APY on the APY tab", () => {
+    wrap(<MarketChartBox marketId="m1" />)
+    expect(screen.getByRole("img", { name: /Fixed APY 5\.20%.*Underlying APY \(7 d\) 4\.98%/ })).toBeTruthy()
+  })
+  it("shows the fixed premium in the APY tooltip (R2-43)", async () => {
+    wrap(<MarketChartBox marketId="m1" />)
+    screen.getByRole("img", { name: /Chart, latest/ }).focus()
+    expect((await screen.findAllByText(/Fixed premium/)).length).toBeGreaterThan(0)
+  })
+  it("plots liquidity on the Liquidity tab with no premium", async () => {
+    wrap(<MarketChartBox marketId="m1" />)
+    await userEvent.click(screen.getByRole("tab", { name: "Liquidity" }))
+    expect(screen.getByRole("img", { name: /Liquidity.*4,?520/ })).toBeTruthy()
+    expect(screen.queryByText(/Fixed premium/)).toBeNull()
+  })
+  it("refetches for the chosen range", async () => {
+    wrap(<MarketChartBox marketId="m1" />)
+    await userEvent.click(screen.getByRole("button", { name: "90 d" }))
+    expect(mocks.historyRanges).toContain("90d")
+  })
+  it("says why when history is unavailable", () => {
+    mocks.history = "error"
+    wrap(<MarketChartBox marketId="m1" />)
+    expect(screen.getByText(/History could not be read right now/)).toBeTruthy()
+  })
+  it("Market details tab shows the details", async () => {
+    wrap(<MarketChartBox marketId="m1" />)
+    await userEvent.click(screen.getByRole("tab", { name: "Market details" }))
+    expect(screen.getByText("Oracle rate")).toBeTruthy()
+  })
+})
+
+describe("MarketDetails", () => {
+  const stat = (label: string) => screen.getByText(label).nextSibling?.textContent
+  it("lists the funded figures: oracle rate and freshness, PT and YT outstanding, reserves, fees, maturity date", () => {
+    mocks.ms = marketState({
+      fees: { tokenizationBps: live(5n), ytBps: live(30n), swapTierBps: live(0n), protocolShareBps: live(0n) },
+      swapFeeRate: live(3_000_000_000n),
+    })
+    wrap(<MarketDetails marketId="m1" />)
+    expect(stat("Oracle rate")).toBe("1.0500")
+    expect(stat("Oracle updated")).toBe("10m 0s ago")
+    expect(stat("PT outstanding")).toBe("500")
+    expect(stat("YT outstanding")).toBe("500")
+    expect(stat("Pool PT reserve")).toBe("1,200")
+    expect(stat("Pool SY reserve")).toBe("3,400")
+    expect(stat("Tokenization fee")).toBe("0.05%")
+    expect(stat("YT fee")).toBe("0.30%")
+    expect(stat("Current swap fee (decreases to 0 at maturity)")).toBe("0.3000%")
+    expect(stat("Maturity")).toBe("Jan 15, 2027")
+  })
+  it("defines the oracle rate: notional per SY share (M4)", async () => {
     globalThis.ResizeObserver ??= class {
       observe() {}
       unobserve() {}
       disconnect() {}
     }
-    wrap(<MarketHeader marketId="m1" />)
+    wrap(<MarketDetails marketId="m1" />)
     await userEvent.hover(screen.getByRole("button", { name: "1.0500" }))
     expect((await screen.findAllByText(/^Notional per SY share, read from the market oracle\./)).length).toBeGreaterThan(0)
   })
-  it("shows the oracle rate, its age, the totals and the reserves", () => {
-    wrap(<MarketHeader marketId="m1" />)
-    expect(screen.getByRole("heading", { name: "STA · test" })).toBeTruthy()
-    expect(screen.getByText("1.0500")).toBeTruthy()
-    expect(screen.getByText("10m 0s ago")).toBeTruthy()
-    expect(screen.getByText("PT total supply").nextSibling?.textContent).toBe("500")
-    expect(screen.getByText("YT total supply").nextSibling?.textContent).toBe("500")
-    expect(screen.getByText("Pool PT reserve").nextSibling?.textContent).toBe("1200")
-    expect(screen.getByText("Pool SY reserve").nextSibling?.textContent).toBe("3400")
-    expect(screen.getByText("PT price (pool spot)").nextSibling?.textContent).toBe("0.9800 notional value per PT")
-    expect(screen.getByText("Matures in 10d 0h 0m")).toBeTruthy()
-  })
-  it("shows the pool value estimate and the three fees", () => {
-    mocks.ms = marketState({
-      fees: { tokenizationBps: live(5n), ytBps: live(30n), swapTierBps: live(0n), protocolShareBps: live(0n) },
-      swapFeeRate: live(3_000_000_000n),
-    })
-    wrap(<MarketHeader marketId="m1" />)
-    expect(screen.getByText("Pool value (estimate)").nextSibling?.textContent).toBe("≈ 4520 STA, PT at pool price")
-    expect(screen.getByText("Tokenization fee").nextSibling?.textContent).toBe("0.05%")
-    expect(screen.getByText("YT fee").nextSibling?.textContent).toBe("0.30%")
-    expect(screen.getByText("Current swap fee (decreases to 0 at maturity)").nextSibling?.textContent).toBe("0.3000%")
-  })
-  it("shows Unavailable for the fees and pool value when unreadable", () => {
-    mocks.ms = marketState({ fees: { tokenizationBps: down(), ytBps: down(), swapTierBps: live(0n), protocolShareBps: live(0n) }, swapFeeRate: down(), exchangeRate: down() })
-    wrap(<MarketHeader marketId="m1" />)
-    for (const label of ["Tokenization fee", "YT fee", "Current swap fee (decreases to 0 at maturity)", "Pool value (estimate)"]) {
-      expect(screen.getByText(label).nextSibling?.textContent).toBe("Unavailable")
-    }
-  })
   it("shows an oracle timestamp in the future as 0s ago, not a negative age", () => {
     mocks.ms = marketState({ oracleTimestamp: live(BigInt(LEDGER_TIME + 500)) })
-    wrap(<MarketHeader marketId="m1" />)
-    expect(screen.getByText("Oracle updated").nextSibling?.textContent).toBe("0s ago")
+    wrap(<MarketDetails marketId="m1" />)
+    expect(stat("Oracle updated")).toBe("0s ago")
+  })
+  it("shows Unavailable for unreadable values, never a zero", () => {
+    mocks.ms = marketState({ oracleRate: down(), totalPt: down(), poolState: down(), fees: { tokenizationBps: down(), ytBps: down(), swapTierBps: live(0n), protocolShareBps: live(0n) }, swapFeeRate: down() })
+    wrap(<MarketDetails marketId="m1" />)
+    for (const l of ["Oracle rate", "PT outstanding", "Pool SY reserve", "Tokenization fee", "YT fee", "Current swap fee (decreases to 0 at maturity)"]) {
+      expect(stat(l)).toBe("Unavailable")
+    }
   })
   it("hides old values after a failed refresh", () => {
     mocks.stale = true
-    wrap(<MarketHeader marketId="m1" />)
+    wrap(<MarketDetails marketId="m1" />)
     expect(screen.getByRole("alert").textContent).toMatch(/Unavailable — last update failed/)
-    expect(screen.queryByText("1.0500")).toBeNull()
-  })
-  it("shows Unavailable for an unavailable value", () => {
-    mocks.ms = marketState({ oracleRate: down(), totalPt: down(), poolState: down() })
-    wrap(<MarketHeader marketId="m1" />)
-    expect(screen.getByText("Oracle rate").nextSibling?.textContent).toBe("Unavailable")
-    expect(screen.getByText("PT total supply").nextSibling?.textContent).toBe("Unavailable")
-    expect(screen.getByText("Pool SY reserve").nextSibling?.textContent).toBe("Unavailable")
+    expect(screen.queryByText("Oracle rate")).toBeNull()
   })
 })
 
@@ -313,6 +419,18 @@ describe("MarketView", () => {
   it("mounts the action tabs for this market (R8)", () => {
     wrap(<MarketView marketId="m1" />)
     expect(screen.getByRole("region", { name: "Actions for m1" })).toBeTruthy()
+  })
+  it("compliance and safety cards stay under the panel, in the right column (R2-7)", () => {
+    wrap(<MarketView marketId="m1" />)
+    const right = screen.getByTestId("market-right")
+    expect(within(right).getByRole("region", { name: "Actions for m1" })).toBeTruthy()
+    expect(within(right).getByText("Authorization required")).toBeTruthy()
+    expect(within(right).getByText("SY wrapper")).toBeTruthy()
+    const left = screen.getByTestId("market-left")
+    expect(within(left).getByRole("heading", { name: "STA · test" })).toBeTruthy()
+    expect(within(left).getByText("TVL")).toBeTruthy()
+    expect(within(left).getByRole("tab", { name: "APY" })).toBeTruthy()
+    expect(within(left).queryByText("Authorization required")).toBeNull()
   })
   it("opens the Get test tokens dialog for this market from the compliance card", async () => {
     mocks.wallet = { status: "connected", publicKey: "GABC", networkPassphrase: "x" }

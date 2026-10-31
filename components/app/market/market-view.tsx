@@ -4,7 +4,9 @@ import { useState } from "react"
 import { useManifestFindings } from "@/hooks/use-manifest-findings"
 import { ActionTabs } from "@/components/app/actions/action-tabs"
 import { ComplianceCard } from "@/components/app/market/compliance-card"
+import { MarketChartBox } from "@/components/app/market/market-chart-box"
 import { MarketHeader } from "@/components/app/market/market-header"
+import { MarketStats } from "@/components/app/market/market-stats"
 import { SafetyCard } from "@/components/app/market/safety-card"
 import { OnboardingDialog } from "@/components/app/onboarding/onboarding-dialog"
 
@@ -24,10 +26,15 @@ export function MarketView({ marketId }: { marketId: string }) {
           </ul>
         </div>
       ) : null}
-      <MarketHeader marketId={marketId} />
       <div className="grid items-start gap-6 min-[900px]:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
-        <ActionTabs marketId={marketId} />
-        <div className="grid min-w-0 gap-6">
+        <div data-testid="market-left" className="grid min-w-0 gap-6">
+          <MarketHeader marketId={marketId} />
+          <MarketStats marketId={marketId} />
+          <MarketChartBox marketId={marketId} />
+        </div>
+        {/* Placeholder until the trade panel replaces the action tabs (R2-7). */}
+        <div data-testid="market-right" className="grid min-w-0 gap-6">
+          <ActionTabs marketId={marketId} />
           <ComplianceCard marketId={marketId} onGetTestTokens={openOnboarding} />
           <SafetyCard marketId={marketId} />
         </div>
