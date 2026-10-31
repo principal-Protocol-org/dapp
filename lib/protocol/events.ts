@@ -273,7 +273,7 @@ type Ctx = { account: string; code: string; decimals: number }
 function lineFor(i: Item, kind: HistoryKind, c: Ctx): string | null {
   const f = i.decoded?.fields
   if (!f) return null
-  const amt = (k: string) => formatAmount(f[k] as bigint, c.decimals)
+  const amt = (k: string) => formatAmount(f[k] as bigint, c.decimals, c.decimals, { group: true })
   switch (key(i)) {
     case "sy.deposit":
       return `Deposited ${amt("amount")} ${c.code}`
@@ -285,7 +285,7 @@ function lineFor(i: Item, kind: HistoryKind, c: Ctx): string | null {
       return `Recombined ${amt("amount")} PT + ${amt("amount")} YT into ${amt("shares")} SY`
     case "manager.redeem": {
       const out = (f.from_pt as bigint) + (f.from_yt as bigint)
-      return `Redeemed ${amt("pt_amount")} PT + ${amt("yt_amount")} YT. Received ${formatAmount(out, c.decimals)} ${c.code}`
+      return `Redeemed ${amt("pt_amount")} PT + ${amt("yt_amount")} YT. Received ${formatAmount(out, c.decimals, c.decimals, { group: true })} ${c.code}`
     }
     case "manager.yt_claim":
       return `Claimed ${amt("paid")} ${c.code} of yield`
@@ -309,7 +309,7 @@ const TOKEN: Partial<Record<Role, string>> = { pt: "PT", yt: "YT", sy: "SY", poo
 
 function transferLine(i: Item, c: Ctx): string {
   const f = i.decoded?.fields ?? {}
-  const amount = formatAmount(f.amount as bigint, c.decimals)
+  const amount = formatAmount(f.amount as bigint, c.decimals, c.decimals, { group: true })
   const token = TOKEN[i.role] ?? ""
   return f.from === c.account
     ? `Sent ${amount} ${token} to ${shorten(String(f.to))}`

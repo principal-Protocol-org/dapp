@@ -1,6 +1,7 @@
 import { act, render, screen, within } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { appendLog } from "@/lib/app/local-log"
+import { writeRoute, type RouteRun } from "@/lib/app/route-log"
 import { TX_TIMEOUT_SECONDS } from "@/lib/protocol/review"
 import type { HistoryData } from "@/hooks/use-history"
 
@@ -49,6 +50,32 @@ const data = (over: Partial<HistoryData> = {}) => ({
   truncated: false,
   ...over,
 })
+
+const H1 = "1".repeat(64)
+const H2 = "2".repeat(64)
+const E7 = 10_000_000n
+
+/** A two-step "Buy PT" route (deposit, then buy) over USDY with the given step states. */
+function route(over: Partial<RouteRun> = {}, steps?: RouteRun["steps"]): RouteRun {
+  return {
+    id: "r1",
+    account: ADDRESS,
+    marketId: "m1",
+    kind: "buy_pt",
+    request: { kind: "buy_pt", marketId: "m1", source: ADDRESS, amount: 1500n * E7, pay: "underlying", receive: "sy", matured: false },
+    plans: [
+      { action: "deposit", amount: { from: "input" }, gives: "STA", takes: "SY" },
+      { action: "buy_pt", amount: { from: "step", index: 0, field: "value" }, gives: "SY", takes: "PT" },
+    ],
+    outputs: [{ kind: "amount", value: 1500n * E7 }],
+    steps: steps ?? [
+      { action: "deposit", status: "confirmed", hash: H1 },
+      { action: "buy_pt", status: "confirmed", hash: H2 },
+    ],
+    startedAt: Date.now(),
+    ...over,
+  } as RouteRun
+}
 
 beforeEach(() => {
   localStorage.clear()
@@ -187,5 +214,49 @@ describe("history table", () => {
     mocks.history = { data: data({ truncated: true }), isPending: false, isError: false, stale: false }
     render(<HistoryTable />)
     expect(screen.getByText(/too long to load in full.*older entries may be missing/i)).toBeTruthy()
+  })
+
+  it("groups a route's steps under one entry", () => {
+    appendLog({ hash: H1, action: "deposit", marketId: "m1", account: ADDRESS, at: 1, status: "SUCCESS" })
+    appendLog({ hash: H2, action: "buy_pt", marketId: "m1", account: ADDRESS, at: 2, status: "SUCCESS" })
+    writeRoute(route())
+    render(<HistoryTable />)
+    const row = screen.getByText("Buy PT · 2 steps").closest("tr") as HTMLElement
+    expect(within(row).getByText("1. Deposit · Confirmed")).toBeTruthy()
+    expect(within(row).getByRole("link", { name: `View transaction ${H1} on stellar.expert` })).toBeTruthy()
+    expect(within(row).getByRole("link", { name: `View transaction ${H2} on stellar.expert` })).toBeTruthy()
+    // the steps are not listed again as rows of their own
+    expect(screen.getAllByRole("link", { name: /View transaction 1{64}/ })).toHaveLength(1)
+    expect(screen.getAllByRole("row")).toHaveLength(3) // header + route + event
+    expect(within(row).getByText("Completed")).toBeTruthy()
+  })
+
+  it("an interrupted route links back to its market with Continue", () => {
+    appendLog({ hash: H1, action: "deposit", marketId: "m1", account: ADDRESS, at: 1, status: "SUCCESS" })
+    writeRoute(route({}, [{ action: "deposit", status: "confirmed", hash: H1 }, { action: "buy_pt", status: "pending" }]))
+    render(<HistoryTable />)
+    const row = screen.getByText("Buy PT · 2 steps").closest("tr") as HTMLElement
+    expect(within(row).getByText("Interrupted")).toBeTruthy()
+    expect(within(row).getByText("You hold 1,500 SY")).toBeTruthy()
+    expect(within(row).getByRole("link", { name: /continue/i }).getAttribute("href")).toBe("/app/markets/m1?tab=pt&side=buy")
+  })
+
+  it("does not offer Continue on a finished or closed route", () => {
+    writeRoute(route())
+    writeRoute(route({ id: "r2", closed: true }, [{ action: "deposit", status: "confirmed", hash: H1 }, { action: "buy_pt", status: "pending" }]))
+    render(<HistoryTable />)
+    expect(screen.queryByRole("link", { name: /continue/i })).toBeNull()
+    expect(screen.getByText("Stopped")).toBeTruthy()
+  })
+
+  it("amounts are grouped", () => {
+    mocks.history = {
+      data: data({ entries: [{ hash: HASH, ledger: 250, at: "2026-10-05T10:00:00Z", kind: "mint", lines: ["Deposited 1,234.5 STA"], marketId: "m1" }] }),
+      isPending: false, isError: false, stale: false,
+    }
+    writeRoute(route({}, [{ action: "deposit", status: "confirmed", hash: H1 }, { action: "buy_pt", status: "failed", hash: H2 }]))
+    render(<HistoryTable />)
+    expect(screen.getByText("Deposited 1,234.5 STA")).toBeTruthy()
+    expect(screen.getByText("You hold 1,500 SY")).toBeTruthy()
   })
 })

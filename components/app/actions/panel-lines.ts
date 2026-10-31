@@ -8,6 +8,10 @@ export const TOKEN_DECIMALS = 7
 /** A preview amount with its unit, exact to the raw unit: "100.0000 SY", "4.5431818 STA". */
 export const tokens = (raw: bigint, unit: string, decimals = TOKEN_DECIMALS) => `${formatTokenAmount(raw, decimals)} ${unit}`
 
+/** The same with English thousands separators, for the Portfolio: "1,234.0000 PT". */
+export const groupedTokens = (raw: bigint, unit: string, decimals = TOKEN_DECIMALS) =>
+  `${formatTokenAmount(raw, decimals, true)} ${unit}`
+
 /** An exact amount for a sentence, trailing zeros trimmed: "100", "104.9475". */
 export const plain = (raw: bigint, decimals = TOKEN_DECIMALS) => formatAmount(raw, decimals, decimals)
 
