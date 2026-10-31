@@ -144,8 +144,13 @@ export async function recordAll(deps: RecordDeps): Promise<RecordResult> {
       timer = setTimeout(() => resolve("late"), budget)
     })
     try {
-      const outcome = await Promise.race([deps.refreshRegistry(now() + budget).then(() => "done" as const), late])
-      if (outcome === "late") console.error("recorder: the registry refresh ran past its time budget; recording the markets listed so far")
+      const refresh = deps.refreshRegistry(now() + budget)
+      const outcome = await Promise.race([refresh.then(() => "done" as const), late])
+      if (outcome === "late") {
+        console.error("recorder: the registry refresh ran past its time budget; recording the markets listed so far")
+        // It is still running: a later failure is logged, never left unhandled or silent.
+        refresh.catch((error) => console.error(`recorder: the registry refresh failed after its time budget: ${describeError(error)}`))
+      }
     } catch (error) {
       if (error instanceof DatabaseConfigError) throw error
       console.error(`recorder: registry refresh failed: ${describeError(error)}`)

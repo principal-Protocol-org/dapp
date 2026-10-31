@@ -114,7 +114,8 @@ export class PoolReadError extends Error {
   }
 }
 
-type Read<T> = { ok: true; value: T } | { ok: false; error: string; unreadable: boolean }
+/** `wrongType`: the view answered, with a value of another type (`error` is this module's words then). */
+type Read<T> = { ok: true; value: T } | { ok: false; error: string; unreadable: boolean; wrongType?: true }
 
 /** One view call. A contract trap is an answer (`unreadable: false`); a transport failure is not. */
 async function read<T>(
@@ -129,7 +130,7 @@ async function read<T>(
   try {
     return { ok: true, value: map(live.value) }
   } catch (error) {
-    return { ok: false, error: error instanceof Error ? error.message : String(error), unreadable: false }
+    return { ok: false, error: error instanceof Error ? error.message : String(error), unreadable: false, wrongType: true }
   }
 }
 
@@ -156,8 +157,16 @@ function text(v: unknown): string {
   throw new Error("expected a string")
 }
 
-/** A failed read in this module's words: what was read and whether the contract refused it. */
-const failure = (what: string, r: { unreadable: boolean }) => (r.unreadable ? what : `${what} was refused by the contract`)
+/**
+ * A failed read in this module's words: what was read, and whether the contract trapped or answered
+ * a value of the wrong type ("expected a contract address" from the mappers below reads "is not a
+ * contract address").
+ */
+function failure(what: string, r: { unreadable: boolean; wrongType?: true; error?: string }): string {
+  if (r.unreadable) return what
+  if (r.wrongType) return `${what} ${(r.error ?? "").replace(/^expected (.*?)(, got .*)?$/, "is not $1")}`
+  return `${what} was refused by the contract`
+}
 
 function value<T>(r: Read<T>, what: string): T {
   if (r.ok) return r.value
@@ -439,9 +448,15 @@ async function check(deps: RegistryDeps, pool: string, known: Market[], stored: 
   return { status: v.unreadable ? "unreadable" : "invalid", reason: v.reason ?? "invalid", market, ...(v.detail ? { detail: v.detail } : {}) }
 }
 
+/** The RPC's words behind a verdict: logged server-side only, redacted (R2-40, R2-41). */
+export function logOutcome(where: string, pool: string, outcome: Outcome): void {
+  if (outcome.status === "unreadable") console.error(`${where}: ${pool} could not be checked: ${redact(outcome.detail ?? outcome.reason)}`)
+  else if (outcome.status === "invalid" && outcome.detail) console.error(`${where}: ${pool} is invalid: ${redact(outcome.detail)}`)
+}
+
 function write(store: RegistryStore, pool: string, source: RegistrySource, outcome: Outcome): Promise<void> {
   if (outcome.status === "valid") return store.record({ pool, source, valid: true, reason: null, market: outcome.market })
-  if (outcome.status === "unreadable") console.error(`registry: ${pool} could not be checked: ${redact(outcome.detail ?? outcome.reason)}`)
+  logOutcome("registry", pool, outcome)
   return store.record({ pool, source, valid: outcome.status === "unreadable" ? null : false, reason: outcome.reason, market: outcome.market })
 }
 

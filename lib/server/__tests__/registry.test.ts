@@ -372,6 +372,16 @@ describe("validateMarket", () => {
     expect(v.reason).toMatch(/yt minter/)
   })
 
+  it("a view answering the wrong type is named as such, not as a refusal (R2-41)", async () => {
+    const c = chain.deploy(10)
+    chain.views.set(`${c.pt}.minter`, ISSUER)
+    const market = seedMarket(c)
+    const v = await validateMarket(chain.reader, chain.rpc, manifestWith([market]), market)
+    expect(v.valid).toBe(false)
+    expect(v.reason).toMatch(/pt minter is not a contract address/)
+    expect(v.reason).not.toMatch(/refused/)
+  })
+
   it("a market on foreign infrastructure is refused without a single read", async () => {
     const market = seedMarket(chain.deploy(10))
     const foreign = { ...market, contracts: { ...market.contracts, router: cid(91) } }
@@ -521,6 +531,16 @@ describe("discover and resolvedMarkets", () => {
     // With the database down, pages fall back to the manifest seeds.
     store.fail = new Error("connect ECONNREFUSED")
     expect(await resolvedMarkets({ store, manifest })).toEqual([seed])
+  })
+
+  it("the RPC detail of a definite refusal is logged server-side, never stored (R2-41)", async () => {
+    const c = chain.deploy(10)
+    chain.views.delete(`${c.yt}.recovery_escrow`)
+    const seed = seedMarket(c)
+    await revalidate(depsFor(manifestWith([seed])))
+    expect(store.rowsMap.get(c.pool)).toMatchObject({ valid: false, reason: expect.stringMatching(/yt recovery_escrow was refused by the contract/) })
+    expect(String(store.rowsMap.get(c.pool)?.reason)).not.toMatch(/MissingValue/)
+    expect(JSON.stringify(error.mock.calls)).toMatch(/MissingValue/)
   })
 
   it("a seed whose check could not finish stays listed (an RPC hiccup is not a verdict)", async () => {
@@ -717,6 +737,17 @@ describe("POST /api/markets", () => {
     expect(res.status).toBe(422)
     expect(await res.json()).toMatchObject({ error: "invalid_market", reason: expect.stringMatching(/oracle/i) })
     expect(writes()).toEqual([])
+  })
+
+  it("a 422 logs the RPC detail of a refused view server-side and answers in this app's words (R2-41)", async () => {
+    const c = chain.deploy(20)
+    chain.views.delete(`${c.yt}.recovery_escrow`)
+    const res = await post({ pool: c.pool })
+    expect(res.status).toBe(422)
+    const text = await res.text()
+    expect(text).toMatch(/yt recovery_escrow was refused by the contract/)
+    expect(text).not.toMatch(/MissingValue|HostError/)
+    expect(JSON.stringify(error.mock.calls)).toMatch(/MissingValue/)
   })
 
   it("a valid pool is stored as published", async () => {

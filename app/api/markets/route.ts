@@ -21,8 +21,8 @@ import { activeManifest } from "@/lib/protocol/manifest-source"
 import { createRpcReader } from "@/lib/protocol/reader"
 import { createRpcServer } from "@/lib/protocol/stellar"
 import { DatabaseConfigError, sql } from "@/lib/server/db"
-import { PUBLISH_WINDOW_MS, publishMarket, resolvedMarkets, sqlRegistryStore, takePublishSlot } from "@/lib/server/registry"
-import { clientIp, isCrossSite, isJson, readBody, redact } from "@/lib/server/request"
+import { logOutcome, PUBLISH_WINDOW_MS, publishMarket, resolvedMarkets, sqlRegistryStore, takePublishSlot } from "@/lib/server/registry"
+import { clientIp, isCrossSite, isJson, readBody } from "@/lib/server/request"
 
 // ~40 simulations and ledger-entry reads for one pool.
 export const maxDuration = 30
@@ -113,8 +113,8 @@ export async function POST(request: Request): Promise<Response> {
       pool,
     )
     if (outcome.status === "valid") return json({ market: outcome.market })
+    logOutcome("markets route", pool, outcome)
     if (outcome.status === "invalid") return refuse("invalid_market", { reason: outcome.reason })
-    console.error(`markets route: ${pool} could not be checked: ${redact(outcome.detail ?? outcome.reason)}`)
     return refuse("unverified", { reason: UNVERIFIED_REASON })
   } catch (error) {
     if (error instanceof DatabaseConfigError) return refuse("not_configured")
