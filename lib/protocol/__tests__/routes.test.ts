@@ -4,7 +4,16 @@ import testnetJson from "@/config/manifests/testnet.json"
 import { parseManifest } from "../manifest"
 import { ACTION_META, invocationFor, type ActionId } from "../actions"
 import type { ActionOutput } from "../guards"
-import { planRoute, resolveStep, type RouteContext, type RouteRequest, type StepPlan } from "../routes"
+import {
+  describeHoldings,
+  planRoute,
+  resolveStep,
+  routeHoldings,
+  unwindFrom,
+  type RouteContext,
+  type RouteRequest,
+  type StepPlan,
+} from "../routes"
 
 const m = parseManifest(structuredClone(testnetJson))
 const market = m.markets[0]
@@ -135,5 +144,99 @@ describe("no step is ever PrincipalManager.mint", () => {
       deadline: 1n,
     })
     expect(inv.functionName).toBe("wrap_and_mint")
+  })
+})
+
+describe("route holdings (spec §4 interruption)", () => {
+  /** One whole token: every Principal token, and the test USDY, have 7 decimals. */
+  const S = 10_000_000n
+  const usdy = { code: "USDY", decimals: 7 }
+  const scaled: RouteContext = {
+    routerFunctions: [],
+    buyYt: { syIn: 90n * S, depositUnderlying: 95n * S },
+    keepYtSplit: { mintUnderlying: 40n * S, depositUnderlying: 60n * S },
+  }
+  const plan = (r: RouteRequest) => planRoute(r, scaled) as StepPlan[]
+
+  it("after a deposit the user holds the SY it produced, and unwind is one withdraw of it", () => {
+    const r = { ...base, kind: "buy_pt" as const, amount: 1_000n * S }
+    const h = routeHoldings(r, plan(r), [{ kind: "amount", value: 1_000n * S }], 1)
+    expect(h).toEqual({ sy: 1_000n * S })
+    expect(describeHoldings(h!, usdy)).toBe("You hold 1000 SY")
+    expect(unwindFrom(h)).toEqual({
+      available: true,
+      amount: 1_000n * S,
+      plan: { action: "withdraw", amount: { from: "value", value: 1_000n * S }, gives: "SY", takes: "USDY" },
+    })
+  })
+
+  it("shows an exact small amount rather than rounding it to 0", () => {
+    const r = { ...base, kind: "buy_pt" as const }
+    const h = routeHoldings(r, plan(r), [{ kind: "amount", value: 87n }], 1)
+    expect(describeHoldings(h!, usdy)).toBe("You hold 0.0000087 SY")
+  })
+
+  it("nets what later steps consumed: Buy YT leaves the YT and the SY refund (plus deposit dust)", () => {
+    const r = { ...base, kind: "buy_yt" as const }
+    // deposit 95 USDY -> 92 SY; buy_yt spends sy_in 90 SY -> 40 YT + 85 SY back: 2 + 85 SY left
+    const outs: ActionOutput[] = [
+      { kind: "amount", value: 92n * S },
+      { kind: "buy_yt", yt_out: 40n * S, sy_back: 85n * S },
+    ]
+    const h = routeHoldings(r, plan(r), outs, 2)
+    expect(h).toEqual({ yt: 40n * S, sy: 87n * S })
+    expect(describeHoldings(h!, usdy)).toBe("You hold 40 YT and 87 SY")
+    const u = unwindFrom(h)
+    expect(u.available).toBe(false)
+    if (!u.available) expect(u.reason).toMatch(/YT/)
+  })
+
+  it("matured LP withdraw keeps the removed SY after the redeem paid USDY", () => {
+    const r = { ...base, kind: "lp_withdraw" as const, matured: true }
+    const outs: ActionOutput[] = [
+      { kind: "remove_liquidity", pt: 10n * S, sy: 5n * S },
+      { kind: "redeem", underlying_from_pt: 1000n * S, underlying_from_yt: 0n },
+    ]
+    const h = routeHoldings(r, plan(r), outs, 2)
+    expect(h).toEqual({ sy: 5n * S, underlying: 1000n * S })
+    expect(describeHoldings(h!, usdy)).toBe("You hold 5 SY and 1000 USDY")
+    expect(unwindFrom(h)).toMatchObject({ available: true, amount: 5n * S })
+  })
+
+  it("PT and SY after removing liquidity cannot go back to USDY in one call", () => {
+    const r = { ...base, kind: "lp_withdraw" as const }
+    const h = routeHoldings(r, plan(r), [{ kind: "remove_liquidity", pt: 10n * S, sy: 5n * S }], 1)
+    expect(h).toEqual({ pt: 10n * S, sy: 5n * S })
+    expect(describeHoldings(h!, usdy)).toBe("You hold 10 PT and 5 SY")
+    const u = unwindFrom(h)
+    expect(u.available).toBe(false)
+    if (!u.available) expect(u.reason).toMatch(/PT/)
+  })
+
+  it("LP keep YT interrupted before add_liquidity lists PT, YT and SY", () => {
+    const r = { ...base, kind: "lp_keep_yt" as const }
+    const outs: ActionOutput[] = [
+      { kind: "mint", pt_minted: 40n * S, yt_minted: 40n * S, fee_shares: 1n },
+      { kind: "amount", value: 59n * S },
+    ]
+    expect(describeHoldings(routeHoldings(r, plan(r), outs, 2)!, usdy)).toBe("You hold 40 PT, 40 YT and 59 SY")
+  })
+
+  it("nothing confirmed: no holdings, and no unwind", () => {
+    const r = { ...base, kind: "buy_pt" as const }
+    const h = routeHoldings(r, plan(r), [], 0)
+    expect(h).toEqual({})
+    expect(describeHoldings(h!, usdy)).toBeUndefined()
+    const u = unwindFrom(h)
+    expect(u.available).toBe(false)
+    if (!u.available) expect(u.reason).toMatch(/Nothing has moved/)
+  })
+
+  it("a confirmed step whose result could not be read makes the holdings unknown, never a guess", () => {
+    const r = { ...base, kind: "buy_pt" as const }
+    expect(routeHoldings(r, plan(r), [null], 1)).toBeUndefined()
+    const u = unwindFrom(undefined)
+    expect(u.available).toBe(false)
+    if (!u.available) expect(u.reason).toMatch(/could not read/)
   })
 })
