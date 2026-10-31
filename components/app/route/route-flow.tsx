@@ -7,13 +7,14 @@ import { RestoreBanner, type RestoreStep } from "@/components/app/actions/restor
 import { showTxToast } from "@/components/app/actions/tx-feedback"
 import { RouteProgress } from "@/components/app/route/route-progress"
 import { RouteReviewDialog } from "@/components/app/route/route-review-dialog"
+import { useLedgerClock } from "@/hooks/use-ledger-clock"
 import { useExecute } from "@/hooks/use-execute"
 import { useRoute, type UseRouteOptions } from "@/hooks/use-route"
 import { noticeForError, noticeForResult, type TxNotice } from "@/lib/app/tx-notice"
 import type { Blocker } from "@/lib/protocol/gates"
 import type { RestoreReview } from "@/lib/protocol/review"
-import type { RouteRequest, StepPlan } from "@/lib/protocol/routes"
-import type { Network } from "@/lib/protocol/types"
+import type { RouteKind, RouteRequest, StepPlan } from "@/lib/protocol/routes"
+import { activeManifest } from "@/lib/protocol/manifest-source"
 
 export type RouteFlowProps = {
   /** Connected account, market and the per-step gate; handed to `useRoute`. */
@@ -31,9 +32,6 @@ export type RouteFlowProps = {
   canStart: boolean
   /** Why starting is off (shown while idle). */
   blockers: Blocker[]
-  network: Network
-  /** Short title, e.g. "Buy PT". */
-  label: string
   onNotice(notice: TxNotice): void
   /** Step 1 reached the network (R2-3): the panel resets its amount fields here. */
   onReachedNetwork?: UseRouteOptions["onReachedNetwork"]
@@ -45,13 +43,30 @@ export type RouteFlowProps = {
  * interrupted panels, and 0001's restore flow when a step is stopped by an archived entry. It owns
  * `useRoute`, so the host passes only account, market, `gate` and the plans.
  */
+const LABELS: Record<RouteKind, string> = {
+  buy_pt: "Buy PT",
+  sell_pt: "Sell PT",
+  buy_yt: "Buy YT",
+  sell_yt: "Sell YT",
+  lp_keep_yt: "Add liquidity (keep YT)",
+  lp_only: "Add liquidity",
+  lp_withdraw: "Withdraw liquidity",
+  split: "Split",
+  recombine: "Recombine",
+}
+
 export function RouteFlow(props: RouteFlowProps) {
+  // Today's manifest; a later task moves client code to useManifest().
+  const network = activeManifest().network
+  const { ledgerTime } = useLedgerClock()
   const route = useRoute({ account: props.account, marketId: props.marketId, gate: props.gate, onReachedNetwork: props.onReachedNetwork })
   const exec = useExecute()
   const { state } = route
-  const latest = useRef(props)
+  const kind = state.run?.kind ?? props.request?.kind
+  const label = kind ? LABELS[kind] : "route"
+  const latest = useRef({ ...props, label })
   useEffect(() => {
-    latest.current = props
+    latest.current = { ...props, label }
   })
 
   const [restore, setRestore] = useState<RestoreStep>({ step: "idle" })
@@ -69,7 +84,7 @@ export function RouteFlow(props: RouteFlowProps) {
   }, [doneId])
 
   const fail = (label: string, error: unknown) => {
-    const notice = noticeForError(label, error, props.network)
+    const notice = noticeForError(label, error, network)
     setRestore({ step: "failed", notice })
   }
   const startRestore = async () => {
@@ -91,7 +106,7 @@ export function RouteFlow(props: RouteFlowProps) {
     setRestore({ step: "signing", restore: prepared })
     try {
       const result = await exec.executeRestore(prepared)
-      const notice = noticeForResult("Restore", result, props.network)
+      const notice = noticeForResult("Restore", result, network)
       showTxToast(notice)
       props.onNotice(notice)
       if (result.status === "SUCCESS") {
@@ -113,7 +128,7 @@ export function RouteFlow(props: RouteFlowProps) {
       {state.phase === "idle" ? (
         <>
           <Button type="button" className="w-full" disabled={!props.canStart || !props.request || props.plans.length === 0} onClick={start}>
-            Review {props.label}
+            Review {label}
           </Button>
           {props.blockers.length > 0 ? <GateList blockers={props.blockers} /> : null}
         </>
@@ -134,12 +149,14 @@ export function RouteFlow(props: RouteFlowProps) {
       <RouteProgress route={route} />
       {reviewing && state.run ? (
         <RouteReviewDialog
-          title={props.label}
+          title={label}
           plans={state.run.plans}
           steps={state.run.steps}
           step={state.step}
           review={state.review}
           secondsLeft={state.secondsLeft}
+          ledgerTime={ledgerTime}
+          phase={state.phase as "reviewing" | "signing"}
           signing={state.phase === "signing"}
           blockers={state.blockers ?? []}
           onSign={route.sign}

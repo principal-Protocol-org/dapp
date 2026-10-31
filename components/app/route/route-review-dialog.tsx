@@ -3,7 +3,7 @@
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { GateList } from "@/components/app/actions/gate-list"
-import { formatUnixTime } from "@/lib/protocol/format"
+import { TechnicalDetails, TimeLimit } from "@/components/app/actions/review-parts"
 import type { Blocker } from "@/lib/protocol/gates"
 import type { Review } from "@/lib/protocol/review"
 import type { StepPlan } from "@/lib/protocol/routes"
@@ -90,8 +90,10 @@ export function RouteReviewDialog({
   plans,
   steps,
   step,
+  phase,
   review,
   secondsLeft,
+  ledgerTime,
   signing,
   blockers,
   onSign,
@@ -101,8 +103,11 @@ export function RouteReviewDialog({
   plans: StepPlan[]
   steps?: RouteStep[]
   step: number
+  /** Signing needs the step reviewed (prepared, gates passed), not signing and not stopped. */
+  phase: "reviewing" | "signing"
   review?: Review
   secondsLeft?: number
+  ledgerTime: number | null
   signing: boolean
   blockers: Blocker[]
   onSign(): void
@@ -124,15 +129,13 @@ export function RouteReviewDialog({
             <Lines title={`Step ${step}: you give`} items={review.summary.give} />
             <Lines title={`Step ${step}: you get at least`} items={review.summary.getAtLeast} />
             <Lines title="Fees" items={review.summary.fees} />
-            <p className="text-sm text-ink">
-              Valid until {formatUnixTime(review.summary.validUntil)}
-              {review.summary.deadline !== undefined ? `; deadline ${formatUnixTime(review.summary.deadline)}` : ""}.
-            </p>
+            <TimeLimit deadline={review.summary.deadline} validUntil={review.summary.validUntil} ledgerTime={ledgerTime} />
             {secondsLeft !== undefined ? (
               <p className="text-xs text-ink-muted">
                 This step is valid for {secondsLeft} more seconds; after that the route stops and you can prepare it again.
               </p>
             ) : null}
+            <TechnicalDetails review={review} />
           </div>
         ) : (
           <p className="text-sm text-ink">Preparing step {step} with the network…</p>
@@ -143,7 +146,7 @@ export function RouteReviewDialog({
           <Button type="button" variant="secondary" onClick={onClose} disabled={signing}>
             Cancel
           </Button>
-          <Button type="button" onClick={onSign} disabled={signing || !review || blockers.length > 0}>
+          <Button type="button" onClick={onSign} disabled={signing || phase !== "reviewing" || !review || blockers.length > 0}>
             Sign step {step} of {of}
           </Button>
         </DialogFooter>
