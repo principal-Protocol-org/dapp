@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest"
 
 // jsdom does not lay out, so these pin the classes that keep a 375 px page from scrolling sideways
 // (I3). The width itself is checked in a browser.
-vi.mock("@/components/app/markets/markets-table", () => ({ MarketsTable: () => <div /> }))
+vi.mock("@/components/app/markets/market-groups", () => ({ MarketGroups: () => <div /> }))
 vi.mock("@/components/app/portfolio/portfolio-view", () => ({ PortfolioView: () => <div /> }))
 vi.mock("@/components/app/history/history-table", () => ({ HistoryTable: () => <div /> }))
 
