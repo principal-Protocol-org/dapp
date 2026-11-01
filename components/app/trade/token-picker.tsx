@@ -14,15 +14,18 @@ export function TokenPicker({
   onChange,
   options,
   code = "USDY",
+  label = "Token",
 }: {
   value: PayToken
   onChange: (value: PayToken) => void
   options: readonly PayToken[]
   /** The underlying's asset code. */
   code?: string
+  /** The group's accessible name, e.g. "Pay with" on a "You pay" field. */
+  label?: string
 }) {
   return (
-    <div role="radiogroup" aria-label="Token" className="inline-flex max-w-full gap-1 rounded-md border border-line p-0.5">
+    <div role="radiogroup" aria-label={label} className="inline-flex max-w-full gap-1 rounded-md border border-line p-0.5">
       {options.map((option) => {
         const selected = option === value
         return (

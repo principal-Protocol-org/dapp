@@ -7,7 +7,8 @@ import { ActionPanel } from "@/components/app/actions/action-panel"
 import { addLiquidityPanel, addLiquiditySyPanel, removeLiquidityPanel } from "@/components/app/actions/liquidity-tab"
 import { redeemPanel } from "@/components/app/actions/redeem-tab"
 import { usePanels, type PanelEntry } from "@/components/app/actions/panel-group"
-import { buyPtPanel, buyYtPanel, sellPtPanel, sellYtPanel } from "@/components/app/actions/trade-tab"
+import { buyYtPanel, sellYtPanel } from "@/components/app/actions/trade-tab"
+import { PtTab } from "@/components/app/trade/pt-tab"
 import { TokenPicker, type PayToken } from "@/components/app/trade/token-picker"
 import { ToolsMenu, type ToolId } from "@/components/app/trade/tools-menu"
 import { useManifest } from "@/components/app/manifest-provider"
@@ -35,14 +36,13 @@ const isTab = (v: string | null | undefined): v is TabId => TABS.some((t) => t.i
 const sideOr = (tab: TabId, v: string | null | undefined): SideId => SIDES[tab].find((s) => s.id === v)?.id ?? SIDES[tab][0].id
 
 /**
- * Interim bodies (R2-48): the 0001 panels, one per tab and side. Tasks 16 to 18 replace them.
- * Built once per market: configs must stay stable (panel-config rule 1).
+ * The 0001 panels this panel still hosts, built once per market: configs must stay stable
+ * (panel-config rule 1). PT trades are the PT tab's (Task 16); after maturity the PT tab hosts
+ * 0001's Redeem. YT and LP are interim bodies (R2-48) until Tasks 17 and 18 replace them.
  */
 const bodies = (market: Market, manifest: Manifest): PanelEntry[] => {
   const reader = () => createRpcReader(manifest)
   return [
-    { id: "pt:buy", label: "Buy PT", config: buyPtPanel(market, reader) },
-    { id: "pt:sell", label: "Sell PT", config: sellPtPanel(market, reader) },
     { id: "pt:redeem", label: "Redeem", config: redeemPanel(market) },
     { id: "yt:buy", label: "Buy YT", config: buyYtPanel(market, reader) },
     { id: "yt:sell", label: "Sell YT", config: sellYtPanel(market, reader) },
@@ -90,6 +90,7 @@ function TradePanelView({ marketId }: { marketId: string }) {
   const panels = usePanels(marketId, bodies)
   const [chosenTab, setChosenTab] = useState<TabId | null>(null)
   const [chosenSide, setChosenSide] = useState<SideId | null>(null)
+  // The interim YT and LP bodies pay in SY (R2-50); the PT tab has a picker on its own fields.
   const [pay, setPay] = useState<PayToken>("sy")
   const [tool, setTool] = useState<ToolId | null>(null)
   if (!hydrated) return <PanelFallback />
@@ -98,8 +99,9 @@ function TradePanelView({ marketId }: { marketId: string }) {
   // A tab the user picked starts on its first side; the URL's side applies to the URL's tab.
   const side = sideOr(tab, chosenSide ?? (chosenTab ? null : urlSide))
   const code = market?.underlying.code ?? "USDY"
-  // After maturity the PT tab redeems (0001 behaviour; Task 16 reworks it).
-  const bodyId = tab === "pt" && matured ? "pt:redeem" : `${tab}:${side}`
+  // After maturity the PT tab offers Redeem only (spec §3), through 0001's panel.
+  const ptTrade = tab === "pt" && !matured
+  const bodyId = tab === "pt" ? "pt:redeem" : `${tab}:${side}`
   const body = panels.find((p) => p.id === bodyId)
 
   return (
@@ -148,14 +150,20 @@ function TradePanelView({ marketId }: { marketId: string }) {
               ))}
             </div>
           )}
-          <TokenPicker value={pay} onChange={setPay} options={["underlying", "sy"]} code={code} />
+          {tab !== "pt" ? <TokenPicker value={pay} onChange={setPay} options={["underlying", "sy"]} code={code} /> : null}
         </div>
-        {pay === "underlying" ? (
+        {tab !== "pt" && pay === "underlying" ? (
           <p className="text-xs text-ink-muted">
             Paying with {code} directly is coming. These panels pay in SY: deposit {code} to SY first.
           </p>
         ) : null}
-        <TabsContent value={tab}>{body ? <ActionPanel key={body.id} config={body.config} marketId={marketId} /> : null}</TabsContent>
+        <TabsContent value={tab}>
+          {ptTrade ? (
+            <PtTab marketId={marketId} side={side === "sell" ? "sell" : "buy"} />
+          ) : body ? (
+            <ActionPanel key={body.id} config={body.config} marketId={marketId} />
+          ) : null}
+        </TabsContent>
       </Tabs>
       <p className="flex flex-wrap gap-x-4 gap-y-1 text-sm text-ink-muted">
         <button type="button" onClick={() => setTool("deposit")} className="underline underline-offset-2 hover:text-ink">

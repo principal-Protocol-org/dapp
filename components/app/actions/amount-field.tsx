@@ -21,6 +21,7 @@ export function AmountField({
   decimals,
   onChange,
   onBlur,
+  picker,
 }: {
   id: string
   spec: FieldSpec
@@ -31,6 +32,8 @@ export function AmountField({
   decimals: number
   onChange(text: string): void
   onBlur(): void
+  /** A token picker shown under the label (the trade tabs' "You pay" field). */
+  picker?: React.ReactNode
 }) {
   const errorId = `${id}-error`
   const balanceId = `${id}-balance`
@@ -45,6 +48,7 @@ export function AmountField({
           </span>
         ) : null}
       </div>
+      {picker ? <div className="flex min-w-0 flex-wrap items-center gap-2">{picker}</div> : null}
       <div className="flex items-center gap-2">
         <div className="relative min-w-0 flex-1">
           <Input
