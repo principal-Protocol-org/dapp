@@ -50,7 +50,19 @@ import type { Finding, Manifest, Market } from "@/lib/protocol/types"
 import { pendingYield } from "@/lib/protocol/yield"
 import { createStellarFaucetChain, resetFaucetStateForTests, runFaucet } from "@/lib/server/faucet"
 import { fundedKeypairSigner, type KeypairSigner } from "./keypair-signer"
-import { DAPP, DEV_STACK, eventually, faucetIssuerSecret, json, readManifest, run, runwaySeconds, skipReason, sleep } from "./local-stack"
+import {
+  DAPP,
+  DEV_STACK,
+  eventually,
+  faucetIssuerSecret,
+  json,
+  oracleTick as tickOracle,
+  readManifest,
+  run,
+  runwaySeconds,
+  skipReason,
+  sleep,
+} from "./local-stack"
 
 /** Shared-context defaults: 50 bps slippage, 300 s deadline. */
 const SLIPPAGE_BPS = 50n
@@ -259,9 +271,9 @@ describe.skipIf(skip !== null)("protocol layer on the local network", () => {
     return { ...clock, now: () => clock.closeTime + (Date.now() - clock.readAtMs) / 1000 }
   }
 
+  /** The shared tick (`scripts/dev-stack/oracle-tick.sh`), logged. */
   async function oracleTick(rate?: bigint): Promise<string> {
-    const { stdout } = await run(join(DEV_STACK, "oracle-tick.sh"), rate === undefined ? [] : [rate.toString()], { cwd: DAPP })
-    const line = stdout.trim()
+    const line = await tickOracle(rate)
     log(line)
     return line
   }

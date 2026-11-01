@@ -135,24 +135,41 @@ describe("the recorder on the local stack (Task 24)", () => {
     const slotNow = async () => Math.floor((await ledgerCloseTime((await server.getLatestLedger()).sequence)) / SLOT_SECONDS)
     const taken = async (slot: number) => (await sql<{ n: string }>`select count(*)::text as n from market_state_snapshots where pool = ${pool} and slot = ${slot}`)[0].n !== "0"
 
-    // A row already in this slot is someone else's (the recorder inserts once per slot): it is
-    // never touched; the test waits for the next slot instead.
-    let slot = await slotNow()
-    while (await taken(slot)) {
-      out.log(`slot ${slot} already has a row for this pool; waiting for the next slot`)
-      await sleep(15_000)
-      slot = await slotNow()
-    }
-    const before = (await server.getLatestLedger()).sequence
     const deps = { reader: createRpcReader(manifest), sql, manifest, markets: async () => [market], now: () => Date.now(), ledgerCloseTime }
-    const result = await recordAll(deps)
-    const after = (await server.getLatestLedger()).sequence
-    expect(result).toEqual({ recorded: 1, failed: [] })
+    const nextSlot = async (slot: number) => {
+      while ((await slotNow()) <= slot) await sleep(15_000)
+    }
+
+    // A row already in this slot is someone else's (another recorder, such as a dev server's cron:
+    // the recorder inserts once per slot). It is never touched: the test records in the next slot,
+    // once, and skips if that one is taken too. A run that records 0 because another recorder took
+    // the slot in between is that same race, never a failure.
+    let recorded: { before: number; after: number } | undefined
+    for (let attempt = 1; attempt <= 2 && !recorded; attempt++) {
+      const slot = await slotNow()
+      if (await taken(slot)) {
+        out.log(`slot ${slot} already has a row for this pool${attempt === 1 ? "; waiting for the next slot" : ""}`)
+      } else {
+        const before = (await server.getLatestLedger()).sequence
+        const result = await recordAll(deps)
+        const after = (await server.getLatestLedger()).sequence
+        expect(result.failed).toEqual([])
+        if (result.recorded === 1) recorded = { before, after }
+        else out.log(`slot ${slot} was taken by another recorder while this one ran${attempt === 1 ? "; trying the next slot" : ""}`)
+      }
+      if (!recorded && attempt === 1) await nextSlot(slot)
+    }
+    if (!recorded) {
+      console.info("[recorder] skipped: another recorder took two slots in a row, so this test could not write its own row")
+      return ctx.skip()
+    }
+    const { before, after } = recorded
 
     const rows = await sql<{ slot: string; ledger: string; at: string; implied_rate: string; pt_reserve: string; sy_reserve: string; oracle_rate: string }>`
       select slot::text, ledger::text, extract(epoch from close_time)::bigint::text as at, implied_rate::text, pt_reserve::text,
              sy_reserve::text, oracle_rate::text
-      from market_state_snapshots where pool = ${pool} and slot >= ${slot} order by slot desc`
+      from market_state_snapshots where pool = ${pool} and ledger between ${before} and ${after}`
+    // This test's row: the only one read between the two clock reads.
     expect(rows).toHaveLength(1)
     const row = rows[0]
     written = { pool, slot: Number(row.slot), ledger: Number(row.ledger) }
@@ -185,5 +202,5 @@ describe("the recorder on the local stack (Task 24)", () => {
       expect(await recordAll(deps)).toEqual({ recorded: 0, failed: [] })
       out.log("a second run in the same slot recorded 0 rows")
     }
-  }, 16 * MINUTE)
+  }, 18 * MINUTE)
 })

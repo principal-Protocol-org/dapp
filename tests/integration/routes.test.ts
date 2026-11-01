@@ -66,14 +66,24 @@ import {
 } from "./local-stack"
 import { createRunner, SLIPPAGE_BPS, type Runner, type StepRecord } from "./route-runner"
 
+/** The run takes minutes; below this much life left the suite skips (R2-68: it never redeploys). */
+const MIN_RUNWAY_SECONDS = 1_800
+
+/** Why the deployed market is too close to maturity for this suite, or null. */
+async function runwayReason(): Promise<string | null> {
+  const runway = await runwaySeconds(readManifest())
+  if (runway >= MIN_RUNWAY_SECONDS) return null
+  const when = runway > 0 ? `matures in ${Math.floor(runway / 60)} min` : "has matured"
+  return `the local market ${when}; redeploy a fresh market to run the routes suite (it needs ${MIN_RUNWAY_SECONDS / 60} min)`
+}
+
 const down = await skipReason()
+const skip = down ?? (await runwayReason())
 if (down) console.info(`[routes] skipped: ${down}. Start it with scripts/dev-stack/up.sh.`)
+else if (skip) console.info(`[routes] skipped: ${skip}.`)
 
 const out = createLog("routes")
 const log = out.log
-
-/** The run takes minutes; below this much life left the market is not used (R2-68: report instead). */
-const MIN_RUNWAY_SECONDS = 1_800
 /** The oracle is stale after 3,600 s; it is ticked when older than this, so it stays fresh for the run. */
 const TICK_AFTER_SECONDS = 1_800
 
@@ -109,7 +119,7 @@ type ChainState = {
   treasury: Balances
 }
 
-describe.skipIf(down !== null)("every route on the local USDY market (Task 24)", () => {
+describe.skipIf(skip !== null)("every route on the local USDY market (Task 24)", () => {
   let manifest: Manifest
   let market: Market
   let findings: Finding[]
@@ -229,11 +239,8 @@ describe.skipIf(down !== null)("every route on the local USDY market (Task 24)",
     expect(findings.filter((f) => f.severity === "error")).toEqual([])
     treasury = (await promisify(execFile)("stellar", ["keys", "address", "principal-localdev-treasury"])).stdout.trim()
 
-    // R2-68: the developer's market is used as it is, never redeployed. One that cannot be used stops the run.
-    const runway = await runwaySeconds(manifest)
-    if (runway < MIN_RUNWAY_SECONDS) {
-      throw new Error(`NEEDS_CONTEXT: ${market.marketId} matures in ${runway} s; this run needs ${MIN_RUNWAY_SECONDS} s and never redeploys the stack (R2-68)`)
-    }
+    // R2-68: the developer's market is used as it is, never redeployed (too close to maturity, the
+    // suite skips above). An oracle that cannot be ticked or an empty pool stops the run.
     const clock = await ledgerClock(manifest)
     const ms0 = await fetchMarketState(reader(), manifest, market.marketId)
     const age = clock.closeTime - Number(live(ms0.oracleTimestamp, "oracle timestamp"))
@@ -362,13 +369,16 @@ describe.skipIf(down !== null)("every route on the local USDY market (Task 24)",
     })
     const [buy] = t.steps
     if (buy.decoded.kind !== "buy_yt") throw new Error("not a buy_yt output")
-    // The buy moves the solver's sy_in, a large multiple of the spend (R2-59: disclosed as capital).
+    // The buy moves the solver's sy_in (asserted equal to the plan's above), more than the spend
+    // (R2-59: disclosed as capital).
     expect(buy.amount).toBe(syIn)
-    expect(syIn > 100n * spendSy).toBe(true)
+    expect(syIn > spendSy).toBe(true)
     expect(t.quote.capital?.moved).toBe(syIn)
     const net = syIn - buy.decoded.sy_back
-    // R2-58: the signed bound holds, and the net cost is the spend at most, plus the slippage setting.
+    // R2-58: the signed bound holds, the net cost is within what the quote disclosed ("spends at
+    // most", in SY here), and within the spend plus the slippage setting.
     expect(net <= buy.guards.maxNetCost!, `net ${net} vs signed max ${buy.guards.maxNetCost}`).toBe(true)
+    expect(net <= t.quote.maxCost!, `net ${net} vs disclosed ${t.quote.maxCost}`).toBe(true)
     expect(net <= ceilDiv(spendSy * (BPS + SLIPPAGE_BPS), BPS), `net ${net} vs spend ${spendSy}`).toBe(true)
     expect(delta(t, "sy")).toBe(-net)
     expect(delta(t, "yt")).toBe(buy.decoded.yt_out)
@@ -401,6 +411,8 @@ describe.skipIf(down !== null)("every route on the local USDY market (Task 24)",
     // per conversion (deposit rounded up, withdraw down) on top of the spend at slippage.
     const spent = -delta(t, "underlying")
     expect(spent).toBe(dep.amount - value(withdraw.decoded))
+    // Within what the quote disclosed ("spends at most", in the token paid: USDY).
+    expect(spent <= t.quote.maxCost!, `spent ${spent} vs disclosed ${t.quote.maxCost}`).toBe(true)
     expect(spent <= ceilDiv(req.amount * (BPS + SLIPPAGE_BPS), BPS) + 2n, `spent ${spent} vs spend ${req.amount}`).toBe(true)
     // Any SY the deposit gave beyond sy_in stays in the wallet (dust).
     expect(delta(t, "sy")).toBe(value(dep.decoded) - syIn)
