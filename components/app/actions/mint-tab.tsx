@@ -2,7 +2,6 @@
 
 import { showLive } from "@/components/app/live"
 import type { IndicativeContext, PanelConfig, PreviewLine } from "@/components/app/actions/panel-config"
-import { PanelGroup, usePanels, type PanelEntry } from "@/components/app/actions/panel-group"
 import { amountOf, max0, outputOf, plain, tokens, withoutAccount } from "@/components/app/actions/panel-lines"
 import { formatBps, formatRate } from "@/lib/protocol/format"
 import type { MarketState } from "@/lib/protocol/market-state"
@@ -11,9 +10,10 @@ import { allLive } from "@/lib/protocol/reader"
 import type { Market } from "@/lib/protocol/types"
 
 /**
- * The Mint tab (spec §6): deposit the underlying into SY, withdraw SY back to the underlying, and
- * mint PT + YT from the underlying. There is no mint from SY: `PrincipalManager.mint` takes no
- * floor and the fee can change before it lands, so the dApp does not offer it (spec §6).
+ * The 0001 deposit, withdraw and mint panels (spec §6), hosted by the Quick actions dialogs: deposit
+ * the underlying into SY, withdraw SY back to the underlying, and split (mint PT + YT) from the
+ * underlying. There is no mint from SY: `PrincipalManager.mint` takes no floor and the fee can
+ * change before it lands, so the dApp does not offer it (spec §6).
  */
 
 const SY_NOTE = "Use SY to buy PT or YT, add liquidity, or withdraw it."
@@ -149,15 +149,4 @@ export function mintPanel(market: Market): PanelConfig {
       return [`You hold ${plain(sy.value)} SY. Minting starts from ${code}. ${SY_NOTE}`]
     },
   }
-}
-
-const mintPanels = (market: Market): PanelEntry[] => [
-  { id: "deposit", label: "Deposit", config: depositPanel(market) },
-  { id: "withdraw", label: "Withdraw", config: withdrawPanel(market) },
-  { id: "mint", label: "Mint PT + YT", config: mintPanel(market) },
-]
-
-export function MintTab({ marketId, initialPanel }: { marketId: string; initialPanel?: string }) {
-  const panels = usePanels(marketId, mintPanels)
-  return <PanelGroup label="Mint" marketId={marketId} panels={panels} requestedId={initialPanel} />
 }

@@ -2,50 +2,24 @@
 
 import { showLive } from "@/components/app/live"
 import type { PanelConfig, PreviewLine } from "@/components/app/actions/panel-config"
-import { PanelGroup, usePanels, type PanelEntry } from "@/components/app/actions/panel-group"
-import { useMatured } from "@/hooks/use-matured"
 import { amountOf, outputOf, plain, tokens, withoutAccount } from "@/components/app/actions/panel-lines"
 import { formatBps, formatRate } from "@/lib/protocol/format"
-import { previewRecombine, previewRedeemPt } from "@/lib/protocol/previews"
+import { previewRedeemPt } from "@/lib/protocol/previews"
 import { allLive } from "@/lib/protocol/reader"
 import type { Market } from "@/lib/protocol/types"
 import { pendingOf, settlementOf } from "@/lib/protocol/position"
 import type { RedemptionRate } from "@/lib/protocol/yield"
 
 /**
- * The Redeem tab (spec §6): recombine PT + YT into SY before maturity, claim YT yield, and redeem
- * PT and YT at maturity. Claim and redeem take no floor; the previews say what fixes the amount.
+ * The 0001 claim and redeem panels (spec §6): claim YT yield (the Portfolio's Claim dialog) and
+ * redeem PT and YT at maturity (the PT tab after maturity). Claim and redeem take no floor; the
+ * previews say what fixes the amount. Recombining is the Quick action's route (R2-72).
  */
 
 const BASIS_HINT: Record<RedemptionRate["basis"], string> = {
   settled: "Final: fixed when the market settled.",
   frozen: "Fixed: the YT yield index froze at maturity at this rate; the first redemption records it.",
   oracle: "Indicative — settles at the oracle rate of your redemption.",
-}
-
-export function recombinePanel(): PanelConfig {
-  return {
-    action: "recombine",
-    fields: [{ id: "amount", label: "PT and YT to recombine", unit: "PT + YT" }],
-    description: "Exit before maturity: burn equal amounts of PT and YT to get SY back at the oracle rate.",
-    indicative: (ms, { amount }) =>
-      amount === undefined
-        ? []
-        : [
-            { label: "SY received", value: showLive(allLive([ms.oracleRate] as const, ([r]) => previewRecombine(amount, r)), (v) => tokens(v, "SY")) },
-            { label: "Burns", value: `${tokens(amount, "PT")} + ${tokens(amount, "YT")}` },
-          ],
-    market: (ms) => [{ label: "Oracle rate", value: showLive(ms.oracleRate, formatRate), hint: "Recombining pays the amount divided by the oracle rate, in SY." }],
-    exact: (output) => [{ label: "SY received", value: tokens(amountOf(output), "SY") }],
-    floors: { minOut: { label: "Minimum SY received", unit: "SY" } },
-    notes({ account }) {
-      if (!account || account.pt.status !== "live" || account.yt.status !== "live") return []
-      const pt = account.pt.value
-      const yt = account.yt.value
-      return [`Recombining burns equal amounts of PT and YT. You can recombine up to ${plain(pt < yt ? pt : yt)} (you hold ${plain(pt)} PT and ${plain(yt)} YT).`]
-    },
-    result: (output, { input }) => `You recombined ${plain(input.amount)} PT and ${plain(input.amount)} YT into ${plain(amountOf(output))} SY.`,
-  }
 }
 
 export function claimPanel(market: Market): PanelConfig {
@@ -133,17 +107,4 @@ export function redeemPanel(market: Market): PanelConfig {
       return `You redeemed ${parts.join(" and ")} for ${plain(o.underlying_from_pt + o.underlying_from_yt, decimals)} ${code}.`
     },
   }
-}
-
-const redeemPanels = (market: Market): PanelEntry[] => [
-  { id: "recombine", label: "Recombine", config: recombinePanel() },
-  { id: "claim_yield", label: "Claim yield", config: claimPanel(market) },
-  { id: "redeem", label: "Redeem", config: redeemPanel(market) },
-]
-
-/** Opens on Recombine before maturity and on Redeem after it (fix round 1). */
-export function RedeemTab({ marketId, initialPanel }: { marketId: string; initialPanel?: string }) {
-  const panels = usePanels(marketId, redeemPanels)
-  const matured = useMatured(marketId)
-  return <PanelGroup label="Redeem" marketId={marketId} panels={panels} defaultId={matured ? "redeem" : undefined} requestedId={initialPanel} />
 }
