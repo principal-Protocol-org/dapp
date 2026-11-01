@@ -44,16 +44,8 @@ export type TradeRoute = {
 
 /**
  * One trade of the PT, YT or LP tab, from the amount the user typed to the route `RouteFlow` runs,
- * through the trade adapter (R2-55). Before the route starts:
- * - its first step is simulated as the user, exactly as 0001 simulates an action;
- * - the route is checked by `routePreStartBlockers` (lib/protocol/route-gates.ts): step 1 with that
- *   simulation (R2-23), the later steps on everything that does not depend on what the earlier steps
- *   produce, with the circuit breaker (R2-61) and the deposit cap (R2-62) counted across the steps;
- *   the route starts only when it would pass;
- * - the quote takes the first step's simulated output, so a one-step trade shows its exact figures.
- *
- * A first step stopped only by an archived entry may start: the route then stops on that step and
- * `RouteFlow` offers 0001's restore, then Continue.
+ * through the trade adapter (R2-55). Before the route starts it is checked by `useRouteStart`; the
+ * quote takes the first step's simulated output, so a one-step trade shows its exact figures.
  */
 export function useTradeRoute({
   marketId,
@@ -73,22 +65,16 @@ export function useTradeRoute({
 }): TradeRoute {
   const manifest = useManifest()
   const matured = useMatured(marketId) === true
-  const { slippageBps, deadlineSeconds } = useSettings()
-  const { wallet, ledgerTime, ms } = gate
+  const { slippageBps } = useSettings()
+  const { wallet, ms } = gate
   const source = wallet.status === "connected" ? wallet.publicKey : null
-  const complete = check.ok && trade.amount > 0n
 
   const ctx = { marketId, source: source ?? "", matured, routerFunctions: manifest.routerFunctions ?? [], ...(ms ? { ms } : {}) }
   const planned = adapter.plan(trade, ctx)
   const plans = Array.isArray(planned) ? planned : []
   const disabled = Array.isArray(planned) ? undefined : planned.disabled
-  const request = toRouteRequest(trade, ctx)
-
-  const first = plans[0] ? preStartDraft(plans[0], request).input : null
-  const offered = isOffered(first)
-  const simInput: ActionInput | null =
-    source !== null && complete && ledgerTime !== null && first && offered ? { ...first, deadline: BigInt(Math.floor(ledgerTime) + deadlineSeconds) } : null
-  const sim = useSimulation(simInput)
+  const start = useRouteStart({ gate, request: toRouteRequest(trade, ctx), plans, ...(disabled ? { disabled } : {}), check })
+  const { sim, simInput } = start
   const firstStep: TradeState["firstStep"] = simInput && sim.output ? { action: simInput.action, output: sim.output } : undefined
 
   // The connected account's LP, for the LP tab's pool share; absent without one.
@@ -101,6 +87,77 @@ export function useTradeRoute({
     const p = adapter.plan(at, ctx)
     return adapter.quote(at, { ms, slippageBps, plans: Array.isArray(p) ? p : [], ...held })
   }
+
+  return {
+    source: start.source,
+    request: start.request,
+    plans,
+    quote,
+    quoteFor,
+    sim,
+    blockers: start.blockers,
+    canStart: start.canStart,
+    gate: start.gate,
+  }
+}
+
+export type RouteStart = {
+  /** The connected account, or null. */
+  source: string | null
+  /** What `RouteFlow` starts, as the connected account; null while the amount is not valid, no wallet is connected or nothing is planned. */
+  request: RouteRequest | null
+  /** 0001's simulation of the route's first step, as the user, for this exact request. */
+  sim: Simulation
+  /** The first step as simulated (open guards, the ledger deadline); null while it is not simulated. */
+  simInput: ActionInput | null
+  /** Every reason the route may not start now, in 0001's order; the amount field's own refusal first. */
+  blockers: Blocker[]
+  canStart: boolean
+  /** The per-step gate `RouteFlow` hands to `useRoute`: 0001's gates, with the step's simulation. */
+  gate: RouteGate
+}
+
+/**
+ * Whether a planned route may start, for any form that hosts `RouteFlow`: the trade tabs (through
+ * `useTradeRoute`) and the Recombine quick action, which plans with `planRoute` directly. Before the
+ * route starts:
+ * - its first step is simulated as the user, exactly as 0001 simulates an action;
+ * - the route is checked by `routePreStartBlockers` (lib/protocol/route-gates.ts): step 1 with that
+ *   simulation (R2-23), the later steps on everything that does not depend on what the earlier steps
+ *   produce, with the circuit breaker (R2-61) and the deposit cap (R2-62) counted across the steps;
+ *   the route starts only when it would pass.
+ *
+ * A first step stopped only by an archived entry may start: the route then stops on that step and
+ * `RouteFlow` offers 0001's restore, then Continue.
+ */
+export function useRouteStart({
+  gate,
+  request,
+  plans,
+  disabled,
+  check,
+}: {
+  /** The panel's `useGateContext(marketId)`. */
+  gate: GateInputs
+  /** The route asked for; `source` is the connected account or "", `amount` 0 while `check` refuses the field. */
+  request: RouteRequest
+  /** The planner's steps; empty when it refused the route. */
+  plans: StepPlan[]
+  /** Why the planner refused the route, if it did. */
+  disabled?: string
+  /** The amount field's check (`checkAmount`): its refusal replaces the amount and balance gates. */
+  check: AmountCheck
+}): RouteStart {
+  const { deadlineSeconds } = useSettings()
+  const { wallet, ledgerTime } = gate
+  const source = wallet.status === "connected" ? wallet.publicKey : null
+  const complete = check.ok && request.amount > 0n
+
+  const first = plans[0] ? preStartDraft(plans[0], request).input : null
+  const offered = isOffered(first)
+  const simInput: ActionInput | null =
+    source !== null && complete && ledgerTime !== null && first && offered ? { ...first, deadline: BigInt(Math.floor(ledgerTime) + deadlineSeconds) } : null
+  const sim = useSimulation(simInput)
 
   const blockers: Blocker[] = gate.base
     ? routePreStartBlockers({
@@ -126,10 +183,8 @@ export function useTradeRoute({
   return {
     source,
     request: complete && source !== null && plans.length > 0 ? { ...request, source } : null,
-    plans,
-    quote,
-    quoteFor,
     sim,
+    simInput,
     blockers,
     canStart,
     gate: routeGate,

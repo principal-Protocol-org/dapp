@@ -1,6 +1,6 @@
 "use client"
 
-import { Suspense, useId, useState } from "react"
+import { Fragment, Suspense, useId, useState } from "react"
 import { useSearchParams } from "next/navigation"
 import { cn } from "cn"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
@@ -9,7 +9,7 @@ import { redeemPanel } from "@/components/app/actions/redeem-tab"
 import { usePanels, type PanelEntry } from "@/components/app/actions/panel-group"
 import { LpTab } from "@/components/app/trade/lp-tab"
 import { PtTab } from "@/components/app/trade/pt-tab"
-import { QuickActions, type QuickActionId } from "@/components/app/trade/quick-actions"
+import { isQuickAction, QuickActions, type QuickActionId } from "@/components/app/trade/quick-actions"
 import { YtTab } from "@/components/app/trade/yt-tab"
 import { useHydrated } from "@/hooks/use-hydrated"
 import { useMatured } from "@/hooks/use-matured"
@@ -57,8 +57,9 @@ const bodies = (market: Market): PanelEntry[] => [{ id: "pt:redeem", label: "Red
 
 /**
  * The market page's action panel: PT, YT and LP tabs, a side toggle, and the Quick actions menu
- * (each tab's fields carry their own token picker). `?tab=` and `?side=` choose where it opens, so it
- * sits in a Suspense boundary.
+ * (each tab's fields carry their own token picker). `?tab=` and `?side=` choose where it opens, and
+ * `?quick=` a Quick action dialog to open on it (History's Continue for a recombine), so it sits in
+ * a Suspense boundary.
  */
 export function TradePanel({ marketId }: { marketId: string }) {
   return (
@@ -89,12 +90,24 @@ function TradePanelView({ marketId }: { marketId: string }) {
   const params = useSearchParams()
   const urlTab = params?.get("tab")
   const urlSide = params?.get("side")
+  const urlQuick = params?.get("quick")
   const matured = useMatured(marketId)
   const panels = usePanels(marketId, bodies)
   const [chosenTab, setChosenTab] = useState<TabId | null>(null)
   const [chosenSide, setChosenSide] = useState<SideId | null>(null)
-  const [tool, setTool] = useState<QuickActionId | null>(null)
+  // undefined until the user opens or closes a Quick action: until then `?quick=` decides.
+  const [chosenTool, setChosenTool] = useState<QuickActionId | null | undefined>(undefined)
+  // Bumped when the Recombine dialog closes: the tab below remounts, so its RouteFlow reads the route
+  // log again. The dialog's RouteFlow may have moved a run on while the tab's (inert behind the
+  // modal) still held its own copy of it, which it could otherwise prepare again.
+  const [bodyKey, setBodyKey] = useState(0)
   if (!hydrated) return <PanelFallback />
+
+  const tool: QuickActionId | null = chosenTool === undefined ? (isQuickAction(urlQuick) ? urlQuick : null) : chosenTool
+  const onToolChange = (next: QuickActionId | null) => {
+    if (tool === "recombine" && next !== "recombine") setBodyKey((k) => k + 1)
+    setChosenTool(next)
+  }
 
   const tab: TabId = chosenTab ?? (isTab(urlTab) ? urlTab : "pt")
   // A tab the user picked starts on its first side; the URL's side applies to the URL's tab.
@@ -114,7 +127,7 @@ function TradePanelView({ marketId }: { marketId: string }) {
         <h2 id={headingId} className="font-serif text-2xl text-ink">
           Trade
         </h2>
-        <QuickActions marketId={marketId} tool={tool} onToolChange={setTool} />
+        <QuickActions marketId={marketId} tool={tool} onToolChange={onToolChange} onRedeem={toRedeem} />
       </div>
       <Tabs
         value={tab}
@@ -158,15 +171,17 @@ function TradePanelView({ marketId }: { marketId: string }) {
           )}
         </div>
         <TabsContent value={tab}>
-          {ptTrade ? (
-            <PtTab marketId={marketId} side={side === "sell" ? "sell" : "buy"} />
-          ) : tab === "yt" ? (
-            <YtTab marketId={marketId} side={side === "sell" ? "sell" : "buy"} onRedeem={toRedeem} />
-          ) : tab === "lp" ? (
-            <LpTab marketId={marketId} side={side === "withdraw" ? "withdraw" : "deposit"} />
-          ) : body ? (
-            <ActionPanel key={body.id} config={body.config} marketId={marketId} />
-          ) : null}
+          <Fragment key={bodyKey}>
+            {ptTrade ? (
+              <PtTab marketId={marketId} side={side === "sell" ? "sell" : "buy"} />
+            ) : tab === "yt" ? (
+              <YtTab marketId={marketId} side={side === "sell" ? "sell" : "buy"} onRedeem={toRedeem} />
+            ) : tab === "lp" ? (
+              <LpTab marketId={marketId} side={side === "withdraw" ? "withdraw" : "deposit"} />
+            ) : body ? (
+              <ActionPanel key={body.id} config={body.config} marketId={marketId} />
+            ) : null}
+          </Fragment>
         </TabsContent>
       </Tabs>
     </section>
