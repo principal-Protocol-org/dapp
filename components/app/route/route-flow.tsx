@@ -27,6 +27,8 @@ export type RouteFlowProps = {
   gate: UseRouteOptions["gate"]
   /** What the user asked for; null while the form is not valid. */
   request: RouteRequest | null
+  /** The route the form builds, for the button's label while `request` is still null. */
+  kind?: RouteKind
   plans: StepPlan[]
   /** The form is valid and every gate passes for starting. */
   canStart: boolean
@@ -61,7 +63,7 @@ export function RouteFlow(props: RouteFlowProps) {
   const route = useRoute({ account: props.account, marketId: props.marketId, gate: props.gate, onReachedNetwork: props.onReachedNetwork })
   const exec = useExecute()
   const { state } = route
-  const kind = state.run?.kind ?? props.request?.kind
+  const kind = state.run?.kind ?? props.request?.kind ?? props.kind
   const label = kind ? LABELS[kind] : "route"
   const latest = useRef({ ...props, label })
   useEffect(() => {
