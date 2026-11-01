@@ -34,7 +34,7 @@ vi.mock("@/lib/protocol/stellar", async (orig) => ({
 }))
 // Switches for quotes the live adapter does not give today: no APY on a route that sells, or an APY
 // after that formats apart from the APY before on a trade the adapter says moves no price.
-const stub = vi.hoisted(() => ({ dropApy: false, nudgeApy: false }))
+const stub = vi.hoisted(() => ({ dropApy: false, nudgeApy: false, dropAlsoOut: false }))
 vi.mock("@/lib/protocol/trade-adapter", async (orig) => {
   const mod = await orig<typeof import("@/lib/protocol/trade-adapter")>()
   const real = mod.currentContractsAdapter
@@ -45,6 +45,7 @@ vi.mock("@/lib/protocol/trade-adapter", async (orig) => {
       quote: (...args: Parameters<typeof real.quote>) => {
         const q = real.quote(...args)
         if (q.status !== "live") return q
+        if (stub.dropAlsoOut) return { ...q, value: { ...q.value, alsoOut: undefined } }
         if (stub.dropApy) return { ...q, value: { ...q.value, apyBefore: undefined, apyAfter: undefined } }
         if (stub.nudgeApy && q.value.apyBefore !== undefined) return { ...q, value: { ...q.value, apyAfter: q.value.apyBefore + 0.0001 } }
         return q
@@ -124,6 +125,7 @@ beforeEach(() => {
   mocks.manifest = usdyManifest as typeof mocks.manifest
   nav.search = ""
   stub.dropApy = false
+  stub.dropAlsoOut = false
   stub.nudgeApy = false
   mocks.accounts[A] = accountState({
     underlying: live(100_000n * UNIT),
@@ -148,6 +150,15 @@ const pick = async (group: string, option: RegExp) => {
 const keepYt = () => screen.getByRole("switch", { name: "Keep YT" })
 const reviewButton = (label: string) => screen.getByRole("button", { name: `Review ${label}` }) as HTMLButtonElement
 const stepsIn = (dialog: HTMLElement) => within(within(dialog).getByRole("list", { name: "Route steps" })).getAllByRole("listitem")
+
+describe("LP tab — the static note", () => {
+  it("shows the LP earns row before any amount is entered", async () => {
+    await renderUi(<LpTab marketId="m1" side="deposit" />)
+    expect(detail("LP earns")).toBe("PT convergence")
+    expect(await tipOf("LP earns")).toBe("LPs earn PT convergence; swap fees go to the protocol and the market creator.")
+    expect(screen.getByText("Enter an amount to see the details.")).toBeTruthy()
+  })
+})
 
 describe("LP tab — Deposit, Keep YT on", () => {
   it("Keep YT on: output LP and YT, APY unchanged, no slippage, tokenization fee on the split part", async () => {
@@ -449,6 +460,18 @@ describe("LP tab — Withdraw", () => {
     expect(await tipOf("Redeemed part")).toMatch(/The redeemed part, .* USDY, is paid in USDY even when you receive SY/)
     // The pool pause never holds LPs in after maturity (market_pool:522-526).
     expect(reviewButton("Withdraw liquidity").disabled).toBe(false)
+  })
+
+  it("a missing redeemed part says Unavailable with its reason in the tip, never the bare token code", async () => {
+    stub.dropAlsoOut = true
+    mocks.getLedgerClock.mockImplementation(AFTER_MATURITY)
+    mocks.fetchMarketState.mockResolvedValue(maturedMarket())
+    simulateReturns(mocks, [removed.pt, removed.sy])
+    await renderUi(<LpTab marketId="m1" side="withdraw" />)
+    await pick("Receive as", /SY/)
+    await enter("You pay", "1000")
+    expect(detail("Redeemed part")).toBe("Unavailable")
+    expect(await tipOf("Redeemed part")).toMatch(/could not be read from the quote.*paid in USDY even when you receive SY/)
   })
 
   it("before maturity the pool pause stops a withdraw, as the contract does", async () => {
