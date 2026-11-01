@@ -52,6 +52,11 @@ vi.mock("@/components/app/trade/yt-tab", () => ({
   YtTab: ({ side }: { side: string }) => <p>{`yt tab: ${side}`}</p>,
 }))
 
+// The LP tab has its own tests (lp-tab.test.tsx); here it shows its side.
+vi.mock("@/components/app/trade/lp-tab", () => ({
+  LpTab: ({ side }: { side: string }) => <p>{`lp tab: ${side}`}</p>,
+}))
+
 import { TradePanel } from "../trade/trade-panel"
 import { TokenPicker } from "../trade/token-picker"
 
@@ -80,9 +85,9 @@ describe("TradePanel tabs", () => {
     await userEvent.click(screen.getByRole("button", { name: "Sell" }))
     expect(screen.getByText("yt tab: sell")).toBeTruthy()
     await userEvent.click(screen.getByRole("tab", { name: "LP" }))
-    expect(screen.getByText("panel: add_liquidity")).toBeTruthy()
+    expect(screen.getByText("lp tab: deposit")).toBeTruthy()
     await userEvent.click(screen.getByRole("button", { name: "Withdraw" }))
-    expect(screen.getByText("panel: remove_liquidity")).toBeTruthy()
+    expect(screen.getByText("lp tab: withdraw")).toBeTruthy()
   })
 
   it("takes the tab and side from ?tab= and ?side=", async () => {
@@ -96,7 +101,7 @@ describe("TradePanel tabs", () => {
   it("opens LP withdraw from ?tab=lp&side=withdraw", async () => {
     mocks.search = "tab=lp&side=withdraw"
     render(<TradePanel marketId="m1" />)
-    expect(await screen.findByText("panel: remove_liquidity")).toBeTruthy()
+    expect(await screen.findByText("lp tab: withdraw")).toBeTruthy()
   })
 
   it("falls back to PT Buy on unknown values, and to the tab's first side on a side it lacks", async () => {
@@ -106,7 +111,7 @@ describe("TradePanel tabs", () => {
     unmount()
     mocks.search = "tab=lp&side=sell"
     render(<TradePanel marketId="m1" />)
-    expect(await screen.findByText("panel: add_liquidity")).toBeTruthy()
+    expect(await screen.findByText("lp tab: deposit")).toBeTruthy()
   })
 
   it("the user's later pick wins over the URL", async () => {
@@ -133,6 +138,18 @@ describe("TradePanel tabs", () => {
     expect(screen.queryByRole("button", { name: "Sell" })).toBeNull()
     expect(screen.getByText("This market has matured: YT trading has closed.")).toBeTruthy()
   })
+
+  it("after maturity the LP tab opens on Withdraw, unless a side is asked for", async () => {
+    mocks.matured = true
+    mocks.search = "tab=lp"
+    const { unmount } = render(<TradePanel marketId="m1" />)
+    expect(await screen.findByText("lp tab: withdraw")).toBeTruthy()
+    unmount()
+    // History's Continue for a Keep YT route asks for Deposit, where its route resumes.
+    mocks.search = "tab=lp&side=deposit"
+    render(<TradePanel marketId="m1" />)
+    expect(await screen.findByText("lp tab: deposit")).toBeTruthy()
+  })
 })
 
 describe("TokenPicker", () => {
@@ -152,35 +169,28 @@ describe("TokenPicker", () => {
     expect(onChange).toHaveBeenCalledWith("sy")
   })
 
-  it("is in the header of the interim LP bodies, on SY, and wired to its state (R2-50)", async () => {
-    mocks.search = "tab=lp"
-    render(<TradePanel marketId="m1" />)
-    await screen.findByText("panel: add_liquidity")
-    expect(screen.getAllByRole("radio")).toHaveLength(2)
-    expect(screen.getAllByRole("radio")[1].getAttribute("aria-checked")).toBe("true")
-    await userEvent.click(screen.getAllByRole("radio")[0])
-    expect(screen.getAllByRole("radio")[0].getAttribute("aria-checked")).toBe("true")
-    expect(screen.getByText(/pay in SY/)).toBeTruthy()
-  })
-
-  it("is not in the header of the PT and YT tabs, whose fields carry their own", async () => {
+  it("is not in the panel's header on any tab: the PT, YT and LP tabs' fields carry their own", async () => {
     render(<TradePanel marketId="m1" />)
     await screen.findByText("pt tab: buy")
-    expect(screen.queryByRole("radiogroup")).toBeNull()
-    expect(screen.queryByText(/pay in SY/)).toBeNull()
-    await userEvent.click(screen.getByRole("tab", { name: "YT" }))
-    expect(screen.getByText("yt tab: buy")).toBeTruthy()
+    for (const [tab, body] of [["YT", "yt tab: buy"], ["LP", "lp tab: deposit"]] as const) {
+      expect(screen.queryByRole("radiogroup")).toBeNull()
+      expect(screen.queryByText(/pay in SY/)).toBeNull()
+      await userEvent.click(screen.getByRole("tab", { name: tab }))
+      expect(screen.getByText(body)).toBeTruthy()
+    }
     expect(screen.queryByRole("radiogroup")).toBeNull()
     expect(screen.queryByText(/pay in SY/)).toBeNull()
   })
 
-  it("the PT and YT tabs pay the underlying directly, so they offer no \"Need SY?\" deposit link", async () => {
+  it("every tab pays the underlying directly, so none offers a \"Need SY?\" deposit link", async () => {
     render(<TradePanel marketId="m1" />)
     await screen.findByText("pt tab: buy")
     expect(screen.queryByRole("button", { name: "Need SY? Deposit USDY" })).toBeNull()
     expect(screen.getByRole("button", { name: "Split USDY into PT + YT" })).toBeTruthy()
-    await userEvent.click(screen.getByRole("tab", { name: "YT" }))
-    expect(screen.queryByRole("button", { name: "Need SY? Deposit USDY" })).toBeNull()
+    for (const tab of ["YT", "LP"]) {
+      await userEvent.click(screen.getByRole("tab", { name: tab }))
+      expect(screen.queryByRole("button", { name: /Need SY\?/ })).toBeNull()
+    }
   })
 })
 
@@ -207,13 +217,10 @@ describe("Tools", () => {
     }
   })
 
-  it("links plain words on the page to the deposit and split dialogs", async () => {
+  it("links plain words on the page to the split dialog", async () => {
     mocks.search = "tab=lp"
     render(<TradePanel marketId="m1" />)
-    await screen.findByText("panel: add_liquidity")
-    await userEvent.click(screen.getByRole("button", { name: "Need SY? Deposit USDY" }))
-    expect(within(await screen.findByRole("dialog")).getByText("panel: deposit")).toBeTruthy()
-    await userEvent.keyboard("{Escape}")
+    await screen.findByText("lp tab: deposit")
     await userEvent.click(screen.getByRole("button", { name: "Split USDY into PT + YT" }))
     expect(within(await screen.findByRole("dialog")).getByText("panel: mint")).toBeTruthy()
   })

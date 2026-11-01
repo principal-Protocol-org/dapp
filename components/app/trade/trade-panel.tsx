@@ -4,19 +4,17 @@ import { Suspense, useId, useState } from "react"
 import { useSearchParams } from "next/navigation"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { ActionPanel } from "@/components/app/actions/action-panel"
-import { addLiquidityPanel, addLiquiditySyPanel, removeLiquidityPanel } from "@/components/app/actions/liquidity-tab"
 import { redeemPanel } from "@/components/app/actions/redeem-tab"
 import { usePanels, type PanelEntry } from "@/components/app/actions/panel-group"
+import { LpTab } from "@/components/app/trade/lp-tab"
 import { PtTab } from "@/components/app/trade/pt-tab"
-import { TokenPicker, type PayToken } from "@/components/app/trade/token-picker"
 import { ToolsMenu, type ToolId } from "@/components/app/trade/tools-menu"
 import { YtTab } from "@/components/app/trade/yt-tab"
 import { useManifest } from "@/components/app/manifest-provider"
 import { useHydrated } from "@/hooks/use-hydrated"
 import { useMatured } from "@/hooks/use-matured"
-import { createRpcReader } from "@/lib/protocol/reader"
 import { getMarket } from "@/lib/protocol/manifest"
-import type { Manifest, Market } from "@/lib/protocol/types"
+import type { Market } from "@/lib/protocol/types"
 
 type TabId = "pt" | "yt" | "lp"
 type SideId = "buy" | "sell" | "deposit" | "withdraw"
@@ -33,22 +31,19 @@ const SIDES: Record<TabId, { id: SideId; label: string }[]> = {
 }
 
 const isTab = (v: string | null | undefined): v is TabId => TABS.some((t) => t.id === v)
-const sideOr = (tab: TabId, v: string | null | undefined): SideId => SIDES[tab].find((s) => s.id === v)?.id ?? SIDES[tab][0].id
+/**
+ * The side `v` names on `tab`, else the tab's first. After maturity LP opens on Withdraw: Deposit has
+ * closed (History's Continue still asks for Deposit, where a Keep YT route resumes).
+ */
+const sideOr = (tab: TabId, v: string | null | undefined, matured: boolean): SideId =>
+  SIDES[tab].find((s) => s.id === v)?.id ?? (tab === "lp" && matured ? "withdraw" : SIDES[tab][0].id)
 
 /**
- * The 0001 panels this panel still hosts, built once per market: configs must stay stable
- * (panel-config rule 1). PT and YT trades are the PT and YT tabs' (Tasks 16, 17); after maturity the
- * PT tab hosts 0001's Redeem. LP is an interim body (R2-48) until Task 18 replaces it.
+ * The 0001 panel this panel still hosts, built once per market: configs must stay stable
+ * (panel-config rule 1). PT, YT and LP are the trade-adapter tabs (Tasks 16–18); after maturity the
+ * PT tab hosts 0001's Redeem.
  */
-const bodies = (market: Market, manifest: Manifest): PanelEntry[] => {
-  const reader = () => createRpcReader(manifest)
-  return [
-    { id: "pt:redeem", label: "Redeem", config: redeemPanel(market) },
-    { id: "lp:deposit", label: "Add PT + SY", config: addLiquidityPanel() },
-    { id: "lp:deposit-sy", label: "Add SY only", config: addLiquiditySyPanel(market, reader) },
-    { id: "lp:withdraw", label: "Remove", config: removeLiquidityPanel() },
-  ]
-}
+const bodies = (market: Market): PanelEntry[] => [{ id: "pt:redeem", label: "Redeem", config: redeemPanel(market) }]
 
 /**
  * The market page's action panel: PT, YT and LP tabs, a side toggle, a token picker and the Tools
@@ -88,20 +83,17 @@ function TradePanelView({ marketId }: { marketId: string }) {
   const panels = usePanels(marketId, bodies)
   const [chosenTab, setChosenTab] = useState<TabId | null>(null)
   const [chosenSide, setChosenSide] = useState<SideId | null>(null)
-  // The interim LP bodies pay in SY (R2-50); the PT and YT tabs have a picker on their own fields.
-  const [pay, setPay] = useState<PayToken>("sy")
   const [tool, setTool] = useState<ToolId | null>(null)
   if (!hydrated) return <PanelFallback />
 
   const tab: TabId = chosenTab ?? (isTab(urlTab) ? urlTab : "pt")
   // A tab the user picked starts on its first side; the URL's side applies to the URL's tab.
-  const side = sideOr(tab, chosenSide ?? (chosenTab ? null : urlSide))
+  const side = sideOr(tab, chosenSide ?? (chosenTab ? null : urlSide), matured === true)
   const code = market?.underlying.code ?? "USDY"
   // After maturity the PT tab offers Redeem only (spec §3), through 0001's panel, and the YT tab
   // says its trading has closed (R2-60).
   const ptTrade = tab === "pt" && !matured
-  const bodyId = tab === "pt" ? "pt:redeem" : `${tab}:${side}`
-  const body = panels.find((p) => p.id === bodyId)
+  const body = panels.find((p) => p.id === "pt:redeem")
   const toRedeem = () => {
     setChosenTab("pt")
     setChosenSide(null)
@@ -155,30 +147,21 @@ function TradePanelView({ marketId }: { marketId: string }) {
               ))}
             </div>
           )}
-          {tab === "lp" ? <TokenPicker value={pay} onChange={setPay} options={["underlying", "sy"]} code={code} /> : null}
         </div>
-        {tab === "lp" && pay === "underlying" ? (
-          <p className="text-xs text-ink-muted">
-            Paying with {code} directly is coming. These panels pay in SY: deposit {code} to SY first.
-          </p>
-        ) : null}
         <TabsContent value={tab}>
           {ptTrade ? (
             <PtTab marketId={marketId} side={side === "sell" ? "sell" : "buy"} />
           ) : tab === "yt" ? (
             <YtTab marketId={marketId} side={side === "sell" ? "sell" : "buy"} onRedeem={toRedeem} />
+          ) : tab === "lp" ? (
+            <LpTab marketId={marketId} side={side === "withdraw" ? "withdraw" : "deposit"} />
           ) : body ? (
             <ActionPanel key={body.id} config={body.config} marketId={marketId} />
           ) : null}
         </TabsContent>
       </Tabs>
       <p className="flex flex-wrap gap-x-4 gap-y-1 text-sm text-ink-muted">
-        {/* Only the interim LP bodies still need SY; the PT and YT tabs pay the underlying directly. */}
-        {tab === "lp" ? (
-          <button type="button" onClick={() => setTool("deposit")} className="underline underline-offset-2 hover:text-ink">
-            Need SY? Deposit {code}
-          </button>
-        ) : null}
+        {/* Every tab pays the underlying directly, so none needs SY first; the Tools menu still deposits. */}
         <button type="button" onClick={() => setTool("split")} className="underline underline-offset-2 hover:text-ink">
           Split {code} into PT + YT
         </button>
