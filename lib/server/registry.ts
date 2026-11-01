@@ -733,6 +733,47 @@ export async function resolvedMarkets(deps: { store: RegistryStore; manifest: Ma
   return listed
 }
 
+/** A registry market the app does not list, with why (R2-38): this app's own words, never RPC text. */
+export type InvalidMarket = { pool: string; name: string | null; reason: string }
+
+/**
+ * The rows the registry holds as `valid = false` (a hidden seed too), for the manager view
+ * (R2-38). Their reasons were written by this module's checks (Task 11: no RPC text). When the
+ * registry cannot be read, or is slower than `timeoutMs`, the answer is `unavailable`, never an
+ * empty list that would read as "nothing is invalid".
+ */
+export async function invalidMarkets(deps: {
+  store: RegistryStore
+  manifest: Manifest
+  timeoutMs?: number
+}): Promise<{ status: "ok"; rows: InvalidMarket[] } | { status: "unavailable" }> {
+  let rows: RegistryRow[]
+  try {
+    rows = await within(deps.store.rows(), deps.timeoutMs ?? ROWS_TIMEOUT_MS)
+  } catch (error) {
+    if (!(error instanceof DatabaseConfigError) && !(error instanceof RegistryTimeout)) {
+      console.error(`registry: invalid markets could not be read (${dbCode(error)})`)
+    }
+    return { status: "unavailable" }
+  }
+  const seedNames = new Map(deps.manifest.markets.map((m) => [m.contracts.pool, m.displayName]))
+  const invalid = rows.filter((r) => r.valid === false)
+  return {
+    status: "ok",
+    rows: invalid.map((r) => {
+      let name: string | null = seedNames.get(r.pool) ?? null
+      if (name === null && r.market) {
+        try {
+          name = parseMarket(r.market).displayName
+        } catch {
+          name = null
+        }
+      }
+      return { pool: r.pool, name, reason: r.reason ?? "it did not pass the registry's checks" }
+    }),
+  }
+}
+
 /** A database failure by its code only: its message can carry the host or the connection string. */
 function dbCode(error: unknown): string {
   return error && typeof error === "object" && "code" in error ? String((error as { code: unknown }).code) : "unknown"

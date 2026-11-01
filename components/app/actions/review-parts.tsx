@@ -1,6 +1,6 @@
 import { formatDuration } from "@/components/app/live"
 import { formatUnixTime, shorten } from "@/lib/protocol/format"
-import type { Review } from "@/lib/protocol/review"
+import type { AnyReview } from "@/lib/protocol/review"
 
 /**
  * When the transaction can no longer land, in plain words (M3). Two limits apply: the contract
@@ -38,7 +38,7 @@ export function TimeLimit({ deadline, validUntil, ledgerTime }: { deadline?: num
 }
 
 /** The folded call, call tree, unsigned transaction hash and fee field of a prepared review. */
-export function TechnicalDetails({ review }: { review: Review }) {
+export function TechnicalDetails({ review }: { review: AnyReview }) {
   return (
 <details className="rounded-lg border border-line p-3 text-sm">
   <summary className="cursor-pointer font-medium text-ink">Technical details</summary>

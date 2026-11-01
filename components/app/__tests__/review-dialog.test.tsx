@@ -1,7 +1,7 @@
 import { render, screen } from "@testing-library/react"
 import { describe, expect, it } from "vitest"
 import { formatUnixTime } from "@/lib/protocol/format"
-import type { Review } from "@/lib/protocol/review"
+import type { ManagerReview, Review } from "@/lib/protocol/review"
 import { ReviewDialog } from "../actions/review-dialog"
 
 const NOW = 1_800_000_000
@@ -66,5 +66,36 @@ describe("ReviewDialog time limits (M3)", () => {
   it("says to check the device clock when the time bound has already passed by ledger time", () => {
     const text = show(review({ deadline: NOW + 300, validUntil: NOW - 600 }))
     expect(text).toContain("Check your device clock")
+  })
+})
+
+describe("ReviewDialog for a manager call (0002 §5)", () => {
+  function managerReview(): ManagerReview {
+    const invocation = { contractId: "CPOOL", functionName: "set_paused", args: [] }
+    return {
+      origin: { type: "manager", call: { kind: "set_paused", source: "G", invocation, label: "Pause the pool of USDY 2027" } },
+      invocation,
+      unsignedXdr: "AAAA",
+      unsignedXdrHash: "sha256:11",
+      fee: "100",
+      preparedAtMs: NOW * 1000,
+      expiresAtMs: NOW * 1000 + 60_000,
+      summary: { give: [], getAtLeast: [], fees: ["Network fee: up to 0.00001 XLM"], validUntil: NOW + 300 },
+      callTree: ["MarketPool.set_paused"],
+    }
+  }
+  const showManager = () =>
+    render(
+      <ReviewDialog open title="Pause pool" phase="review" review={managerReview()} blockers={[]} ledgerTime={NOW} secondsLeft={60} pending={false} canSign onSign={() => {}} onClose={() => {}} />,
+    )
+
+  it("shows what is signed, from the call's label, before anything else, and no give / get lines", () => {
+    showManager()
+    const text = screen.getByRole("dialog").textContent ?? ""
+    expect(screen.getByText("Pause the pool of USDY 2027")).toBeTruthy()
+    expect(text.indexOf("Pause the pool of USDY 2027")).toBeLessThan(text.indexOf("Fees"))
+    expect(text).not.toContain("You give")
+    expect(text).not.toContain("the least you get")
+    expect(text).toContain("MarketPool.set_paused")
   })
 })

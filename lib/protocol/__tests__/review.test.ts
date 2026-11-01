@@ -30,7 +30,8 @@ import {
   setPausedCall,
   type ManagerCall,
 } from "../manager-calls"
-import { evaluateManagerGates, type Role } from "../manager-gates"
+import { evaluateManagerGates } from "../manager-gates"
+import type { Role } from "../roles"
 import { parseManifest } from "../manifest"
 import { AMOUNTS_MOVED_REASON, SubmissionRejectedError, createRpcServer, transactionEnvelopeHash } from "../stellar"
 import {
@@ -48,7 +49,7 @@ import {
   type ReviewRpcServer,
   TX_TIMEOUT_SECONDS,
 } from "../review"
-import type { Live, WalletState } from "../types"
+import type { Finding, Live, WalletState } from "../types"
 
 const manifest = parseManifest(structuredClone(testnetJson))
 const market = manifest.markets[0]
@@ -1483,37 +1484,38 @@ describe("manager reviews (0002 §5): the same review → sign pipeline as an ac
     const connected = (publicKey = SOURCE): WalletState => ({ status: "connected", publicKey, networkPassphrase: passphrase })
     const holds = (...roles: Role[]): Live<Role[]> => ({ status: "live", value: roles, ledger: 90 })
     const unreadable: Live<Role[]> = { status: "unavailable", error: "RPC rate limited (429)" }
+    const ok = { findings: [] as Finding[], listed: true }
     const pause = () => setPausedCall(manifest, { source: SOURCE, marketId: market.marketId, contract: "pool", paused: true })
     const authorize = () => setAuthorizedCall(manifest, { source: SOURCE, sac: market.underlying.sac, account: GRANTEE, authorize: true })
     const register = () => registerMarketCall(manifest, { source: SOURCE, pool: FOREIGN })
     const consumer = () => addConsumerCall(manifest, { source: SOURCE, consumer: FOREIGN })
 
     it("wrong role blocks with the role named", () => {
-      expect(evaluateManagerGates(grant(), { wallet: connected(), roles: holds("issuer", "creator") })).toEqual([
+      expect(evaluateManagerGates(grant(), { ...ok, wallet: connected(), roles: holds("issuer", "creator") })).toEqual([
         {
           code: "wallet",
           message: `Only the Permissioning admin can grant this. You are connected as ${short(SOURCE)}, which is not the Permissioning admin. Connect the Permissioning admin's wallet to sign this.`,
         },
       ])
-      const messageFor = (call: ManagerCall) => evaluateManagerGates(call, { wallet: connected(), roles: holds() }).map((b) => b.message)
+      const messageFor = (call: ManagerCall) => evaluateManagerGates(call, { ...ok, wallet: connected(), roles: holds() }).map((b) => b.message)
       expect(messageFor(authorize())).toEqual([expect.stringMatching(/^Only the asset's issuer can change who is authorized to hold it\. /)])
       expect(messageFor(pause())).toEqual([expect.stringMatching(/^Only this contract's admin can pause or unpause it\. /)])
-      expect(messageFor(register())).toEqual([expect.stringMatching(/^Only the protocol admin can register a market on the Router\. /)])
-      expect(messageFor(consumer())).toEqual([expect.stringMatching(/^Only the protocol admin can add a risk control consumer\. /)])
+      expect(messageFor(register())).toEqual([expect.stringMatching(/^Only the Router admin can register a market on the Router\. /)])
+      expect(messageFor(consumer())).toEqual([expect.stringMatching(/^Only the RiskControl admin can add a risk control consumer\. /)])
     })
 
     it("the role each call needs lets it through", () => {
-      const pass = (call: ManagerCall, role: Role) => expect(evaluateManagerGates(call, { wallet: connected(), roles: holds(role) })).toEqual([])
+      const pass = (call: ManagerCall, role: Role) => expect(evaluateManagerGates(call, { ...ok, wallet: connected(), roles: holds(role) })).toEqual([])
       pass(authorize(), "issuer")
       pass(grant(), "permissioningAdmin")
       pass(grantAssetCall(manifest, { source: SOURCE, account: GRANTEE, asset: market.contracts.yt }), "permissioningAdmin")
       pass(pause(), "contractAdmin")
-      pass(register(), "protocolAdmin")
-      pass(consumer(), "protocolAdmin")
+      pass(register(), "routerAdmin")
+      pass(consumer(), "riskControlAdmin")
     })
 
     it("an unavailable roles read blocks a call that needs a role", () => {
-      expect(evaluateManagerGates(grant(), { wallet: connected(), roles: unreadable })).toEqual([
+      expect(evaluateManagerGates(grant(), { ...ok, wallet: connected(), roles: unreadable })).toEqual([
         {
           code: "unavailable",
           message: "Could not read your roles (RPC rate limited (429)). Signing stays off until it can be checked; try again in a moment.",
@@ -1521,22 +1523,44 @@ describe("manager reviews (0002 §5): the same review → sign pipeline as an ac
       ])
     })
 
+    it("R2-53: a manifest error finding turns off every call but set_paused", () => {
+      const broken = { ...ok, findings: [{ severity: "error", message: "The Router address is not valid." }] as Finding[] }
+      const gates = (call: ManagerCall, role: Role) => evaluateManagerGates(call, { ...broken, wallet: connected(), roles: holds(role) })
+      expect(gates(pause(), "contractAdmin")).toEqual([])
+      expect(gates(grant(), "permissioningAdmin")).toEqual([
+        { code: "manifest", message: expect.stringContaining("The Router address is not valid.") },
+      ])
+      expect(gates(claim(), "issuer")).toHaveLength(1)
+      // A warning does not block.
+      const warned = { ...ok, findings: [{ severity: "warning", message: "x" }] as Finding[] }
+      expect(evaluateManagerGates(grant(), { ...warned, wallet: connected(), roles: holds("permissioningAdmin") })).toEqual([])
+    })
+
+    it("R2-53: a market that is not listed valid turns off every call but set_paused", () => {
+      const unlisted = { ...ok, listed: false }
+      expect(evaluateManagerGates(pause(), { ...unlisted, wallet: connected(), roles: holds("contractAdmin") })).toEqual([])
+      expect(evaluateManagerGates(claim(), { ...unlisted, wallet: connected(), roles: holds() })).toEqual([
+        { code: "manifest", message: expect.stringContaining("not listed as valid") },
+      ])
+    })
+
     it("the fee claims are permissionless: no role is needed and the roles are not read", () => {
-      expect(evaluateManagerGates(claim(), { wallet: connected(), roles: unreadable })).toEqual([])
-      expect(evaluateManagerGates(claim(), { wallet: connected(), roles: holds() })).toEqual([])
+      expect(evaluateManagerGates(claim(), { ...ok, wallet: connected(), roles: unreadable })).toEqual([])
+      expect(evaluateManagerGates(claim(), { ...ok, wallet: connected(), roles: holds() })).toEqual([])
     })
 
     it("checks the wallet and network first, as for an action, and the role only for the connected signer", () => {
-      expect(evaluateManagerGates(grant(), { wallet: { status: "disconnected" }, roles: unreadable })).toEqual([
+      expect(evaluateManagerGates(grant(), { ...ok, wallet: { status: "disconnected" }, roles: unreadable })).toEqual([
         { code: "wallet", message: "No wallet is connected. Connect your wallet to sign." },
       ])
       expect(
         evaluateManagerGates(grant(), {
+          ...ok,
           wallet: { status: "wrong_network", publicKey: SOURCE, actualPassphrase: "Public Global Stellar Network ; September 2015", expectedPassphrase: passphrase },
           roles: holds("permissioningAdmin"),
         }),
       ).toEqual([{ code: "network", message: `Your wallet is on a different network from this market. Switch it to the network "${passphrase}", then try again.` }])
-      expect(evaluateManagerGates(grant(), { wallet: connected(Keypair.random().publicKey()), roles: holds() })).toEqual([
+      expect(evaluateManagerGates(grant(), { ...ok, wallet: connected(Keypair.random().publicKey()), roles: holds() })).toEqual([
         {
           code: "wallet",
           message:

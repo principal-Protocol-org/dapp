@@ -11,20 +11,19 @@
 import { shorten } from "./format"
 import { Gates, walletGate, type Blocker } from "./gates"
 import type { ManagerCall, ManagerCallKind } from "./manager-calls"
-import type { Live, WalletState } from "./types"
+import type { Role } from "./roles"
+import type { Finding, Live, WalletState } from "./types"
 
-/**
- * The roles an account can hold (spec 0002 §5, "My markets"): `issuer` is the underlying SAC's
- * `admin()`, `creator` `MarketConfig.creator()`, `protocolAdmin` `MarketConfig.protocol_admin()`
- * (and the admin of the Router and RiskControl it wires markets on), `contractAdmin` `get_admin()`
- * on the pool, SY wrapper or manager, `permissioningAdmin` `Permissioning.get_admin()`.
- */
-export type Role = "issuer" | "creator" | "protocolAdmin" | "contractAdmin" | "permissioningAdmin"
+export type { Role }
 
 export type ManagerGateContext = {
   wallet: WalletState
   /** The connected account's roles where the call acts; `unavailable` blocks a call that needs one. */
   roles: Live<Role[]>
+  /** `validateManifest` output: an `error` turns off every call but `set_paused` (R2-53). */
+  findings: Finding[]
+  /** The market the call is about is listed valid (a valid registry row or a validated seed); true for a shared contract. */
+  listed: boolean
 }
 
 /** The role a call needs, who holds it, and what it lets them do, in plain words. */
@@ -43,8 +42,8 @@ export const REQUIRED_ROLE: Record<ManagerCallKind, RoleRequirement | null> = {
   grant_account: { role: "permissioningAdmin", who: "the Permissioning admin", can: "grant this" },
   grant_asset: { role: "permissioningAdmin", who: "the Permissioning admin", can: "grant this" },
   set_paused: { role: "contractAdmin", who: "this contract's admin", can: "pause or unpause it" },
-  register_market: { role: "protocolAdmin", who: "the protocol admin", can: "register a market on the Router" },
-  add_consumer: { role: "protocolAdmin", who: "the protocol admin", can: "add a risk control consumer" },
+  register_market: { role: "routerAdmin", who: "the Router admin", can: "register a market on the Router" },
+  add_consumer: { role: "riskControlAdmin", who: "the RiskControl admin", can: "add a risk control consumer" },
   claim_protocol_fees: null,
   claim_creator_fees: null,
 }
@@ -58,6 +57,17 @@ export const REQUIRED_ROLE: Record<ManagerCallKind, RoleRequirement | null> = {
 export function evaluateManagerGates(call: ManagerCall, ctx: ManagerGateContext): Blocker[] {
   const g = new Gates()
   walletGate(call.source, ctx.wallet, g)
+  // R2-53: pausing stays possible whatever the market's validity (an emergency action; the role and
+  // the simulation still apply). Everything else needs a trusted manifest and a market listed valid.
+  if (call.kind !== "set_paused") {
+    const errors = ctx.findings.filter((f) => f.severity === "error")
+    if (errors.length > 0) {
+      g.block("manifest", `The deployment manifest for this network is invalid, so signing is off until it is fixed: ${errors.map((e) => e.message).join("; ")}`)
+    }
+    if (!ctx.listed) {
+      g.block("manifest", "This market is not listed as valid, so only pausing it is possible. Signing is off until the market passes the registry's checks again.")
+    }
+  }
   const need = REQUIRED_ROLE[call.kind]
   const signer = ctx.wallet.status === "connected" && ctx.wallet.publicKey === call.source
   if (need && signer) {
