@@ -75,7 +75,13 @@ function YtTrade({ marketId, side }: { marketId: string; side: YtSide }) {
   const [touched, setTouched] = useState<Record<YtSide, boolean>>({ buy: false, sell: false })
   // The picker defaults to the underlying (R2-50): on "You pay" for a buy, on "You receive" for a sale.
   const [tokens, setTokens] = useState<Record<YtSide, PayToken>>({ buy: "underlying", sell: "underlying" })
+  // Max's refusal is for the side and token it was asked on: a change of either clears it.
   const [maxError, setMaxError] = useState<string | null>(null)
+  const [maxSide, setMaxSide] = useState(side)
+  if (maxSide !== side) {
+    setMaxSide(side)
+    setMaxError(null)
+  }
   const [last, setLast] = useState<{ owner: string; notice: TxNotice } | null>(null)
 
   const code = market?.underlying.code ?? "USDY"
@@ -127,7 +133,16 @@ function YtTrade({ marketId, side }: { marketId: string; side: YtSide }) {
   if (!market) return null
 
   const picker = (label: string) => (
-    <TokenPicker label={label} value={token} onChange={(t) => setTokens((all) => ({ ...all, [side]: t }))} options={["underlying", "sy"]} code={code} />
+    <TokenPicker
+      label={label}
+      value={token}
+      onChange={(t) => {
+        setMaxError(null)
+        setTokens((all) => ({ ...all, [side]: t }))
+      }}
+      options={["underlying", "sy"]}
+      code={code}
+    />
   )
 
   const details: PreviewLine[] = q ? detailLines(q, side, code, slippageBps, steps, amountText, unitOf) : []

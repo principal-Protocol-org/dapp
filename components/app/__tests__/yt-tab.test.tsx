@@ -30,6 +30,22 @@ vi.mock("@/lib/protocol/stellar", async (orig) => ({
   // The fake reviews carry no real XDR; the route logs this hash before "signing".
   transactionEnvelopeHash: (xdr: string) => `hash-of-${xdr}`,
 }))
+// Switches for the edge cases: a break-even rate that cannot be worked out, a solver that throws.
+const stub = vi.hoisted(() => ({ noBreakEven: false, solverThrows: false }))
+vi.mock("@/lib/protocol/rates", async (orig) => {
+  const mod = await orig<typeof import("@/lib/protocol/rates")>()
+  return { ...mod, effectiveImpliedApy: (p: Parameters<typeof mod.effectiveImpliedApy>[0]) => (stub.noBreakEven ? undefined : mod.effectiveImpliedApy(p)) }
+})
+vi.mock("@/lib/protocol/yt-solver", async (orig) => {
+  const mod = await orig<typeof import("@/lib/protocol/yt-solver")>()
+  return {
+    ...mod,
+    solveBuyYt: (...args: Parameters<typeof mod.solveBuyYt>) => {
+      if (stub.solverThrows) throw new Error("Buy-YT solver did not converge")
+      return mod.solveBuyYt(...args)
+    },
+  }
+})
 vi.mock("@/lib/protocol/review", async (orig) => ({
   ...(await orig<object>()),
   prepareReview: mocks.prepareReview,
@@ -95,6 +111,8 @@ beforeEach(() => {
   installDefaults(mocks)
   mocks.manifest = usdyManifest as typeof mocks.manifest
   nav.search = ""
+  stub.noBreakEven = false
+  stub.solverThrows = false
   mocks.accounts[A] = accountState({
     underlying: live(100_000n * UNIT),
     sy: live(100_000n * UNIT),
@@ -221,10 +239,42 @@ describe("YT tab — Buy", () => {
     )
     await renderUi(<YtTab marketId="m1" side="buy" />)
     await enter("You pay", "100")
-    const adds = (raw: bigint) => new RegExp(`this adds ${formatAmount(raw, 7, 7).replace(".", "\\.")}\\.`)
-    expect(screen.getByText(adds(dep))).toBeTruthy()
-    expect(screen.getByText(adds(reported))).toBeTruthy()
+    const fmt = (raw: bigint) => formatAmount(raw, 7, 7).replace(".", "\\.")
+    // Step 1, the deposit, against today's window.
+    expect(screen.getByText(new RegExp(`^This would trip the protocol-wide circuit breaker: 800 of .* this adds ${fmt(dep)}\\.`))).toBeTruthy()
+    // Step 2, the buy, reports its sy_in at the SY rate, with step 1's deposit already counted (R2-61).
+    expect(
+      screen.getByText(new RegExp(`^Step 2 \\(Buy YT\\), counted after the steps before it: this would trip the protocol-wide circuit breaker: ${fmt(800n * UNIT + dep)} of .* this adds ${fmt(reported)}\\.`)),
+    ).toBeTruthy()
     expect(reviewButton("Buy YT").disabled).toBe(true)
+  })
+
+  it("the breaker counts the deposit and the buy both: a route that fits step by step but not in total is refused before its first signature (R2-61)", async () => {
+    const r = solved(100n * UNIT)
+    const moved = depositFor(r.syIn)
+    simulateReturns(mocks, moved)
+    // Room for 1.5x what is moved: each step alone fits; the deposit and the buy's mint together do not.
+    const room = (moved * 3n) / 2n
+    mocks.fetchMarketState.mockResolvedValue(
+      poolMarket({ cb: { limit: live(100_000n * UNIT), volume: live(100_000n * UNIT - room), assetLimit: live(0n), assetVolume: live(0n) } }),
+    )
+    await renderUi(<YtTab marketId="m1" side="buy" />)
+    await enter("You pay", "100")
+    expect(screen.queryByText(/^This would trip/)).toBeNull()
+    expect(screen.getByText(/^Step 2 \(Buy YT\), counted after the steps before it: this would trip the protocol-wide circuit breaker/)).toBeTruthy()
+    expect(reviewButton("Buy YT").disabled).toBe(true)
+    expect(mocks.prepareReview).not.toHaveBeenCalled()
+  })
+
+  it("a simulated deposit short of the buy's sy_in is refused before the first signature, naming step 2", async () => {
+    const r = solved(100n * UNIT)
+    // The deposit, simulated as the user, gives one raw SY less than the buy needs.
+    simulateReturns(mocks, r.syIn - 1n)
+    await renderUi(<YtTab marketId="m1" side="buy" />)
+    await enter("You pay", "100")
+    expect(screen.getByText(/^Step 2 \(Buy YT\) needs more than step 1 gives, as simulated now/)).toBeTruthy()
+    expect(reviewButton("Buy YT").disabled).toBe(true)
+    expect(mocks.prepareReview).not.toHaveBeenCalled()
   })
 
   it("break-even sentence names the effective implied APY and says the YT is worth 0 at maturity", async () => {
@@ -296,6 +346,61 @@ describe("YT tab — Buy", () => {
     // 0001's floors: the YT floor and max_net_cost from the simulated net cost (R2-58).
     expect(input.guards).toEqual({ minOut: minAfterSlippage(r.ytOut, 50n), maxNetCost: ceilDiv(r.netCost * (BPS + 50n), BPS) })
     expect(mocks.executeReview).not.toHaveBeenCalled()
+  })
+
+  it("a break-even rate that cannot be worked out reads Unavailable, in the row and the sentence", async () => {
+    stub.noBreakEven = true
+    await renderUi(<YtTab marketId="m1" side="buy" />)
+    await enter("You pay", "100")
+    expect(detail("Effective implied APY")).toBe("Unavailable")
+    expect(screen.getByText(/The break-even rate is unavailable: this app could not work it out from these amounts\. At maturity the YT is worth 0\./)).toBeTruthy()
+    expect(screen.queryByText(/You gain if USDY's average APY until then exceeds/)).toBeNull()
+  })
+
+  it("a solver that throws makes the quote Unavailable and the route disabled, never 0 YT", async () => {
+    stub.solverThrows = true
+    await renderUi(<YtTab marketId="m1" side="buy" />)
+    await enter("You pay", "100")
+    expect(received()).toBe("Unavailable")
+    expect(screen.getByText(/^Unavailable: This app could not size this purchase \(Buy-YT solver did not converge\)/)).toBeTruthy()
+    expect(screen.getByText(/^Buy YT is not offered for this amount\. This app could not size this purchase/)).toBeTruthy()
+    expect(screen.queryByText(/^0(\.0+)? YT$/)).toBeNull()
+    expect(reviewButton("Buy YT").disabled).toBe(true)
+  })
+
+  it("the amount resets once the step reaches the network (R2-3)", async () => {
+    const r = solved(100n * UNIT)
+    simulateReturns(mocks, [r.ytOut, r.syBack])
+    await renderUi(<YtTab marketId="m1" side="buy" />)
+    await pick("Pay with", /SY/)
+    await enter("You pay", "100")
+    await user().click(reviewButton("Buy YT"))
+    await settle()
+    await user().click(await screen.findByRole("button", { name: "Sign step 1 of 1" }))
+    await settle()
+    expect(mocks.executeReview).toHaveBeenCalledTimes(1)
+    expect(payField().value).toBe("")
+  })
+
+  it("a Max refusal is not left standing after the token or the side changes", async () => {
+    // Half a raw unit's worth of moving room: nothing this balance can spend is priced.
+    mocks.accounts[A] = accountState({ underlying: live(3n), sy: live(3n), yt: live(1_000n * UNIT), permYt: live(true), depositCap: live(0n) })
+    nav.search = "tab=yt"
+    await renderUi(<TradePanel marketId="m1" />)
+    await user().click(screen.getByRole("button", { name: "Max You pay" }))
+    await settle()
+    expect(screen.getByText(/^Max could not be worked out|^Your balance does not cover/)).toBeTruthy()
+    await pick("Pay with", /SY/)
+    expect(screen.queryByText(/^Max could not be worked out|^Your balance does not cover/)).toBeNull()
+    await pick("Pay with", /^USDY$/)
+    await user().click(screen.getByRole("button", { name: "Max You pay" }))
+    await settle()
+    expect(screen.getByText(/^Max could not be worked out|^Your balance does not cover/)).toBeTruthy()
+    await user().click(screen.getByRole("button", { name: "Sell" }))
+    await settle()
+    await user().click(screen.getByRole("button", { name: "Buy" }))
+    await settle()
+    expect(screen.queryByText(/^Max could not be worked out|^Your balance does not cover/)).toBeNull()
   })
 
   it("a spend the pool cannot absorb is Unavailable with the solver's reason, never a zero", async () => {
