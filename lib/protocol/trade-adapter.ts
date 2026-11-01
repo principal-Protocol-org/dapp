@@ -514,34 +514,46 @@ const MAX_TRIES = 8
  * (a hundredth of the balance). A smaller buy moves a larger multiple of its spend, so a ratio taken
  * at a spend no larger than the result is the cautious one; one taken at a larger spend (a typed
  * amount above Max, or a reference above it when the multiple passes 100) would move more than the
- * balance. So every candidate is quoted again, and one that moves more than the balance is replaced
- * from a reference four times smaller. The balance gate still checks. A trade whose quote discloses
- * no capital moves only what it spends: it may spend the whole balance.
+ * balance. So every candidate is quoted again: one that moves more than the balance is replaced from
+ * a reference four times smaller, and one the trade cannot price (the pool cannot take it) caps the
+ * next at a quarter of it. The balance gate still checks. A trade whose quote discloses no capital
+ * moves only what it spends: it may spend the whole balance.
  */
 export function maxSpend(quoteAt: (amount: bigint) => Live<TradeQuote> | null, balance: bigint, typed?: bigint): MaxSpend {
   if (balance <= 0n) return { ok: true, amount: 0n }
   const fallback = balance / MAX_REFERENCE_DIVISOR > 0n ? balance / MAX_REFERENCE_DIVISOR : balance
+  const quarter = (amount: bigint) => (amount / MAX_BACKOFF > 0n ? amount / MAX_BACKOFF : 1n)
+  const why = (error: string) => `Max could not be worked out: ${error.replace(/\.$/, "")}.`
   let reference = typed !== undefined && typed > 0n && typed <= balance ? typed : fallback
-  const why = (q: Live<TradeQuote> | null) =>
-    `Max could not be worked out: ${q ? (q.status === "unavailable" ? q.error.replace(/\.$/, "") : "the trade could not be priced") : "this market's data has not loaded yet"}.`
+  // The largest spend still worth trying: a spend the trade cannot price lowers it.
+  let ceiling = balance
+  let reason = "the trade could not be priced"
   for (let i = 0; i < MAX_TRIES; i++) {
-    let at = quoteAt(reference)
-    // A typed spend the trade cannot be priced at still leaves the reference spend to try.
-    if ((!at || at.status !== "live") && reference !== fallback) {
-      reference = fallback
-      at = quoteAt(reference)
+    const at = quoteAt(reference)
+    if (!at) return { ok: false, reason: why("this market's data has not loaded yet") }
+    if (at.status !== "live") {
+      // A typed spend the trade cannot price still leaves the reference spend; a reference it cannot
+      // price backs off.
+      reason = at.error
+      reference = reference !== fallback && fallback <= ceiling ? fallback : quarter(reference)
+      continue
     }
-    if (!at || at.status !== "live") return { ok: false, reason: why(at) }
     const capital = at.value.capital
     if (!capital) return { ok: true, amount: balance }
-    if (capital.moved <= 0n) return { ok: false, reason: why(null) }
+    if (capital.moved <= 0n) return { ok: false, reason: why("the trade reports nothing moved for this amount") }
     const fit = (balance * reference) / capital.moved
-    const candidate = fit < balance ? fit : balance
+    const candidate = fit < ceiling ? fit : ceiling
     if (candidate <= 0n) return { ok: false, reason: "Your balance does not cover what even the smallest purchase moves." }
     const check = quoteAt(candidate)
-    if (!check || check.status !== "live") return { ok: false, reason: why(check) }
+    if (!check) return { ok: false, reason: why("this market's data has not loaded yet") }
+    if (check.status !== "live") {
+      reason = check.error
+      ceiling = quarter(candidate)
+      if (reference > ceiling) reference = ceiling
+      continue
+    }
     if (!check.value.capital || check.value.capital.moved <= balance) return { ok: true, amount: candidate }
-    reference = candidate / MAX_BACKOFF > 0n ? candidate / MAX_BACKOFF : 1n
+    reference = quarter(candidate)
   }
-  return { ok: false, reason: "Max could not be worked out for this balance: enter the amount yourself." }
+  return { ok: false, reason: why(reason) }
 }

@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import type { AccountState } from "../account-state"
 import { ACTION_META, type ActionId, type ActionInput } from "../actions"
 import type { ComplianceItem } from "../compliance"
-import { BLOCKER_ORDER, evaluateGates, type Blocker, type GateContext } from "../gates"
+import { BLOCKER_ORDER, breakerReport, evaluateGates, withEarlierReports, type Blocker, type GateContext } from "../gates"
 import type { MarketState } from "../market-state"
 import { SCALE } from "../math"
 import type { SimulationOutcome } from "../stellar"
@@ -908,6 +908,77 @@ describe("Buy YT is gated on what it moves, not on what it spends (R2-57)", () =
     }
     expect(gates("deposit", room6000, { amount: 2n * SPEND })).toEqual([])
     expect(codes(gates("deposit", room6000, { amount: 2n * SY_IN }))).toEqual(["cap"])
+  })
+})
+
+describe("breakerReport — what one step adds to RiskControl's window (R2-61)", () => {
+  const market = healthyMarket()
+  it("a deposit reports its amount; wrap_and_mint reports twice; buy_yt its SY at the SY rate", () => {
+    expect(breakerReport(inputFor("deposit"), { market })).toBe(10n * UNIT)
+    expect(breakerReport(inputFor("mint"), { market })).toBe(20n * UNIT)
+    const m2 = { ...market, exchangeRate: live(2n * SCALE) }
+    expect(breakerReport(inputFor("buy_yt"), { market: m2 })).toBe(20n * UNIT)
+  })
+
+  it("an action that does not report, or no amount, adds nothing", () => {
+    expect(breakerReport(inputFor("sell_pt"), { market })).toBe(0n)
+    expect(breakerReport(inputFor("withdraw"), { market })).toBe(0n)
+    expect(breakerReport(inputFor("deposit", { amount: 0n }), { market })).toBe(0n)
+  })
+
+  it("buy_yt's report is unknown while the SY exchange rate cannot be read", () => {
+    expect(breakerReport(inputFor("buy_yt"), { market: { ...market, exchangeRate: down() } })).toBeUndefined()
+  })
+})
+
+describe("withEarlierReports — a later route step is checked with the earlier steps counted (R2-61)", () => {
+  const tight = (c: GateContext) => {
+    c.market.cb.limit = live(100n * UNIT)
+    c.market.cb.volume = live(85n * UNIT)
+    c.market.cb.assetLimit = live(100n * UNIT)
+    c.market.cb.assetVolume = live(81n * UNIT)
+  }
+  const ctxWith = (mutate: Mutate) => {
+    const c = healthyCtx("deposit")
+    mutate(c, "deposit")
+    return c
+  }
+
+  it("adds what the earlier steps report to both windows: a step that fits alone is refused once they count", () => {
+    const c = ctxWith(tight)
+    expect(evaluateGates(inputFor("deposit"), c)).toEqual([])
+    const later = withEarlierReports(c, 10n * UNIT, 2)
+    expect(later.market.cb.volume).toEqual(live(95n * UNIT))
+    expect(later.market.cb.assetVolume).toEqual(live(91n * UNIT))
+    expect(codes(evaluateGates(inputFor("deposit"), later))).toEqual(["risk", "risk"])
+    // The context passed in is not changed.
+    expect(c.market.cb.volume).toEqual(live(85n * UNIT))
+  })
+
+  it("leaves an unreadable volume unreadable", () => {
+    const c = ctxWith((x) => {
+      tight(x)
+      x.market.cb.assetVolume = down("rpc down")
+    })
+    expect(withEarlierReports(c, 10n * UNIT, 2).market.cb.assetVolume).toEqual(down("rpc down"))
+  })
+
+  it("an earlier step whose report is unknown makes the step's breaker check unverifiable, never a pass", () => {
+    const later = withEarlierReports(ctxWith(tight), undefined, 2)
+    const blockers = evaluateGates(inputFor("deposit"), later)
+    // Both windows are on, and neither can be verified.
+    expect(codes(blockers)).toEqual(["unavailable", "unavailable"])
+    for (const b of blockers) expect(b.message).toMatch(/before step 2 of this route/)
+    // With both breakers off there is nothing to verify.
+    const off = withEarlierReports(
+      ctxWith((x) => {
+        x.market.cb.limit = live(0n)
+        x.market.cb.assetLimit = live(0n)
+      }),
+      undefined,
+      2,
+    )
+    expect(evaluateGates(inputFor("deposit"), off)).toEqual([])
   })
 })
 

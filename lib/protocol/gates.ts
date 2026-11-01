@@ -449,27 +449,57 @@ function complianceGate(input: ActionInput, ctx: GateContext, g: Gates): void {
 }
 
 /**
- * `RiskControl.check_deposit` (risk_control:233-290): each limit trips on `volume + amount > limit`;
- * a limit of 0 disables it. wrap_and_mint reports twice (SYWrapper.deposit, then
- * PrincipalManager.mint); swap_sy_for_yt once, from mint, at the SY's underlying value
- * (principal_manager:363-368). `2·amount` bounds the mint leg (`floor(floor(a/r)·r) <= a`) from above.
+ * What one action adds to `RiskControl.check_deposit`'s window (risk_control:233-290), in the
+ * underlying: a deposit its amount; wrap_and_mint twice (SYWrapper.deposit, then
+ * PrincipalManager.mint), bounded from above by `2·amount` (`floor(floor(a/r)·r) <= a`);
+ * swap_sy_for_yt once, from mint, at the SY's underlying value (principal_manager:363-368). 0 for an
+ * action that does not report, or no amount; undefined when it cannot be worked out (buy_yt with the
+ * SY exchange rate unreadable).
  */
+export function breakerReport(input: ActionInput, ctx: Pick<GateContext, "market">): bigint | undefined {
+  const a = input.action
+  const amount = input.amount
+  if (!RISK_CHECKED.has(a) || amount <= 0n) return 0n
+  if (a === "deposit") return amount
+  if (a === "mint") return 2n * amount
+  const rate = ctx.market.exchangeRate
+  if (rate.status !== "live") return undefined
+  const value = (amount * rate.value) / SCALE
+  return value > 0n ? value : amount
+}
+
+/**
+ * The gate context for step `step` (1-based) of a route, before the route starts (R2-61): RiskControl
+ * counts every step that reports to it in the same window, so what the steps before it report
+ * (`earlier`) is added to both windows' volumes. An unreadable volume stays unreadable; when what the
+ * earlier steps report is unknown, the volumes become unverifiable, so the step's breaker check
+ * refuses rather than passes. The deposit cap is not touched: only SYWrapper.deposit charges it.
+ */
+export function withEarlierReports<C extends Pick<GateContext, "market">>(ctx: C, earlier: bigint | undefined, step: number): C {
+  if (earlier === 0n) return ctx
+  const add = (volume: Live<bigint>): Live<bigint> => {
+    if (volume.status !== "live") return volume
+    if (earlier === undefined) {
+      return { status: "unavailable", error: `it must include what the steps before step ${step} of this route add, which could not be worked out` }
+    }
+    return { ...volume, value: volume.value + earlier }
+  }
+  const cb = ctx.market.cb
+  return { ...ctx, market: { ...ctx.market, cb: { ...cb, volume: add(cb.volume), assetVolume: add(cb.assetVolume) } } }
+}
+
+/** `RiskControl.check_deposit`: each limit trips on `volume + amount > limit`; a limit of 0 disables it. */
 function breakerGate(input: ActionInput, ctx: GateContext, g: Gates): void {
   const a = input.action
   if (!RISK_CHECKED.has(a) || input.amount <= 0n) return
   const cb = ctx.market.cb
-  const amount = input.amount
 
   let reported: bigint | null | undefined = null // null: not computed yet; undefined: unavailable
   const report = (): bigint | undefined => {
     if (reported !== null) return reported
-    if (a === "deposit") reported = amount
-    else if (a === "mint") reported = 2n * amount
-    else {
-      const rate = g.need(ctx.market.exchangeRate, "the SY exchange rate")
-      const value = rate === undefined ? undefined : (amount * rate) / SCALE
-      reported = value === undefined ? undefined : value > 0n ? value : amount
-    }
+    reported = breakerReport(input, ctx)
+    // Only buy_yt's report can be unknown: its SY is valued at the exchange rate. Name that read.
+    if (reported === undefined) g.need(ctx.market.exchangeRate, "the SY exchange rate")
     return reported
   }
 
