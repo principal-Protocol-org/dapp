@@ -13,11 +13,13 @@ Current state and known limits in full: [`.rness/docs/dapp.md`](../../.rness/doc
 | Route | What it shows |
 |---|---|
 | `/` | The landing page. |
-| `/app` | Markets: one row per manifest market, with maturity, fixed APY, pool liquidity and status. |
-| `/app/markets/[marketId]` | One market: rates and fees, compliance and safety cards, and the action tabs (Mint, Trade, Liquidity, Redeem). |
-| `/app/portfolio` | Your PT, YT and LP positions and pending yield. |
+| `/app` | Markets grouped by asset, one row per maturity, with fixed APY, 30-day spark line, liquidity and status. |
+| `/app/markets/[marketId]` | One market: stats and chart (fixed against variable rate), the info card (Details, Compliance, Safety), and the action panel (PT, YT and LP tabs, plus Quick actions). |
+| `/app/portfolio` | Your PT, YT and LP positions and pending yield; claim yield. |
 | `/app/history` | Your transactions, read from RPC events and a local log. |
+| `/app/manage` | Manager view: the markets where your wallet holds a role, with the actions that role can sign. |
 | `POST /api/faucet` | Server route behind "Get test tokens". |
+| `GET /api/cron/record` | The rate recorder, called by a scheduler. Refuses any other caller. |
 
 ## Network selection
 
@@ -54,14 +56,66 @@ Copy `.env.example` to `.env.local`. Never commit real keys.
 | `DATABASE_URL_UNPOOLED` | Server only | Optional. Direct connection for migrations; else `DATABASE_URL` with `-pooler` removed from the host. |
 | `CRON_SECRET` | Server only | Bearer secret Vercel Cron sends to `GET /api/cron/record`. |
 | `QSTASH_CURRENT_SIGNING_KEY`, `QSTASH_NEXT_SIGNING_KEY` | Server only | Verify Upstash QStash signatures on the same route. |
+| `QSTASH_RECORD_URL` | Server only | The public URL QStash calls. The signature is bound to it. Defaults to `https://$VERCEL_PROJECT_PRODUCTION_URL/api/cron/record`; with neither, QStash calls are refused (401). |
 
 `pnpm db:migrate [--env-file .env.testnet]` applies `db/migrations/*.sql` over a direct connection and
-never prints the connection string.
+never prints the connection string. Run it on each Neon branch (testnet, mainnet) before you deploy
+to it:
+
+```bash
+pnpm db:migrate --env-file .env.testnet
+pnpm db:migrate --env-file .env.mainnet
+```
 
 The `FAUCET_*`, `DATABASE_URL`, `CRON_SECRET` and `QSTASH_*` secrets are read only in files that start
 with `import "server-only"`. CI fails the build if `FAUCET_`, `DATABASE_URL`, `CRON_SECRET` or `QSTASH_`
 appears in `.next/static`. The local stack writes its own throwaway secret to
 `.env.local`, which is git-ignored.
+
+## Rate recorder and database
+
+A scheduled job calls `GET /api/cron/record` every 15 minutes. For each registered market it reads
+the pool, the manager and the oracle at one ledger and stores one row per market per 15-minute slot
+in `market_state_snapshots`. A retry does not duplicate a row. A failed read stores nothing for
+that market. The charts and the market list read these rows; a gap stays a gap.
+
+The route answers:
+
+| Status | Body | When |
+|---|---|---|
+| 200 | `{ recorded, failed }` | No market failed. |
+| 401 | | The caller sent neither a valid `Authorization: Bearer $CRON_SECRET` nor a valid QStash signature. |
+| 503 | `{ error: "not_configured" }` | `DATABASE_URL` is missing. |
+| 500 | `{ recorded, failed }` with a non-empty `failed` | At least one market failed (an unexpected error answers `{ error: "failed" }`, also 500). Schedulers alert on non-2xx; the retry is safe. |
+
+### Scheduler
+
+No cron entry is committed (`vercel.json` does not exist). Vercel Hobby rejects sub-daily crons
+at deploy time, so a committed entry would break the deploy. Pick one option.
+
+**(a) Vercel Cron.** Needs a plan that allows sub-daily crons. Add this to `vercel.json`:
+
+```json
+{ "crons": [{ "path": "/api/cron/record", "schedule": "*/15 * * * *" }] }
+```
+
+Set `CRON_SECRET` in the Vercel project. Vercel then sends `Authorization: Bearer $CRON_SECRET`.
+
+**(b) Upstash QStash.** Create a schedule with cron `*/15 * * * *` that calls
+`GET https://<your-domain>/api/cron/record`. Set `QSTASH_CURRENT_SIGNING_KEY` and
+`QSTASH_NEXT_SIGNING_KEY` from the QStash console. The route checks the signature against the
+destination URL, so set `QSTASH_RECORD_URL` to the exact URL the schedule calls, unless the app runs
+on Vercel with `VERCEL_PROJECT_PRODUCTION_URL` set. With neither, the route refuses the call.
+
+### Neon
+
+- Put `sslmode=verify-full` in both connection strings.
+- `DATABASE_URL` is the pooled string (host with `-pooler`). The app uses `pg` with a small pool.
+- A Neon compute scales to zero. The first query after idle waits while it wakes. The pool allows
+  `connectionTimeoutMillis` of 5 s for that, so the first cron run of the day may be slow but
+  should not fail. Page renders do not wait: they fall back to the manifest markets after 1.5 s.
+- Never put a real connection string or secret in this repository. Use `.env.local`, `.env.testnet`
+  and `.env.mainnet` (all git-ignored) and the Vercel project settings.
 
 ## Local network
 
@@ -89,9 +143,20 @@ Use `pnpm`.
 | `pnpm lint` | ESLint. |
 | `pnpm typecheck` | `tsc --noEmit`. |
 
-`pnpm test:integration` needs the local stack running and a deployed `config/manifests/local.json`.
-If the network is not reachable, the suite skips and says why. When the market is not fresh, it
-deploys a new one with `MATURITY_SECONDS=600`. A full run takes about 10 minutes.
+`pnpm test:integration` needs the local stack running and a deployed `config/manifests/local.json`
+(`scripts/dev-stack/README.md`). If the network is not reachable, the suite skips and says why.
+
+- It runs the routes, curve and recorder suites against the existing local market. It does not
+  redeploy the stack or rewrite `local.json`.
+- It signs with throwaway local accounts (the stack's dev keys), never a real key.
+- It skips the cases that need a market near maturity, and says so.
+- The lifecycle suite (`tests/integration/lifecycle.test.ts`, the proof for plan 0001) redeploys a
+  market and rewrites `local.json`. It runs only with `LIFECYCLE_REDEPLOY=1`, and only on a stack
+  nobody else is using:
+
+```bash
+LIFECYCLE_REDEPLOY=1 pnpm test:integration
+```
 
 CI (`.github/workflows/ci.yml`) runs lint, typecheck, test and build on pull requests, then the
 server-secret bundle check.
@@ -103,10 +168,35 @@ The app uses the landing page's design system: tokens in `app/globals.css` and c
 "coupon" accent, on a light grey ground with a dark theme. Headings use Newsreader, body text
 Hanken Grotesk and figures IBM Plex Mono. The app works from 375 px wide and both themes.
 
+## For SCF reviewers
+
+Where each funded Tranche 2 item lives in the final interface. Open a market from `/app`.
+
+| Funded item | Where to find it |
+|---|---|
+| Wallet connection, persistent session | The wallet button in the header. |
+| Market page: maturity, oracle rate, countdown, PT/YT outstanding, pool liquidity | The market page header and stats; the Details tab of the info card. |
+| Compliance status from the underlying asset | The Compliance tab of the info card. The Safety tab shows the pause and risk checks. |
+| Deposit and mint panels, with live previews | The Quick actions button on the Trade header: Deposit, Withdraw, Split, Recombine. |
+| Trading panel | The PT and YT tabs. |
+| Liquidity deposit and withdrawal | The LP tab. |
+| Position dashboard | `/app/portfolio`. |
+| Claim yield | `/app/portfolio`. |
+| Redeem at maturity | The PT tab once the market has matured. |
+| Transaction history | `/app/history`. |
+| Market manager | `/app/manage`, shown for a wallet that holds a role on a market. |
+
 ## Known limits
 
-Short list. The long form is in [`.rness/docs/dapp.md`](../../.rness/docs/dapp.md).
+Short list. The long form is in [`.rness/docs/dapp.md`](../../.rness/docs/dapp.md). The requests to the
+contract team are in [`.rness/docs/requests-arthur-0002.md`](../../.rness/docs/requests-arthur-0002.md).
 
+- **The Testnet v1 seed stays hidden or refused** until Arthur's v2 manifest with `wasmHashes`
+  arrives. It pins no Wasm hashes, so the recorder's validation marks it invalid.
+- **The create-market wizard is held** until the new factory and AMM ABI exists (R2-39). `/app/manage`
+  lists markets, roles, fees and grants; it does not create markets yet.
+- **LP only is disabled (R47)**, and **Buy YT needs temporary capital** (about leverage times the spend,
+  mostly returned in the last step) until a flash-swap function exists. See the request document.
 - **"Add liquidity (SY only)" is disabled.** The pool computes the SY it pulls at execution, so the
   amount the user signs never matches. To re-enable: delete `disabled` in `ACTION_META`
   (`lib/protocol/actions.ts`), restore the panel floor test, and promote the integration canary

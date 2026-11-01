@@ -41,6 +41,37 @@ Outputs (both git-ignored; never commit them):
 - `.env.local`: `NEXT_PUBLIC_PRINCIPAL_NETWORK=local`, `FAUCET_ISSUER_SECRET` (the
   `principal-localdev-admin` secret, valid on this throwaway network only) and `DATABASE_URL` for `principal-pg`.
 
+## Keep the oracle fresh
+
+The oracle goes stale after about 1 h. A stale oracle refuses most writes and the app shows
+"Unavailable". Run `scripts/dev-stack/oracle-tick.sh` again (every 30 minutes is enough).
+
+## Postgres: `principal-pg`
+
+`up.sh` starts a `postgres:17` container named `principal-pg` on port 5432 and `deploy.sh` writes its
+`DATABASE_URL` to `.env.local`. It holds the recorder's tables (`pnpm db:migrate` creates them; `deploy.sh`
+runs it for you). Call `GET /api/cron/record` with `Authorization: Bearer $CRON_SECRET` (set a throwaway
+`CRON_SECRET` in `.env.local`) to record a snapshot by hand. `podman rm -f principal-pg` drops the data.
+
+## Integration suites
+
+`pnpm test:integration` (from the repository root) runs against the market in
+`config/manifests/local.json`:
+
+| Suite | What it proves |
+|---|---|
+| `routes.test.ts` | Every trade route, Quick actions, and interruption and unwind, signed on the local network. |
+| `curve.test.ts` | The off-chain curve port equals the pool's quote views. |
+| `registry.test.ts` | Market discovery and validation against the real contracts and `principal-pg`. |
+| `history.test.ts` | The history queries, and the recorder writing one snapshot of the live market to `principal-pg` (the row is deleted afterwards). |
+| `lifecycle.test.ts` | The full lifecycle proof of plan 0001. Skipped unless `LIFECYCLE_REDEPLOY=1`. |
+
+- The suites sign with the throwaway dev accounts (`principal-localdev-admin`, `principal-localdev-treasury`).
+- Cases that need a market near maturity are skipped.
+- `lifecycle.test.ts` deploys a new market and rewrites `local.json`. Run it
+  (`LIFECYCLE_REDEPLOY=1 pnpm test:integration`) only on a stack nobody is using.
+- The creation wizard is held, so there is no wizard suite yet.
+
 ## Teardown
 
 ```bash
