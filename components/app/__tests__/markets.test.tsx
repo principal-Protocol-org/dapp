@@ -223,7 +223,9 @@ describe("MarketGroups", () => {
     const card = marketCard("m2")
     expect(within(card).getByText("No history yet")).toBeTruthy()
     const apy = within(card).getByText("Unavailable", { selector: "[data-cell='underlying-apy']" })
-    expect(apy.getAttribute("title")).toMatch(/No oracle snapshots yet/)
+    // The reason is behind an info tip a tap or focus opens, never only in a title (M10).
+    expect(apy.getAttribute("title")).toBeNull()
+    expect(within(apy).getByRole("button", { name: "More about Underlying APY (7 d) (unavailable)" })).toBeTruthy()
     // The rest of the row still renders.
     expect(within(card).getByRole("link", { name: /YT.*20x/ })).toBeTruthy()
   })
@@ -341,6 +343,18 @@ describe("MarketGroups", () => {
     setMarket("m1", marketState({ ptPrice: live(10_000_000n) }))
     renderList()
     expect(within(marketCard("m1")).queryByRole("link", { name: /^YT/ })).toBeNull()
+  })
+
+  it("a market row's reasons are behind info tips a tap opens, never only in a title (M10)", async () => {
+    setMarket("m1", marketState({ ptPrice: live(10_000_000n) }))
+    mocks.history = {}
+    mocks.sparks = undefined
+    renderList()
+    const card = marketCard("m1")
+    expect(card.querySelector("[title]")).toBeNull()
+    await userEvent.click(within(card).getByRole("button", { name: "More about YT leverage (unavailable)" }))
+    expect((await screen.findByRole("tooltip")).textContent).toMatch(/par/)
+    expect(within(card).getByRole("button", { name: "More about Fixed APY, 30 d (unavailable)" })).toBeTruthy()
   })
 
   it("does not show old values after a failed refresh", () => {

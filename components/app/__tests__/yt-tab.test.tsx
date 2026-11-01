@@ -337,6 +337,17 @@ describe("YT tab — Buy", () => {
     // R2-58: max_net_cost = net cost × (1 + 0.5 %), rounded up, as guards.ts signs it.
     const maxNetCost = ceilDiv(r.netCost * (BPS + 50n), BPS)
     expect(detail("Spends at most")).toBe(`${amount(depositFor(r.syIn) - (r.syIn - maxNetCost))} USDY`)
+    // The figure is this preview's: the Buy YT step signs its own SY bound, from its own simulation (M15).
+    expect(await tipOf("Spends at most")).toBe(
+      "At your 0.50% slippage tolerance, on this preview. Step 2 is signed with its own bound, from its own simulation, and fails rather than cost more.",
+    )
+  })
+
+  it("paying in SY, the bound is step 1's own (M15)", async () => {
+    await renderUi(<YtTab marketId="m1" side="buy" />)
+    await pick("Pay with", /SY/)
+    await enter("You pay", "100")
+    expect(await tipOf("Spends at most")).toMatch(/^At your 0\.50% slippage tolerance, on this preview\. Step 1 is signed with its own bound, from its own simulation/)
   })
 
   it("paying in SY is one step, its refund stays SY, and its simulation makes the figures exact", async () => {

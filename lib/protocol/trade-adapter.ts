@@ -117,7 +117,7 @@ export type TradeQuote = {
    * Buy PT: the gain at maturity in USD (oracle units), fixed whatever the underlying's price does,
    * and that gain in the underlying at today's oracle rate (indicative: it falls as the price rises).
    */
-  payoff?: { gainUsd: bigint; pct: number; gainUnderlying: bigint }
+  payoff?: { gainUsd: bigint; pct: number | undefined; gainUnderlying: bigint }
   /**
    * Capital the route moves beyond what it spends (Buy YT today, R2-59), in the token paid: `moved`
    * leaves the user, `back` comes back in step `backStep` (1-based, from the plan), `spent` is the

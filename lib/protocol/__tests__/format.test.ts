@@ -8,6 +8,7 @@ import {
   formatPercent,
   formatRate,
   formatTokenAmount,
+  formatUsd,
   formatUsdCents,
   hashLike,
   parseDecimalToRaw,
@@ -114,6 +115,18 @@ describe("formatUsdCents (a USD gain or loss, against the reader)", () => {
 
   it("groups thousands", () => {
     expect(formatUsdCents(12_345_678_900_000n, 7)).toBe("+$1,234,567.89");
+  });
+});
+
+describe("formatUsd (a USD value, to the cent)", () => {
+  it("floors a value to the cent, grouped, with no plus sign", () => {
+    expect(formatUsd(1_000_000_000n, 7)).toBe("$100.00");
+    expect(formatUsd(1_001_234_500n, 7)).toBe("$100.12");
+    expect(formatUsd(12_345_678_900_000n, 7)).toBe("$1,234,567.89");
+    expect(formatUsd(0n, 7)).toBe("$0.00");
+  });
+  it("keeps the sign of a negative value, its magnitude rounded up", () => {
+    expect(formatUsd(-1_230_001n, 7)).toBe("-$0.13");
   });
 });
 

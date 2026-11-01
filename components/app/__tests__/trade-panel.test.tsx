@@ -1,4 +1,4 @@
-import { act } from "react"
+import { act, useState } from "react"
 import { hydrateRoot, type Root } from "react-dom/client"
 import { renderToString } from "react-dom/server"
 import { render, screen, within } from "@testing-library/react"
@@ -240,6 +240,37 @@ describe("TokenPicker", () => {
     render(<TokenPicker value="underlying" onChange={onChange} options={["underlying", "sy"]} />)
     await userEvent.click(screen.getByRole("radio", { name: /SY/ }))
     expect(onChange).toHaveBeenCalledWith("sy")
+  })
+
+  it("is one tab stop: only the checked option is focusable (roving tabindex, M11)", () => {
+    render(<TokenPicker value="sy" onChange={vi.fn()} options={["underlying", "sy"]} />)
+    const [usdy, sy] = screen.getAllByRole("radio")
+    expect(usdy.getAttribute("tabindex")).toBe("-1")
+    expect(sy.getAttribute("tabindex")).toBe("0")
+  })
+
+  it("arrow keys move the choice and the focus, wrapping around, as a radio group does (M11)", async () => {
+    function Host() {
+      const [value, setValue] = useState<"underlying" | "sy">("underlying")
+      return <TokenPicker value={value} onChange={setValue} options={["underlying", "sy"]} />
+    }
+    render(<Host />)
+    const radio = (i: number) => screen.getAllByRole("radio")[i]
+    await userEvent.tab()
+    expect(document.activeElement).toBe(radio(0))
+    await userEvent.keyboard("{ArrowRight}")
+    expect(radio(1).getAttribute("aria-checked")).toBe("true")
+    expect(document.activeElement).toBe(radio(1))
+    await userEvent.keyboard("{ArrowDown}")
+    expect(radio(0).getAttribute("aria-checked")).toBe("true")
+    expect(document.activeElement).toBe(radio(0))
+    await userEvent.keyboard("{ArrowLeft}")
+    expect(radio(1).getAttribute("aria-checked")).toBe("true")
+    await userEvent.keyboard("{ArrowUp}")
+    expect(radio(0).getAttribute("aria-checked")).toBe("true")
+    // One tab stop: Tab leaves the group.
+    await userEvent.tab()
+    expect(document.activeElement).not.toBe(radio(1))
   })
 
   it("is not in the panel's header on any tab: the PT, YT and LP tabs' fields carry their own", async () => {

@@ -247,6 +247,36 @@ describe("Recombine quick action — figures it cannot work out", () => {
     expect(screen.queryByText(/^≈? ?0(\.0+)? (USDY|SY)$/)).toBeNull()
   })
 
+  it("a dust amount whose SY rounds to nothing is Unavailable, never \"0 SY\" (M2)", async () => {
+    mocks.simulateInvocation.mockImplementation(() => new Promise(() => {}))
+    await renderUi(<RecombineAction marketId="m1" />)
+    // 1 raw unit of PT + YT pays 1 / 1.05 SY: 0 once floored.
+    expect(previewRecombine(1n, ORACLE)).toBe(0n)
+    await enter(FIELD, "0.0000001")
+    expect(screen.getByText("Unavailable: this amount is too small to recombine.")).toBeTruthy()
+    expect(screen.queryByText(/^≈? ?0(\.0+)? (USDY|SY)$/)).toBeNull()
+    await pickSy()
+    expect(screen.getByText("Unavailable: this amount is too small to recombine.")).toBeTruthy()
+  })
+
+  it("a simulated step 1 that pays no SY is Unavailable, never a zero (M2)", async () => {
+    simulateReturns(mocks, 0n)
+    await renderUi(<RecombineAction marketId="m1" />)
+    await enter(FIELD, "100")
+    expect(screen.getByText("Unavailable: this amount is too small to recombine.")).toBeTruthy()
+  })
+
+  it("SY that unwraps to no USDY at today's rate is Unavailable, never \"≈ 0 USDY\" (M2)", async () => {
+    mocks.fetchMarketState.mockResolvedValue(marketState({ exchangeRate: live(1n) }))
+    mocks.simulateInvocation.mockImplementation(() => new Promise(() => {}))
+    await renderUi(<RecombineAction marketId="m1" />)
+    await enter(FIELD, "0.0001")
+    expect(previewRecombine(1_000n, ORACLE)).toBe(952n)
+    expect(previewWithdraw(952n, 1n)).toBe(0n)
+    expect(screen.getByText("Unavailable: this amount is too small to recombine.")).toBeTruthy()
+    expect(screen.queryByText(/≈ 0(\.0+)? USDY/)).toBeNull()
+  })
+
   it("an unreadable SY rate leaves the USDY figure Unavailable, never a zero", async () => {
     mocks.fetchMarketState.mockResolvedValue(marketState({ exchangeRate: down("rpc down") }))
     await renderUi(<RecombineAction marketId="m1" />)

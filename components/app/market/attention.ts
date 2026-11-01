@@ -11,12 +11,27 @@ const used = (limit: Live<bigint>, volume: Live<bigint>) =>
 /**
  * How many problems the Safety tab reports: each paused contract (SY wrapper, pool, risk control), a
  * stale oracle, an exhausted protocol-wide breaker window, an exhausted per-asset breaker window and the
- * account's used-up deposit cap. Derived from the data the Safety rows already read; an unreadable value
- * is not counted (the row itself says Unavailable). `undefined` when the market state is not known
- * (unavailable or stale), never a made-up 0.
+ * account's used-up deposit cap. Derived from the data the Safety rows already read.
+ *
+ * `undefined`, never a made-up count (M3, ruled in 18d), when the market state is not known
+ * (unavailable or stale), when any value counted here is unreadable (its row says Unavailable), or
+ * when a connected account cannot be read (`account` null). `account` undefined: no wallet, so the
+ * deposit cap is not counted (its row asks to connect one).
  */
-export function safetyIssues(ms: MarketState | undefined, account: AccountState | undefined): number | undefined {
-  if (!ms) return undefined
+export function safetyIssues(ms: MarketState | undefined, account: AccountState | null | undefined): number | undefined {
+  if (!ms || account === null) return undefined
+  const read: Live<unknown>[] = [
+    ms.syPaused,
+    ms.poolPaused,
+    ms.riskPaused,
+    ms.oracleFresh,
+    ms.cb.limit,
+    ms.cb.volume,
+    ms.cb.assetLimit,
+    ms.cb.assetVolume,
+    ...(account ? [account.depositCap, account.netDeposited] : []),
+  ]
+  if (read.some((v) => v.status !== "live")) return undefined
   const flags = [
     isTrue(ms.syPaused),
     isTrue(ms.poolPaused),

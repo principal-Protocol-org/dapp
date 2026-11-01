@@ -90,7 +90,12 @@ export function CardTabs({
   )
 }
 
-/** A tab's body, padded like the rest of the card. */
+/** A tab's body, padded like the rest of the card. It is focusable (Radix), so it shows a focus ring (M11). */
 export function CardTabsContent({ className, ...props }: React.ComponentProps<typeof TabsPrimitive.Content>) {
-  return <TabsPrimitive.Content className={cn("p-5 text-sm outline-none", className)} {...props} />
+  return (
+    <TabsPrimitive.Content
+      className={cn("p-5 text-sm focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring", className)}
+      {...props}
+    />
+  )
 }

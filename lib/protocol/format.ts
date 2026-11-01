@@ -87,6 +87,15 @@ export function formatUsdCents(raw: bigint, decimals: number): string {
 }
 
 /**
+ * A USD value (not a gain) to the cent: "$1,234.50". Rounded like `formatUsdCents`, so a value is
+ * floored, never overstated; no sign unless it is negative ("-$0.13").
+ */
+export function formatUsd(raw: bigint, decimals: number): string {
+  const signed = formatUsdCents(raw, decimals);
+  return signed.startsWith("+") ? signed.slice(1) : signed;
+}
+
+/**
  * A gain or loss as `formatAmount` shows an amount (trimmed, ASCII "-"), rounded against the reader
  * like `formatUsdCents`: -4.7619048 at 4 digits is "-4.762", never "-4.7619".
  */

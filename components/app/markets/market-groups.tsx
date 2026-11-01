@@ -18,6 +18,7 @@ import { SparkLine } from "@/components/app/charts/spark-line"
 import { liquidityOf, type Liquidity } from "@/components/app/market/liquidity"
 import { underlyingApyOf } from "@/components/app/market/underlying-apy"
 import { UNAVAILABLE } from "@/components/app/live"
+import { InfoTip, UnavailableTip } from "@/components/app/info-tip"
 import { StatusBadge, type MarketStatus } from "@/components/app/markets/status-badge"
 
 export type { MarketStatus }
@@ -99,12 +100,21 @@ function Amount({ raw, decimals, unit }: { raw: bigint; decimals: number; unit: 
   )
 }
 
-function Unavailable({ reason }: { reason?: string }) {
-  return (
-    <span title={reason} className="text-ink-muted">
-      {UNAVAILABLE}
-    </span>
-  )
+/**
+ * Unavailable, with its reason. In a market row the reason is behind an info tip a tap or focus
+ * opens (M10). An asset row is itself the toggle button (R2-70), where a tip's own button cannot
+ * nest: there the text keeps a `title` for pointer users, and each reason it sums up sits behind a
+ * tip in the market rows it expands to.
+ */
+function Unavailable({ label, reason, inButton = false }: { label: string; reason?: string; inButton?: boolean }) {
+  if (inButton || !reason) {
+    return (
+      <span title={reason} className="text-ink-muted">
+        {UNAVAILABLE}
+      </span>
+    )
+  }
+  return <UnavailableTip label={label} reason={reason} className="text-ink-muted" />
 }
 
 function Cell({ label, children, className = "" }: { label: string; children: ReactNode; className?: string }) {
@@ -122,11 +132,14 @@ function LiquidityTvl({
   tvl,
   decimals,
   unit,
+  inButton = false,
 }: {
   liquidity: Liquidity
   tvl: { kind: "value"; value: bigint } | { kind: "unavailable" }
   decimals: number
   unit: string
+  /** In the asset row's toggle button: no info tip can nest there. */
+  inButton?: boolean
 }) {
   return (
     <span className="flex flex-col items-end font-mono tabular-nums">
@@ -136,11 +149,11 @@ function LiquidityTvl({
         ) : liquidity.kind === "none" ? (
           "No liquidity yet"
         ) : (
-          <Unavailable reason="The pool's value could not be read." />
+          <Unavailable label="Liquidity" reason="The pool's value could not be read." inButton={inButton} />
         )}
       </span>
       <span className="text-xs text-ink-muted">
-        {tvl.kind === "value" ? <Amount raw={tvl.value} decimals={decimals} unit={unit} /> : <Unavailable reason="The TVL could not be read." />}
+        {tvl.kind === "value" ? <Amount raw={tvl.value} decimals={decimals} unit={unit} /> : <Unavailable label="TVL" reason="The TVL could not be read." inButton={inButton} />}
       </span>
     </span>
   )
@@ -165,8 +178,8 @@ function Chip({ kind, marketId, figure, text }: { kind: "yt" | "pt"; marketId: s
   const label = kind === "yt" ? "YT" : "PT"
   if (figure.kind === "none") {
     return (
-      <span title={figure.reason} className="block text-right text-sm text-ink-muted">
-        {text}
+      <span className="flex justify-end text-sm">
+        <UnavailableTip label={kind === "yt" ? "YT leverage" : "PT fixed APY"} reason={figure.reason} text={text} className="text-ink-muted" />
       </span>
     )
   }
@@ -183,7 +196,14 @@ function UnderlyingApy({ pool }: { pool: string }) {
   const { data, isPending } = useMarketHistory(pool, "7d")
   if (isPending) return <Skeleton className="ml-auto h-5 w-16" />
   const f = underlyingApyOf(data)
-  if (f.kind === "none") return <div data-cell="underlying-apy" title={f.reason}>{UNAVAILABLE}</div>
+  if (f.kind === "none") {
+    return (
+      <div data-cell="underlying-apy" className="inline-flex items-center gap-1.5">
+        {UNAVAILABLE}
+        <InfoTip label={`Underlying APY (7 d) (${UNAVAILABLE.toLowerCase()})`}>{f.reason}</InfoTip>
+      </div>
+    )
+  }
   return (
     <div data-cell="underlying-apy" className="flex flex-col items-end">
       <span>{formatPercent(f.value)}</span>
@@ -194,7 +214,7 @@ function UnderlyingApy({ pool }: { pool: string }) {
 
 function SparkCell({ spark, isPending, failed }: { spark: Spark | undefined; isPending: boolean; failed: boolean }) {
   if (isPending) return <Skeleton className="h-7 w-24" />
-  if (failed) return <Unavailable reason="History could not be read right now." />
+  if (failed) return <Unavailable label="Fixed APY, 30 d" reason="History could not be read right now." />
   const points = spark?.points ?? []
   const change = spark?.changePts ?? null
   const dated = points.filter((p) => p.value !== null)
@@ -383,17 +403,17 @@ function AssetGroup({
           <>
             <span className="flex items-baseline justify-between gap-3 md:block">
               <span className="text-xs text-ink-muted md:hidden">Liquidity / TVL</span>
-              <LiquidityTvl liquidity={liquidity} tvl={tvl.kind === "value" ? tvl : ({ kind: "unavailable" } as const)} decimals={group.decimals} unit={group.code} />
+              <LiquidityTvl liquidity={liquidity} tvl={tvl.kind === "value" ? tvl : ({ kind: "unavailable" } as const)} decimals={group.decimals} unit={group.code} inButton />
             </span>
             <span className="hidden md:block" />
             <span className="hidden md:block" />
             <span className="flex items-baseline justify-between gap-3 font-mono tabular-nums md:block md:text-right">
               <span className="text-xs text-ink-muted md:hidden">Best YT leverage</span>
-              {bestLev.kind === "value" ? <span>{`${Math.round(bestLev.value)}x`}</span> : <Unavailable reason={bestLev.reason} />}
+              {bestLev.kind === "value" ? <span>{`${Math.round(bestLev.value)}x`}</span> : <Unavailable label="Best YT leverage" reason={bestLev.reason} inButton />}
             </span>
             <span className="flex items-baseline justify-between gap-3 font-mono tabular-nums md:block md:text-right">
               <span className="text-xs text-ink-muted md:hidden">Best fixed APY</span>
-              {bestApy.kind === "value" ? <span className="text-par">{formatPercent(bestApy.value)}</span> : <Unavailable reason={bestApy.reason} />}
+              {bestApy.kind === "value" ? <span className="text-par">{formatPercent(bestApy.value)}</span> : <Unavailable label="Best fixed APY" reason={bestApy.reason} inButton />}
             </span>
           </>
         )}

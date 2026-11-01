@@ -3,6 +3,7 @@
 import { useRef, useState, type ReactNode } from "react"
 import { InfoIcon } from "lucide-react"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
+import { UNAVAILABLE } from "@/components/app/live"
 
 /**
  * A small "i" beside a label, with the explanation behind it (R2-65). One shared component for every
@@ -34,7 +35,8 @@ export function InfoTip({ label, children }: { label: string; children: ReactNod
               openAtPress.current = null
               setOpen(!seen)
             }}
-            className="-m-1 inline-flex shrink-0 items-center justify-center rounded-full p-1 text-ink-muted hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ring"
+            // A 24 px target (M11) around the 14 px icon; the negative margin keeps the icon's footprint in the line.
+            className="-m-[5px] inline-flex size-6 shrink-0 items-center justify-center rounded-full text-ink-muted hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ring"
           >
             <InfoIcon aria-hidden="true" className="size-3.5" />
           </button>
@@ -44,6 +46,21 @@ export function InfoTip({ label, children }: { label: string; children: ReactNod
         </TooltipContent>
       </Tooltip>
     </TooltipProvider>
+  )
+}
+
+/**
+ * "Unavailable" (or another `text` standing in for a figure) with its reason behind an info tip,
+ * which a tap, a click or keyboard focus opens (M10): never only in a `title`, which touch and
+ * keyboard users cannot reach. `label` names the figure; the button reads "More about TVL
+ * (unavailable)". Not for use inside another button.
+ */
+export function UnavailableTip({ label, reason, text = UNAVAILABLE, className }: { label: string; reason: string; text?: string; className?: string }) {
+  return (
+    <span className={`inline-flex min-w-0 items-center gap-1.5 ${className ?? ""}`}>
+      {text}
+      <InfoTip label={`${label} (${text.toLowerCase()})`}>{reason}</InfoTip>
+    </span>
   )
 }
 

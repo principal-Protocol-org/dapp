@@ -134,13 +134,14 @@ export function LineChart({
           ))}
         </div>
       </div>
-      {stale && !empty && latestAt !== null ? (
+      {/* M7: the pool's latest snapshot dates the history even when none falls in this range. */}
+      {stale && latestAt !== null ? (
         <p role="status" className="rounded-md bg-accent px-3 py-2 text-xs text-accent-foreground">
           {`History is ${ageH} h old`}
         </p>
       ) : null}
       {empty ? (
-        <p className="py-10 text-center text-sm text-muted-foreground">No history yet</p>
+        <p className="py-10 text-center text-sm text-muted-foreground">{latestAt === null ? "No history yet" : "Nothing was recorded in this range."}</p>
       ) : (
         <div className="relative min-w-0">
           <svg
