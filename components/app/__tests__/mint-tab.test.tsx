@@ -29,8 +29,18 @@ vi.mock("@/lib/protocol/review", async (orig) => ({
 }))
 
 import { A, MARKET } from "./panel-mocks"
-import { disconnect, enter, gateList, installDefaults, openTab, renderUi, reviewButton, simulateReturns, teardown, tipOf, valueIn } from "./panel-harness"
-import { depositPanel, mintPanel, MintTab, withdrawPanel } from "../actions/mint-tab"
+import { disconnect, enter, gateList, installDefaults, renderUi, reviewButton, simulateReturns, teardown, tipOf, valueIn } from "./panel-harness"
+import { ActionPanel } from "../actions/action-panel"
+import { depositPanel, mintPanel, withdrawPanel } from "../actions/mint-tab"
+
+/**
+ * The 0001 deposit, withdraw and split (mint) panels, mounted as the Quick actions dialogs mount
+ * them: one `ActionPanel` per config, each config built once (panel-config rule 1). The tab group
+ * that once held them was mounted nowhere and is gone (M12).
+ */
+const DEPOSIT = depositPanel(MARKET)
+const WITHDRAW = withdrawPanel(MARKET)
+const MINT = mintPanel(MARKET)
 
 const STA_100 = 1_000_000_000n
 const STA_5000 = 50_000_000_000n
@@ -45,15 +55,10 @@ function input(action: ActionInput["action"], amount: bigint): ActionInput {
 beforeEach(() => installDefaults(mocks))
 afterEach(teardown)
 
-describe("Mint tab — deposit", () => {
-  it("offers deposit, withdraw and mint from the underlying only: there is no mint from SY", async () => {
-    await renderUi(<MintTab marketId="m1" />)
-    expect(screen.getAllByRole("tab").map((t) => t.textContent)).toEqual(["Deposit", "Withdraw", "Mint PT + YT"])
-  })
-
+describe("Deposit panel", () => {
   it("deposit of 100 at exchange_rate 1e7 shows 100.0000 SY (indicative, without a wallet)", async () => {
     disconnect(mocks)
-    await renderUi(<MintTab marketId="m1" />)
+    await renderUi(<ActionPanel config={DEPOSIT} marketId="m1" />)
     await enter("STA to deposit", "100")
     expect(valueIn("Indicative", "SY received")).toBe("100.0000 SY")
     expect(valueIn("Market (indicative)", "SY exchange rate")).toBe("1.0000 STA per SY")
@@ -62,7 +67,7 @@ describe("Mint tab — deposit", () => {
 
   it("says the deposit cap is loading, not to connect a wallet, while the account loads (V6)", async () => {
     mocks.accounts[A] = "pending"
-    await renderUi(<MintTab marketId="m1" />)
+    await renderUi(<ActionPanel config={DEPOSIT} marketId="m1" />)
     await enter("STA to deposit", "100")
     expect(valueIn("Market (indicative)", "Your deposit cap left")).toBe("Loading…")
   })
@@ -70,7 +75,7 @@ describe("Mint tab — deposit", () => {
   it("deposit follows the exchange rate: amount·1e7/exchange_rate, floored", async () => {
     disconnect(mocks)
     mocks.fetchMarketState.mockResolvedValue(marketState({ exchangeRate: live(12_500_000n) }))
-    await renderUi(<MintTab marketId="m1" />)
+    await renderUi(<ActionPanel config={DEPOSIT} marketId="m1" />)
     await enter("STA to deposit", "100")
     expect(valueIn("Indicative", "SY received")).toBe("80.0000 SY")
   })
@@ -78,7 +83,7 @@ describe("Mint tab — deposit", () => {
   it("deposit shows the cap left (depositCap − netDeposited) next to the exact quote", async () => {
     mocks.accounts[A] = funded()
     simulateReturns(mocks, STA_100)
-    await renderUi(<MintTab marketId="m1" />)
+    await renderUi(<ActionPanel config={DEPOSIT} marketId="m1" />)
     await enter("STA to deposit", "100")
     expect(valueIn("Exact (simulated)", "SY received")).toBe("100.0000 SY")
     expect(valueIn("Exact (simulated)", "Minimum SY received")).toBe("99.5 SY")
@@ -92,7 +97,7 @@ describe("Mint tab — deposit", () => {
   it("a cap of 0 is shown as no cap", async () => {
     mocks.accounts[A] = funded({ depositCap: live(0n) })
     simulateReturns(mocks, STA_100)
-    await renderUi(<MintTab marketId="m1" />)
+    await renderUi(<ActionPanel config={DEPOSIT} marketId="m1" />)
     await enter("STA to deposit", "100")
     expect(valueIn("Market (indicative)", "Your deposit cap left")).toBe("No cap")
   })
@@ -100,19 +105,18 @@ describe("Mint tab — deposit", () => {
   it("an unreadable exchange rate shows Unavailable, never a guess", async () => {
     disconnect(mocks)
     mocks.fetchMarketState.mockResolvedValue(marketState({ exchangeRate: { status: "unavailable", error: "rpc down" } }))
-    await renderUi(<MintTab marketId="m1" />)
+    await renderUi(<ActionPanel config={DEPOSIT} marketId="m1" />)
     await enter("STA to deposit", "100")
     expect(valueIn("Indicative", "SY received")).toBe("Unavailable")
     expect(valueIn("Market (indicative)", "SY exchange rate")).toBe("Unavailable")
   })
 })
 
-describe("Mint tab — withdraw", () => {
+describe("Withdraw panel", () => {
   it("withdraw shows shares·exchange_rate/1e7 in the underlying", async () => {
     disconnect(mocks)
     mocks.fetchMarketState.mockResolvedValue(marketState({ exchangeRate: live(10_500_000n) }))
-    await renderUi(<MintTab marketId="m1" />)
-    await openTab("Withdraw")
+    await renderUi(<ActionPanel config={WITHDRAW} marketId="m1" />)
     await enter("SY to withdraw", "100")
     expect(valueIn("Indicative", "STA received")).toBe("105.0000 STA")
   })
@@ -120,8 +124,7 @@ describe("Mint tab — withdraw", () => {
   it("withdraw's exact quote and floor are in the underlying, through Router.unwrap", async () => {
     mocks.accounts[A] = funded({ sy: live(STA_100) })
     simulateReturns(mocks, STA_100)
-    await renderUi(<MintTab marketId="m1" />)
-    await openTab("Withdraw")
+    await renderUi(<ActionPanel config={WITHDRAW} marketId="m1" />)
     await enter("SY to withdraw", "100")
     expect(valueIn("Exact (simulated)", "STA received")).toBe("100.0000 STA")
     expect(valueIn("Exact (simulated)", "Minimum STA received")).toBe("99.5 STA")
@@ -129,14 +132,13 @@ describe("Mint tab — withdraw", () => {
   })
 })
 
-describe("Mint tab — mint PT + YT", () => {
+describe("Split panel (mint PT + YT from the underlying)", () => {
   const fees5bps = { tokenizationBps: live(5n), ytBps: live(0n), swapTierBps: live(0n), protocolShareBps: live(0n) }
 
   it("mint of 100 at oracle 1.05 with 5 bps shows 104.9475 PT + 104.9475 YT and a fee of 0.05 SY", async () => {
     disconnect(mocks)
     mocks.fetchMarketState.mockResolvedValue(marketState({ fees: fees5bps }))
-    await renderUi(<MintTab marketId="m1" />)
-    await openTab("Mint PT + YT")
+    await renderUi(<ActionPanel config={MINT} marketId="m1" />)
     await enter("STA to mint with", "100")
     expect(valueIn("Indicative", "You receive")).toBe("104.9475 PT + 104.9475 YT")
     expect(valueIn("Indicative", "Tokenization fee")).toBe("0.0500 SY")
@@ -149,8 +151,7 @@ describe("Mint tab — mint PT + YT", () => {
     mocks.accounts[A] = funded()
     mocks.fetchMarketState.mockResolvedValue(marketState({ fees: fees5bps }))
     simulateReturns(mocks, { pt_minted: 1_049_475_000n, yt_minted: 1_049_475_000n, fee_shares: 500_000n })
-    await renderUi(<MintTab marketId="m1" />)
-    await openTab("Mint PT + YT")
+    await renderUi(<ActionPanel config={MINT} marketId="m1" />)
     await enter("STA to mint with", "100")
     expect(valueIn("Exact (simulated)", "You receive")).toBe("104.9475 PT + 104.9475 YT")
     expect(valueIn("Exact (simulated)", "Tokenization fee")).toBe("0.0500 SY")
@@ -162,26 +163,28 @@ describe("Mint tab — mint PT + YT", () => {
 
   it("an SY balance shows the note: use SY to buy PT or YT, add liquidity, or withdraw it", async () => {
     mocks.accounts[A] = funded({ sy: live(STA_100) })
-    await renderUi(<MintTab marketId="m1" />)
-    await openTab("Mint PT + YT")
+    await renderUi(<ActionPanel config={MINT} marketId="m1" />)
     expect(screen.getByText(/You hold 100 SY\. Minting starts from STA\. Use SY to buy PT or YT, add liquidity, or withdraw it\./)).toBeTruthy()
   })
 
   it("no SY balance, no SY note", async () => {
     mocks.accounts[A] = funded({ sy: live(0n) })
-    await renderUi(<MintTab marketId="m1" />)
-    await openTab("Mint PT + YT")
+    await renderUi(<ActionPanel config={MINT} marketId="m1" />)
     expect(screen.queryByText(/Use SY to buy PT or YT/)).toBeNull()
   })
 
-  it("the circuit-breaker capacity is shown as consumed twice for mint (once for deposit)", async () => {
+  it("the circuit-breaker capacity is consumed once for a deposit", async () => {
     disconnect(mocks)
-    await renderUi(<MintTab marketId="m1" />)
+    await renderUi(<ActionPanel config={DEPOSIT} marketId="m1" />)
     await enter("STA to deposit", "100")
     // limit 100000 STA − volume 25000 STA = 75000 STA left; the per-asset limit is off (0).
     expect(valueIn("Market (indicative)", "Circuit breaker, protocol-wide")).toBe("100.0000 STA of 75000.0000 STA left")
     expect(screen.queryByText(/Circuit breaker, STA/)).toBeNull()
-    await openTab("Mint PT + YT")
+  })
+
+  it("the circuit-breaker capacity is shown as consumed twice for mint (once for the deposit, once for the mint)", async () => {
+    disconnect(mocks)
+    await renderUi(<ActionPanel config={MINT} marketId="m1" />)
     await enter("STA to mint with", "100")
     expect(valueIn("Market (indicative)", "Circuit breaker, protocol-wide")).toBe("200.0000 STA of 75000.0000 STA left")
     // The explanation sits behind the row's info tip (R2-65), not under it.
@@ -194,8 +197,7 @@ describe("Mint tab — mint PT + YT", () => {
     const cb = { limit: live(10_000_000_000n), volume: live(8_500_000_000n), assetLimit: live(0n), assetVolume: live(0n) }
     mocks.fetchMarketState.mockResolvedValue(marketState({ cb }))
     simulateReturns(mocks, { pt_minted: 1_050_000_000n, yt_minted: 1_050_000_000n, fee_shares: 0n })
-    await renderUi(<MintTab marketId="m1" />)
-    await openTab("Mint PT + YT")
+    await renderUi(<ActionPanel config={MINT} marketId="m1" />)
     await enter("STA to mint with", "100")
     expect(valueIn("Market (indicative)", "Circuit breaker, protocol-wide")).toBe("200.0000 STA of 150.0000 STA left")
     expect(within(gateList()).getByText(/circuit breaker.*counts twice/)).toBeTruthy()
@@ -203,7 +205,7 @@ describe("Mint tab — mint PT + YT", () => {
   })
 })
 
-describe("Mint tab — result messages", () => {
+describe("Deposit, withdraw and split — result messages", () => {
   it("say what happened, in plain words", () => {
     expect(depositPanel(MARKET).result!({ kind: "amount", value: STA_100 }, { input: input("deposit", STA_100) })).toBe(
       "You deposited 100 STA and received 100 SY.",

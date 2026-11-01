@@ -35,7 +35,6 @@ import {
   enter,
   gateList,
   installDefaults,
-  openTab,
   renderUi,
   reviewButton,
   settle,
@@ -45,7 +44,17 @@ import {
   user,
   valueIn,
 } from "./panel-harness"
-import { claimPanel, recombinePanel, redeemPanel, RedeemTab } from "../actions/redeem-tab"
+import { ActionPanel } from "../actions/action-panel"
+import { claimPanel, redeemPanel } from "../actions/redeem-tab"
+
+/**
+ * The 0001 claim and redeem panels, mounted as their hosts mount them (the Portfolio's Claim dialog,
+ * the PT tab after maturity): one `ActionPanel` per config, built once (panel-config rule 1). The tab
+ * group that once held them and its single-step recombine panel were mounted nowhere and are gone
+ * (M12): Recombine is the Quick action's route (R2-72, recombine-action.test.tsx).
+ */
+const CLAIM = claimPanel(MARKET)
+const REDEEM = redeemPanel(MARKET)
 
 const PT_50 = 500_000_000n
 const YT_30 = 300_000_000n
@@ -54,7 +63,6 @@ const UNSETTLED_NOTE =
   "Until the market is settled, the PT amount depends on the oracle rate when your transaction lands; it can only be lower than shown."
 const i128 = (value: bigint) => ({ type: "i128", value })
 const fieldValue = (label: string) => (screen.getByLabelText(label) as HTMLInputElement).value
-const inlineError = (label: string) => document.getElementById(`${screen.getByLabelText(label).id}-error`)?.textContent ?? null
 
 /** Example 3 (principal docs/YIELD_MATH_AND_FEES.md): 104.9475 YT minted at 1.05, 10% YT fee. */
 const example3Account = () =>
@@ -88,44 +96,12 @@ beforeEach(() => {
 })
 afterEach(teardown)
 
-describe("Redeem tab — exit before maturity (recombine)", () => {
-  it("needs equal PT and YT: MAX is min(PT, YT), and more is refused", async () => {
-    await renderUi(<RedeemTab marketId="m1" />)
-    expect(screen.getByText("Balance: 30 PT + YT")).toBeTruthy()
-    expect(screen.getByText("Recombining burns equal amounts of PT and YT. You can recombine up to 30 (you hold 50 PT and 30 YT).")).toBeTruthy()
-    await user().click(screen.getByRole("button", { name: "Max PT and YT to recombine" }))
-    expect(fieldValue("PT and YT to recombine")).toBe("30")
-    await enter("PT and YT to recombine", "40")
-    expect(inlineError("PT and YT to recombine")).toBe("More than your balance: you have 30 PT + YT.")
-    expect(reviewButton("Recombine PT + YT").disabled).toBe(true)
-  })
-
-  it("previews amount·1e7/rate SY, then the exact SY and its floor", async () => {
-    simulateReturns(mocks, 100_000_000n)
-    await renderUi(<RedeemTab marketId="m1" />)
-    await enter("PT and YT to recombine", "10.5")
-    expect(valueIn("Exact (simulated)", "SY received")).toBe("10.0000 SY")
-    expect(valueIn("Exact (simulated)", "Minimum SY received")).toBe("9.95 SY")
-    expect(mocks.simulateInvocation.mock.calls.at(-1)![0].invocation.functionName).toBe("recombine")
-    expect(reviewButton("Recombine PT + YT").disabled).toBe(false)
-  })
-
-  it("without a wallet, previews amount·1e7/oracle rate", async () => {
-    disconnect(mocks)
-    await renderUi(<RedeemTab marketId="m1" />)
-    await enter("PT and YT to recombine", "10.5")
-    // 10.5 · 1e7 / 1.05e7
-    expect(valueIn("Indicative", "SY received")).toBe("10.0000 SY")
-  })
-})
-
-describe("Redeem tab — claim yield", () => {
+describe("Claim panel", () => {
   it("shows the pending yield gross, the YT fee and the net (Example 3), beside the exact claim", async () => {
     mocks.accounts[A] = example3Account()
     mocks.fetchMarketState.mockResolvedValue(unsettled())
     simulateReturns(mocks, 40_888_636n)
-    await renderUi(<RedeemTab marketId="m1" />)
-    await openTab("Claim yield")
+    await renderUi(<ActionPanel config={CLAIM} marketId="m1" />)
     await settle(400) // no field to type: wait out the simulation debounce
     await settle()
     // Example 3: gross ≈ 4.5432, fee ≈ 0.4543, net ≈ 4.0889; exactly 45_431_818 / 4_543_182 / 40_888_636 raw.
@@ -139,37 +115,33 @@ describe("Redeem tab — claim yield", () => {
 
   it("without a wallet, asks to connect one", async () => {
     disconnect(mocks)
-    await renderUi(<RedeemTab marketId="m1" />)
-    await openTab("Claim yield")
+    await renderUi(<ActionPanel config={CLAIM} marketId="m1" />)
     expect(valueIn("Your yield (indicative)", "Pending yield")).toBe("Connect a wallet to see it")
   })
 
   it("with a wallet whose account is still loading, says so instead (V6)", async () => {
     mocks.accounts[A] = "pending"
-    await renderUi(<RedeemTab marketId="m1" />)
-    await openTab("Claim yield")
+    await renderUi(<ActionPanel config={CLAIM} marketId="m1" />)
     expect(valueIn("Your yield (indicative)", "Pending yield")).toBe("Loading…")
   })
 
   it("nothing to claim is refused before signing", async () => {
     mocks.accounts[A] = accountState({ permYt: live(true), yt: live(0n) })
     simulateReturns(mocks, 0n)
-    await renderUi(<RedeemTab marketId="m1" />)
-    await openTab("Claim yield")
+    await renderUi(<ActionPanel config={CLAIM} marketId="m1" />)
     expect(valueIn("Your yield (indicative)", "You receive (net)")).toBe("0.0000 STA")
     expect(within(gateList()).getByText(/Nothing to claim yet/)).toBeTruthy()
     expect(reviewButton("Claim yield").disabled).toBe(true)
   })
 })
 
-describe("Redeem tab — redeem at maturity", () => {
+describe("Redeem panel (at maturity)", () => {
   beforeEach(afterMaturity)
 
   it("sets PT and YT independently; MAX for PT is the PT balance, not min(PT, YT)", async () => {
     mocks.fetchMarketState.mockResolvedValue(settled())
     simulateReturns(mocks, { underlying_from_pt: 1n, underlying_from_yt: 0n })
-    await renderUi(<RedeemTab marketId="m1" />)
-    await openTab("Redeem")
+    await renderUi(<ActionPanel config={REDEEM} marketId="m1" />)
     await user().click(screen.getByRole("button", { name: "Max PT to redeem" }))
     expect(fieldValue("PT to redeem")).toBe("50")
     await user().click(screen.getByRole("button", { name: "Max YT to redeem" }))
@@ -188,8 +160,7 @@ describe("Redeem tab — redeem at maturity", () => {
   it("before settlement, the preview is labelled indicative — settles at the oracle rate of your redemption", async () => {
     disconnect(mocks)
     mocks.fetchMarketState.mockResolvedValue(unsettled())
-    await renderUi(<RedeemTab marketId="m1" />)
-    await openTab("Redeem")
+    await renderUi(<ActionPanel config={REDEEM} marketId="m1" />)
     await enter("PT to redeem", "105")
     // Example 2's PT leg: 105 PT at 1.10 = 95.4545 STA (floor(105e7 · 1e7 / 1.1e7)).
     expect(valueIn("Indicative", "From PT")).toBe("95.4545454 STA")
@@ -202,8 +173,7 @@ describe("Redeem tab — redeem at maturity", () => {
   it("once settled, the rate is final and no longer indicative", async () => {
     disconnect(mocks)
     mocks.fetchMarketState.mockResolvedValue(settled({ oracleRate: live(12_000_000n) }))
-    await renderUi(<RedeemTab marketId="m1" />)
-    await openTab("Redeem")
+    await renderUi(<ActionPanel config={REDEEM} marketId="m1" />)
     await enter("PT to redeem", "105")
     expect(valueIn("Settlement", "Settlement rate")).toBe("1.1000")
     expect(await tipOf("Settlement rate")).toBe("Final: fixed when the market settled.")
@@ -214,8 +184,7 @@ describe("Redeem tab — redeem at maturity", () => {
   it("frozen but unsettled, the rate is the frozen one, not the live oracle", async () => {
     disconnect(mocks)
     mocks.fetchMarketState.mockResolvedValue(unsettled({ ytFrozen: live(true), ytAccruedIndex: live(indexFor(11_000_000n)), oracleRate: live(12_000_000n) }))
-    await renderUi(<RedeemTab marketId="m1" />)
-    await openTab("Redeem")
+    await renderUi(<ActionPanel config={REDEEM} marketId="m1" />)
     await enter("PT to redeem", "105")
     expect(valueIn("Settlement", "Settlement rate")).toBe("1.1000")
     expect(valueIn("Indicative", "From PT")).toBe("95.4545454 STA")
@@ -224,8 +193,7 @@ describe("Redeem tab — redeem at maturity", () => {
   it("previews the YT leg as the account's pending yield, net of the YT fee", async () => {
     mocks.accounts[A] = example3Account()
     mocks.fetchMarketState.mockResolvedValue(settled())
-    await renderUi(<RedeemTab marketId="m1" />)
-    await openTab("Redeem")
+    await renderUi(<ActionPanel config={REDEEM} marketId="m1" />)
     await enter("YT to redeem", "104.9475")
     expect(valueIn("Indicative", "From YT (net of the YT fee)")).toBe("4.0888636 STA")
   })
@@ -233,8 +201,7 @@ describe("Redeem tab — redeem at maturity", () => {
   it("previews the YT leg as loading, not connect-a-wallet, while the account loads (V6)", async () => {
     mocks.accounts[A] = "pending"
     mocks.fetchMarketState.mockResolvedValue(settled())
-    await renderUi(<RedeemTab marketId="m1" />)
-    await openTab("Redeem")
+    await renderUi(<ActionPanel config={REDEEM} marketId="m1" />)
     await enter("YT to redeem", "1")
     expect(valueIn("Indicative", "From YT (net of the YT fee)")).toBe("Loading…")
   })
@@ -243,8 +210,7 @@ describe("Redeem tab — redeem at maturity", () => {
     mocks.accounts[A] = accountState({ permYt: live(true), pt: live(1_050_000_000n), yt: live(1_049_475_000n) })
     mocks.fetchMarketState.mockResolvedValue(settled())
     simulateReturns(mocks, { underlying_from_pt: 954_545_454n, underlying_from_yt: 40_888_636n })
-    await renderUi(<RedeemTab marketId="m1" />)
-    await openTab("Redeem")
+    await renderUi(<ActionPanel config={REDEEM} marketId="m1" />)
     await enter("PT to redeem", "105")
     await enter("YT to redeem", "104.9475")
     expect(valueIn("Exact (simulated)", "From PT")).toBe("95.4545454 STA")
@@ -256,8 +222,7 @@ describe("Redeem tab — redeem at maturity", () => {
   it("a stale oracle while unsettled blocks redeem, with the reason", async () => {
     mocks.fetchMarketState.mockResolvedValue(unsettled({ oracleFresh: live(false) }))
     simulateReturns(mocks, { underlying_from_pt: 1n, underlying_from_yt: 0n })
-    await renderUi(<RedeemTab marketId="m1" />)
-    await openTab("Redeem")
+    await renderUi(<ActionPanel config={REDEEM} marketId="m1" />)
     await enter("PT to redeem", "10")
     expect(
       within(gateList()).getByText(/The oracle price is stale.*The first redemption settles the market at the current oracle price, so that price must be fresh\./),
@@ -268,8 +233,7 @@ describe("Redeem tab — redeem at maturity", () => {
   it("frozen but unsettled, a stale oracle does not block: the contract records the frozen rate (R40)", async () => {
     mocks.fetchMarketState.mockResolvedValue(unsettled({ ytFrozen: live(true), ytAccruedIndex: live(indexFor(11_000_000n)), oracleFresh: live(false) }))
     simulateReturns(mocks, { underlying_from_pt: 1n, underlying_from_yt: 0n })
-    await renderUi(<RedeemTab marketId="m1" />)
-    await openTab("Redeem")
+    await renderUi(<ActionPanel config={REDEEM} marketId="m1" />)
     await enter("PT to redeem", "10")
     expect(screen.getByText("Every check passes.")).toBeTruthy()
     expect(await tipOf("Settlement rate")).toMatch(/^Fixed: the YT yield index froze at maturity/)
@@ -280,8 +244,7 @@ describe("Redeem tab — redeem at maturity", () => {
   it("before settlement, a connected user is told the exact PT amount can only be lower when it lands", async () => {
     mocks.fetchMarketState.mockResolvedValue(unsettled())
     simulateReturns(mocks, { underlying_from_pt: 47_727_272n, underlying_from_yt: 0n })
-    await renderUi(<RedeemTab marketId="m1" />)
-    await openTab("Redeem")
+    await renderUi(<ActionPanel config={REDEEM} marketId="m1" />)
     await enter("PT to redeem", "50")
     expect(valueIn("Exact (simulated)", "From PT")).toBe("4.7727272 STA")
     expect(screen.getByText(UNSETTLED_NOTE)).toBeTruthy()
@@ -289,26 +252,21 @@ describe("Redeem tab — redeem at maturity", () => {
 
   it("settled, or frozen, the PT amount is fixed: no such note", async () => {
     mocks.fetchMarketState.mockResolvedValue(settled())
-    await renderUi(<RedeemTab marketId="m1" />)
-    await openTab("Redeem")
+    await renderUi(<ActionPanel config={REDEEM} marketId="m1" />)
     expect(screen.queryByText(UNSETTLED_NOTE)).toBeNull()
   })
 
   it("a stale oracle once settled does not block: the rate is already fixed", async () => {
     mocks.fetchMarketState.mockResolvedValue(settled({ oracleFresh: live(false) }))
     simulateReturns(mocks, { underlying_from_pt: 1n, underlying_from_yt: 0n })
-    await renderUi(<RedeemTab marketId="m1" />)
-    await openTab("Redeem")
+    await renderUi(<ActionPanel config={REDEEM} marketId="m1" />)
     await enter("PT to redeem", "10")
     expect(screen.getByText("Every check passes.")).toBeTruthy()
   })
 })
 
-describe("Redeem tab — result messages", () => {
+describe("Claim and redeem — result messages", () => {
   it("say what happened, in plain words", () => {
-    expect(recombinePanel().result!({ kind: "amount", value: 95_238_095n }, { input: input("recombine", 100_000_000n) })).toBe(
-      "You recombined 10 PT and 10 YT into 9.5238095 SY.",
-    )
     expect(claimPanel(MARKET).result!({ kind: "amount", value: 40_888_636n }, { input: input("claim_yield", 0n) })).toBe(
       "You claimed 4.0888636 STA of yield.",
     )

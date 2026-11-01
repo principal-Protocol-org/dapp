@@ -228,6 +228,16 @@ describe("Recombine quick action — gates before the first signature", () => {
     expect(review().disabled).toBe(false)
   })
 
+  it("an account the underlying's issuer does not authorize (SAC) is refused before step 1 (R2-74)", async () => {
+    simulateReturns(mocks, 950_000_000n)
+    mocks.accounts[A] = accountState({ pt: live(1_000n * UNIT), yt: live(500n * UNIT), sacAuthorized: live(false), trustline: live("unauthorized") })
+    await renderUi(<RecombineAction marketId="m1" />)
+    await enter(FIELD, "100")
+    expect(review().disabled).toBe(true)
+    expect(screen.getAllByText(/Blocked by the issuer: your trustline exists but is not authorized/).length).toBeGreaterThan(0)
+    expect(mocks.prepareReview).not.toHaveBeenCalled()
+  })
+
   it("a paused PrincipalManager refuses before step 1", async () => {
     mocks.simulateInvocation.mockResolvedValue({ ok: false, kind: "contract_error", contractId: "CMANAGER", code: 9, message: "Error(Contract, #9)" })
     await renderUi(<RecombineAction marketId="m1" />)

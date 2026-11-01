@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react"
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { Keypair, StrKey } from "@stellar/stellar-sdk"
 import { beforeEach, describe, expect, it, vi } from "vitest"
@@ -52,6 +52,9 @@ vi.mock("@/components/app/actions/tx-feedback", () => ({ showTxToast: mocks.toas
 vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} })
 
 import { MyMarkets } from "../manage/my-markets"
+import { ManagerSignFlow } from "../manage/manager-sign-flow"
+import { setPausedCall } from "@/lib/protocol/manager-calls"
+import { evaluateManagerGates } from "@/lib/protocol/manager-gates"
 
 const yes = live(true)
 const no = live(false)
@@ -214,13 +217,34 @@ describe("signing a manager call", () => {
     expect(mocks.execute.mock.calls[0][0]).toBe(prepared)
   })
 
-  it("signing is off while a gate refuses: a call needing a role the wallet lacks never reaches the wallet", async () => {
+  it("the pool admin can sign Pause: roles this call does not need (the Router admin's) do not gate it", async () => {
     // The Router admin read says no: nothing in this view needs it, but the pause gate does use the pool read.
     setRoles(marketRoles(A, { pool: yes }), marketRoles(B))
     show()
     await userEvent.click(screen.getByRole("button", { name: "Pause pool" }))
     const dialog = await screen.findByRole("dialog")
     expect((within(dialog).getByRole("button", { name: "Sign transaction" }) as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it("signing is off while a gate refuses: a call needing a role the wallet lacks never reaches the wallet", async () => {
+    const call = setPausedCall(manifest, { source: ME, marketId: A.marketId, contract: "pool", paused: true })
+    // The real manager gates, for a connected wallet that holds no role on this contract.
+    const blockersFor = (c: ManagerCall) => evaluateManagerGates(c, { wallet: mocks.wallet, roles: live([]), findings: [], listed: true })
+    expect(blockersFor(call).map((b) => b.code)).toEqual(["wallet"])
+    render(
+      <TooltipProvider>
+        <ManagerSignFlow label="Pause pool" title="Pause pool" steps={[call]} blockersFor={blockersFor} ledgerTime={LEDGER_TIME} network={manifest.network} />
+      </TooltipProvider>,
+    )
+    await userEvent.click(screen.getByRole("button", { name: "Pause pool" }))
+    const dialog = await screen.findByRole("dialog")
+    const sign = await within(dialog).findByRole("button", { name: "Sign transaction" })
+    expect((sign as HTMLButtonElement).disabled).toBe(true)
+    expect(within(dialog).getByText("Signing is off")).toBeTruthy()
+    expect(within(dialog).getByText(/Only this contract's admin can pause or unpause it/)).toBeTruthy()
+    fireEvent.click(sign)
+    await new Promise((r) => setTimeout(r, 20))
+    expect(mocks.execute).not.toHaveBeenCalled()
   })
 
   it("Claim creator fees claims the pool and the manager one after the other, each with its own review", async () => {

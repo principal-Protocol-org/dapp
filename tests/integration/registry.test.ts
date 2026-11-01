@@ -3,8 +3,9 @@
  * The market registry against the local stack (spec 0002 §1): the Router's real events, the real
  * contracts' Wasm hashes and wiring, and the real `market_registry` / `ingest_cursor` tables
  * (`principal-pg`; `DATABASE_URL` from `.env.local`; run `pnpm db:migrate` first). Skipped when the
- * network or the database is unreachable. It writes only true verdicts (the seed's row, the cursor)
- * and removes the throwaway row it creates. Prints counts and verdicts only.
+ * network or the database is unreachable. It writes only true verdicts (the seed's row) and removes
+ * the throwaway row it creates. Discovery runs under a test-only `ingest_cursor` name, removed after:
+ * the recorder's live cursor is never read, written or deleted. Prints counts and verdicts only.
  */
 import { readFileSync } from "node:fs"
 import { join } from "node:path"
@@ -26,6 +27,8 @@ function loadEnv() {
 loadEnv()
 
 const THROWAWAY = "C" + "Y".repeat(55)
+/** Every cursor this suite reads or writes gets this prefix, so the live one is never touched. */
+const TEST_CURSOR = "test:"
 
 let ready = false
 let env: Awaited<ReturnType<typeof setup>>
@@ -40,7 +43,13 @@ async function setup() {
   const rpc = createRpcServer(manifest.rpcUrl)
   await rpc.getHealth()
   await sql`select market from market_registry limit 1`
-  const store = registry.sqlRegistryStore(sql)
+  const live = registry.sqlRegistryStore(sql)
+  // The real tables, with the cursor kept under a test-only name.
+  const store = {
+    ...live,
+    cursor: (name: string) => live.cursor(TEST_CURSOR + name),
+    saveCursor: (name: string, ledger: number, cursor: string | null) => live.saveCursor(TEST_CURSOR + name, ledger, cursor),
+  }
   return { manifest, rpc, sql, registry, store, deps: { store, reader: createRpcReader(manifest), rpc, manifest } }
 }
 
@@ -75,21 +84,29 @@ describe("market registry on the local stack", () => {
   it("discovers the seed's mkt_reg through every getEvents page, keeps it a seed, and resumes from the cursor", async (ctx) => {
     if (!ready) return ctx.skip()
     const seedPool = env.manifest.markets[0].contracts.pool
+    const testCursor = TEST_CURSOR + env.registry.cursorName(env.manifest)
+    const liveCursor = await env.sql`select ledger, cursor from ingest_cursor where name = ${env.registry.cursorName(env.manifest)}`
     // A fresh scan from the RPC's oldest ledger: the dev stack registered the seed within retention.
-    await env.sql`delete from ingest_cursor where name = ${env.registry.cursorName(env.manifest)}`
-    const first = await env.registry.discover(env.deps)
-    console.log("first scan checked:", first.checked.length, "pools; gap:", first.gap)
-    expect(first.checked).toContain(seedPool)
-    const saved = await env.store.cursor(env.registry.cursorName(env.manifest))
-    expect(saved?.cursor).toBeTruthy()
-    const again = await env.registry.discover(env.deps)
-    console.log("resumed scan checked:", again.checked.length, "pools")
-    expect(again.checked).not.toContain(seedPool)
+    await env.sql`delete from ingest_cursor where name = ${testCursor}`
+    try {
+      const first = await env.registry.discover(env.deps)
+      console.log("first scan checked:", first.checked.length, "pools; gap:", first.gap)
+      expect(first.checked).toContain(seedPool)
+      const saved = await env.store.cursor(env.registry.cursorName(env.manifest))
+      expect(saved?.cursor).toBeTruthy()
+      const again = await env.registry.discover(env.deps)
+      console.log("resumed scan checked:", again.checked.length, "pools")
+      expect(again.checked).not.toContain(seedPool)
 
-    const rows = await env.store.rows()
-    expect(rows.find((r) => r.pool === seedPool)).toMatchObject({ source: "seed", valid: true })
-    const listed = await env.registry.resolvedMarkets({ store: env.store, manifest: env.manifest })
-    expect(listed.map((m) => m.contracts.pool)).toContain(seedPool)
+      const rows = await env.store.rows()
+      expect(rows.find((r) => r.pool === seedPool)).toMatchObject({ source: "seed", valid: true })
+      const listed = await env.registry.resolvedMarkets({ store: env.store, manifest: env.manifest })
+      expect(listed.map((m) => m.contracts.pool)).toContain(seedPool)
+    } finally {
+      await env.sql`delete from ingest_cursor where name = ${testCursor}`
+    }
+    // The recorder's own cursor is as it was.
+    expect(await env.sql`select ledger, cursor from ingest_cursor where name = ${env.registry.cursorName(env.manifest)}`).toEqual(liveCursor)
   }, 120_000)
 
   it("the SQL store keeps a verdict through an unreadable check and ranks sources", async (ctx) => {
