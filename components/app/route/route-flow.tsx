@@ -20,6 +20,10 @@ export type RouteFlowProps = {
   /** Connected account, market and the per-step gate; handed to `useRoute`. */
   account: string | null
   marketId: string
+  /** The route kinds this host offers (R2-77): it shows and starts only these. */
+  kinds: UseRouteOptions["kinds"]
+  /** The run History's Continue names (`?route=<id>`), if any. */
+  routeId?: string | null
   /**
    * The panel's 0001 gates for one step. It MUST pass the simulation through:
    * `(input, simulation) => evaluateGates(input, { ...base, simulation })`.
@@ -35,8 +39,9 @@ export type RouteFlowProps = {
   /** Why starting is off (shown while idle). */
   blockers: Blocker[]
   /**
-   * False: no start button nor refusals while idle, for a form that is closed (the LP tab's Deposit
-   * after maturity). A route resumed from the log still shows its progress. Default true.
+   * False: no start button nor refusals while idle, for a form that is closed (the LP tab's Deposit,
+   * the PT and YT tabs after maturity): nothing renders until a route resumed from the log shows its
+   * progress. Default true.
    */
   showStart?: boolean
   onNotice(notice: TxNotice): void
@@ -50,6 +55,17 @@ export type RouteFlowProps = {
  * interrupted panels, and 0001's restore flow when a step is stopped by an archived entry. It owns
  * `useRoute`, so the host passes only account, market, `gate` and the plans.
  */
+/**
+ * Which route kinds each host shows and starts (R2-77). Disjoint, so no two hosts ever hold the
+ * same run: the trade tabs and the Recombine dialogs can sit on one page and never act on one run.
+ */
+export const ROUTE_HOSTS = {
+  pt: ["buy_pt", "sell_pt"],
+  yt: ["buy_yt", "sell_yt"],
+  lp: ["lp_keep_yt", "lp_only", "lp_withdraw"],
+  recombine: ["recombine"],
+} as const satisfies Record<string, readonly RouteKind[]>
+
 const LABELS: Record<RouteKind, string> = {
   buy_pt: "Buy PT",
   sell_pt: "Sell PT",
@@ -65,7 +81,14 @@ const LABELS: Record<RouteKind, string> = {
 export function RouteFlow(props: RouteFlowProps) {
   const network = useManifest().network
   const { ledgerTime } = useLedgerClock()
-  const route = useRoute({ account: props.account, marketId: props.marketId, gate: props.gate, onReachedNetwork: props.onReachedNetwork })
+  const route = useRoute({
+    account: props.account,
+    marketId: props.marketId,
+    kinds: props.kinds,
+    routeId: props.routeId,
+    gate: props.gate,
+    onReachedNetwork: props.onReachedNetwork,
+  })
   const exec = useExecute()
   const { state } = route
   const kind = state.run?.kind ?? props.request?.kind ?? props.kind
@@ -78,16 +101,18 @@ export function RouteFlow(props: RouteFlowProps) {
   const [restore, setRestore] = useState<RestoreStep>({ step: "idle" })
   const restoreRef = useRef<RestoreReview | null>(null)
 
-  // A done route is announced once.
+  // A done route is announced once; one turned back into USDY says so (M1), never "all steps".
   const announced = useRef<string | null>(null)
   const doneId = state.phase === "done" ? (state.run?.id ?? null) : null
+  const unwound = state.run?.unwound === true
   useEffect(() => {
     if (!doneId || announced.current === doneId) return
     announced.current = doneId
-    const notice: TxNotice = { tone: "success", title: `${latest.current.label}: all steps confirmed.` }
+    const title = unwound ? `${latest.current.label} stopped and turned back into USDY.` : `${latest.current.label}: all steps confirmed.`
+    const notice: TxNotice = { tone: "success", title }
     showTxToast(notice)
     latest.current.onNotice(notice)
-  }, [doneId])
+  }, [doneId, unwound])
 
   const fail = (label: string, error: unknown) => {
     const notice = noticeForError(label, error, network)
@@ -128,6 +153,8 @@ export function RouteFlow(props: RouteFlowProps) {
 
   const reviewing = state.phase === "reviewing" || state.phase === "signing"
   const start = () => props.request && route.start(props.request, props.plans)
+  // A closed form keeps the route mounted, so a run resumed from the log shows; until then, nothing.
+  if (state.phase === "idle" && props.showStart === false) return null
 
   return (
     <div className="grid gap-3">

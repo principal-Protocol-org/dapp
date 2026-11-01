@@ -29,7 +29,9 @@ export function RouteProgress({ route }: { route: RouteControls }) {
   return (
     <section aria-label="Route progress" className="grid gap-3 rounded-lg border border-line p-3 text-sm text-ink wrap-anywhere">
       <h3 className="font-medium">
-        {state.phase === "done" ? `Route complete: ${state.of} of ${state.of} steps confirmed` : `Step ${state.step} of ${state.of}`}
+        {state.phase === "done"
+          ? `${state.run.unwound ? "Turned back into USDY" : "Route complete"}: ${state.of} of ${state.of} steps confirmed`
+          : `Step ${state.step} of ${state.of}`}
       </h3>
       <RouteSteps plans={plans} steps={state.run.steps} current={state.phase === "done" ? 0 : state.step} />
       {state.error ? (

@@ -7,6 +7,8 @@ import { aprToApy, BPS, ceilDiv, SCALE } from "@/lib/protocol/math"
 import { previewDeposit, previewMint, previewSellYt, previewWithdraw } from "@/lib/protocol/previews"
 import { effectiveImpliedApy } from "@/lib/protocol/rates"
 import { solveBuyYt, type YtSolution } from "@/lib/protocol/yt-solver"
+import { writeRoute } from "@/lib/app/route-log"
+import { planRoute, type RouteRequest, type StepPlan } from "@/lib/protocol/routes"
 import { accountState, live, marketState, MATURITY } from "./fixtures"
 
 const mocks = await vi.hoisted(async () => (await import("./panel-mocks")).createPanelMocks())
@@ -513,5 +515,42 @@ describe("YT tab — after maturity", () => {
     await user().click(screen.getByRole("button", { name: "Redeem in the PT tab" }))
     await settle()
     expect(screen.getByText("Redeem at maturity")).toBeTruthy()
+  })
+})
+
+describe("YT tab — a route interrupted between its steps, after maturity (R2-77)", () => {
+  it("a Sell YT stopped after its sale still shows beside 'trading has closed', with its holdings and Back to USDY", async () => {
+    mocks.getLedgerClock.mockImplementation(async () => ({ sequence: 1, closeTime: Number(MATURITY) + 100, readAtMs: Date.now() }))
+    const request: RouteRequest = { kind: "sell_yt", marketId: "m1", source: A, amount: 10n * SCALE, pay: "underlying", receive: "underlying", matured: false }
+    const plans = planRoute(request, { routerFunctions: [] }) as StepPlan[]
+    expect(plans.map((p) => p.action)).toEqual(["sell_yt", "withdraw"])
+    writeRoute({
+      id: "run-yt",
+      account: A,
+      marketId: "m1",
+      kind: "sell_yt",
+      request,
+      plans,
+      outputs: [{ kind: "amount", value: 3n * SCALE }],
+      steps: [
+        { action: "sell_yt", status: "confirmed", hash: "1".repeat(64) },
+        { action: "withdraw", status: "pending" },
+      ],
+      startedAt: 1,
+    })
+    await renderUi(<YtTab marketId="m1" side="sell" />)
+    expect(screen.getByText(/YT trading closed at maturity/)).toBeTruthy()
+    const progress = screen.getByRole("region", { name: "Route progress" })
+    expect(within(progress).getByRole("heading", { name: "Step 2 of 2" })).toBeTruthy()
+    expect(within(progress).getByText("You hold 3 SY")).toBeTruthy()
+    expect(within(progress).getByRole("button", { name: "Back to USDY" })).toBeTruthy()
+    expect(within(progress).getByRole("button", { name: "Continue" })).toBeTruthy()
+  })
+
+  it("shows nothing more than the closed card when no route of its kinds is waiting", async () => {
+    mocks.getLedgerClock.mockImplementation(async () => ({ sequence: 1, closeTime: Number(MATURITY) + 100, readAtMs: Date.now() }))
+    await renderUi(<YtTab marketId="m1" side="buy" />)
+    expect(screen.queryByRole("region", { name: "Route progress" })).toBeNull()
+    expect(screen.queryByRole("button", { name: /Review/ })).toBeNull()
   })
 })

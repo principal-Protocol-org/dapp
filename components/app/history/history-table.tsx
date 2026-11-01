@@ -6,7 +6,7 @@ import { useWallet } from "@/hooks/use-wallet"
 import { ACTION_META } from "@/lib/protocol/actions"
 import Link from "next/link"
 import { readLog, subscribeLog, type LogEntry } from "@/lib/app/local-log"
-import { readRoutes, subscribeRoutes, type RouteRun, type RouteStep } from "@/lib/app/route-log"
+import { firstOpen, holdsFunds, isDone, readRoutes, subscribeRoutes, type RouteRun, type RouteStep } from "@/lib/app/route-log"
 import { describeHoldings, routeHoldings, type RouteKind } from "@/lib/protocol/routes"
 import { explorerTxUrl } from "@/lib/app/tx-notice"
 import { shorten } from "@/lib/protocol/format"
@@ -59,10 +59,11 @@ const ROUTE_LABEL: Record<RouteKind, string> = {
 }
 
 /**
- * Where the market page resumes a route of this kind (its RouteFlow reads the log). A recombine runs
- * in its Quick action dialog (R2-72), which `?quick=recombine` opens with its form and the run.
+ * Where the market page resumes a route of this kind: the host that shows its kind (R2-77), which
+ * `&route=<id>` then points at this very run. A recombine runs in its Quick action dialog (R2-72),
+ * which `?quick=recombine` opens with its form and the run. A split is one step and never a route.
  */
-const ROUTE_LINK: Record<RouteKind, string> = {
+const ROUTE_LINK: Partial<Record<RouteKind, string>> = {
   buy_pt: "tab=pt&side=buy",
   sell_pt: "tab=pt&side=sell",
   buy_yt: "tab=yt&side=buy",
@@ -70,14 +71,7 @@ const ROUTE_LINK: Record<RouteKind, string> = {
   lp_keep_yt: "tab=lp&side=deposit",
   lp_only: "tab=lp&side=deposit",
   lp_withdraw: "tab=lp&side=withdraw",
-  split: "tab=pt",
   recombine: "quick=recombine",
-}
-
-const isDone = (r: RouteRun) => r.steps.every((s) => s.status === "confirmed")
-const firstOpen = (r: RouteRun) => {
-  const i = r.steps.findIndex((s) => s.status !== "confirmed")
-  return i === -1 ? r.steps.length : i
 }
 /** Something moved, or may have: a route with no sent step left nothing to show. */
 const started = (r: RouteRun) => r.steps.some((s) => s.hash !== undefined || s.status !== "pending")
@@ -270,17 +264,30 @@ function toRouteRow(
   }
   const done = isDone(r)
   const waiting = r.steps.some((s) => s.status === "unknown" || (s.status === "pending" && s.hash !== undefined))
-  const open = !r.closed && !done
+  // Continue only where there is something to continue (M5): a step confirmed or not known yet. A
+  // run closed anyway while it held funds is dismissed, not closed, so it keeps Continue (R2-76).
+  const funded = holdsFunds(r)
+  const link = ROUTE_LINK[r.kind]
   const market = ctx.m.markets.find((x) => x.marketId === r.marketId)
-  const held = open && market && firstOpen(r) > 0 ? routeHoldings(r.request, r.plans, r.outputs, firstOpen(r)) : undefined
+  // What the confirmed steps left; an older run closed with funds (before R2-76) still says so.
+  const held = !done && market && firstOpen(r) > 0 ? routeHoldings(r.request, r.plans, r.outputs, firstOpen(r)) : undefined
+  const status = done
+    ? r.unwound
+      ? "Returned to USDY"
+      : "Completed"
+    : funded
+      ? waiting
+        ? "Waiting for the network"
+        : "Interrupted"
+      : "Stopped"
   return {
     id: r.id,
     at: r.startedAt,
     label: `${ROUTE_LABEL[r.kind]} · ${r.steps.length} ${r.steps.length === 1 ? "step" : "steps"}`,
     market: ctx.name(r.marketId),
-    status: done ? "Completed" : r.closed ? "Stopped" : waiting ? "Waiting for the network" : "Interrupted",
+    status,
     holdings: held && market ? describeHoldings(held, market.underlying) : undefined,
-    continueHref: open ? `/app/markets/${r.marketId}?${ROUTE_LINK[r.kind]}` : undefined,
+    continueHref: funded && link ? `/app/markets/${r.marketId}?${link}&route=${encodeURIComponent(r.id)}` : undefined,
     steps: r.steps.map(stepRow),
   }
 }

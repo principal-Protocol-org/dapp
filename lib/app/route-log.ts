@@ -45,8 +45,16 @@ export type RouteRun = {
   startedAt: number
   /** The remaining steps were replaced by the single call back to USDY. */
   unwound?: boolean
-  /** The user closed it, or started a new route over one where nothing had moved: never resumed. */
+  /**
+   * Closed for good: finished or abandoned with nothing held (the user closed it, or started a new
+   * route over one where nothing had moved). Never resumed, never offered in History.
+   */
   closed?: boolean
+  /**
+   * The user closed it from the panel while it still held funds (R2-76): the panel no longer
+   * resumes it on its own, but History lists its holdings with Continue, which re-opens it.
+   */
+  dismissed?: boolean
 }
 
 type Store = Record<string, unknown[]>
@@ -124,7 +132,8 @@ function isRun(value: unknown, account: string): value is RouteRun {
     typeof r.startedAt === "number" &&
     Number.isFinite(r.startedAt) &&
     (r.unwound === undefined || typeof r.unwound === "boolean") &&
-    (r.closed === undefined || typeof r.closed === "boolean")
+    (r.closed === undefined || typeof r.closed === "boolean") &&
+    (r.dismissed === undefined || typeof r.dismissed === "boolean")
   )
 }
 
@@ -172,4 +181,63 @@ export function writeRoute(run: RouteRun, storage: Storage | undefined = default
     // storage full or blocked: the route just won't survive a reload
   }
   listeners.forEach((fn) => fn())
+}
+
+// ---------------------------------------------------------------- what a run holds, and who shows it
+
+/** Every step confirmed. */
+export const isDone = (run: RouteRun): boolean => run.steps.every((s) => s.status === "confirmed")
+
+/** The first step not confirmed; `steps.length` once every step is. */
+export function firstOpen(run: RouteRun): number {
+  const i = run.steps.findIndex((s) => s.status !== "confirmed")
+  return i === -1 ? run.steps.length : i
+}
+
+/**
+ * Funds may sit between the run's steps, or a step's fate is unknown: a confirmed or unknown step
+ * in a run that is neither finished nor closed. A dismissed run still holds them (R2-76).
+ */
+export const holdsFunds = (run: RouteRun): boolean =>
+  !run.closed && !isDone(run) && run.steps.some((s) => s.status === "confirmed" || s.status === "unknown")
+
+/** A run its panel resumes on its own: it holds funds and the user has not dismissed it. */
+export const resumable = (run: RouteRun): boolean => holdsFunds(run) && !run.dismissed
+
+/**
+ * The same progress: each step's status and hash, and whether the run was unwound. The flags
+ * (`closed`, `dismissed`) are not progress: they never mean a step moved.
+ */
+export function sameProgress(a: RouteRun, b: RouteRun): boolean {
+  return (
+    a.steps.length === b.steps.length &&
+    !!a.unwound === !!b.unwound &&
+    a.steps.every((s, i) => s.action === b.steps[i].action && s.status === b.steps[i].status && s.hash === b.steps[i].hash)
+  )
+}
+
+/**
+ * The run a panel shows on load (R2-77): hosts are disjoint by kind, so only runs of `kinds` on
+ * `marketId`. History's Continue names one (`preferId`): it is shown if it is this host's and
+ * still holds funds, even dismissed. Otherwise the newest run that is resumable. `runs` are newest
+ * first, as `readRoutes` returns them.
+ */
+export function pickRun(
+  runs: readonly RouteRun[],
+  host: { marketId: string; kinds: readonly RouteKind[]; preferId?: string | null },
+): RouteRun | undefined {
+  const mine = runs.filter((r) => r.marketId === host.marketId && host.kinds.includes(r.kind))
+  const named = host.preferId ? mine.find((r) => r.id === host.preferId && holdsFunds(r)) : undefined
+  return named ?? mine.find(resumable)
+}
+
+/**
+ * What closing the run on screen writes (R2-76): a run that holds funds is dismissed, so History
+ * keeps its holdings and Continue; one with nothing held is closed for good; a finished one stays
+ * as it is ("done" in History).
+ */
+export function closedCopy(run: RouteRun): RouteRun {
+  if (holdsFunds(run)) return { ...run, dismissed: true }
+  if (!run.closed && !isDone(run)) return { ...run, closed: true }
+  return run
 }

@@ -10,7 +10,7 @@ import { TxNoticeView } from "@/components/app/actions/tx-feedback"
 import { LabelWithTip } from "@/components/app/info-tip"
 import { UNAVAILABLE } from "@/components/app/live"
 import { useManifest } from "@/components/app/manifest-provider"
-import { RouteFlow } from "@/components/app/route/route-flow"
+import { ROUTE_HOSTS, RouteFlow } from "@/components/app/route/route-flow"
 import { routeNote, signaturesLine, type RouteNote } from "@/components/app/trade/route-note"
 import { TokenPicker, type PayToken } from "@/components/app/trade/token-picker"
 import { useRouteStart } from "@/components/app/trade/use-trade-route"
@@ -67,10 +67,12 @@ function figuresFor(ms: MarketState, amount: bigint, receive: PayToken, simulate
  *
  * After maturity recombining is closed (the manager's `assert_not_mature`): no form, a pointer to
  * Redeem, and `RouteFlow` stays mounted so a run stopped between its steps can still finish its
- * withdraw (withdraw stays open at maturity). `onRedeem` is the host's way to the PT tab's Redeem;
- * without one the pointer is a link to it.
+ * withdraw (withdraw stays open at maturity). It shows only recombine runs (R2-77), so the market
+ * page's dialog and the trade tab behind it never hold the same run. `onRedeem` is the host's way to
+ * the PT tab's Redeem; without one the pointer is a link to it. `routeId` is the run History's
+ * Continue names.
  */
-export function RecombineAction({ marketId, onRedeem }: { marketId: string; onRedeem?: () => void }) {
+export function RecombineAction({ marketId, onRedeem, routeId }: { marketId: string; onRedeem?: () => void; routeId?: string | null }) {
   const baseId = useId()
   const manifest = useManifest()
   const market = getMarket(manifest, marketId)
@@ -187,6 +189,8 @@ export function RecombineAction({ marketId, onRedeem }: { marketId: string; onRe
       <RouteFlow
         account={route.source}
         marketId={marketId}
+        kinds={ROUTE_HOSTS.recombine}
+        routeId={routeId}
         gate={route.gate}
         request={route.request}
         kind="recombine"

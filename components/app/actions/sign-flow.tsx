@@ -10,7 +10,7 @@ import { noticeForError, noticeForResult, type TxNotice } from "@/lib/app/tx-not
 import type { ActionInput } from "@/lib/protocol/actions"
 import type { ActionOutput } from "@/lib/protocol/guards"
 import type { Blocker } from "@/lib/protocol/gates"
-import { isExpired, type RestoreReview, type Review } from "@/lib/protocol/review"
+import { isExpired, SIGN_MARGIN_MS, type RestoreReview, type Review } from "@/lib/protocol/review"
 import type { ContractInvocation } from "@/lib/protocol/stellar"
 import type { Network } from "@/lib/protocol/types"
 
@@ -42,12 +42,6 @@ export type SignFlowProps = {
 
 const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error))
 const NOT_READY = "The checks no longer all pass, so this was not prepared. Close this and review again once they do."
-
-/**
- * A review is not sent to Freighter with less than this left before it expires: approving it takes
- * time, and a signature that lands after expiry is refused and wasted. It is prepared again instead.
- */
-export const SIGN_MARGIN_MS = 20_000
 
 /**
  * The review and restore lifecycle of one panel. The panel mounts it with a `key` made of

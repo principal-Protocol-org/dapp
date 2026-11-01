@@ -26,6 +26,8 @@ import type { SimulationOutcome } from "./stellar"
  * - The circuit breaker (R2-61) and the deposit cap (R2-62) see each later step with what the steps
  *   before it already counted: the route's deposits (a mint's included) fill the same windows.
  * - A later step's `requires` that reads only step 1's output is checked against step 1's simulation.
+ * - A route of two or more steps does not start in the last 10 minutes before maturity (R2-78): a
+ *   later step would then be refused at maturity, leaving the user holding SY halfway.
  *
  * A later step's own amount, balance and quote are checked when the route prepares it (`useRoute`).
  */
@@ -39,6 +41,26 @@ const LATER_STEP_SKIPS = new Set<BlockerCode>(["amount", "balance", "quote", "ar
 /** Whether an amount reads no step output other than step 1's. */
 const readsOnlyFirst = (src: AmountSource): boolean => (src.from === "step" ? src.index === 0 : src.from === "sum" ? src.parts.every(readsOnlyFirst) : true)
 const lowerFirst = (text: string) => text.charAt(0).toLowerCase() + text.slice(1)
+
+/** R2-78: a route of 2+ steps needs at least this long before maturity to start. */
+const NEAR_MATURITY_SECONDS = 600
+
+/**
+ * The R2-78 refusal: 2+ steps and the market matures in under 10 minutes (but has not yet: the
+ * maturity gate refuses then). Nothing when maturity or the clock cannot be read: those gates say so.
+ */
+function nearMaturity(steps: number, base: Omit<GateContext, "simulation">): Blocker | undefined {
+  const maturity = base.market.maturity
+  const now = base.ledgerTime
+  if (steps < 2 || maturity.status !== "live" || typeof now !== "number" || !Number.isFinite(now) || now <= 0) return undefined
+  const left = Number(maturity.value) - Math.floor(now)
+  if (left <= 0 || left >= NEAR_MATURITY_SECONDS) return undefined
+  const minutes = Math.ceil(left / 60)
+  return {
+    code: "maturity",
+    message: `This route takes ${steps} signatures and the market matures in ${minutes} min. Start it after maturity is settled, or use a single-step option.`,
+  }
+}
 
 const dedupe = (list: Blocker[]) => list.filter((b, i) => list.findIndex((o) => o.code === b.code && o.message === b.message) === i)
 const rank = (b: Blocker) => BLOCKER_ORDER.indexOf(b.code)
@@ -139,6 +161,8 @@ export function routePreStartBlockers(p: PreStartInput): Blocker[] {
     reported = counted(reported, breakerReport(draft, base), known)
     charged = counted(charged, capCharge(draft), known)
   })
+  const late = nearMaturity(plans.length, base)
+  if (late) list.push(late)
   // A later step's `requires` that reads only step 1's output is checked against step 1's
   // simulation, so a step 1 that gives too little is refused before its signature, not at step 2.
   const firstOut = p.simOutput

@@ -23,7 +23,8 @@ vi.mock("@/components/app/manifest-provider", () => {
   return { useManifest: () => manifest }
 })
 vi.mock("@/hooks/use-execute", () => ({ useExecute: () => exec }))
-vi.mock("@/components/app/actions/tx-feedback", () => ({ showTxToast: vi.fn(), TxNoticeView: () => null }))
+const toast = vi.hoisted(() => vi.fn())
+vi.mock("@/components/app/actions/tx-feedback", () => ({ showTxToast: toast, TxNoticeView: () => null }))
 
 import { RouteFlow } from "../route/route-flow"
 
@@ -79,6 +80,7 @@ function setup(state: Partial<RouteState>, over: Partial<RouteControls> = {}) {
 const base = {
   account: "G",
   marketId: "m1",
+  kinds: ["buy_yt", "sell_yt"] as const,
   gate: () => [],
   request: REQUEST,
   plans: PLANS,
@@ -226,5 +228,35 @@ describe("RouteFlow", () => {
     expect((screen.getByLabelText("Amount") as HTMLInputElement).value).toBe("100")
     act(() => lastOpts.onReachedNetwork?.({ step: 1, status: "SUCCESS", hash: "h" }))
     expect((screen.getByLabelText("Amount") as HTMLInputElement).value).toBe("")
+  })
+
+  it("hands its host's kinds and History's named run to useRoute (R2-77)", () => {
+    setup({})
+    render(<RouteFlow {...base} routeId="run-7" />)
+    expect(lastOpts.kinds).toEqual(["buy_yt", "sell_yt"])
+    expect(lastOpts.routeId).toBe("run-7")
+  })
+
+  it("a closed form with no route on screen renders nothing (the route stays mounted for a resume)", () => {
+    setup({})
+    const { container } = render(<RouteFlow {...base} showStart={false} />)
+    expect(container.innerHTML).toBe("")
+    expect(lastOpts.kinds).toEqual(["buy_yt", "sell_yt"])
+  })
+
+  it("a route turned back into USDY is announced as stopped, not as done (M1)", () => {
+    const back = { ...run(["confirmed", "confirmed"]), unwound: true }
+    setup({ phase: "done", step: 2, of: 2, run: back, canDismiss: true })
+    render(<RouteFlow {...base} />)
+    expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: "Buy YT stopped and turned back into USDY." }))
+    expect(base.onNotice).toHaveBeenCalledWith(expect.objectContaining({ title: "Buy YT stopped and turned back into USDY." }))
+    expect(screen.getByRole("heading", { name: "Turned back into USDY: 2 of 2 steps confirmed" })).toBeTruthy()
+  })
+
+  it("a finished route is announced as done", () => {
+    setup({ phase: "done", step: 3, of: 3, run: run(["confirmed", "confirmed", "confirmed"]), canDismiss: true })
+    render(<RouteFlow {...base} />)
+    expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: "Buy YT: all steps confirmed." }))
+    expect(screen.getByRole("heading", { name: "Route complete: 3 of 3 steps confirmed" })).toBeTruthy()
   })
 })

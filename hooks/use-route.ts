@@ -2,24 +2,35 @@
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import { useQueryClient } from "@tanstack/react-query"
-import { SIGN_MARGIN_MS } from "@/components/app/actions/sign-flow"
 import { useExecute, type Execute } from "@/hooks/use-execute"
 import { useLedgerClock } from "@/hooks/use-ledger-clock"
 import { useSettings } from "@/hooks/use-settings"
 import { derive, simulate } from "@/hooks/use-simulation"
-import { readRoutes, writeRoute, type RouteRun, type RouteStep } from "@/lib/app/route-log"
+import {
+  closedCopy,
+  firstOpen,
+  holdsFunds,
+  isDone,
+  pickRun,
+  readRoutes,
+  sameProgress,
+  writeRoute,
+  type RouteRun,
+  type RouteStep,
+} from "@/lib/app/route-log"
 import { invocationFor, type ActionId, type ActionInput } from "@/lib/protocol/actions"
 import type { Blocker } from "@/lib/protocol/gates"
 import { openGuards, parseOutput, type ActionOutput } from "@/lib/protocol/guards"
 import { getMarket } from "@/lib/protocol/manifest"
 import { useManifest } from "@/components/app/manifest-provider"
-import { isExpired, type Review, type TxResult, type TxStatus } from "@/lib/protocol/review"
+import { isExpired, SIGN_MARGIN_MS, type Review, type TxResult, type TxStatus } from "@/lib/protocol/review"
 import {
   describeHoldings,
   resolveStep,
   routeHoldings,
   unwindFrom,
   type Holdings,
+  type RouteKind,
   type RouteRequest,
   type StepPlan,
   type Unwind,
@@ -78,6 +89,17 @@ export type UseRouteOptions = {
   /** The connected account; routes are logged and resumed per account. */
   account: string | null
   marketId: string
+  /**
+   * The route kinds this host offers (R2-77): it resumes and starts only these, so two hosts never
+   * hold the same run (PT tab `buy_pt|sell_pt`, YT tab `buy_yt|sell_yt`, LP tab `lp_*`, Recombine
+   * dialogs `recombine`). Read when the route loads or starts; fixed per host.
+   */
+  kinds: readonly RouteKind[]
+  /**
+   * The run History's Continue names (`?route=<id>`): shown in place of the newest one when it is
+   * this host's and still holds funds, even dismissed (R2-76), which the opening clears.
+   */
+  routeId?: string | null
   gate: RouteGate
   /**
    * A step reached the network: confirmed, or sent with its result not known yet (as 96c2ded, not
@@ -89,7 +111,10 @@ export type UseRouteOptions = {
 
 export type RouteControls = {
   state: RouteState
-  /** Logs a new run and prepares its first step. A no-op while a route holds funds between steps. */
+  /**
+   * Logs a new run and prepares its first step. A no-op while a route holds funds between steps, and
+   * for a kind this host does not offer.
+   */
   start(req: RouteRequest, plans: StepPlan[]): void
   /** Signs the prepared step, exactly the review shown (R31). Prepares it again if it is about to expire. */
   sign(): void
@@ -97,7 +122,10 @@ export type RouteControls = {
   continue(): void
   /** Interrupted: replaces the remaining steps by the single call back to USDY, and prepares it. */
   unwind(): void
-  /** Closes what is on screen: a review not signed yet, a finished or interrupted route, or a lost step. */
+  /**
+   * Closes what is on screen: a review not signed yet, a finished or interrupted route, or a lost
+   * step. A route that still holds funds is dismissed, not closed: History keeps Continue (R2-76).
+   */
   dismiss(): void
 }
 
@@ -149,6 +177,8 @@ const lostStep = (n: number) =>
   `Step ${n}'s time limit has passed, but the network no longer shows that far back, so this app cannot tell whether it went through. Look it up by its hash and check your balances, then close this route.`
 const neverLanded = (n: number) =>
   `Step ${n} did not land before its time limit, so the network can no longer include it and it moved nothing. Continue to prepare it again.`
+/** Another window (or panel) moved the run on: the log's copy is shown, and nothing runs from the old one. */
+const MOVED_ON = "This route moved on in another window."
 const unreadable = (n: number, why?: string) =>
   `Step ${n} went through, but its result could not be read${why ? ` (${why})` : ""}, so this app does not know the amount step ${n + 1} should use. Check your balances in the Portfolio.`
 
@@ -162,13 +192,18 @@ function closeTimeOf(value: unknown): number | undefined {
   return Number.isFinite(n) && n > 0 ? n : undefined
 }
 
-const isDone = (run: RouteRun) => run.steps.every((s) => s.status === "confirmed")
-/** Funds may sit between steps, or a step's fate is unknown: the route stays until resolved or closed. */
-const holdsFunds = (run: RouteRun) =>
-  !run.closed && !isDone(run) && run.steps.some((s) => s.status === "confirmed" || s.status === "unknown")
-const firstOpen = (run: RouteRun) => {
-  const i = run.steps.findIndex((s) => s.status !== "confirmed")
-  return i === -1 ? run.steps.length : i
+/** The run as the log has it now; undefined when it is not there or the log cannot be read. */
+const storedCopy = (run: RouteRun): RouteRun | undefined => readRoutes(run.account).find((r) => r.id === run.id)
+/** The log's copy when it has moved on from `run` (another window signed or settled a step). */
+function movedOnFrom(run: RouteRun): RouteRun | undefined {
+  const now = storedCopy(run)
+  return now && !sameProgress(now, run) ? now : undefined
+}
+/** History's Continue re-opened a dismissed run (R2-76): it is the panel's again. */
+function reopened(run: RouteRun): RouteRun {
+  const open = { ...run }
+  delete open.dismissed
+  return open
 }
 
 function withStep(run: RouteRun, i: number, step: RouteStep, output?: ActionOutput | null): RouteRun {
@@ -254,9 +289,14 @@ async function lookup(manifest: Manifest, action: ActionId, step: RouteStep): Pr
  *   re-checks it by its hash, on resume first of all.
  * - A reload never prepares or signs: it shows the interrupted route, holdings included.
  * - An unmounted, replaced or re-keyed route stops after logging the step in flight.
+ * - Hosts are disjoint by kind (R2-77), and the log decides across windows: before a step is
+ *   prepared, before it is signed and before a result is written, the run is read again by its id;
+ *   if another window moved it on, the log's copy is shown and this one stops ("moved on"), so a
+ *   step is never prepared or signed twice and a later step is never written over.
  */
 export function useRoute(opts: UseRouteOptions): RouteControls {
   const { account, marketId } = opts
+  const routeId = opts.routeId ?? null
   const manifest = useManifest()
   const exec = useExecute()
   const queryClient = useQueryClient()
@@ -297,6 +337,27 @@ export function useRoute(opts: UseRouteOptions): RouteControls {
     const release = (g: number) => {
       if (live(g)) busy.current = false
     }
+    /** Shows the log's copy of a run another window moved on, and stops: nothing runs from the old copy. */
+    const movedOn = (g: number, r: RouteRun) => {
+      if (!live(g)) return
+      prepared.current = null
+      runRef.current = r
+      setRun(r)
+      const i = firstOpen(r)
+      if (i >= r.steps.length) return show(g, { phase: "done", index: r.steps.length - 1 })
+      if (r.steps[i].status === "unknown") return show(g, { phase: "waiting", index: i, error: MOVED_ON })
+      interrupt(g, i, MOVED_ON)
+    }
+    /** Logs `next`, made from `base`, only while the log still has `base`'s progress; else shows the log's. */
+    const commit = (g: number, base: RouteRun, next: RouteRun): boolean => {
+      const elsewhere = movedOnFrom(base)
+      if (elsewhere) {
+        movedOn(g, elsewhere)
+        return false
+      }
+      save(g, next)
+      return true
+    }
     const exe = (): Execute => latest.current.exec
 
     /** Refetches the account and market reads, then lets the panel render them so `gate` sees them. */
@@ -322,6 +383,8 @@ export function useRoute(opts: UseRouteOptions): RouteControls {
       try {
         if (refresh) await refreshReads()
         if (!live(g)) return
+        const elsewhere = movedOnFrom(r)
+        if (elsewhere) return movedOn(g, elsewhere)
         const plan = r.plans[i]
         let amounts: { amount: bigint; secondaryAmount?: bigint }
         try {
@@ -382,6 +445,10 @@ export function useRoute(opts: UseRouteOptions): RouteControls {
         prepared.current = null
         return interrupt(g, i, blockers[0].message, { blockers })
       }
+      // Another window may have signed this step since it was prepared: the log decides, in the
+      // same tick as the hash is logged below.
+      const elsewhere = movedOnFrom(r)
+      if (elsewhere) return movedOn(g, elsewhere)
       busy.current = true
       prepared.current = null
       const before = r.steps[i]
@@ -399,25 +466,25 @@ export function useRoute(opts: UseRouteOptions): RouteControls {
           result = await exe().execute(p.review)
         } catch (error) {
           // Refused before anything reached the network (wallet, expiry, R31 checks, a busy network).
-          save(g, withStep(cur, i, before))
-          interrupt(g, i, `Step ${i + 1} was not sent: ${text(error)}`)
+          if (commit(g, cur, withStep(cur, i, before))) interrupt(g, i, `Step ${i + 1} was not sent: ${text(error)}`)
         }
         if (result) {
+          // A window that moved the run on meanwhile had this step's result already: its log stands.
           if (result.status === "SUCCESS") {
             const output = result.output ?? null
             const done = withStep(cur, i, { action: before.action, status: "confirmed", hash: result.hash }, output)
-            save(g, done)
             const decodeError = result.decodeError
-            then = () => afterConfirmed(g, done, i, output, decodeError, true)
+            if (commit(g, cur, done)) then = () => afterConfirmed(g, done, i, output, decodeError, true)
           } else if (result.status === "FAILED") {
-            save(g, withStep(cur, i, { action: before.action, status: "failed", hash: result.hash }))
-            interrupt(g, i, result.reason ?? `Step ${i + 1} failed on-chain. Only the network fee was charged.`)
-          } else {
-            save(g, withStep(cur, i, { ...sent, hash: result.hash }))
+            if (commit(g, cur, withStep(cur, i, { action: before.action, status: "failed", hash: result.hash }))) {
+              interrupt(g, i, result.reason ?? `Step ${i + 1} failed on-chain. Only the network fee was charged.`)
+            }
+          } else if (commit(g, cur, withStep(cur, i, { ...sent, hash: result.hash }))) {
             show(g, { phase: "waiting", index: i, error: result.pollError ?? notKnown(i + 1) })
           }
-          // Only once the result is logged, and only to the panel still showing this route: a
-          // callback that throws must not interrupt a route whose step is already settled.
+          // Only once the result is logged (here, or already by the window that moved the run on),
+          // and only to the panel still showing this route: a callback that throws must not
+          // interrupt a route whose step is already settled.
           if (result.status !== "FAILED" && live(g)) {
             try {
               latest.current.opts.onReachedNetwork?.({ step: i + 1, status: result.status, hash: result.hash })
@@ -453,29 +520,37 @@ export function useRoute(opts: UseRouteOptions): RouteControls {
       }
       release(g)
       const hash = step.hash
+      // Written only over the copy this look started from: another window may have moved on since.
       if (found.status === "SUCCESS") {
         const cur = withStep(r, i, { action: step.action, status: "confirmed", hash }, found.output)
-        save(g, cur)
+        if (!commit(g, r, cur)) return
         return afterConfirmed(g, cur, i, found.output, found.decodeError, proceed)
       }
       if (found.status === "FAILED") {
-        save(g, withStep(r, i, { action: step.action, status: "failed", hash }))
-        return interrupt(g, i, found.reason)
+        if (commit(g, r, withStep(r, i, { action: step.action, status: "failed", hash }))) interrupt(g, i, found.reason)
+        return
       }
       if (found.final) {
-        save(g, withStep(r, i, { action: step.action, status: "failed", hash }))
-        return interrupt(g, i, neverLanded(i + 1))
+        if (commit(g, r, withStep(r, i, { action: step.action, status: "failed", hash }))) interrupt(g, i, neverLanded(i + 1))
+        return
       }
       show(g, { phase: "waiting", index: i, error: found.lost ? lostStep(i + 1) : stillUnknown(i + 1), lost: found.lost })
     }
 
     function start(req: RouteRequest, plans: StepPlan[]) {
-      const { account: who, marketId: market } = latest.current.opts
-      if (busy.current || !who || req.source !== who || req.marketId !== market || plans.length === 0) return
+      const { account: who, marketId: market, kinds } = latest.current.opts
+      if (busy.current || !who || req.source !== who || req.marketId !== market || plans.length === 0 || !kinds.includes(req.kind)) return
+      // The run on screen is always of this host's kinds (load and this guard), so this is the
+      // host's funded-run check.
       const active = runRef.current
       if (active && holdsFunds(active)) return
-      // Nothing had moved in the route on screen: it is closed (kept in history) and replaced.
-      if (active && !active.closed && !isDone(active)) writeRoute({ ...active, closed: true })
+      // Nothing had moved in the route on screen: it is closed (kept in history) and replaced,
+      // unless another window moved it on since.
+      if (active && !active.closed && !isDone(active)) {
+        const elsewhere = movedOnFrom(active)
+        if (elsewhere) return movedOn(gen.current, elsewhere)
+        writeRoute(closedCopy(active))
+      }
       const g = ++gen.current
       const fresh: RouteRun = {
         id: newId(),
@@ -516,7 +591,7 @@ export function useRoute(opts: UseRouteOptions): RouteControls {
         outputs: r.outputs.slice(0, k),
         unwound: true,
       }
-      save(g, next)
+      if (!commit(g, r, next)) return
       void prepareStep(g, next, k, true)
     }
 
@@ -529,8 +604,14 @@ export function useRoute(opts: UseRouteOptions): RouteControls {
 
     function close() {
       const r = runRef.current
-      // A finished route stays "done" in History; only an unfinished one is marked closed.
-      if (r && !r.closed && !isDone(r)) writeRoute({ ...r, closed: true })
+      // R2-76: a route that holds funds is dismissed (History keeps Continue), one with nothing held
+      // is closed for good, a finished one stays "done". Only a flag is added, to the log's copy:
+      // closing never undoes a step another window logged.
+      if (r) {
+        const now = storedCopy(r) ?? r
+        const next = closedCopy(now)
+        if (next !== now) writeRoute(next)
+      }
       const g = ++gen.current
       busy.current = false
       prepared.current = null
@@ -556,10 +637,18 @@ export function useRoute(opts: UseRouteOptions): RouteControls {
       close()
     }
 
-    /** On mount and on an account or market change: the newest route of this market that holds funds. */
+    /**
+     * On mount and on an account, market or `routeId` change: the run History's Continue names, else
+     * the newest of this host's kinds on this market that holds funds and was not dismissed.
+     */
     function load(g: number, who: string | null, market: string) {
       if (!live(g)) return
-      const found = who ? readRoutes(who).find((r) => r.marketId === market && holdsFunds(r)) : undefined
+      const { kinds, routeId } = latest.current.opts
+      let found = who ? pickRun(readRoutes(who), { marketId: market, kinds, preferId: routeId }) : undefined
+      if (found?.dismissed) {
+        found = reopened(found)
+        writeRoute(found)
+      }
       runRef.current = found ?? null
       setRun(found ?? null)
       if (!found) return show(g, IDLE)
@@ -576,14 +665,15 @@ export function useRoute(opts: UseRouteOptions): RouteControls {
     return { prepareStep, sign, start, resume, unwind, dismiss, load, stop, expire }
   }, [queryClient])
 
-  // Resume from the log; a change of account or market stops the route on screen (it stays logged).
+  // Resume from the log; a change of account, market or named run stops the route on screen (it
+  // stays logged). `kinds` is read at load time, never a dependency: hosts pass it inline.
   useEffect(() => {
     const g = ++gen.current
     busy.current = false
     prepared.current = null
     void Promise.resolve().then(() => engine.load(g, account, marketId))
     return () => engine.stop()
-  }, [account, marketId, engine])
+  }, [account, marketId, routeId, engine])
 
   // A prepared step left unsigned for 60 s expires and stops the route (spec §4), with its holdings
   // shown. Signing with under 20 s left prepares it again instead (`sign`).

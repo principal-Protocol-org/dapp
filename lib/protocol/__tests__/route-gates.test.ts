@@ -248,4 +248,42 @@ describe("routePreStartBlockers", () => {
     expect(run({ plans, request: request("sell_pt", U), simGuards: guards })).toEqual([{ code: "quote", message: guards.reason }])
     expect(run({ plans, request: request("sell_pt", 0n), simGuards: guards }).map((b) => b.code)).not.toContain("quote")
   })
+
+  describe("R2-78: a route of two or more steps does not start in the last 10 minutes before maturity", () => {
+    const near = (secondsLeft: number) => base((b) => {
+      b.ledgerTime = MATURITY - secondsLeft
+    })
+    const plans = buyYtPlans(60n * U, 60n * U)
+    const req = request("buy_yt", 5n * U)
+    const sim = { simOutput: { kind: "amount" as const, value: 60n * U } }
+
+    it("refuses with the signatures it takes and the minutes left", () => {
+      const found = run({ plans, request: req, base: near(7 * 60), ...sim })
+      expect(found).toEqual([
+        {
+          code: "maturity",
+          message: "This route takes 3 signatures and the market matures in 7 min. Start it after maturity is settled, or use a single-step option.",
+        },
+      ])
+      // Under a minute still reads as a whole minute, never "0 min".
+      expect(run({ plans, request: req, base: near(20), ...sim })[0].message).toMatch(/matures in 1 min\./)
+      expect(run({ plans: plans.slice(0, 2), request: req, base: near(599), ...sim })[0].message).toMatch(/takes 2 signatures and the market matures in 10 min\./)
+    })
+
+    it("starts at 10 minutes or more, and leaves a single step to its own gates", () => {
+      expect(run({ plans, request: req, base: near(600), ...sim })).toEqual([])
+      const one: StepPlan[] = [{ action: "sell_pt", amount: { from: "input" }, gives: "PT", takes: "SY" }]
+      expect(run({ plans: one, request: request("sell_pt", U), base: near(60) })).toEqual([])
+    })
+
+    it("adds nothing once matured (the maturity gate refuses) or while maturity or the clock cannot be read", () => {
+      const matured = run({ plans, request: req, base: near(0), ...sim })
+      expect(matured.filter((b) => /signatures and the market matures/.test(b.message))).toEqual([])
+      const unreadable = base((b) => {
+        b.ledgerTime = MATURITY - 60
+        b.market.maturity = { status: "unavailable", error: "rpc down" }
+      })
+      expect(run({ plans, request: req, base: unreadable, ...sim }).filter((b) => /signatures and the market matures/.test(b.message))).toEqual([])
+    })
+  })
 })

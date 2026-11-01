@@ -328,3 +328,65 @@ describe("Recombine quick action — after maturity", () => {
     expect(mocks.prepareReview.mock.calls[0][0].input).toMatchObject({ action: "withdraw", amount: 952_380_952n })
   })
 })
+
+/** A Buy PT whose deposit confirmed: a PT-tab run, which no Recombine dialog may show (R2-77). */
+function buyPtRun(): RouteRun {
+  const request: RouteRequest = { kind: "buy_pt", marketId: "m1", source: A, amount: 100n * UNIT, pay: "underlying", receive: "underlying", matured: false }
+  return {
+    id: "run-buy-pt",
+    account: A,
+    marketId: "m1",
+    kind: "buy_pt",
+    request,
+    plans: planRoute(request, { routerFunctions: [] }) as StepPlan[],
+    outputs: [{ kind: "amount", value: 95n * UNIT }],
+    steps: [
+      { action: "deposit", status: "confirmed", hash: "2".repeat(64) },
+      { action: "buy_pt", status: "pending" },
+    ],
+    startedAt: 2,
+  }
+}
+
+describe("Recombine quick action — hosts are disjoint by kind (R2-77)", () => {
+  const progressRegions = () => screen.queryAllByRole("region", { name: "Route progress", hidden: true })
+
+  it("the dialog never shows a Buy PT run; the PT tab does", async () => {
+    writeRoute(buyPtRun())
+    nav.search = "quick=recombine"
+    await renderUi(<TradePanel marketId="m1" />)
+    const dialog = await screen.findByRole("dialog", { name: "Recombine PT + YT" })
+    expect(within(dialog).queryByRole("region", { name: "Route progress" })).toBeNull()
+    // The form is free: the PT run does not block a recombine.
+    expect(within(dialog).getByLabelText(FIELD)).toBeTruthy()
+    // Behind the modal, only the PT tab shows the run.
+    expect(progressRegions()).toHaveLength(1)
+    await user().keyboard("{Escape}")
+    await settle()
+    expect(within(screen.getByRole("region", { name: "Route progress" })).getByText("You hold 95 SY")).toBeTruthy()
+  })
+
+  it("a recombine run shows in the dialog only, never in the PT tab behind it", async () => {
+    writeRoute(interruptedRun())
+    nav.search = "quick=recombine"
+    await renderUi(<TradePanel marketId="m1" />)
+    const dialog = await screen.findByRole("dialog", { name: "Recombine PT + YT" })
+    expect(within(dialog).getByRole("region", { name: "Route progress" })).toBeTruthy()
+    expect(progressRegions()).toHaveLength(1)
+    await user().keyboard("{Escape}")
+    await settle()
+    expect(screen.queryByRole("region", { name: "Route progress" })).toBeNull()
+  })
+
+  it("closing the dialog keeps the amount typed in the tab (no remount)", async () => {
+    await renderUi(<TradePanel marketId="m1" />)
+    await enter("You pay", "12")
+    await user().click(screen.getByRole("button", { name: "Quick actions" }))
+    await user().click(screen.getByRole("menuitem", { name: "Recombine PT + YT" }))
+    await screen.findByRole("dialog", { name: "Recombine PT + YT" })
+    await user().keyboard("{Escape}")
+    await settle()
+    expect(screen.queryByRole("dialog")).toBeNull()
+    expect((screen.getByLabelText("You pay") as HTMLInputElement).value).toBe("12")
+  })
+})

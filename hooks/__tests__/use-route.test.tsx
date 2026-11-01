@@ -60,7 +60,7 @@ vi.mock("@/lib/protocol/stellar", async (orig) => ({
 
 import { useRoute, type RouteGate } from "@/hooks/use-route"
 import { readRoutes, writeRoute, type RouteRun } from "@/lib/app/route-log"
-import { planRoute, type RouteRequest, type StepPlan } from "@/lib/protocol/routes"
+import { planRoute, type RouteKind, type RouteRequest, type StepPlan } from "@/lib/protocol/routes"
 
 let client: QueryClient
 const wrapper = ({ children }: { children: React.ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>
@@ -121,10 +121,14 @@ function deferred<T>() {
   return { promise, resolve, reject }
 }
 
-function setup(gateImpl: RouteGate = () => []) {
+/** The PT tab's kinds (R2-77): each host resumes and starts only its own. */
+const PT_KINDS: readonly RouteKind[] = ["buy_pt", "sell_pt"]
+
+function setup(gateImpl: RouteGate = () => [], host: { kinds?: readonly RouteKind[]; routeId?: string } = {}) {
   const gate = vi.fn(gateImpl)
   const onReachedNetwork = vi.fn()
-  const hook = renderHook(() => useRoute({ account: A, marketId: "m1", gate, onReachedNetwork }), { wrapper })
+  const kinds = host.kinds ?? PT_KINDS
+  const hook = renderHook(() => useRoute({ account: A, marketId: "m1", kinds, routeId: host.routeId, gate, onReachedNetwork }), { wrapper })
   return { ...hook, gate, onReachedNetwork }
 }
 
@@ -410,7 +414,7 @@ describe("useRoute", () => {
       seen.push(loggedRun()?.steps[0].status ?? "none")
       throw new Error("panel reset failed")
     })
-    const { result } = renderHook(() => useRoute({ account: A, marketId: "m1", gate: () => [], onReachedNetwork }), { wrapper })
+    const { result } = renderHook(() => useRoute({ account: A, marketId: "m1", kinds: PT_KINDS, gate: () => [], onReachedNetwork }), { wrapper })
     act(() => result.current.start(buyPt, plansFor(buyPt)))
     await untilReview(result, 1)
     act(() => result.current.sign())
@@ -424,7 +428,7 @@ describe("useRoute", () => {
     mocks.exec.execute.mockImplementation(() => step1.promise)
     const onReachedNetwork = vi.fn()
     const { result, rerender } = renderHook(
-      ({ marketId }: { marketId: string }) => useRoute({ account: A, marketId, gate: () => [], onReachedNetwork }),
+      ({ marketId }: { marketId: string }) => useRoute({ account: A, marketId, kinds: PT_KINDS, gate: () => [], onReachedNetwork }),
       { wrapper, initialProps: { marketId: "m1" } },
     )
     act(() => result.current.start(buyPt, plansFor(buyPt)))
@@ -527,7 +531,9 @@ describe("useRoute", () => {
       success(review, { kind: "remove_liquidity", pt: 10n * S, sy: 5n * S }),
     )
     // Step 2 (sell the PT) is refused by a gate: the user holds PT and SY.
-    const { result } = setup((input) => (input.action === "sell_pt" ? [{ code: "maturity", message: "The market has matured." }] : []))
+    const { result } = setup((input) => (input.action === "sell_pt" ? [{ code: "maturity", message: "The market has matured." }] : []), {
+      kinds: ["lp_keep_yt", "lp_only", "lp_withdraw"],
+    })
     act(() => result.current.start(withdrawLp, plansFor(withdrawLp)))
     await untilReview(result, 1)
     act(() => result.current.sign())
@@ -686,10 +692,11 @@ describe("useRoute", () => {
     expect(mocks.exec.prepare).toHaveBeenCalledTimes(prepared)
     expect(result.current.state.step).toBe(2)
 
-    // Closing it keeps it in the log, and frees the panel.
+    // Closing it keeps it in the log, continuable from History (R2-76), and frees the panel.
     act(() => result.current.dismiss())
     expect(result.current.state.phase).toBe("idle")
-    expect(loggedRun()?.closed).toBe(true)
+    expect(loggedRun()?.dismissed).toBe(true)
+    expect(loggedRun()?.closed).toBeUndefined()
   })
 
   it("re-prepares an expiring review instead of signing it", async () => {
@@ -747,5 +754,238 @@ describe("useRoute", () => {
     expect(result.current.state.phase).toBe("idle")
     expect(loggedRun()?.closed).toBeUndefined()
     expect(loggedRun()?.steps.map((s) => s.status)).toEqual(["confirmed", "confirmed"])
+  })
+
+  /** Step 1 confirmed, step 2 declined in the wallet: the run is interrupted, holding 998 SY. */
+  async function interruptedAtStep2(result: { current: ReturnType<typeof useRoute> }) {
+    mocks.exec.execute.mockImplementation(async (review: Review) => {
+      if (review.input.action === "buy_pt") throw new Error("The wallet declined the request.")
+      return success(review, amountOut(998n * S))
+    })
+    act(() => result.current.start(buyPt, plansFor(buyPt)))
+    await untilReview(result, 1)
+    act(() => result.current.sign())
+    await untilReview(result, 2)
+    act(() => result.current.sign())
+    await waitFor(() => expect(result.current.state.phase).toBe("interrupted"))
+  }
+
+  /** A logged Buy PT whose deposit confirmed: it holds 998 SY. */
+  const fundedRun = (over: Partial<RouteRun> = {}): RouteRun => ({
+    id: "run-funded",
+    account: A,
+    marketId: "m1",
+    kind: "buy_pt",
+    request: buyPt,
+    plans: plansFor(buyPt),
+    outputs: [{ kind: "amount", value: 998n * S }],
+    steps: [
+      { action: "deposit", status: "confirmed", hash: "f".repeat(64) },
+      { action: "buy_pt", status: "pending" },
+    ],
+    startedAt: 1,
+    ...over,
+  })
+
+  describe("hosts are disjoint by kind (R2-77)", () => {
+    it("a host resumes only runs of its own kinds: the Recombine dialog never shows a Buy PT run", async () => {
+      writeRoute(fundedRun())
+      const dialog = setup(() => [], { kinds: ["recombine"] })
+      await new Promise((r) => setTimeout(r, 20))
+      expect(dialog.result.current.state.phase).toBe("idle")
+      expect(dialog.result.current.state.run).toBeUndefined()
+      dialog.unmount()
+
+      const tab = setup()
+      await waitFor(() => expect(tab.result.current.state.phase).toBe("interrupted"))
+      expect(tab.result.current.state.run?.id).toBe("run-funded")
+    })
+
+    it("a host never starts a route of a kind it does not offer", async () => {
+      const { result } = setup(() => [], { kinds: ["recombine"] })
+      act(() => result.current.start(buyPt, plansFor(buyPt)))
+      await new Promise((r) => setTimeout(r, 20))
+      expect(result.current.state.phase).toBe("idle")
+      expect(mocks.exec.prepare).not.toHaveBeenCalled()
+      expect(readRoutes(A)).toEqual([])
+    })
+
+    it("History's Continue (route=<id>) opens that run, not the newest one", async () => {
+      writeRoute(fundedRun({ id: "older", startedAt: 1 }))
+      writeRoute(fundedRun({ id: "newer", startedAt: 2 }))
+      const plain = setup()
+      await waitFor(() => expect(plain.result.current.state.run?.id).toBe("newer"))
+      plain.unmount()
+      const { result } = setup(() => [], { routeId: "older" })
+      await waitFor(() => expect(result.current.state.phase).toBe("interrupted"))
+      expect(result.current.state.run?.id).toBe("older")
+      // A Continue naming another host's run is ignored: this host shows its own newest.
+      const other = setup(() => [], { routeId: "not-mine" })
+      await waitFor(() => expect(other.result.current.state.run?.id).toBe("newer"))
+    })
+  })
+
+  describe("Close anyway with funds stays continuable (R2-76)", () => {
+    it("is dismissed, not closed: a reload does not resume it, History's Continue re-opens it and clears the flag", async () => {
+      const first = setup()
+      await interruptedAtStep2(first.result)
+      expect(first.result.current.state.holdings).toBe("You hold 998 SY")
+      act(() => first.result.current.dismiss())
+      expect(first.result.current.state.phase).toBe("idle")
+      const id = loggedRun()!.id
+      expect(loggedRun()).toMatchObject({ dismissed: true })
+      expect(loggedRun()?.closed).toBeUndefined()
+      first.unmount()
+
+      // A plain reload of the page: the panel does not bring the dismissed run back on its own.
+      const reload = setup()
+      await new Promise((r) => setTimeout(r, 20))
+      expect(reload.result.current.state.phase).toBe("idle")
+      reload.unmount()
+
+      // History's Continue names it: it is back, with its holdings, and no longer dismissed.
+      const { result } = setup(() => [], { routeId: id })
+      await waitFor(() => expect(result.current.state.phase).toBe("interrupted"))
+      expect(result.current.state).toMatchObject({ step: 2, holdings: "You hold 998 SY" })
+      expect(loggedRun()?.dismissed).toBeUndefined()
+      const prepared = mocks.exec.prepare.mock.calls.length
+      act(() => result.current.continue())
+      await untilReview(result, 2)
+      expect(mocks.exec.prepare).toHaveBeenCalledTimes(prepared + 1)
+    })
+
+    it("a run with nothing held is closed for good", async () => {
+      mocks.exec.execute.mockImplementationOnce(async (review: Review): Promise<TxResult> => ({ hash: hashOf(review), status: "FAILED", reason: "Cause: the pool moved." }))
+      const { result } = setup()
+      act(() => result.current.start(buyPt, plansFor(buyPt)))
+      await untilReview(result, 1)
+      act(() => result.current.sign())
+      await waitFor(() => expect(result.current.state.phase).toBe("interrupted"))
+      act(() => result.current.dismiss())
+      expect(loggedRun()).toMatchObject({ closed: true })
+      expect(loggedRun()?.dismissed).toBeUndefined()
+    })
+
+    it("dismissing while step 2 is under review, with funds held, keeps the route open with its holdings (R2-24)", async () => {
+      mocks.exec.execute.mockImplementation(async (review: Review) => success(review, amountOut(998n * S)))
+      const { result } = setup()
+      act(() => result.current.start(buyPt, plansFor(buyPt)))
+      await untilReview(result, 1)
+      act(() => result.current.sign())
+      await untilReview(result, 2)
+      act(() => result.current.dismiss())
+      expect(result.current.state).toMatchObject({ phase: "interrupted", step: 2, holdings: "You hold 998 SY", canDismiss: true })
+      expect(result.current.state.error).toMatch(/has not been signed yet/)
+      expect(loggedRun()?.dismissed).toBeUndefined()
+      expect(loggedRun()?.closed).toBeUndefined()
+      // The dropped review is never signed.
+      act(() => result.current.sign())
+      expect(mocks.exec.execute).toHaveBeenCalledTimes(1)
+    })
+
+    it("dismissing a lost step keeps it continuable: Continue re-checks it by its hash, never signs it again", async () => {
+      mocks.exec.execute.mockImplementation(async (review: Review): Promise<TxResult> => ({ hash: hashOf(review), status: "NOT_FOUND" }))
+      const first = setup()
+      act(() => first.result.current.start(buyPt, plansFor(buyPt)))
+      await untilReview(first.result, 1)
+      act(() => first.result.current.sign())
+      await waitFor(() => expect(first.result.current.state.phase).toBe("waiting"))
+      mocks.getTransaction.mockResolvedValueOnce({ status: "NOT_FOUND", latestLedgerCloseTime: LEDGER + 400, oldestLedgerCloseTime: LEDGER + 100 })
+      act(() => first.result.current.continue())
+      await waitFor(() => expect(first.result.current.state.canDismiss).toBe(true))
+      expect(first.result.current.state.holdings).toMatch(/^Nothing had moved before step 1/)
+      act(() => first.result.current.dismiss())
+      expect(first.result.current.state.phase).toBe("idle")
+      const id = loggedRun()!.id
+      expect(loggedRun()).toMatchObject({ dismissed: true, steps: [{ status: "unknown" }, { status: "pending" }] })
+      first.unmount()
+
+      mocks.getTransaction.mockResolvedValue({ status: "SUCCESS", returnValue: nativeToScVal(998n * S, { type: "i128" }) })
+      const { result } = setup(() => [], { routeId: id })
+      await waitFor(() => expect(result.current.state.phase).toBe("interrupted"))
+      expect(result.current.state).toMatchObject({ step: 2, holdings: "You hold 998 SY" })
+      expect(mocks.exec.execute).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  describe("a run advanced in another window is not prepared twice (R2-77)", () => {
+    const MOVED = "This route moved on in another window."
+
+    it("Sign re-reads the run: a step another window already sent is never signed here", async () => {
+      mocks.exec.execute.mockImplementation(async (review: Review) => success(review, amountOut(998n * S)))
+      const { result } = setup()
+      act(() => result.current.start(buyPt, plansFor(buyPt)))
+      await untilReview(result, 1)
+      act(() => result.current.sign())
+      await untilReview(result, 2)
+      // Another window signs step 2 meanwhile: the log has it as sent, by its own hash.
+      const other = loggedRun()!
+      writeRoute({ ...other, steps: [other.steps[0], { action: "buy_pt", status: "unknown", hash: "9".repeat(64), validUntil: LEDGER + 300, sentAt: LEDGER }] })
+      act(() => result.current.sign())
+      await waitFor(() => expect(result.current.state.error).toBe(MOVED))
+      expect(result.current.state).toMatchObject({ phase: "waiting", step: 2 })
+      expect(mocks.exec.execute).toHaveBeenCalledTimes(1)
+      // The other window's step is still logged, by its hash.
+      expect(loggedRun()?.steps[1]).toMatchObject({ status: "unknown", hash: "9".repeat(64) })
+    })
+
+    it("Continue re-reads the run before preparing: a step another window confirmed is not prepared again", async () => {
+      const { result } = setup()
+      await interruptedAtStep2(result)
+      const prepared = mocks.exec.prepare.mock.calls.length
+      const other = loggedRun()!
+      writeRoute({ ...other, outputs: [...other.outputs, { kind: "amount", value: 1_010n * S }], steps: [other.steps[0], { action: "buy_pt", status: "confirmed", hash: "9".repeat(64) }] })
+      act(() => result.current.continue())
+      await waitFor(() => expect(result.current.state.phase).toBe("done"))
+      expect(mocks.exec.prepare).toHaveBeenCalledTimes(prepared)
+      expect(mocks.simulateInvocation.mock.calls.map((c) => c[0].invocation.functionName)).toEqual(["deposit", "swap_sy_for_pt"])
+    })
+
+    it("a re-check never writes over what another window logged since, nor prepares the step it sent", async () => {
+      mocks.exec.execute.mockImplementation(async (review: Review): Promise<TxResult> => ({ hash: hashOf(review), status: "NOT_FOUND" }))
+      const { result } = setup()
+      act(() => result.current.start(buyPt, plansFor(buyPt)))
+      await untilReview(result, 1)
+      act(() => result.current.sign())
+      await waitFor(() => expect(result.current.state.phase).toBe("waiting"))
+      // Another window saw step 1 land, then signed step 2.
+      const other = loggedRun()!
+      writeRoute({
+        ...other,
+        outputs: [{ kind: "amount", value: 998n * S }],
+        steps: [{ ...other.steps[0], status: "confirmed" }, { action: "buy_pt", status: "unknown", hash: "9".repeat(64), validUntil: LEDGER + 300, sentAt: LEDGER }],
+      })
+      mocks.getTransaction.mockResolvedValue({ status: "SUCCESS", returnValue: nativeToScVal(998n * S, { type: "i128" }) })
+      act(() => result.current.continue())
+      await waitFor(() => expect(result.current.state.error).toBe(MOVED))
+      expect(result.current.state).toMatchObject({ phase: "waiting", step: 2 })
+      expect(loggedRun()?.steps[1]).toMatchObject({ status: "unknown", hash: "9".repeat(64) })
+      expect(mocks.exec.prepare).toHaveBeenCalledTimes(1)
+      expect(mocks.exec.execute).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  it("an account change mid-route drops the review, signs nothing for either account, and switching back resumes the run", async () => {
+    const B = "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+    mocks.exec.execute.mockImplementation(async (review: Review) => success(review, amountOut(998n * S)))
+    const { result, rerender } = renderHook(
+      ({ account }: { account: string }) => useRoute({ account, marketId: "m1", kinds: PT_KINDS, gate: () => [] }),
+      { wrapper, initialProps: { account: A } },
+    )
+    act(() => result.current.start(buyPt, plansFor(buyPt)))
+    await untilReview(result, 1)
+    act(() => result.current.sign())
+    await untilReview(result, 2)
+    rerender({ account: B })
+    await waitFor(() => expect(result.current.state.phase).toBe("idle"))
+    act(() => result.current.sign())
+    // B cannot start A's request either.
+    act(() => result.current.start(buyPt, plansFor(buyPt)))
+    await new Promise((r) => setTimeout(r, 20))
+    expect(mocks.exec.execute).toHaveBeenCalledTimes(1)
+    expect(readRoutes(B)).toEqual([])
+    rerender({ account: A })
+    await waitFor(() => expect(result.current.state.phase).toBe("interrupted"))
+    expect(result.current.state).toMatchObject({ step: 2, holdings: "You hold 998 SY" })
   })
 })
