@@ -7,8 +7,8 @@ import { useSettings } from "@/hooks/use-settings"
 import { useSimulation, type Simulation } from "@/hooks/use-simulation"
 import type { AmountCheck } from "@/lib/app/amounts"
 import { ACTION_META, type ActionInput } from "@/lib/protocol/actions"
-import { BLOCKER_ORDER, evaluateGates, type Blocker, type BlockerCode } from "@/lib/protocol/gates"
-import { resolveStep, type RouteRequest, type StepPlan } from "@/lib/protocol/routes"
+import { BLOCKER_ORDER, breakerReport, evaluateGates, withEarlierReports, type Blocker, type BlockerCode } from "@/lib/protocol/gates"
+import { resolveStep, type AmountSource, type RouteRequest, type StepPlan } from "@/lib/protocol/routes"
 import { currentContractsAdapter, toRouteRequest, type TradeAdapter, type TradeQuote, type TradeRequest, type TradeState } from "@/lib/protocol/trade-adapter"
 import type { Live } from "@/lib/protocol/types"
 import { useManifest } from "@/components/app/manifest-provider"
@@ -46,6 +46,10 @@ export type TradeRoute = {
   /** The per-step gate `RouteFlow` hands to `useRoute`: 0001's gates, with the step's simulation. */
   gate: RouteGate
 }
+
+/** Whether an amount reads no step output other than step 1's. */
+const readsOnlyFirst = (src: AmountSource): boolean => (src.from === "step" ? src.index === 0 : src.from === "sum" ? src.parts.every(readsOnlyFirst) : true)
+const lowerFirst = (text: string) => text.charAt(0).toLowerCase() + text.slice(1)
 
 const dedupe = (list: Blocker[]) => list.filter((b, i) => list.findIndex((o) => o.code === b.code && o.message === b.message) === i)
 const rank = (b: Blocker) => BLOCKER_ORDER.indexOf(b.code)
@@ -139,8 +143,34 @@ export function useTradeRoute({
       list.push(...evaluateGates(first, { ...base, simulation: sim.outcome }))
       if (sim.guards && !sim.guards.ok) list.push({ code: "quote", message: sim.guards.reason })
     }
-    for (const plan of plans.slice(1)) {
-      list.push(...evaluateGates(draftOf(plan), base).filter((b) => !LATER_STEP_SKIPS.has(b.code)))
+    // R2-61: RiskControl counts every step of the route in the same window, so each later step is
+    // checked with what the steps before it report already added (the deposit cap is charged once).
+    let earlier: bigint | undefined = first ? breakerReport(first, base) : 0n
+    plans.slice(1).forEach((plan, k) => {
+      const n = k + 2
+      const draft = draftOf(plan)
+      const found = evaluateGates(draft, withEarlierReports(base, earlier, n)).filter((b) => !LATER_STEP_SKIPS.has(b.code))
+      const label = ACTION_META[plan.action].label
+      list.push(...found.map((b) => (b.code === "risk" ? { ...b, message: `Step ${n} (${label}), counted after the steps before it: ${lowerFirst(b.message)}` } : b)))
+      const adds = breakerReport(draft, base)
+      earlier = earlier === undefined || adds === undefined ? undefined : earlier + adds
+    })
+    // A later step's `requires` that reads only step 1's output is checked against step 1's
+    // simulation, so a step 1 that gives too little is refused before its signature, not at step 2.
+    const firstOut = sim.output
+    if (firstOut) {
+      plans.slice(1).forEach((plan, k) => {
+        const checks = (plan.requires ?? []).filter((r) => readsOnlyFirst(r.value) && readsOnlyFirst(r.atLeast))
+        if (checks.length === 0) return
+        try {
+          resolveStep({ ...plan, amount: { from: "value", value: 0n }, secondaryAmount: undefined, requires: checks }, request, [firstOut])
+        } catch {
+          list.push({
+            code: "quote",
+            message: `Step ${k + 2} (${ACTION_META[plan.action].label}) needs more than step 1 gives, as simulated now, so the route is not started: it would stop after step 1. Try again in a moment, or change the amount.`,
+          })
+        }
+      })
     }
     // Nothing is simulated until the amount is complete, nor for a step that is not offered.
     if (!complete || !offered) list = list.filter((b) => b.code !== "quote")
