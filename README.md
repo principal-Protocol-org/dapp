@@ -19,7 +19,7 @@ Current state and known limits in full: [`.rness/docs/dapp.md`](../../.rness/doc
 | `/app/history` | Your transactions, read from RPC events and a local log. |
 | `/app/manage` | Manager view: the markets where your wallet holds a role, with the actions that role can sign. |
 | `POST /api/faucet` | Server route behind "Get test tokens". |
-| `GET /api/cron/record` | The rate recorder, called by a scheduler. Refuses any other caller. |
+| `GET` or `POST /api/cron/record` | The rate recorder, called by a scheduler. Both methods run the same checks. Refuses any other caller. |
 
 ## Network selection
 
@@ -74,7 +74,7 @@ appears in `.next/static`. The local stack writes its own throwaway secret to
 
 ## Rate recorder and database
 
-A scheduled job calls `GET /api/cron/record` every 15 minutes. For each registered market it reads
+A scheduled job calls `/api/cron/record` (GET or POST) every 15 minutes. For each registered market it reads
 the pool, the manager and the oracle at one ledger and stores one row per market per 15-minute slot
 in `market_state_snapshots`. A retry does not duplicate a row. A failed read stores nothing for
 that market. The charts and the market list read these rows; a gap stays a gap.
@@ -102,7 +102,8 @@ at deploy time, so a committed entry would break the deploy. Pick one option.
 Set `CRON_SECRET` in the Vercel project. Vercel then sends `Authorization: Bearer $CRON_SECRET`.
 
 **(b) Upstash QStash.** Create a schedule with cron `*/15 * * * *` that calls
-`GET https://<your-domain>/api/cron/record`. Set `QSTASH_CURRENT_SIGNING_KEY` and
+`https://<your-domain>/api/cron/record` with GET or POST (QStash's default is POST; the route
+accepts both, with the same checks). Set `QSTASH_CURRENT_SIGNING_KEY` and
 `QSTASH_NEXT_SIGNING_KEY` from the QStash console. The route checks the signature against the
 destination URL, so set `QSTASH_RECORD_URL` to the exact URL the schedule calls, unless the app runs
 on Vercel with `VERCEL_PROJECT_PRODUCTION_URL` set. With neither, the route refuses the call.
@@ -219,3 +220,20 @@ contract team are in [`.rness/docs/requests-arthur-0002.md`](../../.rness/docs/r
   browser.
 - **Pause detection.** PrincipalManager has no pause view. A pause is detected only by simulation.
 - **SEP-57 compliance path** is untested on Testnet.
+
+### Before mainnet
+
+Fine on Testnet; each needs a change before mainnet traffic (R2-79).
+
+- **Bounded registry reads.** `sqlRegistryStore.rows()` reads every `market_registry` row, with its
+  JSON, on every page render (`resolvedManifest`), on the uncached `GET /api/markets` and per sparks
+  or history request. Junk factory markets each add an invalid row, and past the 1.5 s race pages
+  fall back to the seeds only. Give `resolvedMarkets` a `where valid is true` query, and cache or
+  drop `GET /api/markets`.
+- **Sparks above 50 pools.** `GET /api/markets/sparks` refuses more than 50 pools in one request, so
+  every spark would show its error state. Chunk the request on the client.
+- **Header role polling.** The header reads about 7 role views per market every 30 s for the
+  connected wallet. That scales with markets × users: gate it on the manager view, or lengthen it.
+- **Step quote against the route preview.** A later step is signed with the floor from its own fresh
+  simulation, which the step review shows. Warn when that quote is worse than the route preview by
+  more than the slippage setting.

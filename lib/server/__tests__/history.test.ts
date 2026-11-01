@@ -63,6 +63,30 @@ describe("getHistory", () => {
     expect(old.latestAt).toBe(NOW - 3601)
   })
 
+  it("dates the history from the pool's latest snapshot, even when none falls in the range (M7)", async () => {
+    // The recorder stopped 40 days ago: nothing in the default 30-day range.
+    const old = NOW - 40 * DAY
+    const calls: { text: string; values: unknown[] }[] = []
+    const sql = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
+      const text = strings.join("?")
+      calls.push({ text, values })
+      return text.includes("order by slot desc limit 1") ? [{ at: String(old) }] : []
+    }) as unknown as Sql
+    const h = await getHistory(sql, POOL, "30d", opts)
+    expect(h.fixedApy).toEqual([])
+    expect(h.latestAt).toBe(old)
+    expect(h.stale).toBe(true)
+    // One seek on this pool's primary key: never a scan of every pool.
+    const latest = calls.find((c) => c.text.includes("order by slot desc limit 1"))
+    expect(latest?.text).toMatch(/where pool = \?/)
+    expect(latest?.values).toEqual([POOL])
+  })
+
+  it("keeps the in-range latest when it is the newest", async () => {
+    const h = await getHistory(fakeSql([row(0, { at: NOW - 10 })]), POOL, "7d", opts)
+    expect(h.latestAt).toBe(NOW - 10)
+  })
+
   it("empty history returns latestAt null", async () => {
     const h = await getHistory(fakeSql([]), POOL, "30d", opts)
     expect(h).toEqual({
