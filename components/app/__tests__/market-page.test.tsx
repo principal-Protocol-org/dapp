@@ -91,7 +91,7 @@ vi.mock("@/hooks/use-ledger-clock", () => ({
   useLedgerClock: () => ({ ...mocks.clock, sequence: 1 }),
 }))
 vi.mock("@/hooks/use-manifest-findings", () => ({ useManifestFindings: () => mocks.findings }))
-// The action panels have their own tests (mint-tab, trade-tab, …); here only their mounting matters.
+// The action panels have their own tests (pt-tab, yt-tab, lp-tab, mint-tab, …); here only their mounting matters.
 vi.mock("@/components/app/trade/trade-panel", () => ({
   TradePanel: ({ marketId }: { marketId: string }) => <section aria-label={`Actions for ${marketId}`} />,
 }))
