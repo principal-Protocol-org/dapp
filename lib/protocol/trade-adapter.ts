@@ -26,13 +26,19 @@
  * Buy YT (Task 17) is sized here, in `plan` and `quote` alike: today's `swap_sy_for_yt` mints PT + YT
  * from `sy_in` SY the user must hold and sells the PT back, so the solver (`yt-solver.ts`) finds the
  * `sy_in` whose net cost is the spend, and the quote discloses that capital (`capital`, R2-59).
+ *
+ * The LP tab (Task 18) is sized here too. Keep YT splits the USDY paid between `wrap_and_mint` (PT +
+ * YT) and a deposit (SY) so that the PT and SY match the pool's ratio, and adds them (`sizeKeepYt`);
+ * Keep YT off is not offered (R47), so it is not quoted. A withdraw removes, then sells the PT, or
+ * redeems it after maturity (R2-20), and the quote reads which from the route.
  */
-import type { ActionId } from "./actions"
+import { ACTION_META, type ActionId } from "./actions"
 import { buyExactPt, buyPt, curveStateFrom, impliedRate, sellPt, spotPrice, type CurveQuote, type CurveState } from "./curve"
 import { minAfterSlippage, type ActionOutput } from "./guards"
 import type { MarketState } from "./market-state"
 import { aprToApy, BPS, ceilDiv, FEE_RATE_SCALE, SCALE } from "./math"
-import { previewDeposit, previewMint, previewRecombine, previewSellYt, previewWithdraw } from "./previews"
+import { settlementOf } from "./position"
+import { previewAddLiquidity, previewDeposit, previewMint, previewRecombine, previewRedeemPt, previewRemoveLiquidity, previewSellYt, previewWithdraw } from "./previews"
 import { priceImpactPpm, ptSpot, ytSpot, type Spot } from "./prices"
 import { apyAfterTrade, effectiveFixedApy, effectiveImpliedApy, fixedPayoffUsd, leverage } from "./rates"
 import { planRoute, type RouteDisabled, type RouteKind, type RouteRequest, type StepPlan, type Token } from "./routes"
@@ -65,6 +71,8 @@ export type TradeState = {
    * Used only when its action is the route's first step; it is never taken for another step.
    */
   firstStep?: { action: ActionId; output: ActionOutput }
+  /** The connected account's LP balance, for the pool share; absent without an account. */
+  heldLp?: bigint
 }
 
 export type TradeQuote = {
@@ -88,9 +96,12 @@ export type TradeQuote = {
   feeToken: "underlying" | "sy"
   /** Price against the pool's spot, fee included, in parts per million; undefined if not priced. */
   priceImpactPpm?: bigint
-  /** The fixed APY (`implied_rate`, compounded) before and once the trade has landed. */
-  apyBefore: number
-  apyAfter: number
+  /**
+   * The fixed APY (`implied_rate`, compounded) before and once the trade has landed. Absent when the
+   * trade prices nothing on the curve: a withdraw after maturity redeems its PT, it sells none.
+   */
+  apyBefore?: number
+  apyAfter?: number
   /**
    * Buy PT: the effective fixed APY. Buy YT: the effective implied APY, the fixed rate at which the
    * YT's cost is fair (R2-17): the break-even rate. Undefined: Unavailable.
@@ -124,6 +135,17 @@ export type TradeQuote = {
    * trade pays); `spot`, at the pool's price before it. Undefined: Unavailable.
    */
   leverage?: { trade?: number; spot?: number }
+  /**
+   * What the user also ends with beside `out`, with its own exactness: Keep YT's YT (exact once the
+   * mint is simulated); a withdraw to SY after maturity's redeemed PT, paid in the underlying.
+   */
+  alsoOut?: { amount: bigint; token: TradeToken; exactness: Exactness }
+  /** The LP tab: the account's share of the LP supply before and once the trade lands; absent without its LP balance. */
+  poolShare?: { before: number; after: number }
+  /** Keep YT: the part of the payment split into PT + YT, in the token paid; the tokenization fee is on it. */
+  splitPart?: bigint
+  /** What the trade leaves in the wallet because the pool does not take it (a two-sided add's rounding). */
+  leftover?: { amount: bigint; token: TradeToken }[]
 }
 
 /** What a route needs beyond the trade: who signs, where, and what the manifest lets it call. */
@@ -419,13 +441,196 @@ function quoteBuyYt(req: TradeRequest, r: Reads, state: TradeState): TradeQuote 
   }
 }
 
-const NOT_YET: Partial<Record<TradeKind, string>> = {
-  lp_keep_yt: "Adding liquidity (keep YT)",
-  lp_only: "Adding liquidity",
-  lp_withdraw: "Withdrawing liquidity",
-}
+// ---------------------------------------------------------------------------------------------
+// LP (Task 18)
+// ---------------------------------------------------------------------------------------------
 
 const MATURED = "This market has matured: PT and YT can no longer be traded in the pool."
+const DEPOSITS_CLOSED = "Adding liquidity closed at maturity: the pool takes no new PT or SY. You can still withdraw your liquidity."
+const NOT_SEEDED = "Pool not seeded yet: adding liquidity opens once the pool has its first liquidity. This app does not offer that first deposit."
+const KEEP_YT_NEEDS_UNDERLYING = "Keeping YT while adding liquidity needs USDY: pay in USDY."
+
+const seeded = (s: CurveState) => s.totalLp > 0n && s.ptReserve > 0n && s.syReserve > 0n
+const reservesOf = (s: CurveState) => ({ pt: s.ptReserve, sy: s.syReserve })
+
+/** `held` of `total` LP as a display ratio; nothing of an empty supply. */
+const shareOf = (held: bigint, total: bigint) => (total > 0n ? Number(held > 0n ? held : 0n) / Number(total) : 0)
+
+/** The account's pool share before, and once `delta` LP is minted (or burned, negative); absent without its LP. */
+function poolShareOf(state: TradeState, total: bigint, delta: bigint): Pick<TradeQuote, "poolShare"> {
+  const held = state.heldLp
+  if (held === undefined) return {}
+  return { poolShare: { before: shareOf(held, total), after: shareOf(held + delta, total + delta) } }
+}
+
+/** The route's first step, when it is `action` and was simulated with an output of `kind`. */
+function simulated<K extends ActionOutput["kind"]>(state: TradeState, action: ActionId, kind: K): Extract<ActionOutput, { kind: K }> | undefined {
+  const step = state.firstStep
+  const first = state.plans[0]
+  if (!step || !first || step.action !== first.action || first.action !== action || step.output.kind !== kind) return undefined
+  return step.output as Extract<ActionOutput, { kind: K }>
+}
+
+/**
+ * What a Keep YT split of `mintUnderlying` and `depositUnderlying` gives, through the contracts' own
+ * math: `wrap_and_mint` deposits, then mints PT + YT from the SY less the tokenization fee
+ * (router:261-273, principal_manager:380-387); the deposit gives SY (sy_wrapper:517-528).
+ */
+function keepYtLegs(mintUnderlying: bigint, depositUnderlying: bigint, r: MarketReads, feeBps: bigint) {
+  return {
+    mint: previewMint(previewDeposit(mintUnderlying, r.exchangeRate), r.oracleRate, feeBps),
+    sy: previewDeposit(depositUnderlying, r.exchangeRate),
+  }
+}
+
+type KeepYtSize = { mintUnderlying: bigint; depositUnderlying: bigint; feeBps: bigint }
+
+/**
+ * Splits the USDY paid for Keep YT (spec §3) so the PT minted (after the tokenization fee) and the SY
+ * deposited go into the pool at its PT : SY ratio, as plan and quote both do. `add_liquidity` takes
+ * `lp = min(pt · L / P, sy · L / S)` and only the matching amounts (market_pool:421-433), so the best
+ * split is where the PT side stops binding: the largest `mintUnderlying` whose PT gives no more LP
+ * than its SY, found by bisection (the PT side only grows with it, the SY side only shrinks), or the
+ * next one. Of those and their neighbours, the one giving the most LP wins, then the one leaving the
+ * least behind, then the one minting less (less fee). Whatever the pool does not take stays in the
+ * wallet; on a realistic pool it is a raw unit or two. Throws the plain-words reason when it cannot.
+ */
+function sizeKeepYt(req: TradeRequest, r: MarketReads, ms: MarketState): KeepYtSize {
+  const { s } = r
+  if (req.pay !== "underlying") throw new Error(KEEP_YT_NEEDS_UNDERLYING)
+  if (s.secondsToMaturity <= 0n) throw new Error(DEPOSITS_CLOSED)
+  if (!seeded(s)) throw new Error(NOT_SEEDED)
+  const fee = need(ms.fees.tokenizationBps, "the tokenization fee")
+  if (typeof fee === "string") throw new Error(fee)
+  const paid = req.amount
+  const tooSmall = "This amount is too small to add any liquidity: enter a larger amount."
+  if (paid < 2n) throw new Error(tooSmall)
+  const at = (m: bigint) => {
+    const { mint, sy } = keepYtLegs(m, paid - m, r, fee)
+    return { m, pt: mint.pt, sy, fromPt: (mint.pt * s.totalLp) / s.ptReserve, fromSy: (sy * s.totalLp) / s.syReserve }
+  }
+  let lo = 0n
+  let hi = paid
+  while (lo < hi) {
+    const mid = (lo + hi + 1n) / 2n
+    const x = at(mid)
+    if (x.fromPt <= x.fromSy) lo = mid
+    else hi = mid - 1n
+  }
+  let best: { m: bigint; lp: bigint; left: bigint } | undefined
+  for (let m = lo - 1n; m <= lo + 2n; m++) {
+    if (m < 1n || m >= paid) continue
+    const x = at(m)
+    const add = previewAddLiquidity(x.pt, x.sy, reservesOf(s), s.totalLp)
+    const left = x.pt - add.ptUsed + (x.sy - add.syUsed)
+    if (!best || add.lp > best.lp || (add.lp === best.lp && left < best.left)) best = { m, lp: add.lp, left }
+  }
+  if (!best || best.lp <= 0n) throw new Error(tooSmall)
+  return { mintUnderlying: best.m, depositUnderlying: paid - best.m, feeBps: fee }
+}
+
+/**
+ * Keep YT on (spec §3): mint PT + YT from part of the USDY, deposit the rest, and add the PT and SY at
+ * the pool's ratio. Output: LP, and the YT kept. Nothing is swapped, so there is no price impact and
+ * the pool's price, so its fixed APY, does not move; the only fee is the tokenization fee on the part
+ * split. A simulated mint (the route's first step) makes the PT and YT exact; the LP stays indicative
+ * until the add is simulated, when the route prepares it.
+ */
+function quoteKeepYt(req: TradeRequest, r: Reads, state: TradeState): TradeQuote {
+  const { s, exchangeRate, slippageBps } = r
+  const { mintUnderlying, depositUnderlying, feeBps } = sizeKeepYt(req, r, state.ms)
+  const legs = keepYtLegs(mintUnderlying, depositUnderlying, r, feeBps)
+  const sim = simulated(state, "mint", "mint")
+  const pt = sim?.pt_minted ?? legs.mint.pt
+  const yt = sim?.yt_minted ?? legs.mint.yt
+  const feeShares = sim?.fee_shares ?? legs.mint.feeShares
+  const add = previewAddLiquidity(pt, legs.sy, reservesOf(s), s.totalLp)
+  if (add.lp <= 0n) throw new Error("This amount is too small to add any liquidity: enter a larger amount.")
+  // The pool once the add lands: pt + pt_used, sy + sy_used, total + lp (market_pool:436-441).
+  const after: CurveState = { ...s, ptReserve: s.ptReserve + add.ptUsed, syReserve: s.syReserve + add.syUsed, totalLp: s.totalLp + add.lp }
+  const leftover: NonNullable<TradeQuote["leftover"]> = [
+    ...(pt > add.ptUsed ? [{ amount: pt - add.ptUsed, token: "pt" as const }] : []),
+    ...(legs.sy > add.syUsed ? [{ amount: legs.sy - add.syUsed, token: "sy" as const }] : []),
+  ]
+  return {
+    kind: "lp_keep_yt",
+    out: add.lp,
+    outToken: "lp",
+    exactness: "indicative",
+    alsoOut: { amount: yt, token: "yt", exactness: sim ? "simulated" : "indicative" },
+    minOut: floor(add.lp, slippageBps),
+    minOutToken: "lp",
+    fee: previewWithdraw(feeShares, exchangeRate),
+    feeToken: "underlying",
+    priceImpactPpm: 0n,
+    apyBefore: apyOf(s),
+    apyAfter: apyOf(after),
+    splitPart: mintUnderlying,
+    leftover,
+    ...poolShareOf(state, s.totalLp, add.lp),
+  }
+}
+
+/**
+ * A withdraw (spec §3): `remove_liquidity` (market_pool:1089-1090), then, before maturity, the PT
+ * sold (`swap_pt_for_sy`) on the pool as the removal left it, which raises the fixed APY (R2-15); a
+ * USDY receiver then withdraws the SY removed and the sale's SY together. After maturity the PT is
+ * redeemed at the settlement rate instead (Router.redeem_at_maturity pays the underlying), and only
+ * the SY removed is withdrawn (R2-20): with SY received, the redeemed part still arrives in USDY.
+ * Which of the two the route does is read from the route (`plans`). A simulated removal makes the PT
+ * and SY exact; what the later steps give stays indicative.
+ */
+function quoteLpWithdraw(req: TradeRequest, r: Reads, state: TradeState): TradeQuote {
+  const { s, exchangeRate, slippageBps } = r
+  const lpIn = req.amount
+  if (s.totalLp <= 0n) throw new Error("The pool has no liquidity, so there is nothing to withdraw.")
+  const sim = simulated(state, "remove_liquidity", "remove_liquidity")
+  const removed = sim ? { pt: sim.pt, sy: sim.sy } : previewRemoveLiquidity(lpIn, reservesOf(s), s.totalLp)
+  const toUnderlying = req.receive === "underlying"
+  const outToken: TradeToken = toUnderlying ? "underlying" : "sy"
+  const share = poolShareOf(state, s.totalLp, -lpIn)
+  const redeems = state.plans.length > 0 ? state.plans.some((p) => p.action === "redeem") : s.secondsToMaturity <= 0n
+
+  if (redeems) {
+    const settlement = settlementOf(state.ms)
+    if (settlement.status !== "live") throw new Error(`Could not read the settlement rate (${settlement.error}).`)
+    const redeemed = removed.pt > 0n ? previewRedeemPt(removed.pt, settlement.value.rate, exchangeRate) : 0n
+    const out = toUnderlying ? redeemed + previewWithdraw(removed.sy, exchangeRate) : removed.sy
+    return {
+      kind: "lp_withdraw",
+      out,
+      outToken,
+      exactness: "indicative",
+      ...(toUnderlying ? {} : { alsoOut: { amount: redeemed, token: "underlying" as const, exactness: "indicative" as const } }),
+      minOut: floor(out, slippageBps),
+      minOutToken: outToken,
+      // Redeeming PT at maturity takes no fee (principal_manager:494-504), and nothing is swapped.
+      fee: 0n,
+      feeToken: toUnderlying ? "underlying" : "sy",
+      ...share,
+    }
+  }
+
+  if (s.secondsToMaturity <= 0n) throw new Error(MATURED)
+  const pool: CurveState = { ...s, ptReserve: s.ptReserve - removed.pt, syReserve: s.syReserve - removed.sy, totalLp: s.totalLp - lpIn }
+  const sale = sellPt(pool, removed.pt)
+  const sy = removed.sy + sale.amountOut
+  const out = toUnderlying ? previewWithdraw(sy, exchangeRate) : sy
+  return {
+    kind: "lp_withdraw",
+    out,
+    outToken,
+    exactness: "indicative",
+    minOut: floor(out, slippageBps),
+    minOutToken: outToken,
+    fee: toUnderlying ? previewWithdraw(sale.feeShares, exchangeRate) : sale.feeShares,
+    feeToken: toUnderlying ? "underlying" : "sy",
+    priceImpactPpm: priceImpactPpm("sell", sale.amountOut, removed.pt, ptSpot(spotPrice(pool), s.rate)),
+    apyBefore: apyOf(s),
+    apyAfter: apyOf(sale.next),
+    ...share,
+  }
+}
 
 /** A read the quote needs, or the reason naming it. */
 function need<T>(value: Live<T>, what: string): T | string {
@@ -452,16 +657,22 @@ const QUOTES: Partial<Record<TradeKind, (req: TradeRequest, r: Reads, state: Tra
   sell_pt: quoteSellPt,
   buy_yt: quoteBuyYt,
   sell_yt: quoteSellYt,
+  lp_keep_yt: quoteKeepYt,
+  lp_withdraw: quoteLpWithdraw,
 }
 
 function quote(req: TradeRequest, state: TradeState): Live<TradeQuote> {
+  // Keep YT off (LP only) is not offered on this release (R47): its reason alone, never a figure for
+  // a trade it never allows (0001 R51 M1).
+  if (req.kind === "lp_only") return unavailable(ACTION_META.add_liquidity_sy.disabled?.reason ?? "Adding liquidity without keeping YT is not quoted by this app yet.")
   const { ms } = state
   const m = readsOf(ms)
   if (typeof m === "string") return unavailable(m)
-  if (m.s.secondsToMaturity <= 0n) return unavailable(MATURED)
+  // A withdraw stays open at maturity: it redeems its PT instead of selling it.
+  if (m.s.secondsToMaturity <= 0n && req.kind !== "lp_withdraw") return unavailable(req.kind === "lp_keep_yt" ? DEPOSITS_CLOSED : MATURED)
   if (req.amount <= 0n) return unavailable("Enter an amount greater than zero.")
   const run = QUOTES[req.kind]
-  if (!run) return unavailable(`${NOT_YET[req.kind] ?? "This trade"} is not quoted by this app yet.`)
+  if (!run) return unavailable("This trade is not quoted by this app yet.")
   try {
     return { status: "live", value: run(req, { ...m, slippageBps: state.slippageBps }, state), ledger: ms.poolState.status === "live" ? ms.poolState.ledger : 0 }
   } catch (error) {
@@ -478,6 +689,8 @@ function quote(req: TradeRequest, state: TradeState): Live<TradeQuote> {
 function plan(req: TradeRequest, ctx: PlanContext): StepPlan[] | RouteDisabled {
   const route = toRouteRequest(req, ctx)
   const base = { routerFunctions: ctx.routerFunctions }
+  // Keep YT's split is sized from the market's reads; paid in SY, the planner gives R2-22's reason.
+  if (req.kind === "lp_keep_yt" && req.pay === "underlying") return planKeepYt(req, ctx, route, base)
   if (req.kind !== "buy_yt") return planRoute(route, base)
   // With no amount yet, the route keeps its shape and moves nothing: it cannot start (there is no
   // request), its gates see nothing to move, and the amount field's own refusal stands.
@@ -490,6 +703,24 @@ function plan(req: TradeRequest, ctx: PlanContext): StepPlan[] | RouteDisabled {
     return planRoute(route, { ...base, buyYt: { syIn: solution.syIn, ...(depositUnderlying !== undefined ? { depositUnderlying } : {}) } })
   } catch (error) {
     return { disabled: `Buy YT is not offered for this amount. ${errorText(error)}` }
+  }
+}
+
+/**
+ * Keep YT's route (spec §4): `wrap_and_mint` of the split part, a deposit of the rest, then
+ * `add_liquidity` of what those two steps really produced. Both amounts are `value`s, so the gates
+ * checked before the route starts see what each step moves and charges (R2-61, R2-62).
+ */
+function planKeepYt(req: TradeRequest, ctx: PlanContext, route: RouteRequest, base: { routerFunctions: string[] }): StepPlan[] | RouteDisabled {
+  if (req.amount <= 0n) return planRoute(route, { ...base, keepYtSplit: { mintUnderlying: 0n, depositUnderlying: 0n } })
+  if (!ctx.ms) return { disabled: "Keep YT is sized from this market's data, which has not loaded yet. Try again in a moment." }
+  const m = readsOf(ctx.ms)
+  if (typeof m === "string") return { disabled: `Keep YT cannot be sized now. ${m}` }
+  try {
+    const { mintUnderlying, depositUnderlying } = sizeKeepYt(req, m, ctx.ms)
+    return planRoute(route, { ...base, keepYtSplit: { mintUnderlying, depositUnderlying } })
+  } catch (error) {
+    return { disabled: errorText(error) }
   }
 }
 

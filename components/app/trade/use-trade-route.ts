@@ -7,7 +7,16 @@ import { useSettings } from "@/hooks/use-settings"
 import { useSimulation, type Simulation } from "@/hooks/use-simulation"
 import type { AmountCheck } from "@/lib/app/amounts"
 import { ACTION_META, type ActionInput } from "@/lib/protocol/actions"
-import { BLOCKER_ORDER, breakerReport, evaluateGates, withEarlierReports, type Blocker, type BlockerCode } from "@/lib/protocol/gates"
+import {
+  BLOCKER_ORDER,
+  breakerReport,
+  capCharge,
+  evaluateGates,
+  withEarlierCapCharges,
+  withEarlierReports,
+  type Blocker,
+  type BlockerCode,
+} from "@/lib/protocol/gates"
 import { resolveStep, type AmountSource, type RouteRequest, type StepPlan } from "@/lib/protocol/routes"
 import { currentContractsAdapter, toRouteRequest, type TradeAdapter, type TradeQuote, type TradeRequest, type TradeState } from "@/lib/protocol/trade-adapter"
 import type { Live } from "@/lib/protocol/types"
@@ -61,7 +70,9 @@ const rank = (b: Blocker) => BLOCKER_ORDER.indexOf(b.code)
  *   that simulation (R2-23): the route starts only when it would pass;
  * - its later steps are gated too, on everything that does not depend on what the earlier steps
  *   produce (maturity, oracle, pauses, pool, compliance grants, caps), so a route is refused before
- *   its first signature rather than left holding SY halfway;
+ *   its first signature rather than left holding SY halfway. The circuit breaker (R2-61) and the
+ *   deposit cap (R2-62) see each later step with what the steps before it already counted: the
+ *   route's deposits (a mint's included) fill the same windows;
  * - the quote takes the first step's simulated output, so a one-step trade shows its exact figures.
  *
  * A first step stopped only by an archived entry may start: the route then stops on that step and
@@ -99,17 +110,20 @@ export function useTradeRoute({
   /**
    * A step's input with open guards. Its `requires` checks (what an earlier step must have produced)
    * run when the route prepares it; before the start they are left out, so a step whose amount is a
-   * value (Buy YT's sy_in) is gated on that amount. A step whose amount comes from an earlier one
-   * stands in with the request's.
+   * value (Buy YT's sy_in, Keep YT's split) is gated on that amount. A step whose amount comes from
+   * an earlier one stands in with the request's, and is marked not `known`: what it deposits or
+   * reports is then unknown to the steps after it.
    */
-  const draftOf = (plan: StepPlan): ActionInput => {
+  const draftOf = (plan: StepPlan): { input: ActionInput; known: boolean } => {
     let amounts: { amount: bigint; secondaryAmount?: bigint }
+    let known = true
     try {
       amounts = resolveStep({ ...plan, requires: [] }, request, [])
     } catch {
       amounts = { amount: trade.amount }
+      known = false
     }
-    return {
+    const input: ActionInput = {
       action: plan.action,
       marketId,
       source: source ?? "",
@@ -118,21 +132,29 @@ export function useTradeRoute({
       guards: {},
       deadline: 0n,
     }
+    return { input, known }
   }
+  /** What a step adds to a running total: unknown once its own amount is a stand-in. */
+  const counted = (total: bigint | undefined, adds: bigint | undefined, known: boolean): bigint | undefined =>
+    total === undefined || adds === undefined || (!known && adds !== 0n) ? undefined : total + adds
 
-  const first = plans[0] ? draftOf(plans[0]) : null
+  const firstDraft = plans[0] ? draftOf(plans[0]) : null
+  const first = firstDraft?.input ?? null
   const offered = first !== null && !ACTION_META[first.action].disabled
   const simInput: ActionInput | null =
     source !== null && complete && ledgerTime !== null && first && offered ? { ...first, deadline: BigInt(Math.floor(ledgerTime) + deadlineSeconds) } : null
   const sim = useSimulation(simInput)
   const firstStep: TradeState["firstStep"] = simInput && sim.output ? { action: simInput.action, output: sim.output } : undefined
 
-  const quote = ms && trade.amount > 0n ? adapter.quote(trade, { ms, slippageBps, plans, ...(firstStep ? { firstStep } : {}) }) : null
+  // The connected account's LP, for the LP tab's pool share; absent without one.
+  const lp = gate.account?.lp
+  const held = lp?.status === "live" ? { heldLp: lp.value } : {}
+  const quote = ms && trade.amount > 0n ? adapter.quote(trade, { ms, slippageBps, plans, ...held, ...(firstStep ? { firstStep } : {}) }) : null
   const quoteFor = (amount: bigint): Live<TradeQuote> | null => {
     if (!ms) return null
     const at = { ...trade, amount }
     const p = adapter.plan(at, ctx)
-    return adapter.quote(at, { ms, slippageBps, plans: Array.isArray(p) ? p : [] })
+    return adapter.quote(at, { ms, slippageBps, plans: Array.isArray(p) ? p : [], ...held })
   }
 
   let blockers: Blocker[] = gate.unavailable
@@ -143,17 +165,21 @@ export function useTradeRoute({
       list.push(...evaluateGates(first, { ...base, simulation: sim.outcome }))
       if (sim.guards && !sim.guards.ok) list.push({ code: "quote", message: sim.guards.reason })
     }
-    // R2-61: RiskControl counts every step of the route in the same window, so each later step is
-    // checked with what the steps before it report already added (the deposit cap is charged once).
-    let earlier: bigint | undefined = first ? breakerReport(first, base) : 0n
+    // R2-61: RiskControl counts every step of the route in the same window, and R2-62: every deposit
+    // of the route (wrap_and_mint's included) is charged against the same deposit cap. So each later
+    // step is checked with what the steps before it report and charge already added.
+    let reported: bigint | undefined = firstDraft ? counted(0n, breakerReport(firstDraft.input, base), firstDraft.known) : 0n
+    let charged: bigint | undefined = firstDraft ? counted(0n, capCharge(firstDraft.input), firstDraft.known) : 0n
     plans.slice(1).forEach((plan, k) => {
       const n = k + 2
-      const draft = draftOf(plan)
-      const found = evaluateGates(draft, withEarlierReports(base, earlier, n)).filter((b) => !LATER_STEP_SKIPS.has(b.code))
+      const { input: draft, known } = draftOf(plan)
+      const seen = withEarlierCapCharges(withEarlierReports(base, reported, n), charged, n)
+      const found = evaluateGates(draft, seen).filter((b) => !LATER_STEP_SKIPS.has(b.code))
       const label = ACTION_META[plan.action].label
-      list.push(...found.map((b) => (b.code === "risk" ? { ...b, message: `Step ${n} (${label}), counted after the steps before it: ${lowerFirst(b.message)}` } : b)))
-      const adds = breakerReport(draft, base)
-      earlier = earlier === undefined || adds === undefined ? undefined : earlier + adds
+      const counts = (b: Blocker) => b.code === "risk" || b.code === "cap"
+      list.push(...found.map((b) => (counts(b) ? { ...b, message: `Step ${n} (${label}), counted after the steps before it: ${lowerFirst(b.message)}` } : b)))
+      reported = counted(reported, breakerReport(draft, base), known)
+      charged = counted(charged, capCharge(draft), known)
     })
     // A later step's `requires` that reads only step 1's output is checked against step 1's
     // simulation, so a step 1 that gives too little is refused before its signature, not at step 2.

@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import type { AccountState } from "../account-state"
 import { ACTION_META, type ActionId, type ActionInput } from "../actions"
 import type { ComplianceItem } from "../compliance"
-import { BLOCKER_ORDER, breakerReport, evaluateGates, withEarlierReports, type Blocker, type GateContext } from "../gates"
+import { BLOCKER_ORDER, breakerReport, capCharge, evaluateGates, withEarlierCapCharges, withEarlierReports, type Blocker, type GateContext } from "../gates"
 import type { MarketState } from "../market-state"
 import { SCALE } from "../math"
 import type { SimulationOutcome } from "../stellar"
@@ -979,6 +979,79 @@ describe("withEarlierReports — a later route step is checked with the earlier 
       2,
     )
     expect(evaluateGates(inputFor("deposit"), off)).toEqual([])
+  })
+})
+
+describe("capCharge — what one step charges against the SY deposit cap (R2-62)", () => {
+  it("a deposit charges its amount, and so does wrap_and_mint (it runs SYWrapper.deposit first)", () => {
+    expect(capCharge(inputFor("deposit"))).toBe(10n * UNIT)
+    expect(capCharge(inputFor("mint"))).toBe(10n * UNIT)
+  })
+
+  it("buy_yt charges nothing: its mint takes SY through PrincipalManager.mint, with no SYWrapper.deposit", () => {
+    expect(capCharge(inputFor("buy_yt"))).toBe(0n)
+  })
+
+  it("an action that does not deposit, or no amount, charges nothing", () => {
+    for (const action of ["withdraw", "buy_pt", "sell_pt", "add_liquidity", "remove_liquidity", "redeem"] as const) {
+      expect(capCharge(inputFor(action))).toBe(0n)
+    }
+    expect(capCharge(inputFor("deposit", { amount: 0n }))).toBe(0n)
+  })
+})
+
+describe("withEarlierCapCharges — a later route step is checked with the earlier deposits charged (R2-62)", () => {
+  // 15 of the 100 cap left: a 10 deposit fits alone, not after an earlier step charged 10.
+  const tight = (c: GateContext) => {
+    c.account!.depositCap = live(100n * UNIT)
+    c.account!.netDeposited = live(85n * UNIT)
+  }
+  const ctxWith = (mutate: Mutate) => {
+    const c = healthyCtx("deposit")
+    mutate(c, "deposit")
+    return c
+  }
+
+  it("adds what the earlier steps charge to the net deposits: a step that fits alone is refused once they count", () => {
+    const c = ctxWith(tight)
+    expect(evaluateGates(inputFor("deposit"), c)).toEqual([])
+    const later = withEarlierCapCharges(c, 10n * UNIT, 2)
+    expect(later.account!.netDeposited).toEqual(live(95n * UNIT))
+    expect(codes(evaluateGates(inputFor("deposit"), later))).toEqual(["cap"])
+    expect(codes(evaluateGates(inputFor("mint"), later))).toEqual(["cap"])
+    // The context passed in is not changed.
+    expect(c.account!.netDeposited).toEqual(live(85n * UNIT))
+  })
+
+  it("nothing earlier, or no account read yet, leaves the context as it is", () => {
+    const c = ctxWith(tight)
+    expect(withEarlierCapCharges(c, 0n, 2)).toBe(c)
+    const noAccount = { ...c, account: undefined }
+    expect(withEarlierCapCharges(noAccount, 10n * UNIT, 2)).toEqual(noAccount)
+  })
+
+  it("leaves an unreadable net-deposit read unreadable", () => {
+    const c = ctxWith((x) => {
+      tight(x)
+      x.account!.netDeposited = down("rpc down")
+    })
+    expect(withEarlierCapCharges(c, 10n * UNIT, 2).account!.netDeposited).toEqual(down("rpc down"))
+  })
+
+  it("an earlier step whose amount is unknown makes the cap check unverifiable, never a pass", () => {
+    const later = withEarlierCapCharges(ctxWith(tight), undefined, 3)
+    const blockers = evaluateGates(inputFor("deposit"), later)
+    expect(codes(blockers)).toEqual(["unavailable"])
+    expect(blockers[0].message).toMatch(/before step 3 of this route/)
+    // With the cap off there is nothing to verify.
+    const off = withEarlierCapCharges(ctxWith((x) => (x.account!.depositCap = live(0n))), undefined, 3)
+    expect(evaluateGates(inputFor("deposit"), off)).toEqual([])
+  })
+
+  it("does not touch the circuit breaker's windows, nor withEarlierReports the cap", () => {
+    const c = ctxWith(tight)
+    expect(withEarlierCapCharges(c, 10n * UNIT, 2).market).toBe(c.market)
+    expect(withEarlierReports(c, 10n * UNIT, 2).account).toBe(c.account)
   })
 })
 

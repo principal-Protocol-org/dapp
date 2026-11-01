@@ -55,7 +55,7 @@ vi.mock("@/lib/protocol/review", async (orig) => ({
 }))
 
 import { A, MANIFEST, MARKET } from "./panel-mocks"
-import { enter, installDefaults, renderUi, settle, simulateReturns, teardown, user } from "./panel-harness"
+import { enter, gateList, installDefaults, renderUi, settle, simulateReturns, teardown, user } from "./panel-harness"
 import { YtTab } from "../trade/yt-tab"
 import { TradePanel } from "../trade/trade-panel"
 
@@ -213,6 +213,24 @@ describe("YT tab — Buy", () => {
     expect(mocks.prepareReview).not.toHaveBeenCalled()
   })
 
+  it("the deposit cap is charged once on a USDY Buy YT: a deposit that fills the cap exactly still starts (R2-62)", async () => {
+    // The buy mints from SY through PrincipalManager.mint, which runs no SYWrapper.deposit: only the
+    // deposit step charges the cap, so counting earlier steps must not charge it again.
+    const r = solved(100n * UNIT)
+    const dep = depositFor(r.syIn)
+    simulateReturns(mocks, dep)
+    mocks.accounts[A] = accountState({
+      underlying: live(100_000n * UNIT),
+      permYt: live(true),
+      depositCap: live(10_000n * UNIT),
+      netDeposited: live(10_000n * UNIT - dep),
+    })
+    await renderUi(<YtTab marketId="m1" side="buy" />)
+    await enter("You pay", "100")
+    expect(screen.queryByText(/deposit cap/)).toBeNull()
+    expect(reviewButton("Buy YT").disabled).toBe(false)
+  })
+
   it("the circuit breaker on the buy_yt step sees its sy_in: a spend that fits is refused before the route starts", async () => {
     const r = solved(100n * UNIT)
     simulateReturns(mocks, [r.ytOut, r.syBack])
@@ -346,6 +364,17 @@ describe("YT tab — Buy", () => {
     // 0001's floors: the YT floor and max_net_cost from the simulated net cost (R2-58).
     expect(input.guards).toEqual({ minOut: minAfterSlippage(r.ytOut, 50n), maxNetCost: ceilDiv(r.netCost * (BPS + 50n), BPS) })
     expect(mocks.executeReview).not.toHaveBeenCalled()
+  })
+
+  it("a simulated buy whose net cost is not positive is refused, with 0001's reason (ported from trade-tab.test)", async () => {
+    const r = solved(100n * UNIT)
+    // The sale returns at least what the buy put in: the YT would cost nothing, which the guards refuse.
+    simulateReturns(mocks, [r.ytOut, r.syIn])
+    await renderUi(<YtTab marketId="m1" side="buy" />)
+    await pick("Pay with", /SY/)
+    await enter("You pay", "100")
+    expect(within(gateList()).getByText(/YT price is not positive/)).toBeTruthy()
+    expect(reviewButton("Buy YT").disabled).toBe(true)
   })
 
   it("a break-even rate that cannot be worked out reads Unavailable, in the row and the sentence", async () => {

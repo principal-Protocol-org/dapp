@@ -274,7 +274,7 @@ function detailLines(
   const lines: PreviewLine[] = [
     {
       label: "Fixed APY",
-      value: `${formatPercent(q.apyBefore)} → ${formatPercent(q.apyAfter)}`,
+      value: q.apyBefore === undefined || q.apyAfter === undefined ? UNAVAILABLE : `${formatPercent(q.apyBefore)} → ${formatPercent(q.apyAfter)}`,
       hint:
         side === "buy"
           ? "The pool's fixed APY now, and once your trade lands: buying YT sells PT into the pool, so the fixed APY rises."
