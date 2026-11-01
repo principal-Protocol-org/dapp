@@ -80,4 +80,12 @@ describe("CardTabs", () => {
     expect(within(tab).getByText(", 1 problem").className).toContain("sr-only")
     expect(within(tab).queryByRole("img")).toBeNull()
   })
+
+  it("gives the focusable tab panel a visible focus ring (M11)", () => {
+    render(<Harness tabs={TABS} />)
+    const panel = screen.getByRole("tabpanel")
+    expect(panel.className).not.toMatch(/(^|\s)outline-none(\s|$)/)
+    expect(panel.className).toContain("focus-visible:outline-2")
+    expect(panel.className).toContain("focus-visible:outline-ring")
+  })
 })

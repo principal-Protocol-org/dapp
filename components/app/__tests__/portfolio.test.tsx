@@ -128,10 +128,11 @@ describe("portfolio", () => {
     wrap()
     const card = screen.getByRole("region", { name: "STA · test" })
     expect(within(card).getByText("Face value at maturity (USD)")).toBeTruthy()
-    expect(within(card).getByText("$100.0000")).toBeTruthy() // 100 PT
-    expect(within(card).getByText("$98.0000")).toBeTruthy() // 100 * 0.98
+    // USD to the cent, as the trade tabs show it (R2-56, M4).
+    expect(within(card).getByText("$100.00")).toBeTruthy() // 100 PT
+    expect(within(card).getByText("$98.00")).toBeTruthy() // 100 * 0.98
     expect(within(card).getByText("Projected fixed return at maturity")).toBeTruthy()
-    expect(within(card).getByText("+$2.0000")).toBeTruthy()
+    expect(within(card).getByText("+$2.00")).toBeTruthy()
     // 10 days left, price 0.98: positive APY, shown as a percent
     expect(within(card).getByText("109.05%")).toBeTruthy()
     // 100 PT / oracle 1.05 at exchange rate 1.0 = 95.2380952 STA, indicative before settlement
@@ -143,6 +144,16 @@ describe("portfolio", () => {
     mocks.ms = marketState({ ptPrice: live(10_200_000n) })
     wrap()
     expect(screen.getByText("-51.46%")).toBeTruthy()
+  })
+
+  it("above par the projected return is a loss to the cent, rounded against the reader, never \"+$-0.12\" (M4)", () => {
+    mocks.ms = marketState({ ptPrice: live(10_012_345n) })
+    wrap()
+    const card = screen.getByRole("region", { name: "STA · test" })
+    // 100 PT at 1.0012345: worth $100.12345 now, $100 at maturity.
+    expect(within(card).getByText("$100.12")).toBeTruthy()
+    expect(within(card).getByText("-$0.13")).toBeTruthy()
+    expect(within(card).queryByText(/\+\$-/)).toBeNull()
   })
 
   it("after maturity shows Matured, not Unavailable, and a final redemption value", () => {
@@ -244,7 +255,7 @@ describe("portfolio", () => {
     expect(within(card).getByText("50.0000 YT")).toBeTruthy()
     expect(within(card).getByText(/1\.0500 · fresh/)).toBeTruthy()
     expect(within(card).getByText("Accruing since rate 1.0000")).toBeTruthy()
-    expect(within(card).getByText("+$2.0000")).toBeTruthy()
+    expect(within(card).getByText("+$2.00")).toBeTruthy()
     // Claim yield opens 0001's claim panel in a dialog
     expect(screen.queryByTestId("action-panel")).toBeNull()
     await userEvent.click(within(card).getByRole("button", { name: /claim yield/i }))
@@ -274,7 +285,7 @@ describe("portfolio", () => {
     const card = screen.getByRole("region", { name: "STA · test" })
     expect(within(card).getByText("1,234.0000 PT")).toBeTruthy()
     expect(within(card).getByText("5,000,000.0000 STA")).toBeTruthy()
-    expect(within(card).getByText("+$24.6800")).toBeTruthy() // 1234 * 0.02
+    expect(within(card).getByText("+$24.68")).toBeTruthy() // 1234 * 0.02
   })
 
   it("links the shortcuts to the new tab and side scheme", () => {

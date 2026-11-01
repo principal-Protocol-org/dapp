@@ -7,7 +7,7 @@ import { useLedgerClock } from "@/hooks/use-ledger-clock"
 import { useMarketState } from "@/hooks/use-market-state"
 import type { HistoryData } from "@/hooks/use-history"
 import type { AccountState } from "@/lib/protocol/account-state"
-import { formatPercent, formatRate, formatTokenAmount } from "@/lib/protocol/format"
+import { formatPercent, formatRate, formatUsd, formatUsdCents } from "@/lib/protocol/format"
 import { getMarket } from "@/lib/protocol/manifest"
 import { useManifest } from "@/components/app/manifest-provider"
 import type { MarketState } from "@/lib/protocol/market-state"
@@ -45,8 +45,13 @@ const day = (iso: string) => iso.slice(0, 10)
 const shortcut = (marketId: string, tab: "pt" | "yt" | "lp", side?: "buy" | "sell" | "deposit" | "withdraw") =>
   `/app/markets/${marketId}?tab=${tab}${side ? `&side=${side}` : ""}`
 
-/** PT amounts are oracle units, which are US dollars: a fixed figure is shown as USD. */
-const usd = (raw: bigint) => `$${formatTokenAmount(raw, 7, true)}`
+/**
+ * PT amounts are oracle units, which are US dollars: a fixed figure is shown as USD, to the cent and
+ * rounded against the reader, as the trade tabs show it (R2-56, M4). A value is floored; a gain is
+ * signed ("+$2.00", "-$0.13").
+ */
+const usd = (raw: bigint) => formatUsd(raw, 7)
+const usdGain = (raw: bigint) => formatUsdCents(raw, 7)
 
 function Tip({ children, tip }: { children: React.ReactNode; tip: string }) {
   return (
@@ -314,7 +319,7 @@ function FixedReturn({
         {matured ? "Matured" : fixed.status === "live" ? usd(fixed.value.valueNow) : ms.ptPrice.status === "unavailable" ? noPrice : UNAVAILABLE}
       </Metric>
       <Metric label="Projected fixed return at maturity">
-        {matured ? "Matured" : fixed.status === "live" ? `+${usd(fixed.value.faceAtMaturity - fixed.value.valueNow)}` : ms.ptPrice.status === "unavailable" ? noPrice : UNAVAILABLE}
+        {matured ? "Matured" : fixed.status === "live" ? usdGain(fixed.value.faceAtMaturity - fixed.value.valueNow) : ms.ptPrice.status === "unavailable" ? noPrice : UNAVAILABLE}
       </Metric>
       <Metric label="Fixed APY from now">
         {matured ? "Matured" : fixed.status === "live" ? <Tip tip="Negative when PT trades above par: holding to maturity returns less than the price now.">{formatPercent(fixed.value.apy)}</Tip> : ms.ptPrice.status === "unavailable" ? noPrice : UNAVAILABLE}

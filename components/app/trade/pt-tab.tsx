@@ -235,7 +235,8 @@ function detailLines(
   if (q.payoff) {
     lines.push({
       label: "At maturity",
-      value: `${formatUsdCents(q.payoff.gainUsd, TOKEN_DECIMALS)} (${formatPercent(q.payoff.pct)})`,
+      // The ratio is left out when it cannot be worked out (nothing paid), never shown as 0%.
+      value: q.payoff.pct === undefined ? formatUsdCents(q.payoff.gainUsd, TOKEN_DECIMALS) : `${formatUsdCents(q.payoff.gainUsd, TOKEN_DECIMALS)} (${formatPercent(q.payoff.pct)})`,
       hint: `Fixed in USD whatever ${code}'s price does. About ${formatGainLoss(q.payoff.gainUnderlying, underlyingDecimals, 4, { group: true })} ${code} at today's ${code} price (indicative). Counted in ${code}, this falls as ${code}'s price rises, so only the USD figure is fixed.`,
     })
   }

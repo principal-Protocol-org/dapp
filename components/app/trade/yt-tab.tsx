@@ -169,7 +169,9 @@ function YtTrade({ marketId, side, routeId }: { marketId: string; side: YtSide; 
         { label: `Comes back (step ${q.capital.backStep})`, value: spentText(q.capital.back) },
       )
     }
-    details.push(...detailLines(q, side, code, slippageBps, steps, amountText, unitOf, side === "buy" && q.yieldOn !== undefined ? breakEven(q, code, spentText(q.capital?.spent ?? trade.amount), amountText(q.yieldOn, "underlying")) : undefined))
+    // The step that signs the Buy YT bound, from the plan (R2-55: never a literal step number).
+    const buyStep = route.plans.findIndex((p) => p.action === "buy_yt") + 1
+    details.push(...detailLines(q, side, code, slippageBps, steps, buyStep, amountText, unitOf, side === "buy" && q.yieldOn !== undefined ? breakEven(q, code, spentText(q.capital?.spent ?? trade.amount), amountText(q.yieldOn, "underlying")) : undefined))
     if (side === "buy" && q.yieldOn !== undefined) {
       details.push({
         label: "At maturity",
@@ -284,6 +286,8 @@ function detailLines(
   code: string,
   slippageBps: bigint,
   steps: number,
+  /** The planned Buy YT step (1-based); 0 when none is planned. */
+  buyStep: number,
   amountText: (raw: bigint, t: TradeToken) => string,
   unitOf: (t: TradeToken) => string,
   breakEvenTip: string | undefined,
@@ -344,11 +348,14 @@ function detailLines(
     },
   )
   if (side === "buy" && q.maxCost !== undefined) {
+    // M15: the figure is this preview's, in the token paid; what is signed is the step's own SY bound
+    // (max_net_cost), from that step's own simulation.
+    const signer = buyStep > 0 ? `Step ${buyStep}` : "The Buy YT step"
     lines.push({
       label: "Spends at most",
       // A buy's fee token is the token paid.
       value: amountText(q.maxCost, q.feeToken),
-      hint: `At your ${slippage} slippage tolerance, on this preview. The Buy YT step is signed with this bound from its own simulation, and fails rather than cost more.`,
+      hint: `At your ${slippage} slippage tolerance, on this preview. ${signer} is signed with its own bound, from its own simulation, and fails rather than cost more.`,
     })
   }
   return lines

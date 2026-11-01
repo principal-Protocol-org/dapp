@@ -10,32 +10,31 @@ import type { MarketState } from "@/lib/protocol/market-state"
 import { useManifest } from "@/components/app/manifest-provider"
 import { Skeleton } from "@/components/ui/skeleton"
 import { UNAVAILABLE } from "@/components/app/live"
+import { UnavailableTip } from "@/components/app/info-tip"
 import { FixedApy } from "@/components/app/market/fixed-apy"
 import { liquidityOf } from "@/components/app/market/liquidity"
 import { Metric } from "@/components/app/market/metric"
 import { underlyingApyOf } from "@/components/app/market/underlying-apy"
 
-function Unavailable({ reason }: { reason: string }) {
-  return (
-    <span title={reason} className="text-ink-muted">
-      {UNAVAILABLE}
-    </span>
-  )
+/** Unavailable, with its reason behind an info tip (M10). `label` is the stat's. */
+function Unavailable({ label, reason }: { label: string; reason: string }) {
+  return <UnavailableTip label={label} reason={reason} className="text-ink-muted" />
 }
 
 function yt(ms: MarketState): React.ReactNode {
-  if (ms.poolSeeded.status === "unavailable") return <Unavailable reason="Whether the pool has liquidity could not be read." />
+  const label = "YT leverage"
+  if (ms.poolSeeded.status === "unavailable") return <Unavailable label={label} reason="Whether the pool has liquidity could not be read." />
   if (!ms.poolSeeded.value) return "No liquidity yet"
-  if (ms.ptPrice.status === "unavailable") return <Unavailable reason="The PT price could not be read." />
+  if (ms.ptPrice.status === "unavailable") return <Unavailable label={label} reason="The PT price could not be read." />
   const l = leverage(ms.ptPrice.value)
-  return l === undefined ? <Unavailable reason="The PT is priced at or above par, so a YT has no leverage." /> : `${Math.round(l)}x`
+  return l === undefined ? <Unavailable label={label} reason="The PT is priced at or above par, so a YT has no leverage." /> : `${Math.round(l)}x`
 }
 
 function UnderlyingApyStat({ pool }: { pool: string }) {
   const { data, isPending } = useMarketHistory(pool, "7d")
   if (isPending) return <Skeleton className="h-6 w-20" />
   const f = underlyingApyOf(data)
-  if (f.kind === "none") return <Unavailable reason={f.reason} />
+  if (f.kind === "none") return <Unavailable label="Underlying APY (7 d)" reason={f.reason} />
   return (
     <>
       <span>{formatPercent(f.value)}</span> <span className="block font-sans text-xs text-ink-muted">{f.caption}</span>
@@ -66,9 +65,9 @@ export function MarketStats({ marketId }: { marketId: string }) {
   return (
     <dl className="grid grid-cols-2 gap-x-6 gap-y-5 rounded-lg border border-line bg-surface p-5 min-[900px]:grid-cols-5">
       <Metric label="Liquidity">
-        {l.kind === "value" ? amount(l.value) : l.kind === "none" ? "No liquidity yet" : <Unavailable reason="The pool's value could not be read." />}
+        {l.kind === "value" ? amount(l.value) : l.kind === "none" ? "No liquidity yet" : <Unavailable label="Liquidity" reason="The pool's value could not be read." />}
       </Metric>
-      <Metric label="TVL">{tvl.status === "live" ? amount(tvl.value) : <Unavailable reason="The TVL could not be read." />}</Metric>
+      <Metric label="TVL">{tvl.status === "live" ? amount(tvl.value) : <Unavailable label="TVL" reason="The TVL could not be read." />}</Metric>
       <Metric label="Underlying APY (7 d)">
         <UnderlyingApyStat pool={market.contracts.pool} />
       </Metric>

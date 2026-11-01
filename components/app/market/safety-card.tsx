@@ -79,11 +79,15 @@ export function SafetyContent({ marketId }: { marketId: string }) {
   )
 }
 
-/** How many problems the Safety tab reports; undefined while the market state is unavailable or stale. */
+/**
+ * How many problems the Safety tab reports; undefined while the market state, a counted value or a
+ * connected account cannot be read (M3).
+ */
 export function useSafetyIssues(marketId: string): number | undefined {
   const { data, stale } = useMarketState(marketId)
   const { state } = useWallet()
   const account = useAccountState(marketId)
-  const acc = state.status === "connected" && !account.stale ? account.data : undefined
+  // No wallet: the cap is not counted. A connected account still loading or unreadable: no count yet.
+  const acc = state.status !== "connected" ? undefined : account.stale ? null : (account.data ?? null)
   return safetyIssues(stale ? undefined : data, acc)
 }

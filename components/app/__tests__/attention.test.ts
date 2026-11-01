@@ -9,8 +9,24 @@ describe("safetyIssues", () => {
   it("is undefined while the market state is unavailable, never a made-up 0", () => {
     expect(safetyIssues(undefined, undefined)).toBeUndefined()
   })
-  it("does not count an unreadable value: the row itself says Unavailable", () => {
-    expect(safetyIssues(marketState({ syPaused: down(), oracleFresh: down() }), undefined)).toBe(0)
+  it("is undefined, never 0, when a counted value is unreadable: its row says Unavailable (M3)", () => {
+    expect(safetyIssues(marketState({ syPaused: down(), oracleFresh: down() }), undefined)).toBeUndefined()
+    // Not even a known problem is counted beside an unreadable row: the count would be a guess.
+    expect(safetyIssues(marketState({ poolPaused: live(true), riskPaused: down() }), undefined)).toBeUndefined()
+  })
+  it.each([["syPaused"], ["poolPaused"], ["riskPaused"], ["oracleFresh"]])("is undefined when %s is unreadable", (k) => {
+    expect(safetyIssues(marketState({ [k]: down() }), undefined)).toBeUndefined()
+  })
+  it.each([["limit"], ["volume"], ["assetLimit"], ["assetVolume"]])("is undefined when the breaker's %s is unreadable, even with its limit off", (k) => {
+    const cb = { limit: live(0n), volume: live(0n), assetLimit: live(0n), assetVolume: live(0n), [k]: down() }
+    expect(safetyIssues(marketState({ cb }), undefined)).toBeUndefined()
+  })
+  it("is undefined when the account's deposit cap or net deposits are unreadable, or a connected account cannot be read", () => {
+    expect(safetyIssues(marketState(), accountState({ depositCap: down() }))).toBeUndefined()
+    expect(safetyIssues(marketState(), accountState({ netDeposited: down() }))).toBeUndefined()
+    expect(safetyIssues(marketState(), null)).toBeUndefined()
+    // No wallet: the deposit-cap row asks to connect one, and is not counted.
+    expect(safetyIssues(marketState(), undefined)).toBe(0)
   })
   it.each([["syPaused"], ["poolPaused"], ["riskPaused"]])("counts 1 when %s", (k) => {
     expect(safetyIssues(marketState({ [k]: live(true) }), undefined)).toBe(1)

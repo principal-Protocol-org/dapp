@@ -83,6 +83,12 @@ describe("fixedPayoffUsd", () => {
   it("a loss is negative", () => {
     expect(fixedPayoffUsd(100_0000000n, 100_0000000n, 1_0500000n).gainUsd).toBe(-5_0000000n)
   })
+
+  it("the ratio is undefined, never 0, when nothing was paid (R2-18 pattern)", () => {
+    expect(fixedPayoffUsd(100_0000000n, 0n, 1_0500000n)).toEqual({ gainUsd: 100_0000000n, pct: undefined })
+    // Paid amounts too small to be worth a USD unit are nothing paid too.
+    expect(fixedPayoffUsd(1n, 0n, 1_0500000n).pct).toBeUndefined()
+  })
 })
 
 describe("underlyingApy7d", () => {

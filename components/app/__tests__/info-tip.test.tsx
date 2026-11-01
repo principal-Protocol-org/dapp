@@ -15,6 +15,14 @@ describe("InfoTip", () => {
     expect(screen.queryByRole("tooltip")).toBeNull()
   })
 
+  it("is a target of at least 24 px, without moving the label beside it (M11)", () => {
+    render(<InfoTip label="Fees">{"The pool's fee."}</InfoTip>)
+    const classes = screen.getByRole("button", { name: "More about Fees" }).className.split(/\s+/)
+    // size-6 is 24 px; the negative margin keeps the 14 px icon's footprint in the line.
+    expect(classes).toEqual(expect.arrayContaining(["size-6", "-m-[5px]"]))
+    expect(classes).not.toContain("p-1")
+  })
+
   it("opens on hover", async () => {
     const user = userEvent.setup()
     render(<InfoTip label="Fees">{"The pool's fee."}</InfoTip>)

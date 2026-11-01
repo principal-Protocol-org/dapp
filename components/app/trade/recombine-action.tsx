@@ -35,12 +35,16 @@ const FIELD = { id: "amount", label: "PT and YT to recombine", unit: "PT + YT" }
 
 type Figures = { ok: true; sy: bigint; syExact: boolean; underlying?: bigint } | { ok: false; error: string }
 
+/** Shown as "Unavailable: this amount is too small to recombine." (the reasons are lower-case fragments). */
+const TOO_SMALL = "this amount is too small to recombine"
+
 /**
  * What the route gives for `amount` PT and YT. Step 1 (Router.recombine) pays `amount ÷ oracle rate`
  * in SY (`previewRecombine`), replaced by its simulation as the user once that has run; step 2
  * (SYWrapper.withdraw), when the user receives the underlying, unwraps that SY at today's SY rate
  * (`previewWithdraw`, floored). Step 2 is never simulated before step 1 lands, so the underlying is
- * always indicative. A figure that cannot be worked out says why: it is never shown as 0.
+ * always indicative. A figure that cannot be worked out says why: it is never shown as 0, and an
+ * amount too small to pay anything (dust) says so (M2).
  */
 function figuresFor(ms: MarketState, amount: bigint, receive: PayToken, simulatedSy: bigint | undefined): Figures {
   try {
@@ -49,10 +53,13 @@ function figuresFor(ms: MarketState, amount: bigint, receive: PayToken, simulate
       if (ms.oracleRate.status !== "live") return { ok: false, error: `the oracle rate could not be read (${ms.oracleRate.error})` }
       sy = previewRecombine(amount, ms.oracleRate.value)
     }
+    if (sy <= 0n) return { ok: false, error: TOO_SMALL }
     const syExact = simulatedSy !== undefined
     if (receive === "sy") return { ok: true, sy, syExact }
     if (ms.exchangeRate.status !== "live") return { ok: false, error: `the SY exchange rate could not be read (${ms.exchangeRate.error})` }
-    return { ok: true, sy, syExact, underlying: previewWithdraw(sy, ms.exchangeRate.value) }
+    const underlying = previewWithdraw(sy, ms.exchangeRate.value)
+    if (underlying <= 0n) return { ok: false, error: TOO_SMALL }
+    return { ok: true, sy, syExact, underlying }
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) }
   }

@@ -73,6 +73,15 @@ describe("LineChart", () => {
     expect(screen.getByText("No history yet")).toBeTruthy()
   })
 
+  it('an empty range over older history says how old it is, never "No history yet" (M7)', () => {
+    // The recorder stopped before this range: the pool's latest snapshot is 40 days old.
+    const latestAt = Math.floor(NOW_MS / 1000) - 40 * 86_400
+    chart({ series: [{ id: "fixed", label: "Fixed APY", color: "pt", points: [] }], latestAt, stale: true })
+    expect(screen.getByText("History is 960 h old")).toBeTruthy()
+    expect(screen.queryByText("No history yet")).toBeNull()
+    expect(screen.getByText("Nothing was recorded in this range.")).toBeTruthy()
+  })
+
   it("labels the image with the latest values and switches range", () => {
     const onRangeChange = vi.fn()
     chart({ onRangeChange })

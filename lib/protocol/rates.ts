@@ -70,15 +70,18 @@ export function effectiveImpliedApy(p: {
   return Math.pow(1 / (1 - c), 1 / years(p.secondsToMaturity)) - 1
 }
 
-/** Fixed payoff at maturity in USD: `ptOut` minus the USD value of what was paid, and as a ratio. */
+/**
+ * Fixed payoff at maturity in USD: `ptOut` minus the USD value of what was paid, and as a ratio of
+ * it. The ratio is `undefined` when nothing was paid (R2-18: uncomputable, never 0).
+ */
 export function fixedPayoffUsd(
   ptOut: bigint,
   paidUnderlying: bigint,
   oracleRate: bigint,
-): { gainUsd: bigint; pct: number } {
+): { gainUsd: bigint; pct: number | undefined } {
   const paidUsd = usdValue(paidUnderlying, oracleRate)
   const gainUsd = ptOut - paidUsd
-  return { gainUsd, pct: paidUsd > 0n ? Number(gainUsd) / Number(paidUsd) : 0 }
+  return { gainUsd, pct: paidUsd > 0n ? Number(gainUsd) / Number(paidUsd) : undefined }
 }
 
 /**

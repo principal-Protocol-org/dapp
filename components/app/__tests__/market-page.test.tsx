@@ -211,12 +211,23 @@ describe("MarketStats", () => {
     wrap(<MarketStats marketId="m1" />)
     expect(stat("Underlying APY (7 d)")?.textContent).toMatch(/4\.98%.*since Jan \d+/)
   })
-  it("says Unavailable with a reason when there is no history (R2-44)", () => {
+  it("says Unavailable with a reason when there is no history (R2-44), behind an info tip a tap or focus opens (M10)", async () => {
     mocks.history = "empty"
-    wrap(<MarketStats marketId="m1" />)
+    const { container } = wrap(<MarketStats marketId="m1" />)
     const v = stat("Underlying APY (7 d)") as HTMLElement
     expect(v?.textContent).toBe("Unavailable")
-    expect(v?.querySelector("[title]")?.getAttribute("title")).toMatch(/No oracle snapshots/)
+    // Never only in a title attribute: touch and keyboard users cannot reach that.
+    expect(container.querySelector("[title]")).toBeNull()
+    await userEvent.click(within(v).getByRole("button", { name: "More about Underlying APY (7 d) (unavailable)" }))
+    expect((await screen.findByRole("tooltip")).textContent).toMatch(/No oracle snapshots/)
+  })
+  it("every Unavailable stat names its reason behind an info tip (M10)", async () => {
+    mocks.ms = marketState({ poolSeeded: live(true), ptPrice: down(), poolState: down() })
+    wrap(<MarketStats marketId="m1" />)
+    const v = stat("YT leverage") as HTMLElement
+    expect(v.textContent).toBe("Unavailable")
+    await userEvent.click(within(v).getByRole("button", { name: "More about YT leverage (unavailable)" }))
+    expect((await screen.findByRole("tooltip")).textContent).toBe("The PT price could not be read.")
   })
   it("says No liquidity yet for an unseeded pool", () => {
     mocks.ms = marketState({ poolSeeded: live(false) })
