@@ -1,36 +1,48 @@
 // @vitest-environment node
 /**
  * The real history queries against Postgres (`principal-pg`; `DATABASE_URL` from `.env.local`).
- * Skipped when the database is unreachable. Seeds a throwaway pool id, runs `getHistory` and
- * `getSparks` for real, and deletes its rows. Run `pnpm db:migrate` first. Prints counts only.
+ * Skipped when the database is unreachable, and refused unless it is the local container (never a
+ * hosted database). Run `pnpm db:migrate` first. Prints counts and verdicts only.
+ *
+ * - The queries: seeds a throwaway pool id, runs `getHistory` and `getSparks` for real, and deletes
+ *   its rows.
+ * - The recorder (Task 24): `recordAll` reads the live local market and writes one snapshot row, and
+ *   `getHistory` / `getSparks` return it. Skipped when the local network is down. The row is deleted
+ *   afterwards, so the database is left as it was found.
  */
-import { readFileSync } from "node:fs"
-import { join } from "node:path"
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
 
 vi.mock("server-only", () => ({}))
 
+import { aprToApy } from "@/lib/protocol/math"
+import { createRpcReader } from "@/lib/protocol/reader"
+import { createRpcServer } from "@/lib/protocol/stellar"
+import { createLog, loadDatabaseUrl, MINUTE, readManifest, skipReason, sleep } from "./local-stack"
+
 const POOL = "C" + "Z".repeat(55)
 const SLOT = 900
 
-function loadEnv() {
-  if (process.env.DATABASE_URL) return
+loadDatabaseUrl()
+
+/** Only the dev stack's own Postgres: a hosted database is never written by this suite. */
+function localDatabase(): boolean {
   try {
-    for (const line of readFileSync(join(process.cwd(), ".env.local"), "utf8").split("\n")) {
-      const m = /^DATABASE_URL=(.*)$/.exec(line.trim())
-      if (m) process.env.DATABASE_URL = m[1].replace(/^["']|["']$/g, "")
-    }
+    const host = new URL(process.env.DATABASE_URL ?? "").hostname
+    return host === "localhost" || host === "127.0.0.1"
   } catch {
-    /* no .env.local */
+    return false
   }
 }
-loadEnv()
 
 let reachable = false
 let sql: typeof import("@/lib/server/db").sql
 
 beforeAll(async () => {
   if (!process.env.DATABASE_URL) return
+  if (!localDatabase()) {
+    console.info("[history] skipped: DATABASE_URL is not the local principal-pg container")
+    return
+  }
   try {
     ;({ sql } = await import("@/lib/server/db"))
     await sql`select 1 from market_state_snapshots limit 1`
@@ -85,4 +97,93 @@ describe("history queries against the real database", () => {
     expect(sparks[POOL].changePts).not.toBeNull()
     expect(sparks[POOL].stale).toBe(false)
   })
+})
+
+describe("the recorder on the local stack (Task 24)", () => {
+  const out = createLog("recorder")
+  /** The row this test wrote, removed afterwards. */
+  let written: { pool: string; slot: number; ledger: number } | undefined
+
+  afterAll(async () => {
+    if (reachable && written) {
+      await sql`delete from market_state_snapshots where pool = ${written.pool} and slot = ${written.slot} and ledger = ${written.ledger}`
+      out.log(`removed the test's row (slot ${written.slot}, ledger ${written.ledger})`)
+    }
+    out.summary()
+  })
+
+  it("recordAll writes one snapshot of the live market, and History returns it", async (ctx) => {
+    if (!reachable) return ctx.skip()
+    const down = await skipReason()
+    if (down) {
+      console.info(`[recorder] skipped: ${down}`)
+      return ctx.skip()
+    }
+    const { recordAll, SLOT_SECONDS } = await import("@/lib/server/recorder")
+    const { getHistory, getSparks } = await import("@/lib/server/history")
+    const manifest = readManifest()
+    const market = manifest.markets[0]
+    const pool = market.contracts.pool
+    const server = createRpcServer(manifest.rpcUrl)
+    // As the cron route reads it (app/api/cron/record/route.ts).
+    const ledgerCloseTime = async (ledger: number) => {
+      const page = await server.getLedgers({ startLedger: ledger, pagination: { limit: 1 } })
+      const found = page.ledgers.find((l) => l.sequence === ledger)
+      if (!found) throw new Error(`ledger ${ledger} not found on the RPC node`)
+      return Number(found.ledgerCloseTime)
+    }
+    const slotNow = async () => Math.floor((await ledgerCloseTime((await server.getLatestLedger()).sequence)) / SLOT_SECONDS)
+    const taken = async (slot: number) => (await sql<{ n: string }>`select count(*)::text as n from market_state_snapshots where pool = ${pool} and slot = ${slot}`)[0].n !== "0"
+
+    // A row already in this slot is someone else's (the recorder inserts once per slot): it is
+    // never touched; the test waits for the next slot instead.
+    let slot = await slotNow()
+    while (await taken(slot)) {
+      out.log(`slot ${slot} already has a row for this pool; waiting for the next slot`)
+      await sleep(15_000)
+      slot = await slotNow()
+    }
+    const before = (await server.getLatestLedger()).sequence
+    const deps = { reader: createRpcReader(manifest), sql, manifest, markets: async () => [market], now: () => Date.now(), ledgerCloseTime }
+    const result = await recordAll(deps)
+    const after = (await server.getLatestLedger()).sequence
+    expect(result).toEqual({ recorded: 1, failed: [] })
+
+    const rows = await sql<{ slot: string; ledger: string; at: string; implied_rate: string; pt_reserve: string; sy_reserve: string; oracle_rate: string }>`
+      select slot::text, ledger::text, extract(epoch from close_time)::bigint::text as at, implied_rate::text, pt_reserve::text,
+             sy_reserve::text, oracle_rate::text
+      from market_state_snapshots where pool = ${pool} and slot >= ${slot} order by slot desc`
+    expect(rows).toHaveLength(1)
+    const row = rows[0]
+    written = { pool, slot: Number(row.slot), ledger: Number(row.ledger) }
+    const closeTime = Number(row.at)
+    // One ledger, read between the two clock reads; keyed by that ledger's close time.
+    expect(written.ledger).toBeGreaterThanOrEqual(before)
+    expect(written.ledger).toBeLessThanOrEqual(after)
+    expect(closeTime).toBe(await ledgerCloseTime(written.ledger))
+    expect(written.slot).toBe(Math.floor(closeTime / SLOT_SECONDS))
+    for (const v of [row.implied_rate, row.pt_reserve, row.sy_reserve, row.oracle_rate]) expect(BigInt(v) > 0n).toBe(true)
+    out.log(
+      `recorded pool ${pool.slice(0, 8)}… slot ${written.slot} ledger ${written.ledger} (read between ledgers ${before} and ${after}): ` +
+        `implied_rate ${row.implied_rate}, pt ${row.pt_reserve}, sy ${row.sy_reserve}, oracle ${row.oracle_rate}`,
+    )
+
+    // History returns it: the newest point of the 7-day series, at its close time, not stale.
+    const h = await getHistory(sql, pool, "7d", { maturity: market.maturity })
+    expect(h.latestAt).toBe(closeTime)
+    expect(h.stale).toBe(false)
+    expect(h.fixedApy.at(-1)).toEqual({ at: closeTime, value: aprToApy(BigInt(row.implied_rate), BigInt(market.maturity - closeTime)) })
+    expect(h.liquidity.at(-1)?.at).toBe(closeTime)
+    expect(h.liquidity.at(-1)?.value).not.toBeNull()
+    const sparks = await getSparks(sql, [pool], { [pool]: market.maturity })
+    expect(sparks[pool].points.at(-1)?.at).toBe(closeTime)
+    expect(sparks[pool].stale).toBe(false)
+    out.log(`getHistory 7d: ${h.fixedApy.length} points, latest at ${closeTime}, fixed APY ${h.fixedApy.at(-1)?.value}; spark ${sparks[pool].points.length} points`)
+
+    // A retry inside the same slot inserts nothing (on conflict do nothing).
+    if ((await slotNow()) === written.slot) {
+      expect(await recordAll(deps)).toEqual({ recorded: 0, failed: [] })
+      out.log("a second run in the same slot recorded 0 rows")
+    }
+  }, 16 * MINUTE)
 })

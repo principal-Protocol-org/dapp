@@ -9,13 +9,12 @@
  * onboarding helpers and the server faucet with its real chain. A keypair stands in for Freighter.
  *
  * Skipped unless `config/manifests/local.json` is a `local` manifest and its RPC answers
- * (`scripts/dev-stack/up.sh`). The deployed market must mature within the run; when it does not
- * fit, the suite deploys a fresh one (`scripts/dev-stack/deploy.sh`, which rewrites local.json).
+ * (`scripts/dev-stack/up.sh`). The deployed market must mature within the run (it is redeemed at
+ * the end, and the oracle is set to 1.05 on the way). When it does not fit, the suite skips with the
+ * reason: the developer may be testing on that market (R2-68). With `LIFECYCLE_REDEPLOY=1` it
+ * deploys a fresh one instead (`scripts/dev-stack/deploy.sh`, which rewrites local.json).
  */
-import { execFile } from "node:child_process"
-import { existsSync, readFileSync } from "node:fs"
 import { join } from "node:path"
-import { promisify } from "node:util"
 import { Keypair, Transaction, rpc, scValToNative } from "@stellar/stellar-sdk"
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
 
@@ -29,7 +28,7 @@ import { fetchAccountHistory, type HistoryKind } from "@/lib/protocol/events"
 import { evaluateGates, type GateContext } from "@/lib/protocol/gates"
 import { guardsFrom, openGuards, parseOutput, type ActionOutput } from "@/lib/protocol/guards"
 import { createHorizon } from "@/lib/protocol/horizon"
-import { parseManifest, validateManifest } from "@/lib/protocol/manifest"
+import { validateManifest } from "@/lib/protocol/manifest"
 import { fetchMarketState, type MarketState } from "@/lib/protocol/market-state"
 import { BPS, ceilDiv } from "@/lib/protocol/math"
 import { addTrustline, fetchMarketPermissions, onboardingSteps } from "@/lib/protocol/onboarding"
@@ -51,12 +50,7 @@ import type { Finding, Manifest, Market } from "@/lib/protocol/types"
 import { pendingYield } from "@/lib/protocol/yield"
 import { createStellarFaucetChain, resetFaucetStateForTests, runFaucet } from "@/lib/server/faucet"
 import { fundedKeypairSigner, type KeypairSigner } from "./keypair-signer"
-
-const run = promisify(execFile)
-
-const DAPP = join(__dirname, "..", "..")
-const MANIFEST_PATH = join(DAPP, "config", "manifests", "local.json")
-const DEV_STACK = join(DAPP, "scripts", "dev-stack")
+import { DAPP, DEV_STACK, eventually, faucetIssuerSecret, json, readManifest, run, runwaySeconds, skipReason, sleep } from "./local-stack"
 
 /** Shared-context defaults: 50 bps slippage, 300 s deadline. */
 const SLIPPAGE_BPS = 50n
@@ -68,8 +62,9 @@ const U = 10_000_000n
  * Seconds from the start of the run to maturity the pre-maturity steps need (onboarding, 11
  * transactions and the pinned zap, two oracle ticks, a pause and an unpause: about 1.5 minutes
  * measured), and the most this run waits for maturity.
- * Outside that window a fresh market is deployed, maturing `DEPLOY_MATURITY_SECONDS` after the
- * deploy reads the ledger time (the deploy itself takes about two minutes of that).
+ * Outside that window the suite skips (`runwayReason`); with `LIFECYCLE_REDEPLOY=1` a fresh market is
+ * deployed instead, maturing `DEPLOY_MATURITY_SECONDS` after the deploy reads the ledger time (the
+ * deploy itself takes about two minutes of that).
  */
 const MIN_RUNWAY_SECONDS = 240
 const MAX_RUNWAY_SECONDS = 900
@@ -77,58 +72,28 @@ const DEPLOY_MATURITY_SECONDS = 600
 
 const MINUTE = 60_000
 
-function readManifest(): Manifest {
-  return parseManifest(JSON.parse(readFileSync(MANIFEST_PATH, "utf8")))
+/**
+ * Why this suite does not run on the market deployed now, or null. It needs a market that matures
+ * within the run and changes it for good (oracle 1.05, a pause, the R47 canary, redemption), so it
+ * never runs on a market with a longer life: that is the developer's (R2-68). `LIFECYCLE_REDEPLOY=1`
+ * lets it deploy a fresh market instead.
+ */
+async function runwayReason(): Promise<string | null> {
+  if (process.env.LIFECYCLE_REDEPLOY === "1") return null
+  const runway = await runwaySeconds(readManifest())
+  if (runway >= MIN_RUNWAY_SECONDS && runway <= MAX_RUNWAY_SECONDS) return null
+  return (
+    `the local market matures in ${runway} s, outside the ${MIN_RUNWAY_SECONDS}-${MAX_RUNWAY_SECONDS} s this suite needs, ` +
+    "and it never redeploys the developer's stack on its own (set LIFECYCLE_REDEPLOY=1 to deploy a fresh market)"
+  )
 }
 
-/** Why the suite cannot run here, or null: a local manifest and a healthy RPC are required. */
-async function skipReason(): Promise<string | null> {
-  if (!existsSync(MANIFEST_PATH)) return "config/manifests/local.json does not exist"
-  let manifest: Manifest
-  try {
-    manifest = readManifest()
-  } catch (error) {
-    return `config/manifests/local.json is not a valid manifest (${error instanceof Error ? error.message : String(error)})`
-  }
-  if (manifest.network !== "local") return `config/manifests/local.json is for "${manifest.network}", not "local"`
-  try {
-    const health = await createRpcServer(manifest.rpcUrl).getHealth()
-    if (health.status !== "healthy") return `the local RPC reports "${health.status}"`
-  } catch (error) {
-    return `the local RPC does not answer (${error instanceof Error ? error.message : String(error)})`
-  }
-  return null
-}
-
-const skip = await skipReason()
-if (skip) console.info(`[integration] skipped: ${skip}. Start it with scripts/dev-stack/up.sh.`)
-
-/** The faucet key the dev stack wrote; read here, never printed. */
-function faucetIssuerSecret(): string {
-  const prefix = "FAUCET_ISSUER_SECRET="
-  const line = readFileSync(join(DAPP, ".env.local"), "utf8")
-    .split(/\r?\n/)
-    .find((l) => l.startsWith(prefix))
-  if (!line) throw new Error(".env.local has no FAUCET_ISSUER_SECRET; run scripts/dev-stack/deploy.sh")
-  return line.slice(prefix.length).trim()
-}
-
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
-
-/** Polls `read` until `done` holds (Horizon trails RPC by a ledger or two). */
-async function eventually<T>(read: () => Promise<T>, done: (value: T) => boolean, what: string, timeoutMs = 30_000): Promise<T> {
-  const until = Date.now() + timeoutMs
-  for (;;) {
-    const value = await read()
-    if (done(value)) return value
-    if (Date.now() > until) throw new Error(`timed out waiting for ${what}`)
-    await sleep(1_000)
-  }
-}
+const down = await skipReason()
+const skip = down ?? (await runwayReason())
+if (down) console.info(`[integration] skipped: ${down}. Start it with scripts/dev-stack/up.sh.`)
+else if (skip) console.info(`[integration] skipped: ${skip}.`)
 
 const abs = (v: bigint) => (v < 0n ? -v : v)
-/** JSON that survives bigints (results and outcomes carry them). */
-const json = (value: unknown) => JSON.stringify(value, (_, v: unknown) => (typeof v === "bigint" ? v.toString() : v))
 
 /** Everything the run observed, printed again at the end so the report has it in one place. */
 const observed: string[] = []
