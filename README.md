@@ -56,7 +56,6 @@ Copy `.env.example` to `.env.local`. Never commit real keys.
 | `DATABASE_URL_UNPOOLED` | Server only | Optional. Direct connection for migrations; else `DATABASE_URL` with `-pooler` removed from the host. |
 | `CRON_SECRET` | Server only | Optional. Bearer secret Vercel Cron sends to `GET /api/cron/record`. Unset, the route refuses every Bearer call. |
 | `QSTASH_CURRENT_SIGNING_KEY`, `QSTASH_NEXT_SIGNING_KEY` | Server only | Verify Upstash QStash signatures on the same route. |
-| `QSTASH_RECORD_URL` | Server only | The exact public URL QStash calls. The signature is bound to it. Defaults to `https://$VERCEL_PROJECT_PRODUCTION_URL/api/cron/record`, the production domain, so set it in every environment other than Production. With neither, QStash calls are refused (401). |
 
 `pnpm db:migrate [--env-file .env.testnet]` applies `db/migrations/*.sql` over a direct connection and
 never prints the connection string. Run it on each Neon branch (testnet, mainnet) before you deploy
@@ -103,10 +102,11 @@ For each environment:
 - Create a QStash schedule with cron `*/15 * * * *` that calls the exact URL
   `https://<domain>/api/cron/record`, on the final host (no redirect). POST is QStash's default; the
   route accepts GET and POST with the same checks.
-- Set `QSTASH_CURRENT_SIGNING_KEY` and `QSTASH_NEXT_SIGNING_KEY` from that QStash account, and
-  `QSTASH_RECORD_URL` to the same exact URL. The route checks the signature against it. Outside
-  Production the default is the production domain, so without `QSTASH_RECORD_URL` the testnet
-  environment refuses every call.
+- Set `QSTASH_CURRENT_SIGNING_KEY` and `QSTASH_NEXT_SIGNING_KEY` from that QStash account. A
+  signature is bound to the URL it was sent to; the route checks it against the URL the request
+  came in on, so no URL variable is needed in any environment. That URL is trusted only where
+  Vercel sets the host, so QStash calls are accepted only on Vercel (`VERCEL=1`, set when the
+  project exposes system environment variables, the default); elsewhere use `CRON_SECRET`.
 - Keep the environment's secrets (faucet key, `DATABASE_URL`, QStash keys) in that environment only.
   Preview deployments of other branches get none of them.
 - No `vercel.json` and no `CRON_SECRET` are needed.
