@@ -13,6 +13,7 @@ import type { MarketState } from "../market-state"
 import { aprToApy, ceilDiv, FEE_RATE_SCALE, SCALE } from "../math"
 import { previewDeposit, previewWithdraw } from "../previews"
 import { effectiveFixedApy, fixedPayoffUsd } from "../rates"
+import { planRoute, type StepPlan } from "../routes"
 import { currentContractsAdapter, toRouteRequest, type TradeQuote, type TradeRequest } from "../trade-adapter"
 import type { Live } from "../types"
 
@@ -45,8 +46,28 @@ function quoted(result: Live<TradeQuote>): TradeQuote {
   if (result.status !== "live") throw new Error(`expected a live quote, got: ${result.error}`)
   return result.value
 }
+const CTX = { marketId: "m1", source: "GABC", matured: false, routerFunctions: [] as string[] }
+
+/** Today's route for `req` (adapter #1's plan). */
+function plansFor(req: TradeRequest): StepPlan[] {
+  const plans = currentContractsAdapter.plan(req, CTX)
+  if (!Array.isArray(plans)) throw new Error(plans.disabled)
+  return plans
+}
+
+/**
+ * A one-step route, as `planRoute` builds one once a single-step Router function ships and the
+ * manifest lists it (`SINGLE_STEP`, empty today); `action` stands in for that function's action.
+ */
+function oneStep(req: TradeRequest): StepPlan[] {
+  const single = { fn: "swap_one_step", action: req.kind === "buy_pt" ? ("buy_pt" as const) : ("sell_pt" as const) }
+  const plans = planRoute(toRouteRequest(req, CTX), { routerFunctions: [single.fn], singleStep: { [req.kind]: single } })
+  if (!Array.isArray(plans) || plans.length !== 1) throw new Error("expected a one-step route")
+  return plans
+}
+
 const quote = (req: TradeRequest, state: Partial<Parameters<typeof currentContractsAdapter.quote>[1]> = {}) =>
-  currentContractsAdapter.quote(req, { ms: market(), slippageBps: 50n, ...state })
+  currentContractsAdapter.quote(req, { ms: market(), slippageBps: 50n, ...state, plans: state.plans ?? plansFor(req) })
 
 describe("trade adapter #1 — buy PT", () => {
   it("an SY payer gets the curve's PT for the curve's fee, and the fixed APY falls (R2-15)", () => {
@@ -139,7 +160,7 @@ describe("trade adapter #1 — sell PT", () => {
     const rate = 10_200_000n
     const q = quoted(quote(sell("underlying"), { ms: market({ exchangeRate: live(rate) }) }))
     expect(q).toMatchObject({ out: previewWithdraw(931966515n, rate), outToken: "underlying", exactness: "indicative" })
-    expect(q.swapOut).toEqual({ amount: 931966515n, token: "sy", exactness: "indicative" })
+    expect(q.swapOut).toEqual({ amount: 931966515n, token: "sy", exactness: "indicative", step: 1 })
     // No USDY floor exists before step 2 is prepared: the floor shown is step 1's, in SY.
     expect(q).toMatchObject({ minOut: minAfterSlippage(931966515n, 50n), minOutToken: "sy" })
     expect(q).toMatchObject({ fee: previewWithdraw(1150419n, rate), feeToken: "underlying" })
@@ -165,8 +186,47 @@ describe("trade adapter #1 — sell PT", () => {
 
   it("a USDY receiver with step 1 simulated: the SY is exact, the USDY after the withdraw stays indicative", () => {
     const q = quoted(quote(sell("underlying"), { firstStep: { action: "sell_pt", output: { kind: "amount", value: 930_000_000n } } }))
-    expect(q.swapOut).toEqual({ amount: 930_000_000n, token: "sy", exactness: "simulated" })
+    expect(q.swapOut).toEqual({ amount: 930_000_000n, token: "sy", exactness: "simulated", step: 1 })
     expect(q).toMatchObject({ out: 930_000_000n, exactness: "indicative" })
+  })
+})
+
+describe("trade adapter #1 — exactness follows the route, not an assumed shape", () => {
+  it("a one-step USDY buy: the step's simulation is the PT received, and the APY after is recomputed", () => {
+    const req = buy("underlying")
+    const simulated = 1_060_000_000n
+    const indicative = quoted(quote(req, { plans: oneStep(req) }))
+    expect(indicative).toMatchObject({ out: 1070237019n, exactness: "indicative" })
+    const q = quoted(quote(req, { plans: oneStep(req), firstStep: { action: "buy_pt", output: { kind: "amount", value: simulated } } }))
+    expect(q).toMatchObject({ out: simulated, exactness: "simulated", minOut: minAfterSlippage(simulated, 50n), minOutToken: "pt" })
+    // The SY the pool receives is the deposit's (SY rate 1): 100 SY, less the fee.
+    expect(q.apyAfter).toBe(apy(impliedRate({ ...A, ptReserve: A.ptReserve - simulated, syReserve: A.syReserve + SY_100 - 1232877n })))
+  })
+
+  it("a one-step USDY sale: the simulated USDY is exact, with its own floor and no separate SY leg", () => {
+    const req = sell("underlying")
+    const rate = 10_200_000n
+    const ms = market({ exchangeRate: live(rate) })
+    const indicative = quoted(quote(req, { ms, plans: oneStep(req) }))
+    expect(indicative).toMatchObject({ out: previewWithdraw(931966515n, rate), exactness: "indicative", minOutToken: "underlying" })
+    expect(indicative.swapOut).toBeUndefined()
+    const usdy = 950_000_000n
+    const q = quoted(quote(req, { ms, plans: oneStep(req), firstStep: { action: "sell_pt", output: { kind: "amount", value: usdy } } }))
+    expect(q).toMatchObject({ out: usdy, outToken: "underlying", exactness: "simulated", minOut: minAfterSlippage(usdy, 50n), minOutToken: "underlying" })
+    expect(q.swapOut).toBeUndefined()
+  })
+
+  it("a simulation is used only for the route's first step", () => {
+    // Paying USDY today deposits first: a simulated swap cannot be that step's.
+    const q = quoted(quote(buy("underlying"), { firstStep: { action: "buy_pt", output: { kind: "amount", value: 1n } } }))
+    expect(q).toMatchObject({ out: 1070237019n, exactness: "indicative" })
+  })
+
+  it("a loss in USDY is never understated: its magnitude rounds away from zero", () => {
+    // 100 SY ($105 at 1.05) for 100 PT redeeming $100: a $5 loss, 4.76190476… USDY.
+    const q = quoted(quote(buy("sy"), { firstStep: { action: "buy_pt", output: { kind: "amount", value: SY_100 } } }))
+    expect(q.payoff!.gainUsd).toBe(-50_000_000n)
+    expect(q.payoff!.gainUnderlying).toBe(-47_619_048n)
   })
 })
 
@@ -201,7 +261,7 @@ describe("trade adapter #1 — unavailable, never a guess", () => {
   })
 
   it("kinds the later tabs add are not quoted yet", () => {
-    const r = quote({ kind: "buy_yt", amount: SY_100, pay: "sy", receive: "sy" })
+    const r = quote({ kind: "buy_yt", amount: SY_100, pay: "sy", receive: "sy" }, { plans: [] })
     expect(r.status).toBe("unavailable")
   })
 })

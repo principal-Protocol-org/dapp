@@ -166,9 +166,12 @@ function TradePanelView({ marketId }: { marketId: string }) {
         </TabsContent>
       </Tabs>
       <p className="flex flex-wrap gap-x-4 gap-y-1 text-sm text-ink-muted">
-        <button type="button" onClick={() => setTool("deposit")} className="underline underline-offset-2 hover:text-ink">
-          Need SY? Deposit {code}
-        </button>
+        {/* Only the interim YT and LP bodies still need SY; the PT tab pays the underlying directly. */}
+        {tab !== "pt" ? (
+          <button type="button" onClick={() => setTool("deposit")} className="underline underline-offset-2 hover:text-ink">
+            Need SY? Deposit {code}
+          </button>
+        ) : null}
         <button type="button" onClick={() => setTool("split")} className="underline underline-offset-2 hover:text-ink">
           Split {code} into PT + YT
         </button>

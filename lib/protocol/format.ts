@@ -64,6 +64,42 @@ export function formatTokenAmount(raw: bigint, decimals: number, group = false):
   return padded ? `${whole}.${padded}` : whole;
 }
 
+/**
+ * `raw` at `digits` fraction digits, rounded against the reader: a gain (or zero) down, a loss's
+ * magnitude up. A gain is never overstated and a loss never understated (or shown as zero).
+ */
+function againstReader(raw: bigint, decimals: number, digits: number): bigint {
+  if (digits >= decimals) return raw;
+  const unit = 10n ** BigInt(decimals - digits);
+  return raw >= 0n ? (raw / unit) * unit : -(((-raw + unit - 1n) / unit) * unit);
+}
+
+/**
+ * A USD gain or loss to the cent, signed: "+$5.53", "-$0.13", "+$1,234.50". `raw` is in oracle
+ * units (USD) at `decimals`. A gain is floored, a loss's magnitude rounded up, so the figure never
+ * flatters the trade; the minus is the ASCII "-" of `formatAmount`.
+ */
+export function formatUsdCents(raw: bigint, decimals: number): string {
+  const rounded = againstReader(raw, decimals, 2);
+  const negative = rounded < 0n;
+  const abs = negative ? -rounded : rounded;
+  return `${negative ? "-" : "+"}$${fixed(abs, decimals, Math.min(2, decimals), false, true)}`;
+}
+
+/**
+ * A gain or loss as `formatAmount` shows an amount (trimmed, ASCII "-"), rounded against the reader
+ * like `formatUsdCents`: -4.7619048 at 4 digits is "-4.762", never "-4.7619".
+ */
+export function formatGainLoss(
+  raw: bigint,
+  decimals: number,
+  maxFraction = 4,
+  options: { group?: boolean } = {},
+): string {
+  const digits = Math.min(maxFraction, decimals);
+  return formatAmount(againstReader(raw, decimals, digits), decimals, digits, options);
+}
+
 /** Rate at SCALE with 4 fixed decimals: 10_500_000n -> "1.0500". */
 export function formatRate(rate: bigint): string {
   return fixed(rate, SCALE.toString().length - 1, 4, false);

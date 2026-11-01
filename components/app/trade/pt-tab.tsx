@@ -16,30 +16,17 @@ import { STALE, useGateContext } from "@/hooks/use-gate-context"
 import { useSettings } from "@/hooks/use-settings"
 import { checkAmount } from "@/lib/app/amounts"
 import type { TxNotice } from "@/lib/app/tx-notice"
-import { formatAmount, formatBps, formatPercent, formatTokenAmount } from "@/lib/protocol/format"
+import { ACTION_META } from "@/lib/protocol/actions"
+import { formatBps, formatGainLoss, formatPercent, formatTokenAmount, formatUsdCents } from "@/lib/protocol/format"
 import { getMarket } from "@/lib/protocol/manifest"
 import { formatImpact } from "@/lib/protocol/prices"
+import type { StepPlan } from "@/lib/protocol/routes"
 import type { TradeQuote, TradeRequest, TradeToken } from "@/lib/protocol/trade-adapter"
 
 export type PtSide = "buy" | "sell"
 
-/** Every Principal token (SY, PT, YT, LP) has 7 decimals; the underlying's come from the manifest. */
+/** Every Principal token (SY, PT, YT, LP) has 7 decimals; PT is in USD (oracle units). */
 const TOKEN_DECIMALS = 7
-/** PT is denominated in USD (oracle units, 7 decimals): one cent is 10^5 raw units. */
-const CENT = 100_000n
-
-const group = (digits: string) => digits.replace(/\B(?=(\d{3})+(?!\d))/g, ",")
-
-/** A USD gain or loss to the cent, signed: a gain is never overstated, a loss never understated. */
-function usd(raw: bigint): string {
-  const negative = raw < 0n
-  const abs = negative ? -raw : raw
-  const cents = negative ? (abs + CENT - 1n) / CENT : abs / CENT
-  return `${negative ? "−" : "+"}$${group((cents / 100n).toString())}.${(cents % 100n).toString().padStart(2, "0")}`
-}
-
-/** Spec §3's payoff ratio: two decimals and a spaced percent sign ("5.26 %"). */
-const payoffPct = (pct: number) => `${(pct * 100).toFixed(2).replace("-", "−")} %`
 
 /**
  * The PT tab (spec 0002 §3): buy or sell PT, paying or receiving the underlying (a multi-step
@@ -96,8 +83,8 @@ export function PtTab({ marketId, side }: { marketId: string; side: PtSide }) {
     <TokenPicker label={label} value={token} onChange={(t) => setTokens((all) => ({ ...all, [side]: t }))} options={["underlying", "sy"]} code={code} />
   )
 
-  const details: PreviewLine[] = q ? detailLines(q, side, code, slippageBps, steps, amountText) : []
-  const note = routeNote({ side, token, code, steps, exact: swapExact, connected: route.source !== null, pending: route.sim.pending })
+  const details: PreviewLine[] = q ? detailLines(q, side, code, slippageBps, steps, amountText, unitOf) : []
+  const note = routeNote({ plans: route.plans, q, connected: route.source !== null, pending: route.sim.pending })
 
   return (
     <Card className="@container">
@@ -140,7 +127,7 @@ export function PtTab({ marketId, side }: { marketId: string; side: PtSide }) {
             <p className="text-xs text-ink-muted">{`Worth about ${amountText(q.valueToday, "underlying")} today, at the pool's price.`}</p>
           ) : null}
           {q && q.swapOut ? (
-            <p className="text-xs text-ink-muted">{`Indicative: step 2 withdraws step 1's SY to ${code} at today's SY rate.`}</p>
+            <p className="text-xs text-ink-muted">{`Indicative: the steps after step ${q.swapOut.step} turn its ${unitOf(q.swapOut.token)} into ${unitOf(q.outToken)} at today's rate.`}</p>
           ) : null}
         </div>
 
@@ -157,15 +144,15 @@ export function PtTab({ marketId, side }: { marketId: string; side: PtSide }) {
             <p className="text-sm text-ink wrap-anywhere">{`${UNAVAILABLE}: ${route.quote.error}`}</p>
           ) : q ? (
             <>
-              <p className="label">{swapExact ? (q.swapOut ? "Step 1 exact (simulated)" : "Exact (simulated)") : "Indicative"}</p>
+              <p className="label">{swapExact ? (q.swapOut ? `Step ${q.swapOut.step} exact (simulated)` : "Exact (simulated)") : "Indicative"}</p>
               <PreviewList lines={details} />
               {q.payoff ? (
                 <div className="grid gap-1 rounded-lg border border-line p-3">
                   <p className="text-sm font-medium text-ink">
-                    {`At maturity: ${usd(q.payoff.gainUsd)} (${payoffPct(q.payoff.pct)}), fixed in USD whatever ${code}'s price does.`}
+                    {`At maturity: ${formatUsdCents(q.payoff.gainUsd, TOKEN_DECIMALS)} (${formatPercent(q.payoff.pct)}), fixed in USD whatever ${code}'s price does.`}
                   </p>
                   <p className="text-xs text-ink-muted">
-                    {`About ${formatAmount(q.payoff.gainUnderlying, underlyingDecimals, 4, { group: true })} ${code} at today's ${code} price (indicative). Counted in ${code}, this falls as ${code}'s price rises, so only the USD figure is fixed.`}
+                    {`About ${formatGainLoss(q.payoff.gainUnderlying, underlyingDecimals, 4, { group: true })} ${code} at today's ${code} price (indicative). Counted in ${code}, this falls as ${code}'s price rises, so only the USD figure is fixed.`}
                   </p>
                 </div>
               ) : null}
@@ -202,6 +189,7 @@ function detailLines(
   slippageBps: bigint,
   steps: number,
   amountText: (raw: bigint, t: TradeToken) => string,
+  unitOf: (t: TradeToken) => string,
 ): PreviewLine[] {
   const slippage = formatBps(slippageBps)
   const lines: PreviewLine[] = [
@@ -223,9 +211,9 @@ function detailLines(
   }
   if (q.swapOut) {
     lines.push({
-      label: "SY from step 1",
+      label: `${unitOf(q.swapOut.token)} from step ${q.swapOut.step}`,
       value: amountText(q.swapOut.amount, q.swapOut.token),
-      hint: q.swapOut.exactness === "simulated" ? "Simulated as your account." : "Indicative until step 1 is simulated as your account.",
+      hint: q.swapOut.exactness === "simulated" ? "Simulated as your account." : `Indicative until step ${q.swapOut.step} is simulated as your account.`,
     })
   }
   lines.push(
@@ -238,36 +226,36 @@ function detailLines(
     {
       label: "Minimum received",
       value: amountText(q.minOut, q.minOutToken),
-      hint:
-        steps > 1
-          ? side === "buy"
-            ? `At your ${slippage} slippage tolerance, on this preview. Step 2 is signed with its own minimum, from a fresh simulation once step 1 is confirmed.`
-            : `Step 1's minimum, in SY, at your ${slippage} slippage tolerance. Step 2 gets its own minimum in ${code} when it is prepared.`
+      hint: q.swapOut
+        ? `Step ${q.swapOut.step}'s minimum, in ${unitOf(q.minOutToken)}, at your ${slippage} slippage tolerance. The steps after it get their own minimums when they are prepared.`
+        : steps > 1
+          ? `At your ${slippage} slippage tolerance, on this preview. Each step is signed with its own minimum, from a fresh simulation once the step before it is confirmed.`
           : `Signed into the transaction at your ${slippage} slippage tolerance: it fails rather than give less.`,
     },
   )
   return lines
 }
 
-/** The route in plain words, and which figures are exact (R2-55). */
-function routeNote(p: { side: PtSide; token: PayToken; code: string; steps: number; exact: boolean; connected: boolean; pending: boolean }): string | null {
-  const { side, token, code, steps, exact, connected, pending } = p
-  if (steps === 0) return null
-  const signatures = `${steps} ${steps === 1 ? "signature" : "signatures"}`
-  const pendingSim = !connected
-    ? "connect a wallet for an exact quote."
-    : pending
-      ? "getting an exact quote…"
-      : "the exact quote comes from simulating it as your account."
-  if (side === "buy" && token === "underlying") {
-    return `Paying in ${code} takes ${signatures}: step 1 deposits your ${code} into SY, step 2 swaps that SY for PT. The PT figures are indicative, from this app's copy of the pool's math on its current state: step 2 gets its exact amount and minimum from its own simulation once step 1 is confirmed.`
+/** One step in plain words: its action, and what it gives and takes. */
+const stepText = (plan: StepPlan) => `${ACTION_META[plan.action].label} (you give ${plan.gives}, you get ${plan.takes})`
+
+/**
+ * The route in plain words, built from the steps the adapter planned (never from an assumed route
+ * shape), and which figures are exact (R2-55).
+ */
+function routeNote(p: { plans: StepPlan[]; q: TradeQuote | undefined; connected: boolean; pending: boolean }): string | null {
+  const { plans, q, connected, pending } = p
+  if (plans.length === 0) return null
+  const route =
+    plans.length === 1
+      ? `This is one step, one signature: ${stepText(plans[0])}.`
+      : `This takes ${plans.length} signatures, one per step: ${plans.map((plan, i) => `step ${i + 1}, ${stepText(plan)}`).join("; ")}.`
+  if (!q) return route
+  if (q.exactness === "simulated") return `${route} The amount you receive is exact: it was simulated as your account.`
+  if (q.swapOut?.exactness === "simulated") {
+    return `${route} Step ${q.swapOut.step}'s output is exact (simulated); what the later steps give is worked out at today's rates, and each gets its own minimum when it is prepared.`
   }
-  if (side === "buy") {
-    return `Paying in SY takes ${signatures}. ${exact ? "The figures are exact: the swap was simulated as your account." : `The figures are indicative until the swap is simulated: ${pendingSim}`}`
-  }
-  const swap = exact ? "The SY from step 1 is exact (simulated)" : `The SY from step 1 is indicative until it is simulated (${pendingSim.replace(/\.$/, "")})`
-  if (token === "underlying") {
-    return `Receiving ${code} takes ${signatures}: step 1 sells your PT for SY, step 2 withdraws that SY to ${code}. ${swap}; the ${code} is worked out at today's SY rate, and step 2 gets its own minimum when it is prepared.`
-  }
-  return `Receiving SY takes ${signatures}. ${exact ? "The figures are exact: the sale was simulated as your account." : `The figures are indicative until the sale is simulated: ${pendingSim}`}`
+  const later = plans.length > 1 ? " Each step after the first is signed with an exact amount and minimum from its own simulation, once the step before it is confirmed." : ""
+  const exact = !connected ? " Connect a wallet for an exact quote." : pending ? " Getting an exact quote…" : ""
+  return `${route} The figures are indicative, from this app's copy of the pool's math on its current state.${later}${exact}`
 }

@@ -26,6 +26,26 @@ vi.mock("@/lib/protocol/stellar", async (orig) => ({
   // The fake reviews carry no real XDR; the route logs this hash before "signing".
   transactionEnvelopeHash: (xdr: string) => `hash-of-${xdr}`,
 }))
+// A one-step route, as `planRoute` builds one once a single-step Router function ships and the
+// manifest lists it (`SINGLE_STEP` is empty today): on for the tests that set `stub.oneStep`.
+const stub = vi.hoisted(() => ({ oneStep: false }))
+vi.mock("@/lib/protocol/trade-adapter", async (orig) => {
+  const mod = await orig<typeof import("@/lib/protocol/trade-adapter")>()
+  const { planRoute } = await import("@/lib/protocol/routes")
+  return {
+    ...mod,
+    currentContractsAdapter: {
+      quote: mod.currentContractsAdapter.quote,
+      plan: (req: Parameters<typeof mod.currentContractsAdapter.plan>[0], ctx: Parameters<typeof mod.currentContractsAdapter.plan>[1]) =>
+        stub.oneStep
+          ? planRoute(mod.toRouteRequest(req, ctx), {
+              routerFunctions: ["swap_one_step"],
+              singleStep: { [req.kind]: { fn: "swap_one_step", action: req.kind === "buy_pt" ? "buy_pt" : "sell_pt" } },
+            })
+          : mod.currentContractsAdapter.plan(req, ctx),
+    },
+  }
+})
 vi.mock("@/lib/protocol/review", async (orig) => ({
   ...(await orig<object>()),
   prepareReview: mocks.prepareReview,
@@ -76,6 +96,7 @@ beforeEach(() => {
   installDefaults(mocks)
   mocks.manifest = usdyManifest as typeof mocks.manifest
   nav.search = ""
+  stub.oneStep = false
   mocks.accounts[A] = accountState({ underlying: live(BALANCE), sy: live(BALANCE), pt: live(BALANCE), permYt: live(true) })
   mocks.fetchMarketState.mockResolvedValue(poolMarket())
 })
@@ -128,7 +149,7 @@ describe("PT tab — Buy", () => {
     await renderUi(<PtTab marketId="m1" side="buy" />)
     await pick("Pay with", /SY/)
     await enter("You pay", "100.1")
-    expect(screen.getByText("At maturity: +$5.53 (5.26 %), fixed in USD whatever USDY's price does.")).toBeTruthy()
+    expect(screen.getByText("At maturity: +$5.53 (5.26%), fixed in USD whatever USDY's price does.")).toBeTruthy()
     // $5.53 at 1.05 USD per USDY.
     expect(screen.getByText(/About 5\.2666 USDY at today's USDY price \(indicative\)/)).toBeTruthy()
   })
@@ -157,12 +178,14 @@ describe("PT tab — Buy", () => {
     simulateReturns(mocks, 1_000_000_000n)
     await renderUi(<PtTab marketId="m1" side="buy" />)
     await enter("You pay", "100")
-    expect(screen.getByText(/Paying in USDY takes 2 signatures/)).toBeTruthy()
+    expect(
+      screen.getByText(/This takes 2 signatures, one per step: step 1, Deposit \(you give USDY, you get SY\); step 2, Buy PT \(you give SY, you get PT\)\./),
+    ).toBeTruthy()
 
     await pick("Pay with", /SY/)
     await settle(400)
     await settle()
-    expect(screen.getByText(/Paying in SY takes 1 signature/)).toBeTruthy()
+    expect(screen.getByText(/This is one step, one signature: Buy PT \(you give SY, you get PT\)\./)).toBeTruthy()
     await user().click(screen.getByRole("button", { name: "Review Buy PT" }))
     await settle()
     const dialog = await screen.findByRole("dialog", { name: "Review route: Buy PT" })
@@ -252,18 +275,60 @@ describe("PT tab — Sell", () => {
     await enter("You pay", "100")
     expect(received()).toBe("93.1966515 USDY")
     // The USDY comes from step 2's withdraw at today's SY rate: never shown as exact.
-    expect(screen.getByText("Indicative: step 2 withdraws step 1's SY to USDY at today's SY rate.")).toBeTruthy()
+    expect(screen.getByText("Indicative: the steps after step 1 turn its SY into USDY at today's rate.")).toBeTruthy()
     // Selling PT raises the fixed APY (R2-15).
     expect(detail("Fixed APY")).toBe(`${apy(501023n)} → ${apy(503687n)}`)
     expect(detail("Fees")).toBe("0.1150419 USDY")
     // The floor shown is step 1's, in SY: step 2's does not exist before it is prepared.
     expect(detail("Minimum received")).toBe("92.7306682 SY")
-    expect(screen.getByText(/Receiving USDY takes 2 signatures/)).toBeTruthy()
+    expect(screen.getByText(/This takes 2 signatures, one per step: step 1, Sell PT \(you give PT, you get SY\); step 2, Withdraw \(you give SY, you get USDY\)\./)).toBeTruthy()
 
     await pick("Receive as", /SY/)
     expect(received()).toBe("93.1966515 SY")
-    expect(screen.getByText(/Receiving SY takes 1 signature/)).toBeTruthy()
+    expect(screen.getByText(/This is one step, one signature: Sell PT \(you give PT, you get SY\)\./)).toBeTruthy()
     expect(screen.queryByText(/At maturity/)).toBeNull()
+  })
+})
+
+describe("PT tab — whatever the route's shape", () => {
+  it("a one-step USDY buy reads as one step, and its simulation makes the output exact", async () => {
+    stub.oneStep = true
+    let answer: (value: unknown) => void = () => {}
+    mocks.simulateInvocation.mockImplementation(() => new Promise((resolve) => (answer = resolve)))
+    await renderUi(<PtTab marketId="m1" side="buy" />)
+    await enter("You pay", "100")
+    // The copy comes from the plan: one step, never "step 1 …, step 2 …".
+    expect(screen.getByText(/This is one step, one signature: Buy PT \(you give USDY, you get PT\)\./)).toBeTruthy()
+    expect(screen.queryByText(/step 2/i)).toBeNull()
+    expect(screen.getByText("Indicative")).toBeTruthy()
+    expect(received()).toBe("107.0237019 PT")
+
+    answer({ ok: true, retval: 1_060_000_000n, latestLedger: 1, minResourceFee: "100" })
+    await settle()
+    expect(screen.getByText("Exact (simulated)")).toBeTruthy()
+    expect(received()).toBe("106.0000 PT")
+    expect(screen.getByText(/The amount you receive is exact: it was simulated as your account\./)).toBeTruthy()
+    // The one step was simulated with the USDY typed.
+    expect(mocks.simulateInvocation.mock.calls.at(-1)?.[0].invocation.functionName).toBe("swap_sy_for_pt")
+  })
+})
+
+describe("PT tab — a quote it cannot work out", () => {
+  it("a failed read shows Unavailable with its reason, never a zero", async () => {
+    mocks.fetchMarketState.mockResolvedValue(marketState({ ...poolMarket(), oracleRate: { status: "unavailable", error: "rpc down" } }))
+    await renderUi(<PtTab marketId="m1" side="buy" />)
+    await enter("You pay", "100")
+    expect(received()).toBe("Unavailable")
+    expect(screen.getByText("Unavailable: Could not read the oracle rate (rpc down).")).toBeTruthy()
+    expect(screen.queryByText(/^0(\.0+)? PT$/)).toBeNull()
+  })
+
+  it("a trade the pool cannot take shows the pool's reason", async () => {
+    mocks.accounts[A] = accountState({ underlying: live(10n ** 18n), permYt: live(true) })
+    await renderUi(<PtTab marketId="m1" side="buy" />)
+    await enter("You pay", "2900000")
+    expect(received()).toBe("Unavailable")
+    expect(screen.getByText("Unavailable: the pool does not have enough liquidity for this trade")).toBeTruthy()
   })
 })
 

@@ -4,9 +4,11 @@ import {
   formatAmount,
   formatBps,
   formatFeeRate,
+  formatGainLoss,
   formatPercent,
   formatRate,
   formatTokenAmount,
+  formatUsdCents,
   hashLike,
   parseDecimalToRaw,
   shorten,
@@ -93,5 +95,37 @@ describe("formatTokenAmount (preview amounts)", () => {
     expect(formatTokenAmount(150n, 2)).toBe("1.50");
     expect(formatTokenAmount(7n, 0)).toBe("7");
     expect(formatTokenAmount(123_456_789_012n, 9)).toBe("123.456789012");
+  });
+});
+
+describe("formatUsdCents (a USD gain or loss, against the reader)", () => {
+  it("floors a gain to the cent, with a plus sign", () => {
+    expect(formatUsdCents(55_263_157n, 7)).toBe("+$5.52");
+    expect(formatUsdCents(55_300_000n, 7)).toBe("+$5.53");
+    expect(formatUsdCents(0n, 7)).toBe("+$0.00");
+    expect(formatUsdCents(99_999n, 7)).toBe("+$0.00");
+  });
+
+  it("rounds a loss's magnitude up, with the ASCII minus of formatAmount", () => {
+    expect(formatUsdCents(-1_230_001n, 7)).toBe("-$0.13");
+    expect(formatUsdCents(-1n, 7)).toBe("-$0.01");
+    expect(formatUsdCents(-1_300_000n, 7)).toBe("-$0.13");
+  });
+
+  it("groups thousands", () => {
+    expect(formatUsdCents(12_345_678_900_000n, 7)).toBe("+$1,234,567.89");
+  });
+});
+
+describe("formatGainLoss (an amount gained or lost, against the reader)", () => {
+  it("truncates a gain like formatAmount", () => {
+    expect(formatGainLoss(52_666_666n, 7)).toBe("5.2666");
+    expect(formatGainLoss(52_666_666n, 7)).toBe(formatAmount(52_666_666n, 7));
+  });
+
+  it("rounds a loss's magnitude up, so it is never understated or shown as 0", () => {
+    expect(formatGainLoss(-47_619_048n, 7)).toBe("-4.762");
+    expect(formatGainLoss(-1n, 7)).toBe("-0.0001");
+    expect(formatGainLoss(-12_345_678_900_000n, 7, 2, { group: true })).toBe("-1,234,567.89");
   });
 });

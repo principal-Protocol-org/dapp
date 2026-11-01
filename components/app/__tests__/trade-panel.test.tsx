@@ -152,6 +152,13 @@ describe("TokenPicker", () => {
     expect(screen.queryByRole("radiogroup")).toBeNull()
     expect(screen.queryByText(/pay in SY/)).toBeNull()
   })
+
+  it("the PT tab pays the underlying directly, so it offers no \"Need SY?\" deposit link", async () => {
+    render(<TradePanel marketId="m1" />)
+    await screen.findByText("pt tab: buy")
+    expect(screen.queryByRole("button", { name: "Need SY? Deposit USDY" })).toBeNull()
+    expect(screen.getByRole("button", { name: "Split USDY into PT + YT" })).toBeTruthy()
+  })
 })
 
 describe("Tools", () => {
@@ -178,8 +185,9 @@ describe("Tools", () => {
   })
 
   it("links plain words on the page to the deposit and split dialogs", async () => {
+    mocks.search = "tab=yt"
     render(<TradePanel marketId="m1" />)
-    await screen.findByText("pt tab: buy")
+    await screen.findByText("panel: buy_yt")
     await userEvent.click(screen.getByRole("button", { name: "Need SY? Deposit USDY" }))
     expect(within(await screen.findByRole("dialog")).getByText("panel: deposit")).toBeTruthy()
     await userEvent.keyboard("{Escape}")

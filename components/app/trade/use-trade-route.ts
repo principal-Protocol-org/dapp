@@ -113,7 +113,7 @@ export function useTradeRoute({
   const sim = useSimulation(simInput)
   const firstStep: TradeState["firstStep"] = simInput && sim.output ? { action: simInput.action, output: sim.output } : undefined
 
-  const quote = ms && trade.amount > 0n ? adapter.quote(trade, { ms, slippageBps, ...(firstStep ? { firstStep } : {}) }) : null
+  const quote = ms && trade.amount > 0n ? adapter.quote(trade, { ms, slippageBps, plans, ...(firstStep ? { firstStep } : {}) }) : null
 
   let blockers: Blocker[] = gate.unavailable
   if (gate.base) {
