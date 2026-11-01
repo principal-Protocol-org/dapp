@@ -9,11 +9,10 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { UNAVAILABLE } from "@/components/app/live"
 import { LineChart } from "@/components/app/charts/line-chart"
-import { MarketDetails } from "@/components/app/market/market-details"
 
 const SPREAD = { fixed: "fixed", variable: "underlying" } as const
 
-/** APY and Liquidity history over a range, and the market's details, in three tabs. */
+/** APY and Liquidity history over a range, in two tabs. */
 export function MarketChartBox({ marketId }: { marketId: string }) {
   const market = getMarket(useManifest(), marketId)
   const [range, setRange] = useState<Range>("30d")
@@ -60,13 +59,9 @@ export function MarketChartBox({ marketId }: { marketId: string }) {
         <TabsList>
           <TabsTrigger value="apy">APY</TabsTrigger>
           <TabsTrigger value="liquidity">Liquidity</TabsTrigger>
-          <TabsTrigger value="details">Market details</TabsTrigger>
         </TabsList>
         <TabsContent value="apy">{chart("apy")}</TabsContent>
         <TabsContent value="liquidity">{chart("liquidity")}</TabsContent>
-        <TabsContent value="details">
-          <MarketDetails marketId={marketId} />
-        </TabsContent>
       </Tabs>
     </section>
   )
