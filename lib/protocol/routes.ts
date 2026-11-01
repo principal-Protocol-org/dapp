@@ -397,21 +397,33 @@ export type Unwind = { available: true; amount: bigint; plan: StepPlan } | { ava
 /**
  * The single call back to USDY from what an interrupted route left, where one exists: SY is
  * unwrapped by `withdraw` (Router.unwrap). PT, YT or LP need more than one call (a sale, then a
- * withdraw), so there is no single call back from them.
+ * withdraw), so there is no single call back from them, and the reason names the way out. After
+ * maturity (`matured`) PT and YT can no longer be sold: it names Redeem in the PT tab instead, the
+ * LP's withdraw (open at maturity), and the SY's withdraw.
  */
-export function unwindFrom(h: Holdings | undefined): Unwind {
+export function unwindFrom(h: Holdings | undefined, opts: { matured?: boolean } = {}): Unwind {
   if (h === undefined) {
     return {
       available: false,
       reason: "This app could not read what the last step produced, so it cannot build the call back to USDY. Check your balances in the Portfolio.",
     }
   }
-  const others = (["pt", "yt", "lp"] as const).filter((t) => (h[t] ?? 0n) > 0n).map((t) => HOLDING_LABEL[t])
+  const held = (t: Holding) => (h[t] ?? 0n) > 0n
+  const others = (["pt", "yt", "lp"] as const).filter(held).map((t) => HOLDING_LABEL[t])
   if (others.length > 0) {
     const what = listWords(others)
+    const head = `Going back to USDY in one call works only from SY, and you also hold ${what}.`
+    if (!opts.matured) return { available: false, reason: `${head} Continue the route, or sell the ${what} from the Trade tab.` }
+    const redeemable = (["pt", "yt"] as const).filter(held).map((t) => HOLDING_LABEL[t])
+    const ways = [
+      ...(redeemable.length > 0 ? [`redeem the ${listWords(redeemable)} with Redeem in the PT tab`] : []),
+      ...(held("lp") ? ["withdraw the LP in the LP tab"] : []),
+      ...(held("sy") ? ["withdraw the SY with Quick actions → Withdraw"] : []),
+    ]
+    const next = `continue the route, or ${listWords(ways)}.`
     return {
       available: false,
-      reason: `Going back to USDY in one call works only from SY, and you also hold ${what}. Continue the route, or sell the ${what} from the Trade tab.`,
+      reason: redeemable.length > 0 ? `${head} Trading closed at maturity: ${next}` : `${head} ${next.charAt(0).toUpperCase()}${next.slice(1)}`,
     }
   }
   const sy = h.sy ?? 0n

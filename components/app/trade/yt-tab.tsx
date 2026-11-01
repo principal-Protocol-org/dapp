@@ -42,17 +42,29 @@ const TOKEN_DECIMALS = 7
  * reaches the network (R2-3). After maturity a `RouteResume` keeps a YT route stopped between its
  * steps on screen, beside "YT trading has closed".
  */
-export function YtTab({ marketId, side, onRedeem, routeId }: { marketId: string; side: YtSide; onRedeem?: () => void; routeId?: string | null }) {
+export function YtTab({
+  marketId,
+  side,
+  onRedeem,
+  routeId,
+  onRouteOpened,
+}: {
+  marketId: string
+  side: YtSide
+  onRedeem?: () => void
+  routeId?: string | null
+  onRouteOpened?: (id: string) => void
+}) {
   const matured = useMatured(marketId) === true
-  if (matured) return <YtClosed marketId={marketId} onRedeem={onRedeem} routeId={routeId} />
-  return <YtTrade marketId={marketId} side={side} routeId={routeId} />
+  if (matured) return <YtClosed marketId={marketId} onRedeem={onRedeem} routeId={routeId} onRouteOpened={onRouteOpened} />
+  return <YtTrade marketId={marketId} side={side} routeId={routeId} onRouteOpened={onRouteOpened} />
 }
 
 /**
  * R2-60: trades close at maturity; the yield a YT earned before it is paid by Redeem. A YT route
  * interrupted between its steps still shows here, with "Back to USDY" (R2-77).
  */
-function YtClosed({ marketId, onRedeem, routeId }: { marketId: string; onRedeem?: () => void; routeId?: string | null }) {
+function YtClosed({ marketId, onRedeem, routeId, onRouteOpened }: { marketId: string; onRedeem?: () => void; routeId?: string | null; onRouteOpened?: (id: string) => void }) {
   return (
     <Card>
       <CardHeader>
@@ -68,13 +80,13 @@ function YtClosed({ marketId, onRedeem, routeId }: { marketId: string; onRedeem?
             Redeem in the PT tab
           </button>
         ) : null}
-        <RouteResume marketId={marketId} kinds={ROUTE_HOSTS.yt} routeId={routeId} />
+        <RouteResume marketId={marketId} kinds={ROUTE_HOSTS.yt} routeId={routeId} onRouteOpened={onRouteOpened} />
       </CardContent>
     </Card>
   )
 }
 
-function YtTrade({ marketId, side, routeId }: { marketId: string; side: YtSide; routeId?: string | null }) {
+function YtTrade({ marketId, side, routeId, onRouteOpened }: { marketId: string; side: YtSide; routeId?: string | null; onRouteOpened?: (id: string) => void }) {
   const baseId = useId()
   const market = getMarket(useManifest(), marketId)
   const { slippageBps } = useSettings()
@@ -252,6 +264,7 @@ function YtTrade({ marketId, side, routeId }: { marketId: string; side: YtSide; 
           marketId={marketId}
           kinds={ROUTE_HOSTS.yt}
           routeId={routeId}
+          onRouteOpened={onRouteOpened}
           gate={route.gate}
           request={route.request}
           kind={trade.kind}

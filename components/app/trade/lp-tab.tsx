@@ -51,7 +51,7 @@ const shareText = (share: number) => (share > 0 && share < 0.0001 ? "<0.01%" : f
  * (R2-77). The amounts reset once a step reaches the network (R2-3). The split and every figure come
  * from the adapter, and the route's copy from the steps it planned.
  */
-export function LpTab({ marketId, side, routeId }: { marketId: string; side: LpSide; routeId?: string | null }) {
+export function LpTab({ marketId, side, routeId, onRouteOpened }: { marketId: string; side: LpSide; routeId?: string | null; onRouteOpened?: (id: string) => void }) {
   const baseId = useId()
   const market = getMarket(useManifest(), marketId)
   const { slippageBps } = useSettings()
@@ -220,6 +220,7 @@ export function LpTab({ marketId, side, routeId }: { marketId: string; side: LpS
           marketId={marketId}
           kinds={ROUTE_HOSTS.lp}
           routeId={routeId}
+          onRouteOpened={onRouteOpened}
           gate={route.gate}
           request={route.request}
           kind={trade.kind}

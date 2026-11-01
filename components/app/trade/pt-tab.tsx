@@ -39,7 +39,7 @@ const TOKEN_DECIMALS = 7
  * step reaches the network (R2-3). After maturity the trade panel hosts 0001's Redeem panel in this
  * tab's place, with a `RouteResume` for the PT routes still waiting.
  */
-export function PtTab({ marketId, side, routeId }: { marketId: string; side: PtSide; routeId?: string | null }) {
+export function PtTab({ marketId, side, routeId, onRouteOpened }: { marketId: string; side: PtSide; routeId?: string | null; onRouteOpened?: (id: string) => void }) {
   const baseId = useId()
   const market = getMarket(useManifest(), marketId)
   const { slippageBps } = useSettings()
@@ -160,6 +160,7 @@ export function PtTab({ marketId, side, routeId }: { marketId: string; side: PtS
           marketId={marketId}
           kinds={ROUTE_HOSTS.pt}
           routeId={routeId}
+          onRouteOpened={onRouteOpened}
           gate={route.gate}
           request={route.request}
           kind={trade.kind}

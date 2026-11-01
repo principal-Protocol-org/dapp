@@ -214,6 +214,32 @@ describe("route holdings (spec §4 interruption)", () => {
     if (!u.available) expect(u.reason).toMatch(/PT/)
   })
 
+  it("after maturity the way out names Redeem in the PT tab, never a sale that has closed (with Continue and the SY withdraw)", () => {
+    const r = { ...base, kind: "lp_withdraw" as const }
+    const h = routeHoldings(r, plan(r), [{ kind: "remove_liquidity", pt: 10n * S, sy: 5n * S }], 1)
+    const before = unwindFrom(h)
+    if (before.available) throw new Error("expected no single call")
+    expect(before.reason).toMatch(/sell the PT from the Trade tab/)
+    const after = unwindFrom(h, { matured: true })
+    expect(after).toEqual({
+      available: false,
+      reason:
+        "Going back to USDY in one call works only from SY, and you also hold PT. Trading closed at maturity: continue the route, or redeem the PT with Redeem in the PT tab and withdraw the SY with Quick actions → Withdraw.",
+    })
+    // PT and YT together; LP stays a withdraw, which maturity does not close.
+    const both = unwindFrom({ pt: S, yt: S }, { matured: true })
+    if (both.available) throw new Error("expected no single call")
+    expect(both.reason).toBe(
+      "Going back to USDY in one call works only from SY, and you also hold PT and YT. Trading closed at maturity: continue the route, or redeem the PT and YT with Redeem in the PT tab.",
+    )
+    const lp = unwindFrom({ lp: S }, { matured: true })
+    if (lp.available) throw new Error("expected no single call")
+    expect(lp.reason).toBe("Going back to USDY in one call works only from SY, and you also hold LP. Continue the route, or withdraw the LP in the LP tab.")
+    expect(lp.reason).not.toMatch(/sell/)
+    // SY alone is still one withdraw after maturity.
+    expect(unwindFrom({ sy: 5n * S }, { matured: true })).toMatchObject({ available: true, amount: 5n * S })
+  })
+
   it("LP keep YT interrupted before add_liquidity lists PT, YT and SY", () => {
     const r = { ...base, kind: "lp_keep_yt" as const }
     const outs: ActionOutput[] = [
