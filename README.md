@@ -177,12 +177,12 @@ Where each funded Tranche 2 item lives in the final interface. Open a market fro
 | Wallet connection, persistent session | The wallet button in the header. |
 | Market page: maturity, oracle rate, countdown, PT/YT outstanding, pool liquidity | The market page header and stats; the Details tab of the info card. |
 | Compliance status from the underlying asset | The Compliance tab of the info card. The Safety tab shows the pause and risk checks. |
-| Deposit and mint panels, with live previews | The Quick actions button on the Trade header: Deposit, Withdraw, Split, Recombine. |
+| Deposit and mint panels, with live previews | The Quick actions button on the Trade header: Deposit, Withdraw, Split, Recombine PT + YT (receive USDY in 2 steps, or SY in 1). |
 | Trading panel | The PT and YT tabs. |
 | Liquidity deposit and withdrawal | The LP tab. |
 | Position dashboard | `/app/portfolio`. |
 | Claim yield | `/app/portfolio`. |
-| Redeem at maturity | The PT tab once the market has matured. |
+| Redeem at maturity | The PT tab once the market has matured; before maturity, Quick actions → Recombine PT + YT. |
 | Transaction history | `/app/history`. |
 | Market manager | `/app/manage`, shown for a wallet that holds a role on a market. |
 
