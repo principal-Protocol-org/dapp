@@ -58,7 +58,10 @@ const ROUTE_LABEL: Record<RouteKind, string> = {
   recombine: "Recombine",
 }
 
-/** Where the market page resumes a route of this kind (its RouteFlow reads the log). */
+/**
+ * Where the market page resumes a route of this kind (its RouteFlow reads the log). A recombine runs
+ * in its Quick action dialog (R2-72), which `?quick=recombine` opens with its form and the run.
+ */
 const ROUTE_LINK: Record<RouteKind, string> = {
   buy_pt: "tab=pt&side=buy",
   sell_pt: "tab=pt&side=sell",
@@ -68,7 +71,7 @@ const ROUTE_LINK: Record<RouteKind, string> = {
   lp_only: "tab=lp&side=deposit",
   lp_withdraw: "tab=lp&side=withdraw",
   split: "tab=pt",
-  recombine: "tab=pt",
+  recombine: "quick=recombine",
 }
 
 const isDone = (r: RouteRun) => r.steps.every((s) => s.status === "confirmed")

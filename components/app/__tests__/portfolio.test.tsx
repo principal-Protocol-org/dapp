@@ -29,6 +29,11 @@ vi.mock("@/hooks/use-wallet", () => ({ useWallet: () => ({ state: mocks.wallet }
 vi.mock("@/components/app/actions/action-panel", () => ({
   ActionPanel: ({ marketId }: { marketId: string }) => <div data-testid="action-panel">{marketId}</div>,
 }))
+// The recombine route form has its own tests (recombine-action.test.tsx).
+vi.mock("@/components/app/trade/recombine-action", async (orig) => ({
+  ...(await orig<object>()),
+  RecombineAction: ({ marketId }: { marketId: string }) => <div data-testid="recombine-action">{marketId}</div>,
+}))
 vi.mock("@/hooks/use-history", () => ({ useHistory: () => mocks.history }))
 vi.mock("@/hooks/use-ledger-clock", () => ({ useLedgerClock: () => ({ ledgerTime: LEDGER_TIME, sequence: 1, isError: false }) }))
 
@@ -245,6 +250,16 @@ describe("portfolio", () => {
     await userEvent.click(within(card).getByRole("button", { name: /claim yield/i }))
     expect(await screen.findByRole("dialog", { name: /claim yield/i })).toBeTruthy()
     expect(screen.getByTestId("action-panel").textContent).toBe("m1")
+  })
+
+  it("Exit (recombine PT + YT) opens the Recombine quick action's route form, not 0001's single-step panel (R2-72)", async () => {
+    wrap()
+    const card = screen.getByRole("region", { name: "STA · test" })
+    await userEvent.click(within(card).getByRole("button", { name: "Exit (recombine PT + YT)" }))
+    const dialog = await screen.findByRole("dialog", { name: "Recombine PT + YT" })
+    expect(within(dialog).getByText("Give back equal amounts of PT and YT for STA or SY, before maturity.")).toBeTruthy()
+    expect(within(dialog).getByTestId("recombine-action").textContent).toBe("m1")
+    expect(within(dialog).queryByTestId("action-panel")).toBeNull()
   })
 
   it("offers no Claim action without YT", () => {

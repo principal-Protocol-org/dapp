@@ -7,8 +7,8 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { ActionPanel } from "@/components/app/actions/action-panel"
 import { depositPanel, mintPanel, withdrawPanel } from "@/components/app/actions/mint-tab"
-import { recombinePanel } from "@/components/app/actions/redeem-tab"
 import { usePanels, type PanelEntry } from "@/components/app/actions/panel-group"
+import { RECOMBINE_TITLE, RecombineAction, recombineDescription } from "@/components/app/trade/recombine-action"
 import { getMarket } from "@/lib/protocol/manifest"
 import { useManifest } from "@/components/app/manifest-provider"
 import type { Market } from "@/lib/protocol/types"
@@ -17,6 +17,9 @@ export type QuickActionId = "deposit" | "withdraw" | "split" | "recombine"
 
 const ACTION_IDS: QuickActionId[] = ["deposit", "withdraw", "split", "recombine"]
 
+/** A `?quick=` value naming an action (History's Continue opens Recombine this way). */
+export const isQuickAction = (v: string | null | undefined): v is QuickActionId => ACTION_IDS.some((id) => id === v)
+
 const ICONS: Record<QuickActionId, LucideIcon> = {
   deposit: ArrowDownToLineIcon,
   withdraw: ArrowUpFromLineIcon,
@@ -24,13 +27,30 @@ const ICONS: Record<QuickActionId, LucideIcon> = {
   recombine: MergeIcon,
 }
 
+/** An action's menu label and dialog title. */
+const labelOf = (id: QuickActionId, code: string): string => {
+  switch (id) {
+    case "deposit":
+      return `Deposit ${code} → SY`
+    case "withdraw":
+      return `Withdraw SY → ${code}`
+    case "split":
+      return `Split ${code} → PT + YT`
+    case "recombine":
+      return RECOMBINE_TITLE
+  }
+}
+
+/**
+ * The actions that keep 0001's single-step panel (split is one step per spec §4). Recombine is a
+ * route, recombine → withdraw to the underlying (R2-72): its dialog hosts `RecombineAction`.
+ */
 const actionPanels = (market: Market): PanelEntry[] => {
   const code = market.underlying.code
   return [
-    { id: "deposit", label: `Deposit ${code} → SY`, config: depositPanel(market) },
-    { id: "withdraw", label: `Withdraw SY → ${code}`, config: withdrawPanel(market) },
-    { id: "split", label: `Split ${code} → PT + YT`, config: mintPanel(market) },
-    { id: "recombine", label: "Recombine PT + YT → " + code, config: recombinePanel() },
+    { id: "deposit", label: labelOf("deposit", code), config: depositPanel(market) },
+    { id: "withdraw", label: labelOf("withdraw", code), config: withdrawPanel(market) },
+    { id: "split", label: labelOf("split", code), config: mintPanel(market) },
   ]
 }
 
@@ -38,7 +58,7 @@ const DESCRIPTIONS: Record<QuickActionId, string> = {
   deposit: "Turn the underlying asset into SY, the token the pool trades.",
   withdraw: "Turn SY back into the underlying asset.",
   split: "Split the underlying asset into equal amounts of PT and YT.",
-  recombine: "Give back equal amounts of PT and YT for the underlying asset, before maturity.",
+  recombine: recombineDescription("the underlying asset"),
 }
 
 /** An action's one-line description, with the underlying's code in place of "the underlying asset". */
@@ -46,25 +66,29 @@ const describe = (id: QuickActionId, code: string) => DESCRIPTIONS[id].replace("
 
 /**
  * Quick actions: deposit, withdraw, split and recombine, from a small menu on the panel's heading
- * row, each in a dialog that hosts the same panel config as before. Each item shows an icon, its
- * label (its accessible name) and a one-line description (its accessible description). The open
- * action (`tool`) is controlled by the parent, so plain-word links elsewhere on the page open the
- * same dialogs.
+ * row, each in a dialog: deposit, withdraw and split host their 0001 panel config, recombine its
+ * route form. Each item shows an icon, its label (its accessible name) and a one-line description
+ * (its accessible description). The open action (`tool`) is controlled by the parent, so plain-word
+ * links elsewhere on the page, and `?quick=`, open the same dialogs. `onRedeem` takes the user to
+ * the PT tab's Redeem (the Recombine dialog points there after maturity); the dialog closes first.
  */
 export function QuickActions({
   marketId,
   tool,
   onToolChange,
+  onRedeem,
 }: {
   marketId: string
   tool: QuickActionId | null
   onToolChange: (tool: QuickActionId | null) => void
+  onRedeem?: () => void
 }) {
   const baseId = useId()
   const panels = usePanels(marketId, actionPanels)
-  const open = panels.find((p) => p.id === tool)
-  const code = getMarket(useManifest(), marketId)?.underlying.code ?? ""
-  if (panels.length === 0) return null
+  const market = getMarket(useManifest(), marketId)
+  const code = market?.underlying.code ?? ""
+  if (!market) return null
+  const panel = panels.find((p) => p.id === tool)
   return (
     <>
       <DropdownMenu>
@@ -91,7 +115,7 @@ export function QuickActions({
                 <Icon aria-hidden className="mt-0.5 size-4 text-ink-muted" />
                 <span className="grid min-w-0 gap-0.5">
                   <span id={labelId} className="text-sm text-ink">
-                    {panels.find((p) => p.id === id)?.label}
+                    {labelOf(id, code)}
                   </span>
                   <span id={`${labelId}-description`} className="text-xs text-ink-muted wrap-anywhere">
                     {describe(id, code)}
@@ -102,13 +126,27 @@ export function QuickActions({
           })}
         </DropdownMenuContent>
       </DropdownMenu>
-      <Dialog open={open !== undefined} onOpenChange={(o) => !o && onToolChange(null)}>
+      <Dialog open={tool !== null} onOpenChange={(o) => !o && onToolChange(null)}>
         <DialogContent className="max-h-[90dvh] overflow-y-auto sm:max-w-lg">
           <DialogHeader>
-            <DialogTitle>{open?.label}</DialogTitle>
+            <DialogTitle>{tool ? labelOf(tool, code) : null}</DialogTitle>
             <DialogDescription>{tool ? describe(tool, code) : null}</DialogDescription>
           </DialogHeader>
-          {open ? <ActionPanel config={open.config} marketId={marketId} /> : null}
+          {tool === "recombine" ? (
+            <RecombineAction
+              marketId={marketId}
+              onRedeem={
+                onRedeem
+                  ? () => {
+                      onToolChange(null)
+                      onRedeem()
+                    }
+                  : undefined
+              }
+            />
+          ) : panel ? (
+            <ActionPanel config={panel.config} marketId={marketId} />
+          ) : null}
         </DialogContent>
       </Dialog>
     </>

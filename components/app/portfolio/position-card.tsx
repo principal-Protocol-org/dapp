@@ -22,7 +22,8 @@ import { formatDuration, showLive, UNAVAILABLE } from "@/components/app/live"
 import { Metric } from "@/components/app/market/metric"
 import { groupedTokens as tokens } from "@/components/app/actions/panel-lines"
 import { ActionPanel } from "@/components/app/actions/action-panel"
-import { claimPanel, recombinePanel } from "@/components/app/actions/redeem-tab"
+import { claimPanel } from "@/components/app/actions/redeem-tab"
+import { RECOMBINE_TITLE, RecombineAction, recombineDescription } from "@/components/app/trade/recombine-action"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 
 export const STALE = "Unavailable — last update failed"
@@ -128,8 +129,9 @@ function Position({
     ms.maturity.status === "live" && ledgerTime !== null ? ms.maturity.value - BigInt(Math.floor(ledgerTime)) : null
   const matured = secondsToMaturity === null ? null : secondsToMaturity <= 0n
   const [dialog, setDialog] = useState<"claim" | "recombine" | null>(null)
-  // Built once per market: panel configs must stay stable (panel-config rule 1).
-  const panels = useMemo(() => ({ claim: claimPanel(market), recombine: recombinePanel() }), [market])
+  // Built once per market: panel configs must stay stable (panel-config rule 1). Recombine is the
+  // Quick action's route form (R2-72), to the underlying or SY, not 0001's single SY-paying step.
+  const claim = useMemo(() => claimPanel(market), [market])
   const showClaim = yt > 0n || liveBalance(account.ytPendingClaim) > 0n || unknownBalance
 
   return (
@@ -176,14 +178,12 @@ function Position({
       <Dialog open={dialog !== null} onOpenChange={(o) => !o && setDialog(null)}>
         <DialogContent className="max-h-[90dvh] overflow-y-auto sm:max-w-lg">
           <DialogHeader>
-            <DialogTitle>{dialog === "recombine" ? "Exit (recombine PT + YT)" : "Claim yield"}</DialogTitle>
+            <DialogTitle>{dialog === "recombine" ? RECOMBINE_TITLE : "Claim yield"}</DialogTitle>
             <DialogDescription>
-              {dialog === "recombine"
-                ? `Give back equal amounts of PT and YT for ${code}, before maturity.`
-                : `Collect the yield your YT has earned on ${market.displayName}.`}
+              {dialog === "recombine" ? recombineDescription(code) : `Collect the yield your YT has earned on ${market.displayName}.`}
             </DialogDescription>
           </DialogHeader>
-          {dialog ? <ActionPanel config={dialog === "recombine" ? panels.recombine : panels.claim} marketId={marketId} /> : null}
+          {dialog === "recombine" ? <RecombineAction marketId={marketId} /> : dialog === "claim" ? <ActionPanel config={claim} marketId={marketId} /> : null}
         </DialogContent>
       </Dialog>
     </section>

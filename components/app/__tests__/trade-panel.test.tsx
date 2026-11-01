@@ -6,7 +6,7 @@ import userEvent from "@testing-library/user-event"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import type { Blocker } from "@/lib/protocol/gates"
 
-const mocks = vi.hoisted(() => ({ search: "", matured: false as boolean | null, blockers: [] as Blocker[] }))
+const mocks = vi.hoisted(() => ({ search: "", matured: false as boolean | null, blockers: [] as Blocker[], ptMounts: 0 }))
 
 const MARKET = {
   marketId: "m1",
@@ -34,18 +34,40 @@ vi.mock("@/components/app/actions/action-panel", async () => {
   }
 })
 
-// The PT tab has its own tests (pt-tab.test.tsx); here it shows its side and the shared gate list.
+// The PT tab has its own tests (pt-tab.test.tsx); here it shows its side and the shared gate list,
+// and counts its mounts (its RouteFlow reads the route log when it mounts).
 vi.mock("@/components/app/trade/pt-tab", async () => {
+  const { useEffect } = await import("react")
   const { GateList } = await import("@/components/app/actions/gate-list")
   return {
-    PtTab: ({ side }: { side: string }) => (
-      <div>
-        <p>{`pt tab: ${side}`}</p>
-        <GateList blockers={mocks.blockers} />
-      </div>
-    ),
+    PtTab: ({ side }: { side: string }) => {
+      useEffect(() => {
+        mocks.ptMounts++
+      }, [])
+      return (
+        <div>
+          <p>{`pt tab: ${side}`}</p>
+          <GateList blockers={mocks.blockers} />
+        </div>
+      )
+    },
   }
 })
+
+// The recombine route form has its own tests (recombine-action.test.tsx); here it says it is there.
+vi.mock("@/components/app/trade/recombine-action", async (orig) => ({
+  ...(await orig<object>()),
+  RecombineAction: ({ onRedeem }: { onRedeem?: () => void }) => (
+    <div>
+      <p>recombine route form</p>
+      {onRedeem ? (
+        <button type="button" onClick={onRedeem}>
+          Redeem in the PT tab
+        </button>
+      ) : null}
+    </div>
+  ),
+}))
 
 // The YT tab has its own tests (yt-tab.test.tsx); here it shows its side.
 vi.mock("@/components/app/trade/yt-tab", () => ({
@@ -64,6 +86,7 @@ beforeEach(() => {
   mocks.search = ""
   mocks.matured = false
   mocks.blockers = []
+  mocks.ptMounts = 0
 })
 
 const tabNames = () => within(screen.getByRole("tablist", { name: "Token to trade" })).getAllByRole("tab").map((t) => t.textContent)
@@ -228,11 +251,12 @@ describe("TokenPicker", () => {
 })
 
 describe("Quick actions", () => {
+  // Label, what the dialog hosts, description. Recombine is a route form (R2-72), the others 0001 panels.
   const EXPECTED: [string, string, string][] = [
-    ["Deposit USDY → SY", "deposit", "Turn USDY into SY, the token the pool trades."],
-    ["Withdraw SY → USDY", "withdraw", "Turn SY back into USDY."],
-    ["Split USDY → PT + YT", "mint", "Split USDY into equal amounts of PT and YT."],
-    ["Recombine PT + YT → USDY", "recombine", "Give back equal amounts of PT and YT for USDY, before maturity."],
+    ["Deposit USDY → SY", "panel: deposit", "Turn USDY into SY, the token the pool trades."],
+    ["Withdraw SY → USDY", "panel: withdraw", "Turn SY back into USDY."],
+    ["Split USDY → PT + YT", "panel: mint", "Split USDY into equal amounts of PT and YT."],
+    ["Recombine PT + YT", "recombine route form", "Give back equal amounts of PT and YT for USDY or SY, before maturity."],
   ]
 
   it("is a small \"Quick actions\" menu on the heading row, not \"Tools\"", async () => {
@@ -260,15 +284,77 @@ describe("Quick actions", () => {
       const icon = item.querySelector("svg")
       expect(icon?.getAttribute("aria-hidden")).toBe("true")
     }
+    // The old label promised USDY whatever the route paid.
+    expect(screen.queryByRole("menuitem", { name: "Recombine PT + YT → USDY" })).toBeNull()
     await userEvent.keyboard("{Escape}")
-    for (const [label, action] of EXPECTED) {
+    for (const [label, body, description] of EXPECTED) {
       await userEvent.click(screen.getByRole("button", { name: "Quick actions" }))
       await userEvent.click(screen.getByRole("menuitem", { name: label }))
-      const dialog = await screen.findByRole("dialog", { name: label })
-      expect(within(dialog).getByText(`panel: ${action}`)).toBeTruthy()
+      const dialog = await screen.findByRole("dialog", { name: label, description })
+      expect(within(dialog).getByText(body)).toBeTruthy()
       await userEvent.keyboard("{Escape}")
       expect(screen.queryByRole("dialog")).toBeNull()
     }
+  })
+
+  it("Recombine hosts the route form, never 0001's single-step recombine panel (R2-72)", async () => {
+    render(<TradePanel marketId="m1" />)
+    await screen.findByText("pt tab: buy")
+    await userEvent.click(screen.getByRole("button", { name: "Quick actions" }))
+    await userEvent.click(screen.getByRole("menuitem", { name: "Recombine PT + YT" }))
+    const dialog = await screen.findByRole("dialog", { name: "Recombine PT + YT" })
+    expect(within(dialog).getByText("recombine route form")).toBeTruthy()
+    expect(within(dialog).queryByText("panel: recombine")).toBeNull()
+  })
+
+  it("?quick=recombine opens the Recombine dialog (History's Continue); closing it does not open it again", async () => {
+    mocks.search = "quick=recombine"
+    render(<TradePanel marketId="m1" />)
+    const dialog = await screen.findByRole("dialog", { name: "Recombine PT + YT" })
+    expect(within(dialog).getByText("recombine route form")).toBeTruthy()
+    await userEvent.keyboard("{Escape}")
+    expect(screen.queryByRole("dialog")).toBeNull()
+    expect(screen.getByText("pt tab: buy")).toBeTruthy()
+  })
+
+  it("ignores an unknown ?quick=", async () => {
+    mocks.search = "quick=bogus"
+    render(<TradePanel marketId="m1" />)
+    await screen.findByText("pt tab: buy")
+    expect(screen.queryByRole("dialog")).toBeNull()
+  })
+
+  it("closing the Recombine dialog remounts the tab, so its RouteFlow reads the route log again", async () => {
+    render(<TradePanel marketId="m1" />)
+    await screen.findByText("pt tab: buy")
+    expect(mocks.ptMounts).toBe(1)
+    await userEvent.click(screen.getByRole("button", { name: "Quick actions" }))
+    await userEvent.click(screen.getByRole("menuitem", { name: "Recombine PT + YT" }))
+    await screen.findByRole("dialog", { name: "Recombine PT + YT" })
+    // While the dialog is open the tab stays as it was (it is behind the modal).
+    expect(mocks.ptMounts).toBe(1)
+    await userEvent.keyboard("{Escape}")
+    expect(screen.queryByRole("dialog")).toBeNull()
+    expect(mocks.ptMounts).toBe(2)
+    // A 0001 panel's dialog hosts no route: closing it leaves the tab alone.
+    await userEvent.click(screen.getByRole("button", { name: "Quick actions" }))
+    await userEvent.click(screen.getByRole("menuitem", { name: "Deposit USDY → SY" }))
+    await screen.findByRole("dialog", { name: "Deposit USDY → SY" })
+    await userEvent.keyboard("{Escape}")
+    expect(mocks.ptMounts).toBe(2)
+  })
+
+  it("after maturity the Recombine dialog's pointer to Redeem closes it and opens the PT tab", async () => {
+    mocks.matured = true
+    mocks.search = "tab=yt"
+    render(<TradePanel marketId="m1" />)
+    await screen.findByText("yt tab: buy")
+    await userEvent.click(screen.getByRole("button", { name: "Quick actions" }))
+    await userEvent.click(screen.getByRole("menuitem", { name: "Recombine PT + YT" }))
+    const dialog = await screen.findByRole("dialog", { name: "Recombine PT + YT" })
+    await userEvent.click(within(dialog).getByRole("button", { name: "Redeem in the PT tab" }))
+    expect(screen.queryByRole("dialog")).toBeNull()
+    expect(screen.getByText("panel: redeem")).toBeTruthy()
   })
 
   it("opens the split dialog through Quick actions; no separate link on the page (R2-66)", async () => {

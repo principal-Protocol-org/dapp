@@ -258,6 +258,28 @@ describe("history table", () => {
     expect(href("Withdraw liquidity · 2 steps")).toBe("/app/markets/m1?tab=lp&side=withdraw")
   })
 
+  it("an interrupted recombine's Continue opens the Recombine quick action, where its form and run are", () => {
+    writeRoute(
+      route(
+        {
+          id: "r-recombine",
+          kind: "recombine",
+          request: { ...route().request, kind: "recombine", amount: 100n * E7, receive: "underlying" },
+          plans: [
+            { action: "recombine", amount: { from: "input" }, gives: "PT + YT", takes: "SY" },
+            { action: "withdraw", amount: { from: "step", index: 0, field: "value" }, gives: "SY", takes: "USDY" },
+          ],
+          outputs: [{ kind: "amount", value: 95n * E7 }],
+        },
+        [{ action: "recombine", status: "confirmed", hash: H1 }, { action: "withdraw", status: "pending" }],
+      ),
+    )
+    render(<HistoryTable />)
+    const row = screen.getByText("Recombine · 2 steps").closest("tr") as HTMLElement
+    expect(within(row).getByText("You hold 95 SY")).toBeTruthy()
+    expect(within(row).getByRole("link", { name: /continue/i }).getAttribute("href")).toBe("/app/markets/m1?quick=recombine")
+  })
+
   it("does not offer Continue on a finished or closed route", () => {
     writeRoute(route())
     writeRoute(route({ id: "r2", closed: true }, [{ action: "deposit", status: "confirmed", hash: H1 }, { action: "buy_pt", status: "pending" }]))
