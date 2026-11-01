@@ -2,6 +2,7 @@
 
 import { Suspense, useId, useState } from "react"
 import { useSearchParams } from "next/navigation"
+import { cn } from "cn"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { ActionPanel } from "@/components/app/actions/action-panel"
 import { redeemPanel } from "@/components/app/actions/redeem-tab"
@@ -29,6 +30,17 @@ const SIDES: Record<TabId, { id: SideId; label: string }[]> = {
   yt: [{ id: "buy", label: "Buy" }, { id: "sell", label: "Sell" }],
   lp: [{ id: "deposit", label: "Deposit" }, { id: "withdraw", label: "Withdraw" }],
 }
+
+/** Exchange colours (developer's request): the side that buys or adds is green, the one that sells or takes out is red. */
+const SIDE_TONE: Record<SideId, "buy" | "sell"> = { buy: "buy", deposit: "buy", sell: "sell", withdraw: "sell" }
+/**
+ * The pressed side's tint is a tenth of its colour over the surface track: its text keeps at least
+ * 4.5:1 in both themes (light: 4.96 green, 4.78 red; dark: 7.6 and 6.9), which a heavier tint, or the
+ * page's ground under it, does not.
+ */
+const SIDE_BUY = "border-positive bg-positive/10 text-positive"
+const SIDE_SELL = "border-negative bg-negative/10 text-negative"
+const SIDE_OFF = "border-transparent bg-transparent text-ink-muted hover:text-ink"
 
 const isTab = (v: string | null | undefined): v is TabId => TABS.some((t) => t.id === v)
 /**
@@ -130,17 +142,17 @@ function TradePanelView({ marketId }: { marketId: string }) {
           ) : tab === "yt" && matured ? (
             <p className="text-sm text-ink-muted">This market has matured: YT trading has closed.</p>
           ) : (
-            <div role="group" aria-label="Side" className="inline-flex gap-1">
+            <div role="group" aria-label="Side" className="grid w-full grid-cols-2 gap-1 rounded-md border border-line bg-surface p-1">
               {SIDES[tab].map((s) => (
                 <button
                   key={s.id}
                   type="button"
                   aria-pressed={s.id === side}
                   onClick={() => setChosenSide(s.id)}
-                  className={
-                    "min-h-8 rounded-sm px-3 text-sm font-medium focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ring " +
-                    (s.id === side ? "bg-surface-sunk text-ink" : "text-ink-muted hover:text-ink")
-                  }
+                  className={cn(
+                    "min-h-10 w-full rounded-sm border px-3 text-sm font-medium focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ring",
+                    s.id !== side ? SIDE_OFF : SIDE_TONE[s.id] === "buy" ? SIDE_BUY : SIDE_SELL,
+                  )}
                 >
                   {s.label}
                 </button>
