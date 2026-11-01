@@ -2,15 +2,19 @@
  * The prepared review and its execution: the last code path before the user's signature.
  *
  * `prepareReview` builds the exact transaction, has RPC prepare it (`server.prepareTransaction`:
- * simulation, footprint, auth) and describes it in plain words. `executeReview` refuses a review
- * older than 60 s, has the wallet sign it, checks the wallet signed exactly that transaction, then
- * submits, polls and decodes the result. `prepareRestore` builds the `restoreFootprint`
- * transaction an archived-entry simulation asks for; `executeRestore` signs it under the same rules.
+ * simulation, footprint, auth) and describes it in plain words. `prepareManagerReview` does the
+ * same for a manager call (0002 §5), which a builder of `manager-calls.ts` made. `executeReview`
+ * signs either: it refuses a review older than 60 s, re-derives the call from what the review was
+ * prepared from (`origin`), has the wallet sign it, checks the wallet signed exactly that
+ * transaction, then submits, polls and decodes the result. `prepareRestore` builds the
+ * `restoreFootprint` transaction an archived-entry simulation asks for; `executeRestore` signs it
+ * under the same rules.
  *
  * RPC is untrusted (R29): whatever it prepares or simulates is checked against what was built
- * locally before it is shown for signing — same call, same time bounds, no foreign authorization, a
- * fee that is explained and below `MAX_TX_FEE_STROOPS`, and a restore footprint limited to the
- * market's own contracts and the Wasm code its manifest pins (R29b).
+ * locally before it is shown for signing — same call, same time bounds, no foreign authorization
+ * (for a manager call: only the signer's own, for exactly the call and nothing beneath it), a fee
+ * that is explained and below `MAX_TX_FEE_STROOPS`, and a restore footprint limited to the market's
+ * own contracts and the Wasm code its manifest pins (R29b).
  *
  * Ported from `dapp-old/src/lib/transactions.ts` (the prepared review only: the preview and local
  * XDR modes are dropped), `buildPreparedInvokeTransaction` from `dapp-old/src/lib/stellar.ts` (R14)
@@ -29,9 +33,10 @@ import {
 } from "@stellar/stellar-sdk"
 import { ACTION_META, invocationFor, type ActionId, type ActionInput, type GuardValues } from "./actions"
 import { bytesToHex } from "./bytes"
-import { formatAmount } from "./format"
+import { formatAmount, shorten } from "./format"
 import { parseOutput, type ActionOutput } from "./guards"
 import { hashLike } from "./hash"
+import { MANAGER_CALL_AUTH, managerCallTree, rebuildManagerCall, type ManagerCall } from "./manager-calls"
 import { getMarket } from "./manifest"
 import {
   assertSignedTransactionMatchesReview,
@@ -51,11 +56,12 @@ import type { Manifest, Market } from "./types"
 export const REVIEW_TTL_MS = 60_000
 
 /**
- * R31: what `prepareReview` and `prepareRestore` issued, keyed by the very object they returned.
- * `executeReview` and `executeRestore` refuse any other object, and read the preparation time and
- * the XDR hash from here, never from the object they are handed.
+ * R31: what `prepareReview`, `prepareManagerReview` and `prepareRestore` issued, keyed by the very
+ * object they returned. `executeReview` and `executeRestore` refuse any other object, and read the
+ * preparation time, the XDR hash and (for a review) the origin object from here, never from the
+ * object they are handed.
  */
-type Issued = { preparedAtMs: number; unsignedXdrHash: string }
+type Issued = { preparedAtMs: number; unsignedXdrHash: string; origin?: ReviewOrigin }
 const issued = new WeakMap<object, Issued>()
 
 /** The most this app ever asks the user to sign as a network fee: 10 XLM, in stroops (R29). */
@@ -68,8 +74,11 @@ export const TX_TIMEOUT_SECONDS = 300
 const TOKEN_DECIMALS = 7
 const XLM_DECIMALS = 7
 
-export type Review = {
-  input: ActionInput
+/** What a review was prepared from: a user action (0001) or a manager call (0002 §5). */
+export type ReviewOrigin = { type: "action"; input: ActionInput } | { type: "manager"; call: ManagerCall }
+
+/** The prepared transaction and its plain-words description, the same for every review. */
+type PreparedTransaction = {
   invocation: ContractInvocation
   unsignedXdr: string
   unsignedXdrHash: string
@@ -91,6 +100,18 @@ export type Review = {
   }
   callTree: string[]
 }
+
+/** A prepared review of a user action. `input` is `origin.input`, the very same object (R31 checks it). */
+export type Review = PreparedTransaction & { origin: { type: "action"; input: ActionInput }; input: ActionInput }
+
+/**
+ * A prepared review of a manager call (0002 §5). It moves no amount from the signer, so it has no
+ * floor and `give` / `getAtLeast` are empty; every other rule of an action holds (R29, R31, expiry).
+ */
+export type ManagerReview = PreparedTransaction & { origin: { type: "manager"; call: ManagerCall } }
+
+/** Any review `executeReview` signs. */
+export type AnyReview = Review | ManagerReview
 
 export type TxStatus = "SUCCESS" | "FAILED" | "NOT_FOUND"
 
@@ -213,12 +234,22 @@ function assertFeeCapped(fee: bigint, what: string): void {
 }
 
 /**
- * RPC is untrusted (R29). It may add footprint, resources, auth and the resource fee; it must not
- * change who calls what, at which sequence and in which time window, add an authorization for
- * anything but this call, or charge a fee it does not explain. Also applied by the server faucet
- * to the transactions it signs with its own keys (`lib/server/faucet.ts`).
+ * What a prepared transaction may authorize (R29). `rooted`, for an action: every entry is for
+ * exactly this call, with the call's own nested transfers beneath it. `caller`, for a manager call
+ * its signer authorizes: exactly one entry, the source account's own, for exactly this call and
+ * nothing beneath it. `none`, for a permissionless manager call: no entry at all.
  */
-export function assertPreparedMatches(built: Transaction, prepared: Transaction): void {
+export type AuthRule = "rooted" | "caller" | "none"
+
+type AuthFault = { kind: "foreign" } | { kind: "missing" } | { kind: "other_signer"; account: string }
+
+/**
+ * RPC is untrusted (R29). It may add footprint, resources, auth and the resource fee; it must not
+ * change who calls what, at which sequence and in which time window, add an authorization `auth`
+ * does not allow, or charge a fee it does not explain. Also applied by the server faucet to the
+ * transactions it signs with its own keys (`lib/server/faucet.ts`).
+ */
+export function assertPreparedMatches(built: Transaction, prepared: Transaction, auth: AuthRule = "rooted"): void {
   const expected = invokedContractArgs(built)
   const call = invokedContractArgs(prepared)
   const same =
@@ -251,21 +282,46 @@ export function assertPreparedMatches(built: Transaction, prepared: Transaction)
     )
   }
 
-  if (!authorizesOnly(prepared, expected.toXdr("base64"))) {
-    throw new Error(
-      "RPC added an authorization for something other than this call. Refusing to review it; try again or use another RPC.",
-    )
+  const fault = authFault(prepared, expected.toXdr("base64"), auth)
+  if (fault) throw authRefusal(fault)
+}
+
+function authRefusal(fault: AuthFault): Error {
+  switch (fault.kind) {
+    case "foreign":
+      return new Error("RPC added an authorization for something other than this call. Refusing to review it; try again or use another RPC.")
+    case "missing":
+      return new Error("RPC left out the authorization this call needs. Refusing to review it; try again or use another RPC.")
+    case "other_signer":
+      return new Error(
+        `This call needs an authorization from another account (${shorten(fault.account)}), which this app does not ask for. Connect that account's wallet, then try again.`,
+      )
   }
 }
 
-/** Every authorization in the transaction is for exactly this call: same contract, function and arguments. */
-function authorizesOnly(transaction: Transaction, callXdr: string): boolean {
+/** The function is exactly this call: same contract, function and arguments. */
+function isCall(fn: xdr.SorobanAuthorizedFunction, callXdr: string): boolean {
+  return fn.type === "sorobanAuthorizedFunctionTypeContractFn" && fn.contractFn.toXdr("base64") === callXdr
+}
+
+/** Why the transaction's authorizations break `rule` for the call `callXdr`; undefined when they keep it. */
+function authFault(transaction: Transaction, callXdr: string, rule: AuthRule): AuthFault | undefined {
   const [operation] = transaction.operations
   const auth = operation?.type === "invokeHostFunction" ? (operation.auth ?? []) : []
-  return auth.every((entry) => {
-    const fn = entry.rootInvocation.function
-    return fn.type === "sorobanAuthorizedFunctionTypeContractFn" && fn.contractFn.toXdr("base64") === callXdr
-  })
+  if (rule === "rooted") return auth.every((entry) => isCall(entry.rootInvocation.function, callXdr)) ? undefined : { kind: "foreign" }
+  if (rule === "none") return auth.length === 0 ? undefined : { kind: "foreign" }
+  if (auth.length === 0) return { kind: "missing" }
+  const [entry] = auth
+  if (auth.length > 1 || !isCall(entry.rootInvocation.function, callXdr) || entry.rootInvocation.subInvocations.length > 0) {
+    return { kind: "foreign" }
+  }
+  const { credentials } = entry
+  if (credentials.type === "sorobanCredentialsSourceAccount") return undefined
+  // Another account's authorization (address credentials): a signature this app never asks for.
+  if (credentials.type === "sorobanCredentialsAddress") {
+    return { kind: "other_signer", account: Address.fromScAddress(credentials.address.address).toString() }
+  }
+  return { kind: "foreign" }
 }
 
 function decodeTransaction(unsignedXdr: string, networkPassphrase: string): Transaction | undefined {
@@ -303,31 +359,66 @@ function currentTime(nowMs: number | undefined): number {
   return Math.max(nowMs ?? Number.NEGATIVE_INFINITY, Date.now())
 }
 
+/** The call a review must make, re-derived from its origin, and who signs and authorizes it. */
+type ReviewedCall = { source: string; invocation: ContractInvocation; auth: AuthRule; action?: ActionId }
+
+/**
+ * R31: the call `review` was prepared for, derived again from its origin. An action: still offered
+ * (R47), no zero floor (R5), the call `input` maps to. A manager call: the call its builder makes
+ * again for this manifest (`rebuildManagerCall`), which refuses any other contract, function,
+ * argument, signer or label.
+ */
+function reviewedCall(review: AnyReview, manifest: Manifest): ReviewedCall {
+  const { origin } = review
+  if (origin.type === "action") {
+    if (!("input" in review) || review.input !== origin.input) throw changedSince("review", "the action it describes")
+    const input = origin.input
+    assertOffered(input)
+    assertNoZeroFloor(input)
+    return { source: input.source, invocation: invocationFor(manifest, input), auth: "rooted", action: input.action }
+  }
+  let call: ManagerCall
+  try {
+    call = rebuildManagerCall(manifest, origin.call)
+  } catch {
+    throw changedSince("review", "the call it describes")
+  }
+  return { source: call.source, invocation: call.invocation, auth: MANAGER_CALL_AUTH[call.kind] }
+}
+
 /**
  * R31: re-checks, right before signing, that the review still describes exactly the transaction
- * `prepareReview` issued: an action that is offered (R47), no zero floor (R5), the XDR makes the call `input` maps to, from
- * `input.source`, with no foreign authorization, at the reviewed fee (within the cap), and its hash
- * is both the reviewed one and the issued one.
+ * `prepareReview` or `prepareManagerReview` issued: the origin it was issued with, the call
+ * re-derived from it (`reviewedCall`), an XDR that makes exactly that call, from its source, with
+ * no authorization the call's rule does not allow, at the reviewed fee (within the cap), and a hash
+ * that is both the reviewed one and the issued one. Returns the re-derived call.
  */
-function assertReviewIntact(review: Review, manifest: Manifest, record: Issued): void {
-  assertOffered(review.input)
-  assertNoZeroFloor(review.input)
-  const expected = callXdrOf(manifest, review.input.source, invocationFor(manifest, review.input))
-  if (expected === undefined || callXdrOf(manifest, review.input.source, review.invocation) !== expected) {
+function assertReviewIntact(review: AnyReview, manifest: Manifest, record: Issued): ReviewedCall {
+  if (record.origin === undefined || review.origin !== record.origin) throw changedSince("review", "what it was prepared from")
+  const call = reviewedCall(review, manifest)
+  const expected = callXdrOf(manifest, call.source, call.invocation)
+  if (expected === undefined || callXdrOf(manifest, call.source, review.invocation) !== expected) {
     throw changedSince("review", "the call it describes")
   }
   const tx = decodeTransaction(review.unsignedXdr, manifest.networkPassphrase)
   if (!tx || tx.operations.length !== 1 || invokedContractArgs(tx)?.toXdr("base64") !== expected) {
     throw changedSince("review", "its transaction does not make the reviewed call")
   }
-  if (tx.source !== review.input.source) throw changedSince("review", "its transaction has another source account")
+  if (tx.source !== call.source) throw changedSince("review", "its transaction has another source account")
   assertFeeCapped(BigInt(tx.fee), "The transaction to sign")
   if (tx.fee !== review.fee) throw changedSince("review", "its fee")
-  if (!authorizesOnly(tx, expected)) throw changedSince("review", "its transaction authorizes another call")
+  const fault = authFault(tx, expected, call.auth)
+  if (fault) {
+    throw changedSince(
+      "review",
+      fault.kind === "missing" ? "its transaction lacks the authorization the call needs" : "its transaction authorizes another call",
+    )
+  }
   const hash = hashLike(review.unsignedXdr)
   if (hash !== review.unsignedXdrHash || hash !== record.unsignedXdrHash) {
     throw changedSince("review", "its transaction is not the one that was prepared")
   }
+  return call
 }
 
 /** R31: the restore is still exactly the single `restoreFootprint` transaction `prepareRestore` issued. */
@@ -343,6 +434,11 @@ function assertRestoreIntact(restore: RestoreReview, manifest: Manifest, record:
   if (hash !== restore.unsignedXdrHash || hash !== record.unsignedXdrHash) {
     throw changedSince("restore", "its transaction is not the one that was prepared")
   }
+}
+
+/** The exact fee field being signed; the network may charge less, never more. */
+function networkFee(fee: string): string {
+  return `Network fee: up to ${xlm(BigInt(fee))}`
 }
 
 function summarize(market: Market, input: ActionInput, fee: string, validUntil: number): Review["summary"] {
@@ -443,8 +539,7 @@ function summarize(market: Market, input: ActionInput, fee: string, validUntil: 
       break
   }
 
-  // The exact fee field being signed; the network may charge less, never more.
-  const fees = [`Network fee: up to ${xlm(BigInt(fee))}`, ...protocolFees]
+  const fees = [networkFee(fee), ...protocolFees]
   return ACTION_META[input.action].hasDeadline
     ? { give, getAtLeast, fees, deadline: Number(input.deadline), validUntil }
     : { give, getAtLeast, fees, validUntil }
@@ -469,29 +564,15 @@ export async function prepareReview(p: { manifest: Manifest; input: ActionInput;
   assertNoZeroFloor(input)
   const invocation = invocationFor(manifest, input)
 
-  // Ported from dapp-old buildPreparedInvokeTransaction (R14).
   const server = p.rpc ?? createRpcServer(manifest.rpcUrl)
-  const account = await server.getAccount(input.source)
-  const built = buildInvocationEnvelope({
-    source: input.source,
-    sequence: account.sequenceNumber(),
-    networkPassphrase: manifest.networkPassphrase,
-    invocation,
-    timeoutSeconds: TX_TIMEOUT_SECONDS,
-  })
-  let prepared: Transaction
-  try {
-    prepared = await server.prepareTransaction(built)
-  } catch (error) {
-    throw new Error(
-      `The transaction could not be prepared (${errorText(error)}). Nothing was signed; check the reasons shown and try again.`,
-    )
-  }
+  const { built, prepared } = await buildAndPrepare(server, manifest, input.source, invocation)
   assertPreparedMatches(built, prepared)
 
   const unsignedXdr = prepared.toXDR()
   const preparedAtMs = Date.now()
+  const origin: Review["origin"] = { type: "action", input }
   const review: Review = {
+    origin,
     input,
     invocation,
     unsignedXdr,
@@ -502,8 +583,72 @@ export async function prepareReview(p: { manifest: Manifest; input: ActionInput;
     summary: summarize(market, input, prepared.fee, maxTimeOf(built)),
     callTree: CALL_TREES[input.action],
   }
-  issued.set(review, { preparedAtMs, unsignedXdrHash: review.unsignedXdrHash })
+  issued.set(review, { preparedAtMs, unsignedXdrHash: review.unsignedXdrHash, origin })
   return review
+}
+
+/**
+ * Builds the exact transaction for a manager call (0002 §5), has RPC prepare it and describes it
+ * for review, under an action's rules. The call is first re-derived by its builder, before any RPC
+ * call: one no builder of `manager-calls.ts` makes for this manifest is refused. The simulation must
+ * succeed, and RPC may not change the call, its source, sequence or time bounds, charge a fee it
+ * does not explain or one above the cap, or authorize anything but what the call's rule allows
+ * (`MANAGER_CALL_AUTH`: the signer's own authorization of exactly this call, or none) (R29). A
+ * manager call moves no amount from the signer, so it has no floor.
+ */
+export async function prepareManagerReview(p: { manifest: Manifest; call: ManagerCall; rpc?: ReviewRpcServer }): Promise<ManagerReview> {
+  const { manifest } = p
+  const call = rebuildManagerCall(manifest, p.call)
+
+  const server = p.rpc ?? createRpcServer(manifest.rpcUrl)
+  const { built, prepared } = await buildAndPrepare(server, manifest, call.source, call.invocation)
+  assertPreparedMatches(built, prepared, MANAGER_CALL_AUTH[call.kind])
+
+  const unsignedXdr = prepared.toXDR()
+  const preparedAtMs = Date.now()
+  const origin: ManagerReview["origin"] = { type: "manager", call }
+  const review: ManagerReview = {
+    origin,
+    // A copy of its own: R31 compares it with the call re-derived from `origin`.
+    invocation: rebuildManagerCall(manifest, call).invocation,
+    unsignedXdr,
+    unsignedXdrHash: hashLike(unsignedXdr),
+    fee: prepared.fee,
+    preparedAtMs,
+    expiresAtMs: preparedAtMs + REVIEW_TTL_MS,
+    summary: { give: [], getAtLeast: [], fees: [networkFee(prepared.fee)], validUntil: maxTimeOf(built) },
+    callTree: managerCallTree(manifest, call),
+  }
+  issued.set(review, { preparedAtMs, unsignedXdrHash: review.unsignedXdrHash, origin })
+  return review
+}
+
+/**
+ * Builds `invocation` as `source` at its next sequence, with this app's time bounds, and has RPC
+ * prepare it: simulation, footprint, auth and resource fee. Ported from dapp-old
+ * buildPreparedInvokeTransaction (R14). A failed simulation refuses in plain words.
+ */
+async function buildAndPrepare(
+  server: ReviewRpcServer,
+  manifest: Manifest,
+  source: string,
+  invocation: ContractInvocation,
+): Promise<{ built: Transaction; prepared: Transaction }> {
+  const account = await server.getAccount(source)
+  const built = buildInvocationEnvelope({
+    source,
+    sequence: account.sequenceNumber(),
+    networkPassphrase: manifest.networkPassphrase,
+    invocation,
+    timeoutSeconds: TX_TIMEOUT_SECONDS,
+  })
+  try {
+    return { built, prepared: await server.prepareTransaction(built) }
+  } catch (error) {
+    throw new Error(
+      `The transaction could not be prepared (${errorText(error)}). Nothing was signed; check the reasons shown and try again.`,
+    )
+  }
 }
 
 /** True once 60 s have passed since preparation. A clock that went backwards, or NaN, also expires it. */
@@ -602,16 +747,19 @@ function unsuccessful(sent: SubmittedTransaction): TxResult {
 }
 
 /**
- * Executes a prepared review: refuses it once expired, then signs, checks, submits, polls and
- * decodes. After SUCCESS a return value that cannot be read gives `output: undefined` and a
- * `decodeError`, never a throw: the hash and status of an on-chain transaction are not lost.
+ * Executes a prepared review, of an action or of a manager call: refuses it once expired, then
+ * signs, checks, submits, polls and decodes. After SUCCESS a return value that cannot be read gives
+ * `output: undefined` and a `decodeError`, never a throw: the hash and status of an on-chain
+ * transaction are not lost. A manager call has no action output: its SUCCESS carries none, and its
+ * effect is read back from the chain.
  *
- * R31: only a review `prepareReview` returned is executed, its expiry counts from the issued time,
- * it is re-checked in full before signing (`assertReviewIntact`), and expiry is checked again once
- * the wallet has signed, before submitting.
+ * R31: only a review `prepareReview` or `prepareManagerReview` returned is executed, its expiry
+ * counts from the issued time, it is re-checked in full before signing (`assertReviewIntact`, which
+ * re-derives the call from its origin), and expiry is checked again once the wallet has signed,
+ * before submitting. The wallet must sign as the call's source.
  */
 export async function executeReview(p: {
-  review: Review
+  review: AnyReview
   manifest: Manifest
   sign: SignTransaction
   rpc?: ReviewRpcServer
@@ -627,17 +775,18 @@ export async function executeReview(p: {
     }
   }
   fresh()
-  assertReviewIntact(review, p.manifest, record)
+  const call = assertReviewIntact(review, p.manifest, record)
 
   const sent = await signAndSubmit({
     unsignedXdr: review.unsignedXdr,
     manifest: p.manifest,
-    source: review.input.source,
+    source: call.source,
     sign: p.sign,
     rpc: p.rpc,
     afterSign: fresh,
   })
   if (sent.status !== "SUCCESS") return unsuccessful(sent)
+  if (call.action === undefined) return { hash: sent.hash, status: "SUCCESS" }
 
   const unreadable = (reason: string): TxResult => ({
     hash: sent.hash,
@@ -648,7 +797,7 @@ export async function executeReview(p: {
   if (sent.decodeError) return unreadable(sent.decodeError)
   if (sent.returnValue === undefined) return unreadable("it returned no value")
   try {
-    return { hash: sent.hash, status: "SUCCESS", output: parseOutput(review.input.action, sent.returnValue) }
+    return { hash: sent.hash, status: "SUCCESS", output: parseOutput(call.action, sent.returnValue) }
   } catch (error) {
     return unreadable(errorText(error))
   }

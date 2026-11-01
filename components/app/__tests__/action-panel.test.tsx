@@ -150,6 +150,7 @@ let watcher: ((s: { address: string; networkPassphrase: string }) => void) | und
 function fakeReview(input: ActionInput): Review {
   const now = Date.now()
   return {
+    origin: { type: "action", input },
     input,
     invocation: { contractId: "CROUTER", functionName: "swap_sy_for_pt", args: [] },
     unsignedXdr: "AAAA-unsigned",

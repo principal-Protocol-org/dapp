@@ -35,8 +35,10 @@ const PLANS: StepPlan[] = [
 ]
 
 function review(): Review {
+  const input: Review["input"] = { action: "deposit", marketId: "m1", source: "G", amount: 1n, guards: { minOut: 1n }, deadline: 0n }
   return {
-    input: { action: "deposit", marketId: "m1", source: "G", amount: 1n, guards: { minOut: 1n }, deadline: 0n },
+    origin: { type: "action", input },
+    input,
     invocation: { contractId: "CROUTER", functionName: "deposit", args: [] },
     unsignedXdr: "AAAA",
     unsignedXdrHash: "sha256:00",

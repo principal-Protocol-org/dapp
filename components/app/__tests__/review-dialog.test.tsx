@@ -7,8 +7,10 @@ import { ReviewDialog } from "../actions/review-dialog"
 const NOW = 1_800_000_000
 
 function review(summary: Partial<Review["summary"]>): Review {
+  const input: Review["input"] = { action: "buy_pt", marketId: "m1", source: "G", amount: 1n, guards: { minOut: 1n }, deadline: 0n }
   return {
-    input: { action: "buy_pt", marketId: "m1", source: "G", amount: 1n, guards: { minOut: 1n }, deadline: 0n },
+    origin: { type: "action", input },
+    input,
     invocation: { contractId: "CROUTER", functionName: "swap_sy_for_pt", args: [] },
     unsignedXdr: "AAAA",
     unsignedXdrHash: "sha256:00",

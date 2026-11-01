@@ -19,6 +19,18 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import testnetJson from "@/config/manifests/testnet.json"
 import { ACTION_META, invocationFor, type ActionId, type ActionInput, type GuardValues } from "../actions"
 import { hashLike } from "../hash"
+import {
+  addConsumerCall,
+  claimCreatorFeesCall,
+  claimProtocolFeesCall,
+  grantAccountCall,
+  grantAssetCall,
+  registerMarketCall,
+  setAuthorizedCall,
+  setPausedCall,
+  type ManagerCall,
+} from "../manager-calls"
+import { evaluateManagerGates, type Role } from "../manager-gates"
 import { parseManifest } from "../manifest"
 import { AMOUNTS_MOVED_REASON, SubmissionRejectedError, createRpcServer, transactionEnvelopeHash } from "../stellar"
 import {
@@ -27,13 +39,16 @@ import {
   executeRestore,
   executeReview,
   isExpired,
+  prepareManagerReview,
   prepareRestore,
   prepareReview,
+  type ManagerReview,
   type RestoreReview,
   type Review,
   type ReviewRpcServer,
   TX_TIMEOUT_SECONDS,
 } from "../review"
+import type { Live, WalletState } from "../types"
 
 const manifest = parseManifest(structuredClone(testnetJson))
 const market = manifest.markets[0]
@@ -1143,6 +1158,391 @@ describe("executeRestore", () => {
       restore.unsignedXdrHash = hashLike(restore.unsignedXdr)
       restore.fee = costly.fee
       await refusedBeforeSigning(restore, server, "The restore asks for a network fee of 20 XLM, above the 10 XLM this app signs")
+    })
+  })
+})
+
+// ------------------------------------------------------------------ manager calls (0002 §5)
+
+describe("manager reviews (0002 §5): the same review → sign pipeline as an action", () => {
+  const { permissioning } = manifest.shared
+  const GRANTEE = Keypair.random().publicKey()
+  const short = (value: string) => `${value.slice(0, 6)}...${value.slice(-6)}`
+  const grant = (account = GRANTEE): ManagerCall => grantAccountCall(manifest, { source: SOURCE, account })
+  const claim = (): ManagerCall => claimProtocolFeesCall(manifest, { source: SOURCE, marketId: market.marketId, contract: "pool" })
+  const managerReview = (call: ManagerCall = grant(), server = fakeRpc()): Promise<ManagerReview> =>
+    prepareManagerReview({ manifest, call, rpc: server })
+  /** What a permissionless fee claim simulates to: the call, with no authorization at all. */
+  const assembleNoAuth = (tx: Transaction) => rpc.assembleTransaction(tx, simulationSuccess({ auth: [] })).build()
+  /** The `InvokeContractArgs` a call carries, as it appears in an authorization entry. */
+  const argsOf = (call: ManagerCall) =>
+    callOf(
+      new TransactionBuilder(new Account(SOURCE, SEQUENCE), { fee: BASE_FEE, networkPassphrase: passphrase })
+        .addOperation(new Contract(call.invocation.contractId).call(call.invocation.functionName, ...call.invocation.args.map((a) => nativeToScVal(a.value, { type: a.type }))))
+        .setTimeout(300)
+        .build(),
+    )
+  /** An authorization for `root`, by the source account, with `subInvocations` beneath it. */
+  const authWith = (root: xdr.InvokeContractArgs, subInvocations: xdr.InvokeContractArgs[] = []) =>
+    new xdr.SorobanAuthorizationEntry({
+      credentials: xdr.SorobanCredentials.sorobanCredentialsSourceAccount(),
+      rootInvocation: new xdr.SorobanAuthorizedInvocation({
+        function: xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeContractFn(root),
+        subInvocations: subInvocations.map(
+          (sub) =>
+            new xdr.SorobanAuthorizedInvocation({
+              function: xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeContractFn(sub),
+              subInvocations: [],
+            }),
+        ),
+      }),
+    })
+  /** An authorization for `root` that another account must sign (address credentials). */
+  const authBy = (signer: string, root: xdr.InvokeContractArgs) =>
+    new xdr.SorobanAuthorizationEntry({
+      credentials: xdr.SorobanCredentials.sorobanCredentialsAddress(
+        new xdr.SorobanAddressCredentials({
+          address: new Address(signer).toScAddress(),
+          nonce: 1n,
+          signatureExpirationLedger: 100,
+          signature: xdr.ScVal.scvVoid(),
+        }),
+      ),
+      rootInvocation: new xdr.SorobanAuthorizedInvocation({
+        function: xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeContractFn(root),
+        subInvocations: [],
+      }),
+    })
+
+  describe("prepareManagerReview", () => {
+    it("prepares the exact manager call through RPC, with its origin, summary and call tree", async () => {
+      const server = fakeRpc()
+      const call = grant()
+      const r = await managerReview(call, server)
+
+      expect(server.calls.getAccount).toEqual([SOURCE])
+      expect(server.calls.prepared).toHaveLength(1)
+      const prepared = new Transaction(r.unsignedXdr, passphrase)
+      expect(prepared.source).toBe(SOURCE)
+      expect(prepared.sequence).toBe("42")
+      expect(prepared.operations).toHaveLength(1)
+      expect(Address.fromScAddress(callOf(prepared).contractAddress).toString()).toBe(permissioning)
+      // grant_account(caller, account): the signer is the caller.
+      expect(invokedArgs(r.unsignedXdr)).toEqual([SOURCE, GRANTEE])
+      expect(prepared.timeBounds).toEqual(server.calls.prepared[0].timeBounds)
+      expect(r.fee).toBe(PREPARED_FEE)
+      expect(r.unsignedXdrHash).toBe(hashLike(r.unsignedXdr))
+
+      expect(r.origin).toEqual({ type: "manager", call })
+      expect(r.origin.call).not.toBe(call) // the review holds its own copy of what it was prepared from
+      expect(r.invocation).toEqual(call.invocation)
+      expect("input" in r).toBe(false)
+      expect(r.callTree).toEqual(["Permissioning.grant_account"])
+      // No amounts move from the signer, so there is nothing given and no floor: only the fee and the window.
+      expect(r.summary).toEqual({
+        give: [],
+        getAtLeast: [],
+        fees: ["Network fee: up to 0.0012445 XLM"],
+        validUntil: Number(prepared.timeBounds?.maxTime),
+      })
+      expect(r.expiresAtMs - r.preparedAtMs).toBe(REVIEW_TTL_MS)
+    })
+
+    it("prepares every kind of manager call this release builds", async () => {
+      const calls = [
+        setAuthorizedCall(manifest, { source: SOURCE, sac: market.underlying.sac, account: GRANTEE, authorize: true }),
+        grant(),
+        grantAssetCall(manifest, { source: SOURCE, account: GRANTEE, asset: market.contracts.pt }),
+        setPausedCall(manifest, { source: SOURCE, marketId: market.marketId, contract: "pool", paused: true }),
+        registerMarketCall(manifest, { source: SOURCE, pool: FOREIGN }),
+        addConsumerCall(manifest, { source: SOURCE, consumer: FOREIGN }),
+      ]
+      for (const call of calls) {
+        const r = await managerReview(call)
+        expect(r.origin.call).toEqual(call)
+        expect(invokedArgs(r.unsignedXdr)).toEqual(call.invocation.args.map((a) => a.value))
+      }
+      for (const call of [claim(), claimCreatorFeesCall(manifest, { source: SOURCE, marketId: market.marketId, contract: "manager" })]) {
+        const r = await managerReview(call, fakeRpc({ prepareTransaction: async (tx) => assembleNoAuth(tx) }))
+        expect(invokedArgs(r.unsignedXdr)).toEqual([])
+        expect(r.callTree[1]).toBe("SYWrapper.transfer")
+      }
+    })
+
+    it("refuses a call its builder would not make, before any RPC call", async () => {
+      const foreign = grant()
+      foreign.invocation.contractId = FOREIGN
+      await expect(prepareManagerReview({ manifest, call: foreign, rpc: noIo })).rejects.toThrow(
+        "This manager call is not one this app builds for this network: its contract, function or arguments differ.",
+      )
+      const extra = grant()
+      extra.invocation.args.push({ type: "address", value: GRANTEE })
+      await expect(prepareManagerReview({ manifest, call: extra, rpc: noIo })).rejects.toThrow("grant_account takes 2 arguments, not 3.")
+    })
+
+    it("refuses a failed simulation in plain words: the simulation is the source of truth", async () => {
+      const server = fakeRpc({
+        async prepareTransaction() {
+          throw new Error("HostError: Error(Contract, #2)")
+        },
+      })
+      await expect(managerReview(grant(), server)).rejects.toThrow(/could not be prepared \(HostError: Error\(Contract, #2\)\)\. Nothing was signed/)
+    })
+
+    describe("a manager review rejects auth not rooted at the call (R29)", () => {
+      const preparedBy = (prepare: (tx: Transaction) => Transaction, call = grant()) =>
+        managerReview(call, fakeRpc({ prepareTransaction: async (tx) => prepare(tx) }))
+      const foreignAuth = "RPC added an authorization for something other than this call. Refusing to review it; try again or use another RPC."
+
+      it("refuses an authorization for another call", async () => {
+        await expect(preparedBy((tx) => assemble(tx, { auth: [authFor(argsOf(grant(Keypair.random().publicKey())))] }))).rejects.toThrow(foreignAuth)
+      })
+
+      it("refuses the call's own authorization carrying a sub-invocation: an extra grant beneath it", async () => {
+        const extraGrant = argsOf(grant(Keypair.random().publicKey()))
+        await expect(preparedBy((tx) => assemble(tx, { auth: [authWith(callOf(tx), [extraGrant])] }))).rejects.toThrow(foreignAuth)
+      })
+
+      it("refuses a second authorization, even for the same call", async () => {
+        await expect(preparedBy((tx) => assemble(tx, { auth: [authFor(callOf(tx)), authFor(callOf(tx))] }))).rejects.toThrow(foreignAuth)
+      })
+
+      it("refuses an authorization a permissionless claim does not need", async () => {
+        await expect(preparedBy((tx) => assemble(tx), claim())).rejects.toThrow(foreignAuth)
+      })
+
+      it("refuses a call stripped of the signer's authorization", async () => {
+        await expect(preparedBy((tx) => assembleNoAuth(tx))).rejects.toThrow(
+          "RPC left out the authorization this call needs. Refusing to review it; try again or use another RPC.",
+        )
+      })
+
+      it("refuses a call another account would have to authorize, naming it", async () => {
+        const admin = Keypair.random().publicKey()
+        await expect(preparedBy((tx) => assemble(tx, { auth: [authBy(admin, callOf(tx))] }))).rejects.toThrow(
+          `This call needs an authorization from another account (${short(admin)}), which this app does not ask for. Connect that account's wallet, then try again.`,
+        )
+      })
+
+      it("keeps the time bounds and fee checks of an action", async () => {
+        await expect(
+          preparedBy((tx) => assemble(TransactionBuilder.cloneFrom(tx, { timebounds: { minTime: 0, maxTime: 4_102_444_800 } }).build())),
+        ).rejects.toThrow("RPC changed the time bounds")
+        await expect(preparedBy((tx) => assemble(tx, { resourceFee: MAX_TX_FEE_STROOPS }))).rejects.toThrow(
+          "asks for a network fee of 10.00001 XLM, above the 10 XLM this app signs",
+        )
+        await expect(preparedBy((tx) => assemble(TransactionBuilder.cloneFrom(tx, { fee: "5000" }).build()))).rejects.toThrow(
+          "is more than the base fee plus the resource fee it declares",
+        )
+      })
+    })
+  })
+
+  describe("execute re-verifies a manager review (R31)", () => {
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    async function refusedBeforeSigning(r: Review | ManagerReview, server: ReturnType<typeof fakeRpc>, message: string, nowMs?: number) {
+      const sign = signWith()
+      await expect(executeReview({ review: r, manifest, sign, rpc: server, nowMs })).rejects.toThrow(message)
+      expect(sign.seen).toEqual([])
+      expect(server.calls.sent).toEqual([])
+    }
+    const changed = (detail: string) => `This review was changed after it was prepared (${detail}). Prepare it again before signing.`
+    /** The same transaction as `unsignedXdr` (sequence, time bounds, call and fee), authorized by `auth`. */
+    function withAuth(unsignedXdr: string, call: ManagerCall, auth: xdr.SorobanAuthorizationEntry[]): Transaction {
+      const tx = new Transaction(unsignedXdr, passphrase)
+      const { minTime, maxTime } = tx.timeBounds!
+      const built = new TransactionBuilder(new Account(tx.source, (BigInt(tx.sequence) - 1n).toString()), {
+        fee: BASE_FEE,
+        networkPassphrase: passphrase,
+        timebounds: { minTime, maxTime },
+      })
+        .addOperation(new Contract(call.invocation.contractId).call(call.invocation.functionName, ...callOf(tx).args))
+        .build()
+      return rpc.assembleTransaction(built, simulationSuccess({ auth })).build()
+    }
+
+    it("signs, checks, submits and polls a manager review; there is no action output to decode", async () => {
+      const server = fakeRpc()
+      const r = await managerReview(grant(), server)
+      const sign = signWith()
+      const result = await executeReview({ review: r, manifest, sign, rpc: server, nowMs: r.preparedAtMs + 1_000 })
+
+      // The expected signer is the call's source, the connected wallet the gates checked.
+      expect(sign.seen).toEqual([[r.unsignedXdr, passphrase, SOURCE]])
+      expect(server.calls.sent).toHaveLength(1)
+      expect(server.calls.sent[0].hash()).toEqual(new Transaction(r.unsignedXdr, passphrase).hash())
+      expect(server.calls.polled).toEqual([hashOf(r.unsignedXdr)])
+      expect(result).toEqual({ hash: hashOf(r.unsignedXdr), status: "SUCCESS" })
+    })
+
+    it("reports a failed manager call with its cause (R49)", async () => {
+      const server = fakeRpc({
+        async getTransaction() {
+          return { status: "FAILED", resultXdr: failedResult() }
+        },
+      })
+      const r = await managerReview(grant(), server)
+      expect(await executeReview({ review: r, manifest, sign: signWith(), rpc: server })).toEqual({
+        hash: hashOf(r.unsignedXdr),
+        status: "FAILED",
+        reason: "Cause: the contract call failed. Nothing was taken except the network fee.",
+      })
+    })
+
+    it("refuses an expired manager review, one from another account, and one prepareManagerReview did not return", async () => {
+      const server = fakeRpc()
+      const r = await managerReview(grant(), server)
+      await refusedBeforeSigning(r, server, "This review is over a minute old", r.preparedAtMs + REVIEW_TTL_MS)
+      await refusedBeforeSigning({ ...r }, server, "This review was not prepared by this app. Prepare it again before signing.")
+      await expect(executeReview({ review: r, manifest, sign: signWith(Keypair.random()), rpc: server })).rejects.toThrow(
+        "not signed by the connected wallet account",
+      )
+      expect(server.calls.sent).toEqual([])
+    })
+
+    it("re-derives the call from its origin: a changed contract, argument or label is refused", async () => {
+      const server = fakeRpc()
+      const byContract = await managerReview(grant(), server)
+      byContract.origin.call.invocation.contractId = FOREIGN
+      await refusedBeforeSigning(byContract, server, changed("the call it describes"))
+
+      // Still a well-formed grant, but to someone else than the reviewed one.
+      const byArgument = await managerReview(grant(), server)
+      byArgument.origin.call.invocation.args[1] = { type: "address", value: Keypair.random().publicKey() }
+      await refusedBeforeSigning(byArgument, server, changed("the call it describes"))
+
+      const byLabel = await managerReview(grant(), server)
+      byLabel.origin.call.label = "Grant nothing"
+      await refusedBeforeSigning(byLabel, server, changed("the call it describes"))
+
+      const byInvocation = await managerReview(grant(), server)
+      byInvocation.invocation.args[1] = { type: "address", value: Keypair.random().publicKey() }
+      await refusedBeforeSigning(byInvocation, server, changed("the call it describes"))
+    })
+
+    it("refuses a call and description changed together: the transaction no longer makes that call", async () => {
+      const server = fakeRpc()
+      const r = await managerReview(grant(), server)
+      const other = grant(Keypair.random().publicKey())
+      r.origin.call.invocation = other.invocation
+      r.origin.call.label = other.label
+      r.invocation = { ...other.invocation, args: other.invocation.args.map((a) => ({ ...a })) }
+      await refusedBeforeSigning(r, server, changed("its transaction does not make the reviewed call"))
+    })
+
+    it("refuses an XDR swapped for another manager review's", async () => {
+      const server = fakeRpc()
+      const r = await managerReview(grant(), server)
+      const other = await managerReview(setPausedCall(manifest, { source: SOURCE, marketId: market.marketId, contract: "pool", paused: true }), server)
+      r.unsignedXdr = other.unsignedXdr
+      r.unsignedXdrHash = other.unsignedXdrHash
+      await refusedBeforeSigning(r, server, changed("its transaction does not make the reviewed call"))
+    })
+
+    it("refuses a transaction whose authorization gained a sub-invocation, or lost the signer's (R29 again)", async () => {
+      const server = fakeRpc()
+      const r = await managerReview(grant(), server)
+      const call = r.origin.call
+      const withExtraGrant = withAuth(r.unsignedXdr, call, [authWith(argsOf(call), [argsOf(grant(Keypair.random().publicKey()))])])
+      expect(withExtraGrant.fee).toBe(r.fee)
+      r.unsignedXdr = withExtraGrant.toXDR()
+      r.unsignedXdrHash = hashLike(r.unsignedXdr)
+      await refusedBeforeSigning(r, server, changed("its transaction authorizes another call"))
+
+      const stripped = await managerReview(grant(), server)
+      stripped.unsignedXdr = withAuth(stripped.unsignedXdr, stripped.origin.call, []).toXDR()
+      stripped.unsignedXdrHash = hashLike(stripped.unsignedXdr)
+      await refusedBeforeSigning(stripped, server, changed("its transaction lacks the authorization the call needs"))
+    })
+
+    it("refuses a swapped origin: an action review passed off as a manager call, or a manager origin replaced", async () => {
+      const server = fakeRpc()
+      const action = await review("buy_pt", {}, server)
+      ;(action as unknown as ManagerReview).origin = { type: "manager", call: grant() }
+      await refusedBeforeSigning(action, server, changed("what it was prepared from"))
+
+      const m = await managerReview(grant(), server)
+      m.origin = { type: "manager", call: m.origin.call }
+      await refusedBeforeSigning(m, server, changed("what it was prepared from"))
+    })
+
+    it("an action review carries its input as its origin, and refuses an input that is no longer it", async () => {
+      const server = fakeRpc()
+      const r = await review("buy_pt", {}, server)
+      expect(r.origin).toEqual({ type: "action", input: input("buy_pt") })
+      expect(r.origin.input).toBe(r.input)
+      r.input = { ...r.input }
+      await refusedBeforeSigning(r, server, changed("the action it describes"))
+    })
+  })
+
+  describe("evaluateManagerGates", () => {
+    const connected = (publicKey = SOURCE): WalletState => ({ status: "connected", publicKey, networkPassphrase: passphrase })
+    const holds = (...roles: Role[]): Live<Role[]> => ({ status: "live", value: roles, ledger: 90 })
+    const unreadable: Live<Role[]> = { status: "unavailable", error: "RPC rate limited (429)" }
+    const pause = () => setPausedCall(manifest, { source: SOURCE, marketId: market.marketId, contract: "pool", paused: true })
+    const authorize = () => setAuthorizedCall(manifest, { source: SOURCE, sac: market.underlying.sac, account: GRANTEE, authorize: true })
+    const register = () => registerMarketCall(manifest, { source: SOURCE, pool: FOREIGN })
+    const consumer = () => addConsumerCall(manifest, { source: SOURCE, consumer: FOREIGN })
+
+    it("wrong role blocks with the role named", () => {
+      expect(evaluateManagerGates(grant(), { wallet: connected(), roles: holds("issuer", "creator") })).toEqual([
+        {
+          code: "wallet",
+          message: `Only the Permissioning admin can grant this. You are connected as ${short(SOURCE)}, which is not the Permissioning admin. Connect the Permissioning admin's wallet to sign this.`,
+        },
+      ])
+      const messageFor = (call: ManagerCall) => evaluateManagerGates(call, { wallet: connected(), roles: holds() }).map((b) => b.message)
+      expect(messageFor(authorize())).toEqual([expect.stringMatching(/^Only the asset's issuer can change who is authorized to hold it\. /)])
+      expect(messageFor(pause())).toEqual([expect.stringMatching(/^Only this contract's admin can pause or unpause it\. /)])
+      expect(messageFor(register())).toEqual([expect.stringMatching(/^Only the protocol admin can register a market on the Router\. /)])
+      expect(messageFor(consumer())).toEqual([expect.stringMatching(/^Only the protocol admin can add a risk control consumer\. /)])
+    })
+
+    it("the role each call needs lets it through", () => {
+      const pass = (call: ManagerCall, role: Role) => expect(evaluateManagerGates(call, { wallet: connected(), roles: holds(role) })).toEqual([])
+      pass(authorize(), "issuer")
+      pass(grant(), "permissioningAdmin")
+      pass(grantAssetCall(manifest, { source: SOURCE, account: GRANTEE, asset: market.contracts.yt }), "permissioningAdmin")
+      pass(pause(), "contractAdmin")
+      pass(register(), "protocolAdmin")
+      pass(consumer(), "protocolAdmin")
+    })
+
+    it("an unavailable roles read blocks a call that needs a role", () => {
+      expect(evaluateManagerGates(grant(), { wallet: connected(), roles: unreadable })).toEqual([
+        {
+          code: "unavailable",
+          message: "Could not read your roles (RPC rate limited (429)). Signing stays off until it can be checked; try again in a moment.",
+        },
+      ])
+    })
+
+    it("the fee claims are permissionless: no role is needed and the roles are not read", () => {
+      expect(evaluateManagerGates(claim(), { wallet: connected(), roles: unreadable })).toEqual([])
+      expect(evaluateManagerGates(claim(), { wallet: connected(), roles: holds() })).toEqual([])
+    })
+
+    it("checks the wallet and network first, as for an action, and the role only for the connected signer", () => {
+      expect(evaluateManagerGates(grant(), { wallet: { status: "disconnected" }, roles: unreadable })).toEqual([
+        { code: "wallet", message: "No wallet is connected. Connect your wallet to sign." },
+      ])
+      expect(
+        evaluateManagerGates(grant(), {
+          wallet: { status: "wrong_network", publicKey: SOURCE, actualPassphrase: "Public Global Stellar Network ; September 2015", expectedPassphrase: passphrase },
+          roles: holds("permissioningAdmin"),
+        }),
+      ).toEqual([{ code: "network", message: `Your wallet is on a different network from this market. Switch it to the network "${passphrase}", then try again.` }])
+      expect(evaluateManagerGates(grant(), { wallet: connected(Keypair.random().publicKey()), roles: holds() })).toEqual([
+        {
+          code: "wallet",
+          message:
+            "This action was prepared for a different account than the one connected in your wallet. Enter it again so it is prepared for the connected account.",
+        },
+      ])
     })
   })
 })

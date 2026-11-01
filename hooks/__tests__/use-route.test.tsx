@@ -78,6 +78,7 @@ let xdrSeq = 0
 function fakeReview(input: ActionInput): Review {
   const now = Date.now()
   return {
+    origin: { type: "action", input },
     input,
     invocation: { contractId: "C", functionName: input.action, args: [] },
     unsignedXdr: `xdr-${input.action}-${++xdrSeq}`,
