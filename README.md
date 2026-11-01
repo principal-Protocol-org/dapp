@@ -54,9 +54,9 @@ Copy `.env.example` to `.env.local`. Never commit real keys.
 | `FAUCET_PERMISSIONING_ADMIN_SECRET` | Server only | Optional. Defaults to the issuer key. |
 | `DATABASE_URL` | Server only | Postgres for the market recorder (pooled string on Neon; the local stack writes one for `principal-pg`). |
 | `DATABASE_URL_UNPOOLED` | Server only | Optional. Direct connection for migrations; else `DATABASE_URL` with `-pooler` removed from the host. |
-| `CRON_SECRET` | Server only | Bearer secret Vercel Cron sends to `GET /api/cron/record`. |
+| `CRON_SECRET` | Server only | Optional. Bearer secret Vercel Cron sends to `GET /api/cron/record`. Unset, the route refuses every Bearer call. |
 | `QSTASH_CURRENT_SIGNING_KEY`, `QSTASH_NEXT_SIGNING_KEY` | Server only | Verify Upstash QStash signatures on the same route. |
-| `QSTASH_RECORD_URL` | Server only | The public URL QStash calls. The signature is bound to it. Defaults to `https://$VERCEL_PROJECT_PRODUCTION_URL/api/cron/record`; with neither, QStash calls are refused (401). |
+| `QSTASH_RECORD_URL` | Server only | The exact public URL QStash calls. The signature is bound to it. Defaults to `https://$VERCEL_PROJECT_PRODUCTION_URL/api/cron/record`, the production domain, so set it in every environment other than Production. With neither, QStash calls are refused (401). |
 
 `pnpm db:migrate [--env-file .env.testnet]` applies `db/migrations/*.sql` over a direct connection and
 never prints the connection string. Run it on each Neon branch (testnet, mainnet) before you deploy
@@ -90,23 +90,34 @@ The route answers:
 
 ### Scheduler
 
-No cron entry is committed (`vercel.json` does not exist). Vercel Hobby rejects sub-daily crons
-at deploy time, so a committed entry would break the deploy. Pick one option.
+One Vercel project serves both networks. Each environment calls the recorder through its own Upstash
+QStash account, because Vercel Cron runs only on Production deployments.
 
-**(a) Vercel Cron.** Needs a plan that allows sub-daily crons. Add this to `vercel.json`:
+| Branch | Vercel environment | Domain | QStash | Network |
+|---|---|---|---|---|
+| `testnet` | Custom environment `testnet` | `testnet.principalmarket.fi` (public) | `principalmarket-testnet` | Testnet |
+| `main` | Production | `principalmarket.fi` | `principalmarket-mainnet` | Mainnet, once supported (Tranche 3) |
 
-```json
-{ "crons": [{ "path": "/api/cron/record", "schedule": "*/15 * * * *" }] }
-```
+For each environment:
 
-Set `CRON_SECRET` in the Vercel project. Vercel then sends `Authorization: Bearer $CRON_SECRET`.
+- Create a QStash schedule with cron `*/15 * * * *` that calls the exact URL
+  `https://<domain>/api/cron/record`, on the final host (no redirect). POST is QStash's default; the
+  route accepts GET and POST with the same checks.
+- Set `QSTASH_CURRENT_SIGNING_KEY` and `QSTASH_NEXT_SIGNING_KEY` from that QStash account, and
+  `QSTASH_RECORD_URL` to the same exact URL. The route checks the signature against it. Outside
+  Production the default is the production domain, so without `QSTASH_RECORD_URL` the testnet
+  environment refuses every call.
+- Keep the environment's secrets (faucet key, `DATABASE_URL`, QStash keys) in that environment only.
+  Preview deployments of other branches get none of them.
+- No `vercel.json` and no `CRON_SECRET` are needed.
 
-**(b) Upstash QStash.** Create a schedule with cron `*/15 * * * *` that calls
-`https://<your-domain>/api/cron/record` with GET or POST (QStash's default is POST; the route
-accepts both, with the same checks). Set `QSTASH_CURRENT_SIGNING_KEY` and
-`QSTASH_NEXT_SIGNING_KEY` from the QStash console. The route checks the signature against the
-destination URL, so set `QSTASH_RECORD_URL` to the exact URL the schedule calls, unless the app runs
-on Vercel with `VERCEL_PROJECT_PRODUCTION_URL` set. With neither, the route refuses the call.
+Do not create the mainnet schedule before the dApp supports Mainnet. `NEXT_PUBLIC_PRINCIPAL_NETWORK`
+accepts `testnet` or `local` only, so the recorder would write Testnet data into the mainnet database.
+
+Vercel Cron also works, on Production only: add
+`{ "crons": [{ "path": "/api/cron/record", "schedule": "*/15 * * * *" }] }` to `vercel.json` and set
+`CRON_SECRET`. Vercel then sends `Authorization: Bearer $CRON_SECRET`. Vercel Hobby rejects
+sub-daily crons at deploy time.
 
 ### Neon
 
@@ -212,7 +223,9 @@ contract team are in [`.rness/docs/requests-arthur-0002.md`](../../.rness/docs/r
 - **Faucet.**
   - Rate limits: one request per address and per IP every 60 s, 4 runs per minute and 120
     accepted requests per minute per instance, all in memory. A run is queued only if it should
-    finish within 90 s; otherwise the route answers `busy`.
+    finish within 90 s; otherwise the route answers `busy`. Each Vercel instance keeps its own
+    counts, so on the public testnet domain back them with a Vercel Firewall rate-limit rule on
+    `/api/faucet`.
   - One shared underlying across all manifest markets. Several different underlyings are not supported.
   - `maxDuration` is 120 s. That needs Vercel Fluid compute, which is not yet verified.
 - **History** reads RPC `getEvents`. Its retention window is limited and it takes at most 5
