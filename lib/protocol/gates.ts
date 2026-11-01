@@ -473,7 +473,7 @@ export function breakerReport(input: ActionInput, ctx: Pick<GateContext, "market
  * counts every step that reports to it in the same window, so what the steps before it report
  * (`earlier`) is added to both windows' volumes. An unreadable volume stays unreadable; when what the
  * earlier steps report is unknown, the volumes become unverifiable, so the step's breaker check
- * refuses rather than passes. The deposit cap is not touched: only SYWrapper.deposit charges it.
+ * refuses rather than passes. The deposit cap is `withEarlierCapCharges`'s.
  */
 export function withEarlierReports<C extends Pick<GateContext, "market">>(ctx: C, earlier: bigint | undefined, step: number): C {
   if (earlier === 0n) return ctx
@@ -486,6 +486,36 @@ export function withEarlierReports<C extends Pick<GateContext, "market">>(ctx: C
   }
   const cb = ctx.market.cb
   return { ...ctx, market: { ...ctx.market, cb: { ...cb, volume: add(cb.volume), assetVolume: add(cb.assetVolume) } } }
+}
+
+/**
+ * What one action charges against `SYWrapper.charge_deposit_cap` (sy_wrapper:636-650), in the
+ * underlying: a deposit its amount (sy_wrapper:207-225), and wrap_and_mint its amount too, since it
+ * runs SYWrapper.deposit first (router:261-273). 0 for any other action, buy_yt included: its mint
+ * takes SY through PrincipalManager.mint, with no SYWrapper.deposit (R2-62).
+ */
+export function capCharge(input: ActionInput): bigint {
+  return DEPOSIT_CAPPED.has(input.action) && input.amount > 0n ? input.amount : 0n
+}
+
+/**
+ * The gate context for step `step` (1-based) of a route, before the route starts (R2-62): every
+ * deposit of the route (a mint's included) is charged against the same per-address cap, so what the
+ * steps before it charge (`earlier`) is added to the net deposits. An unreadable read stays
+ * unreadable; when what the earlier steps charge is unknown, the net deposits become unverifiable,
+ * so the step's cap check refuses rather than passes. Releases (a withdraw) are never counted: a
+ * route is never let through on a refund it has not received yet.
+ */
+export function withEarlierCapCharges<C extends Pick<GateContext, "account">>(ctx: C, earlier: bigint | undefined, step: number): C {
+  const acc = ctx.account
+  if (earlier === 0n || !acc) return ctx
+  const net = acc.netDeposited
+  if (net.status !== "live") return ctx
+  const netDeposited: Live<bigint> =
+    earlier === undefined
+      ? { status: "unavailable", error: `it must include what the steps before step ${step} of this route deposit, which could not be worked out` }
+      : { ...net, value: net.value + earlier }
+  return { ...ctx, account: { ...acc, netDeposited } }
 }
 
 /** `RiskControl.check_deposit`: each limit trips on `volume + amount > limit`; a limit of 0 disables it. */

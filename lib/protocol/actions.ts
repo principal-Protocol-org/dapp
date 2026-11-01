@@ -49,7 +49,7 @@ export type ActionMeta = {
  * InvalidAction)`, reproduced live in Task 23). It returns once the pool takes a fixed amount.
  */
 const ADD_LIQUIDITY_SY_DISABLED =
-  "Adding liquidity from SY alone is unavailable on this release: the pool works out the SY it takes only when the transaction runs, so the amount you sign can never match it and the transaction would fail. It will return once the pool contract is fixed. You can still add PT and SY together."
+  "Adding liquidity without keeping YT is unavailable on this release: the pool works out the SY it takes only when the transaction runs, so the amount you sign can never match it and the transaction would fail. It will return once the pool contract is fixed. Turn on Keep YT to add liquidity from USDY now."
 
 export const ACTION_META: Record<ActionId, ActionMeta> = {
   deposit: { label: "Deposit", slippageSensitive: true, hasDeadline: false, tab: "mint" },
