@@ -6,10 +6,14 @@ import { useMarketHistory, type Range } from "@/hooks/use-market-history"
 import { getMarket } from "@/lib/protocol/manifest"
 import { useManifest } from "@/components/app/manifest-provider"
 import { Skeleton } from "@/components/ui/skeleton"
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { CardTabs, CardTabsContent, type CardTab } from "@/components/app/card-tabs"
 import { UNAVAILABLE } from "@/components/app/live"
 import { LineChart } from "@/components/app/charts/line-chart"
 
+const TABS: CardTab[] = [
+  { value: "apy", title: "APY", subtitle: "Fixed vs underlying, over time" },
+  { value: "liquidity", title: "Liquidity", subtitle: "Pool liquidity over time" },
+]
 const SPREAD = { fixed: "fixed", variable: "underlying" } as const
 
 /** APY and Liquidity history over a range, in two tabs. */
@@ -54,15 +58,11 @@ export function MarketChartBox({ marketId }: { marketId: string }) {
   }
 
   return (
-    <section aria-label="Market chart" className="min-w-0 rounded-lg border border-line bg-surface p-5">
-      <Tabs value={tab} onValueChange={setTab}>
-        <TabsList>
-          <TabsTrigger value="apy">APY</TabsTrigger>
-          <TabsTrigger value="liquidity">Liquidity</TabsTrigger>
-        </TabsList>
-        <TabsContent value="apy">{chart("apy")}</TabsContent>
-        <TabsContent value="liquidity">{chart("liquidity")}</TabsContent>
-      </Tabs>
+    <section aria-label="Market chart" className="min-w-0 overflow-hidden rounded-lg border border-line bg-surface">
+      <CardTabs value={tab} onValueChange={setTab} tabs={TABS} label="Chart">
+        <CardTabsContent value="apy">{chart("apy")}</CardTabsContent>
+        <CardTabsContent value="liquidity">{chart("liquidity")}</CardTabsContent>
+      </CardTabs>
     </section>
   )
 }

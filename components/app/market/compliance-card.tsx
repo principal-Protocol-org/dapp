@@ -11,6 +11,7 @@ import type { Live } from "@/lib/protocol/types"
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
 import { UNAVAILABLE } from "@/components/app/live"
+import { complianceIssues } from "@/components/app/market/attention"
 
 const FIX_TEXT: Record<NonNullable<ComplianceItem["fix"]>, string> = {
   friendbot: "Fund the account with Friendbot, then reload.",
@@ -82,10 +83,10 @@ export function useComplianceItems(marketId: string) {
   return { connected: state.status === "connected", marketCompliance, account, items }
 }
 
-/** True when a connected account has a compliance item that is not OK on this market. */
-export function useComplianceAttention(marketId: string): boolean {
+/** How many compliance items are not OK for the connected account; undefined when not known. */
+export function useComplianceIssues(marketId: string): number | undefined {
   const { connected, items } = useComplianceItems(marketId)
-  return connected && !!items && items.some((i) => i.status !== "ok")
+  return complianceIssues(connected, items)
 }
 
 /**

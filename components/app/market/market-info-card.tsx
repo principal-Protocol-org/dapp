@@ -3,20 +3,16 @@
 import { Suspense, useState } from "react"
 import { useSearchParams } from "next/navigation"
 import { Skeleton } from "@/components/ui/skeleton"
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { ComplianceContent, useComplianceAttention } from "@/components/app/market/compliance-card"
+import { CardTabs, CardTabsContent, type CardTab } from "@/components/app/card-tabs"
+import { ComplianceContent, useComplianceIssues } from "@/components/app/market/compliance-card"
 import { MarketDetails } from "@/components/app/market/market-details"
-import { SafetyContent, useSafetyAttention } from "@/components/app/market/safety-card"
+import { SafetyContent, useSafetyIssues } from "@/components/app/market/safety-card"
 
 const TABS = ["details", "compliance", "safety"] as const
 type InfoTab = (typeof TABS)[number]
 const isTab = (v: string | null | undefined): v is InfoTab => TABS.includes(v as InfoTab)
 
-const SHELL = "min-w-0 rounded-lg border border-line bg-surface p-5"
-
-function Dot() {
-  return <span role="img" aria-label="needs attention" className="ml-1.5 inline-block size-1.5 rounded-full bg-negative" />
-}
+const SHELL = "min-w-0 overflow-hidden rounded-lg border border-line bg-surface"
 
 /**
  * The market's Details, Compliance and Safety in one tabbed card under the chart. `?info=` opens a
@@ -27,7 +23,7 @@ export function MarketInfoCard({ marketId, onGetTestTokens }: { marketId: string
     <Suspense
       fallback={
         <section aria-label="Market information" className={SHELL}>
-          <Skeleton className="h-48 w-full" />
+          <Skeleton className="m-5 h-48" />
         </section>
       }
     >
@@ -45,33 +41,25 @@ function InfoCardView({ marketId, onGetTestTokens }: { marketId: string; onGetTe
     setSeen(param)
     if (isTab(param)) setTab(param)
   }
-  const complianceAttention = useComplianceAttention(marketId)
-  const safetyAttention = useSafetyAttention(marketId)
+  const tabs: CardTab[] = [
+    { value: "details", title: "Details", subtitle: "Oracle, supply, reserves, fees" },
+    { value: "compliance", title: "Compliance", subtitle: "Your access to this market", count: useComplianceIssues(marketId) },
+    { value: "safety", title: "Safety", subtitle: "Pauses, oracle, limits", count: useSafetyIssues(marketId) },
+  ]
 
   return (
     <section aria-label="Market information" className={SHELL}>
-      <Tabs value={tab} onValueChange={(v) => isTab(v) && setTab(v)}>
-        <TabsList>
-          <TabsTrigger value="details">Details</TabsTrigger>
-          <TabsTrigger value="compliance">
-            Compliance
-            {complianceAttention ? <Dot /> : null}
-          </TabsTrigger>
-          <TabsTrigger value="safety">
-            Safety
-            {safetyAttention ? <Dot /> : null}
-          </TabsTrigger>
-        </TabsList>
-        <TabsContent value="details">
+      <CardTabs value={tab} onValueChange={(v) => isTab(v) && setTab(v)} tabs={tabs} label="Market information">
+        <CardTabsContent value="details">
           <MarketDetails marketId={marketId} />
-        </TabsContent>
-        <TabsContent value="compliance">
+        </CardTabsContent>
+        <CardTabsContent value="compliance">
           <ComplianceContent marketId={marketId} onGetTestTokens={onGetTestTokens} />
-        </TabsContent>
-        <TabsContent value="safety">
+        </CardTabsContent>
+        <CardTabsContent value="safety">
           <SafetyContent marketId={marketId} />
-        </TabsContent>
-      </Tabs>
+        </CardTabsContent>
+      </CardTabs>
     </section>
   )
 }

@@ -9,7 +9,7 @@ import { getMarket } from "@/lib/protocol/manifest"
 import { useManifest } from "@/components/app/manifest-provider"
 import type { Live } from "@/lib/protocol/types"
 import { Skeleton } from "@/components/ui/skeleton"
-import { safetyNeedsAttention } from "@/components/app/market/attention"
+import { safetyIssues } from "@/components/app/market/attention"
 import { formatDuration, showLive, UNAVAILABLE } from "@/components/app/live"
 
 function Row({ label, children }: { label: string; children: React.ReactNode }) {
@@ -79,11 +79,11 @@ export function SafetyContent({ marketId }: { marketId: string }) {
   )
 }
 
-/** True when a contract is paused, the oracle is stale, or a breaker window or the account's deposit cap is used up. */
-export function useSafetyAttention(marketId: string): boolean {
+/** How many problems the Safety tab reports; undefined while the market state is unavailable or stale. */
+export function useSafetyIssues(marketId: string): number | undefined {
   const { data, stale } = useMarketState(marketId)
   const { state } = useWallet()
   const account = useAccountState(marketId)
   const acc = state.status === "connected" && !account.stale ? account.data : undefined
-  return safetyNeedsAttention(stale ? undefined : data, acc)
+  return safetyIssues(stale ? undefined : data, acc)
 }

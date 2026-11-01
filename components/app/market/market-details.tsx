@@ -6,10 +6,9 @@ import { formatAmount, formatBps, formatFeeRate, formatRate } from "@/lib/protoc
 import { getMarket } from "@/lib/protocol/manifest"
 import { useManifest } from "@/components/app/manifest-provider"
 import { Skeleton } from "@/components/ui/skeleton"
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
+import { InfoTip } from "@/components/app/info-tip"
 import { formatDuration, showLive, UNAVAILABLE } from "@/components/app/live"
 import { MATURITY_DATE } from "@/components/app/market/market-header"
-import { Metric } from "@/components/app/market/metric"
 
 /** The market's facts: oracle rate and freshness, supplies, reserves, fees and maturity. */
 export function MarketDetails({ marketId }: { marketId: string }) {
@@ -33,34 +32,53 @@ export function MarketDetails({ marketId }: { marketId: string }) {
       ? UNAVAILABLE
       : `${formatDuration(ledgerTime - Number(ms.oracleTimestamp.value))} ago`
   return (
-    <dl className="grid grid-cols-1 gap-x-8 gap-y-5 min-[480px]:grid-cols-2 min-[900px]:grid-cols-3">
-      <Metric label="Oracle rate">
-        {ms.oracleRate.status === "live" ? (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <button type="button" className="cursor-help underline decoration-dotted underline-offset-4">
-                {formatRate(ms.oracleRate.value)}
-              </button>
-            </TooltipTrigger>
-            <TooltipContent>Notional per SY share, read from the market oracle. PT and YT are counted in notional units.</TooltipContent>
-          </Tooltip>
-        ) : (
-          UNAVAILABLE
-        )}
-      </Metric>
-      <Metric label="Oracle updated">{oracleAge}</Metric>
-      <Metric label="Maturity">{showLive(ms.maturity, (v) => MATURITY_DATE.format(new Date(Number(v) * 1000)))}</Metric>
-      <Metric label="PT outstanding">{showLive(ms.totalPt, amount)}</Metric>
-      <Metric label="YT outstanding">{showLive(ms.totalYt, amount)}</Metric>
-      <Metric label="PT price (pool spot)">{showLive(ms.ptPrice, (v) => `${formatRate(v)} notional value per PT`)}</Metric>
-      <Metric label="Pool PT reserve">{showLive(ms.poolState, (p) => amount(p.ptReserve))}</Metric>
-      <Metric label="Pool SY reserve">{showLive(ms.poolState, (p) => amount(p.syReserve))}</Metric>
-      <Metric label="Tokenization fee">{showLive(ms.fees.tokenizationBps, formatBps)}</Metric>
-      <Metric label="YT fee">{showLive(ms.fees.ytBps, formatBps)}</Metric>
-      <Metric label="Current swap fee (decreases to 0 at maturity)">{showLive(ms.swapFeeRate, formatFeeRate)}</Metric>
-      {ms.settledRate.status === "live" && ms.settledRate.value !== null ? (
-        <Metric label="Settlement rate">{formatRate(ms.settledRate.value)}</Metric>
-      ) : null}
-    </dl>
+    <div className="grid grid-cols-1 gap-x-10 gap-y-6 sm:grid-cols-2">
+      <Group title="Oracle & maturity">
+        <Row label="Oracle rate" tip="Notional per SY share, read from the market oracle. PT and YT are counted in notional units.">
+          {ms.oracleRate.status === "live" ? formatRate(ms.oracleRate.value) : UNAVAILABLE}
+        </Row>
+        <Row label="Oracle updated">{oracleAge}</Row>
+        <Row label="Maturity">{showLive(ms.maturity, (v) => MATURITY_DATE.format(new Date(Number(v) * 1000)))}</Row>
+        {ms.settledRate.status === "live" && ms.settledRate.value !== null ? (
+          <Row label="Settlement rate">{formatRate(ms.settledRate.value)}</Row>
+        ) : null}
+      </Group>
+      <Group title="Pool & fees">
+        <Row label="PT outstanding">{showLive(ms.totalPt, amount)}</Row>
+        <Row label="YT outstanding">{showLive(ms.totalYt, amount)}</Row>
+        <Row label="PT price (pool spot)" tip="Notional value per PT, from the pool's spot price.">
+          {showLive(ms.ptPrice, formatRate)}
+        </Row>
+        <Row label="Pool PT reserve">{showLive(ms.poolState, (p) => amount(p.ptReserve))}</Row>
+        <Row label="Pool SY reserve">{showLive(ms.poolState, (p) => amount(p.syReserve))}</Row>
+        <Row label="Tokenization fee">{showLive(ms.fees.tokenizationBps, formatBps)}</Row>
+        <Row label="YT fee">{showLive(ms.fees.ytBps, formatBps)}</Row>
+        <Row label="Swap fee" tip="The current swap fee. It decreases to 0 at maturity.">
+          {showLive(ms.swapFeeRate, formatFeeRate)}
+        </Row>
+      </Group>
+    </div>
+  )
+}
+
+function Group({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <section aria-label={title} className="min-w-0">
+      <h3 className="label mb-1">{title}</h3>
+      <dl className="grid">{children}</dl>
+    </section>
+  )
+}
+
+/** One title -> value row, like the trade details table: the title on the left, the value on the right. */
+function Row({ label, tip, children }: { label: string; tip?: string; children: React.ReactNode }) {
+  return (
+    <div className="flex items-baseline justify-between gap-4 border-t border-line py-2.5 first:border-t-0">
+      <dt className="flex min-w-0 items-center gap-1.5 text-ink-muted">
+        <span>{label}</span>
+        {tip ? <InfoTip label={label}>{tip}</InfoTip> : null}
+      </dt>
+      <dd className="text-right font-mono text-[15px]/6 tabular-nums text-ink">{children}</dd>
+    </div>
   )
 }
