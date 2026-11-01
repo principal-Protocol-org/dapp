@@ -45,7 +45,7 @@ import { planRoute, type RouteDisabled, type RouteKind, type RouteRequest, type 
 import type { Live } from "./types"
 import { solveBuyYt, type YtSolution } from "./yt-solver"
 
-/** The trades the PT, YT and LP tabs make (the Tools menu's split and recombine are not trades). */
+/** The trades the PT, YT and LP tabs make (Quick actions' split and recombine are not trades). */
 export type TradeKind = Exclude<RouteKind, "split" | "recombine">
 
 /** A token a trade hands over or receives; `underlying` is the market's asset (USDY). */

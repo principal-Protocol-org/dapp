@@ -226,21 +226,42 @@ describe("TokenPicker", () => {
   })
 })
 
-describe("Tools", () => {
-  it("lists Deposit, Withdraw, Split and Recombine, each opening its panel", async () => {
+describe("Quick actions", () => {
+  const EXPECTED: [string, string, string][] = [
+    ["Deposit USDY → SY", "deposit", "Turn USDY into SY, the token the pool trades."],
+    ["Withdraw SY → USDY", "withdraw", "Turn SY back into USDY."],
+    ["Split USDY → PT + YT", "mint", "Split USDY into equal amounts of PT and YT."],
+    ["Recombine PT + YT → USDY", "recombine", "Give back equal amounts of PT and YT for USDY, before maturity."],
+  ]
+
+  it("is a small \"Quick actions\" menu on the heading row, not \"Tools\"", async () => {
     render(<TradePanel marketId="m1" />)
     await screen.findByText("pt tab: buy")
-    const expected: [string, string][] = [
-      ["Deposit USDY → SY", "deposit"],
-      ["Withdraw SY → USDY", "withdraw"],
-      ["Split USDY → PT + YT", "mint"],
-      ["Recombine PT + YT → USDY", "recombine"],
-    ]
-    await userEvent.click(screen.getByRole("button", { name: "Tools" }))
-    expect(screen.getAllByRole("menuitem").map((i) => i.textContent)).toEqual(expected.map(([l]) => l))
+    expect(screen.queryByRole("button", { name: "Tools" })).toBeNull()
+    const trigger = screen.getByRole("button", { name: "Quick actions" })
+    // The toggle scale (text-xs), a quiet variant, and an icon before and a chevron after, both hidden.
+    expect(trigger.getAttribute("data-size")).toBe("toggle")
+    expect(trigger.getAttribute("data-variant")).not.toBe("primary")
+    const icons = trigger.querySelectorAll("svg")
+    expect(icons).toHaveLength(2)
+    for (const icon of icons) expect(icon.getAttribute("aria-hidden")).toBe("true")
+    expect(trigger.getAttribute("aria-haspopup")).toBe("menu")
+  })
+
+  it("lists Deposit, Withdraw, Split and Recombine, each with an icon, its label and its description, each opening its panel", async () => {
+    render(<TradePanel marketId="m1" />)
+    await screen.findByText("pt tab: buy")
+    await userEvent.click(screen.getByRole("button", { name: "Quick actions" }))
+    const items = screen.getAllByRole("menuitem")
+    expect(items).toHaveLength(4)
+    for (const [label, , description] of EXPECTED) {
+      const item = screen.getByRole("menuitem", { name: label, description })
+      const icon = item.querySelector("svg")
+      expect(icon?.getAttribute("aria-hidden")).toBe("true")
+    }
     await userEvent.keyboard("{Escape}")
-    for (const [label, action] of expected) {
-      await userEvent.click(screen.getByRole("button", { name: "Tools" }))
+    for (const [label, action] of EXPECTED) {
+      await userEvent.click(screen.getByRole("button", { name: "Quick actions" }))
       await userEvent.click(screen.getByRole("menuitem", { name: label }))
       const dialog = await screen.findByRole("dialog", { name: label })
       expect(within(dialog).getByText(`panel: ${action}`)).toBeTruthy()
