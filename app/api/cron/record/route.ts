@@ -1,9 +1,10 @@
 import "server-only"
 
 /**
- * `GET /api/cron/record`: the 15-minute recorder (spec 0002 §6). Called by Vercel Cron
- * (`Authorization: Bearer $CRON_SECRET`) or by an Upstash QStash schedule (`Upstash-Signature`);
- * any other caller gets 401 and nothing runs. The answer is `{ recorded, failed }`.
+ * `GET` or `POST /api/cron/record`: the 15-minute recorder (spec 0002 §6). Called by Vercel Cron
+ * (`GET`, `Authorization: Bearer $CRON_SECRET`) or by an Upstash QStash schedule (`POST` by
+ * default, `Upstash-Signature`); both methods run the same checks, and any other caller gets 401
+ * and nothing runs. The answer is `{ recorded, failed }`.
  *
  * Route handlers run at request time under Cache Components when they read the request or touch
  * the network, and this one does both, so it is never prerendered. No `runtime` export: Cache
@@ -21,6 +22,12 @@ import { discover, resolvedMarkets, revalidate, sqlRegistryStore } from "@/lib/s
 // Discovery (a few getEvents pages), ~40 validation reads per market, then ~30 simulations per
 // market, a few attempts, one insert.
 export const maxDuration = 60
+
+/**
+ * The recorder's budget for the registry read (M9). Pages race it at 1.5 s and fall back to the
+ * seeds; the recorder can wait for a cold database, or discovered markets would get gaps.
+ */
+const RECORDER_ROWS_TIMEOUT_MS = 10_000
 
 const sha256 = (value: string) => createHash("sha256").update(value).digest()
 
@@ -81,10 +88,19 @@ export async function GET(request: Request) {
       // listed. Each stops at its deadline and resumes next run (R2-40); discovery gets 60 % of the
       // budget, so a flood of new pools never starves the re-check of the listed markets.
       refreshRegistry: async (deadline) => {
-        const found = await discover(registry, { deadline: Date.now() + (deadline - Date.now()) * 0.6 })
-        await revalidate(registry, { skip: new Set(found.checked), deadline })
+        // M8: a failed discovery (a getEvents error, say) never skips re-validating the listed
+        // markets. Only the error's name is logged: RPC text may carry a provider URL. A missing
+        // database is not a discovery failure: it stops the run, as before.
+        let checked: string[] = []
+        try {
+          checked = (await discover(registry, { deadline: Date.now() + (deadline - Date.now()) * 0.6 })).checked
+        } catch (error) {
+          if (error instanceof DatabaseConfigError) throw error
+          console.error("registry: discovery failed:", error instanceof Error ? error.name : "unknown")
+        }
+        await revalidate(registry, { skip: new Set(checked), deadline })
       },
-      markets: () => resolvedMarkets({ store, manifest }),
+      markets: () => resolvedMarkets({ store, manifest, timeoutMs: RECORDER_ROWS_TIMEOUT_MS }),
       now: () => Date.now(),
       ledgerCloseTime: async (ledger) => {
         const page = await server.getLedgers({ startLedger: ledger, pagination: { limit: 1 } })
@@ -101,3 +117,6 @@ export async function GET(request: Request) {
     return json({ error: "failed" }, 500)
   }
 }
+
+/** QStash schedules call with POST unless told otherwise (M13): the same handler, the same checks. */
+export const POST = GET

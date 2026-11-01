@@ -246,7 +246,8 @@ export async function runFaucet(p: {
   }
   // The route validates the body; this is the last line before anything is signed.
   if (!StrKey.isValidEd25519PublicKey(account)) throw new Error("runFaucet needs a G… account address")
-  // Onboarding trusts, authorizes and pays one asset: every market must share it (R44).
+  // Onboarding trusts, authorizes and pays one asset (R44, R2-14): the manifest's `testAsset`, or,
+  // without one, the underlying every market shares (none when they differ: not configured).
   const asset = faucetAsset(manifest)
   if (!asset) return { error: "not_configured" }
   const chain = p.chain ?? createStellarFaucetChain(manifest)
@@ -269,7 +270,10 @@ export async function runFaucet(p: {
       releaseKeySlots(account, ip)
       throw error
     }
-    // The listed markets must still share the asset this run pays (R44).
+    // Without `testAsset`, the listed markets (registry included) must still share the asset this
+    // run pays (R44): a market on another underlying stops the run. With `testAsset` set, the asset
+    // comes from the manifest whatever the markets are, so this only re-confirms that same asset; a
+    // listed market on another underlying is still granted its PT and YT below, never paid.
     if (faucetAsset(scope)?.sac !== asset.sac) {
       releaseKeySlots(account, ip)
       return { error: "not_configured" }

@@ -119,6 +119,21 @@ async function firstSlot(sql: Sql, pool: string): Promise<number | undefined> {
   return Number.isFinite(n) ? n : undefined
 }
 
+/**
+ * The pool's latest snapshot time (unix s), whatever the range (M7): a recorder that stopped before
+ * the range began still dates its history ("History is N h old"), never "No history yet". The
+ * newest slot is the newest snapshot (slots are 900 s of close time): one seek on the primary key
+ * `(pool, slot)`. Null when the pool has none.
+ */
+async function latestSnapshotAt(sql: Sql, pool: string): Promise<number | null> {
+  const rows = await sql<{ at: string | number | null }>`
+    select extract(epoch from close_time)::bigint as at from market_state_snapshots
+    where pool = ${pool} order by slot desc limit 1`
+  const at = rows[0]?.at
+  const n = Number(at)
+  return at === null || at === undefined || !Number.isFinite(n) ? null : n
+}
+
 type Built = {
   fixedApy: Series
   underlying: Series
@@ -200,14 +215,15 @@ export async function getHistory(sql: Sql, pool: string, range: Range, opts: His
     slots = (RANGE_DAYS[range] * DAY) / SLOT_SECONDS
   }
   const k = bucketSize(slots)
-  const rows = await fetchRows(sql, [pool], from, k, true)
+  const [rows, latest] = await Promise.all([fetchRows(sql, [pool], from, k, true), latestSnapshotAt(sql, pool)])
   const built = build(rows, opts.maturity, from, k)
+  const latestAt = built.latestAt === null ? latest : latest === null ? built.latestAt : Math.max(built.latestAt, latest)
   return {
     fixedApy: built.fixedApy,
     underlyingApy7d: built.underlying,
     liquidity: built.liquidity,
-    latestAt: built.latestAt,
-    stale: isStale(built.latestAt, nowSeconds),
+    latestAt,
+    stale: isStale(latestAt, nowSeconds),
     underlyingWindowSeconds: built.windowSeconds,
   }
 }

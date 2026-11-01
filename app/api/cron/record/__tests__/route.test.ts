@@ -7,6 +7,9 @@ const mocks = vi.hoisted(() => ({
   recordAll: vi.fn(),
   verify: vi.fn(),
   DatabaseConfigError: class DatabaseConfigError extends Error {},
+  discover: undefined as undefined | ((...args: unknown[]) => Promise<unknown>),
+  revalidate: vi.fn(),
+  resolvedCalls: [] as unknown[],
 }))
 vi.mock("@/lib/server/recorder", () => ({ recordAll: mocks.recordAll }))
 vi.mock("@/lib/server/db", () => ({ sql: vi.fn(), DatabaseConfigError: mocks.DatabaseConfigError }))
@@ -22,13 +25,32 @@ vi.mock("@/lib/protocol/manifest-source", async () => {
   return { activeManifest: () => m }
 })
 vi.mock("@/lib/protocol/reader", () => ({ createRpcReader: () => vi.fn() }))
+// The registry is real (its SQL answers nothing) unless a test replaces discovery; re-validation and
+// the markets read are watched.
+vi.mock("@/lib/server/registry", async (orig) => {
+  const real = await orig<typeof import("@/lib/server/registry")>()
+  return {
+    ...real,
+    discover: (...args: Parameters<typeof real.discover>) => (mocks.discover ? mocks.discover(...args) : real.discover(...args)),
+    revalidate: (...args: Parameters<typeof real.revalidate>) => {
+      mocks.revalidate(...args)
+      return Promise.resolve({ checked: [], complete: true })
+    },
+    resolvedMarkets: (deps: Parameters<typeof real.resolvedMarkets>[0]) => {
+      mocks.resolvedCalls.push(deps)
+      return real.resolvedMarkets(deps)
+    },
+  }
+})
 vi.mock("@/lib/protocol/stellar", () => ({ createRpcServer: () => ({}) }))
 
-import { GET } from "../route"
+import { GET, POST } from "../route"
 
 const SECRET = "test-cron-secret-0123456789"
 const call = (headers: Record<string, string> = {}) =>
   GET(new Request("http://localhost/api/cron/record", { headers }))
+const post = (headers: Record<string, string> = {}) =>
+  POST(new Request("http://localhost/api/cron/record", { method: "POST", headers, body: "" }))
 
 describe("GET /api/cron/record", () => {
   beforeEach(() => {
@@ -39,6 +61,9 @@ describe("GET /api/cron/record", () => {
     mocks.recordAll.mockResolvedValue({ recorded: 1, failed: [] })
     mocks.verify.mockReset()
     mocks.recordAll.mockClear()
+    mocks.revalidate.mockClear()
+    mocks.discover = undefined
+    mocks.resolvedCalls = []
   })
   afterEach(() => {
     delete process.env.CRON_SECRET
@@ -132,6 +157,49 @@ describe("GET /api/cron/record", () => {
     const res = await call({ authorization: `Bearer ${SECRET}` })
     expect(res.status).toBe(503)
     expect(await res.json()).toEqual({ error: "not_configured" })
+  })
+
+  it("POST runs too, behind the same checks: QStash schedules call with POST by default (M13)", async () => {
+    expect((await post()).status).toBe(401)
+    expect((await post({ authorization: `Bearer ${SECRET}x` })).status).toBe(401)
+    mocks.verify.mockResolvedValue(false)
+    expect((await post({ "upstash-signature": "bad" })).status).toBe(401)
+    expect(mocks.recordAll).not.toHaveBeenCalled()
+    expect((await post({ authorization: `Bearer ${SECRET}` })).status).toBe(200)
+    mocks.verify.mockResolvedValue(true)
+    const res = await post({ "upstash-signature": "sig" })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ recorded: 1, failed: [] })
+    expect(mocks.recordAll).toHaveBeenCalledTimes(2)
+  })
+
+  it("a failed discovery still re-validates the listed markets, and logs only the error's name (M8)", async () => {
+    const boom = new Error("getEvents: https://rpc.secret.example/?key=abc failed")
+    boom.name = "RpcError"
+    mocks.discover = vi.fn().mockRejectedValue(boom)
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {})
+    await call({ authorization: `Bearer ${SECRET}` })
+    const deps = mocks.recordAll.mock.calls[0][0]
+    await expect(deps.refreshRegistry(Date.now() + 1_000)).resolves.toBeUndefined()
+    expect(mocks.revalidate).toHaveBeenCalledTimes(1)
+    expect(mocks.revalidate.mock.calls[0][1]).toMatchObject({ skip: new Set() })
+    expect(logged).toHaveBeenCalledWith("registry: discovery failed:", "RpcError")
+    expect(JSON.stringify(logged.mock.calls)).not.toContain("secret.example")
+  })
+
+  it("a missing database stops the refresh as before: it is not a discovery failure", async () => {
+    mocks.discover = vi.fn().mockRejectedValue(new mocks.DatabaseConfigError())
+    await call({ authorization: `Bearer ${SECRET}` })
+    const deps = mocks.recordAll.mock.calls[0][0]
+    await expect(deps.refreshRegistry(Date.now() + 1_000)).rejects.toBeInstanceOf(mocks.DatabaseConfigError)
+    expect(mocks.revalidate).not.toHaveBeenCalled()
+  })
+
+  it("the recorder reads the registry with its own 10 s budget, not the page's 1.5 s race (M9)", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {})
+    await call({ authorization: `Bearer ${SECRET}` })
+    await mocks.recordAll.mock.calls[0][0].markets()
+    expect(mocks.resolvedCalls.at(-1)).toMatchObject({ timeoutMs: 10_000 })
   })
 
   it("500 with the same body when any market failed", async () => {
