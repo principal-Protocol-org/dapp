@@ -22,17 +22,22 @@
  * - a route whose first step is a deposit (a USDY-paid buy today): the user holds no SY yet, so the
  *   swap stays indicative until the route prepares it with its own simulation (RouteFlow shows that
  *   step's exact floor); the simulated deposit only fixes the SY the curve prices.
+ *
+ * Buy YT (Task 17) is sized here, in `plan` and `quote` alike: today's `swap_sy_for_yt` mints PT + YT
+ * from `sy_in` SY the user must hold and sells the PT back, so the solver (`yt-solver.ts`) finds the
+ * `sy_in` whose net cost is the spend, and the quote discloses that capital (`capital`, R2-59).
  */
 import type { ActionId } from "./actions"
-import { buyPt, curveStateFrom, impliedRate, sellPt, spotPrice, type CurveQuote, type CurveState } from "./curve"
+import { buyExactPt, buyPt, curveStateFrom, impliedRate, sellPt, spotPrice, type CurveQuote, type CurveState } from "./curve"
 import { minAfterSlippage, type ActionOutput } from "./guards"
 import type { MarketState } from "./market-state"
-import { aprToApy, ceilDiv, FEE_RATE_SCALE, SCALE } from "./math"
-import { previewDeposit, previewWithdraw } from "./previews"
-import { priceImpactPpm, ptSpot } from "./prices"
-import { apyAfterTrade, effectiveFixedApy, fixedPayoffUsd } from "./rates"
+import { aprToApy, BPS, ceilDiv, FEE_RATE_SCALE, SCALE } from "./math"
+import { previewDeposit, previewMint, previewRecombine, previewSellYt, previewWithdraw } from "./previews"
+import { priceImpactPpm, ptSpot, ytSpot, type Spot } from "./prices"
+import { apyAfterTrade, effectiveFixedApy, effectiveImpliedApy, fixedPayoffUsd, leverage } from "./rates"
 import { planRoute, type RouteDisabled, type RouteKind, type RouteRequest, type StepPlan, type Token } from "./routes"
 import type { Live } from "./types"
+import { solveBuyYt, type YtSolution } from "./yt-solver"
 
 /** The trades the PT, YT and LP tabs make (the Tools menu's split and recombine are not trades). */
 export type TradeKind = Exclude<RouteKind, "split" | "recombine">
@@ -86,7 +91,10 @@ export type TradeQuote = {
   /** The fixed APY (`implied_rate`, compounded) before and once the trade has landed. */
   apyBefore: number
   apyAfter: number
-  /** Buy PT: the effective fixed APY; Buy YT (Task 17): the effective implied APY. Undefined: Unavailable. */
+  /**
+   * Buy PT: the effective fixed APY. Buy YT: the effective implied APY, the fixed rate at which the
+   * YT's cost is fair (R2-17): the break-even rate. Undefined: Unavailable.
+   */
   effectiveApy?: number
   /** Buy PT: the PT received, valued today at the pool's spot price, in the underlying. */
   valueToday?: bigint
@@ -95,6 +103,27 @@ export type TradeQuote = {
    * and that gain in the underlying at today's oracle rate (indicative: it falls as the price rises).
    */
   payoff?: { gainUsd: bigint; pct: number; gainUnderlying: bigint }
+  /**
+   * Capital the route moves beyond what it spends (Buy YT today, R2-59), in the token paid: `moved`
+   * leaves the user, `back` comes back in step `backStep` (1-based, from the plan), `spent` is the
+   * difference. Absent when the trade moves only what it spends (a flash swap).
+   */
+  capital?: { moved: bigint; spent: bigint; back: bigint; backStep: number }
+  /**
+   * Buy YT: the most the trade may spend at the slippage tolerance (R2-58), in the token paid, on
+   * this preview. The buy step is signed with its own bound, from that step's simulation (guards.ts).
+   */
+  maxCost?: bigint
+  /**
+   * Buy YT: the underlying whose variable yield the YT earns until maturity, its YT amount (USD) at
+   * today's oracle rate, floored. Indicative: it moves with the underlying's price.
+   */
+  yieldOn?: bigint
+  /**
+   * Buy YT leverage, 1 / YT price (spec §2): `trade`, the YT received per USD spent (the price this
+   * trade pays); `spot`, at the pool's price before it. Undefined: Unavailable.
+   */
+  leverage?: { trade?: number; spot?: number }
 }
 
 /** What a route needs beyond the trade: who signs, where, and what the manifest lets it call. */
@@ -124,8 +153,8 @@ export function toRouteRequest(req: TradeRequest, ctx: PlanContext): RouteReques
 const unavailable = (error: string): Live<never> => ({ status: "unavailable", error })
 const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error))
 
-/** The pool swap each PT trade makes, in today's contracts. */
-const SWAP_ACTION: Partial<Record<TradeKind, ActionId>> = { buy_pt: "buy_pt", sell_pt: "sell_pt" }
+/** The pool swap each trade makes, in today's contracts. */
+const SWAP_ACTION: Partial<Record<TradeKind, ActionId>> = { buy_pt: "buy_pt", sell_pt: "sell_pt", buy_yt: "buy_yt", sell_yt: "sell_yt" }
 
 /**
  * What the route's simulated first step tells the quote, read from the route (`plans`):
@@ -206,27 +235,33 @@ function quoteBuyPt(req: TradeRequest, r: Reads, state: TradeState): TradeQuote 
   }
 }
 
-/** `swap_pt_for_sy` (market_pool lib.rs:305-330), from the curve or the simulated SY out. */
-function quoteSellPt(req: TradeRequest, r: Reads, state: TradeState): TradeQuote {
+/**
+ * The pool once a PT sale whose net SY `syOut` was simulated lands. The SY out is
+ * `gross − ceil(gross · fee_rate / 1e12)` and the reserves lose `gross`; the smallest gross giving
+ * the simulated net is `ceil(net · 1e12 / (1e12 − fee_rate))`.
+ */
+function simulatedPtSale(s: CurveState, ptIn: bigint, syOut: bigint): CurveQuote {
+  if (s.feeRate >= FEE_RATE_SCALE) throw new Error("The pool's swap fee takes the whole sale, so it is not offered.")
+  const gross = ceilDiv(syOut * FEE_RATE_SCALE, FEE_RATE_SCALE - s.feeRate)
+  return { amountIn: 0n, amountOut: syOut, feeShares: gross - syOut, next: { ...s, ptReserve: s.ptReserve + ptIn, syReserve: s.syReserve - gross } }
+}
+
+/**
+ * A sale (Sell PT, Sell YT): the swap pays SY, which later steps withdraw for a USDY receiver.
+ * `price(simulatedSy)` prices the swap from the curve, or from its simulated SY out when there is one;
+ * `spot` is the price of the token sold, in SY, for the price impact.
+ */
+function saleQuote(req: TradeRequest, r: Reads, state: TradeState, price: (simulatedSy?: bigint) => CurveQuote, spot: Spot): TradeQuote {
   const { s, exchangeRate } = r
-  const ptIn = req.amount
   const toUnderlying = req.receive === "underlying"
   const first = firstStepOf(req, state)
   // Later steps turn the swap's SY into USDY (a withdraw today), unless the route is one step.
   const converted = toUnderlying && state.plans.length > 1
-  const curve = sellPt(s, ptIn)
   // The swap's simulated SY: the swap step's own output, or, for a one-step route paying USDY, the
   // smallest SY that withdraws to the simulated USDY.
   const simulated =
     first?.role === "swap" ? first.amount : first?.role === "final" ? (toUnderlying ? ceilDiv(first.amount * SCALE, exchangeRate) : first.amount) : undefined
-  let q: CurveQuote = curve
-  if (simulated !== undefined) {
-    // The SY out is `gross − ceil(gross · fee_rate / 1e12)`; the reserves lose `gross`. The smallest
-    // gross giving the simulated net is `ceil(net · 1e12 / (1e12 − fee_rate))`.
-    if (s.feeRate >= FEE_RATE_SCALE) throw new Error("The pool's swap fee takes the whole sale, so it is not offered.")
-    const gross = ceilDiv(simulated * FEE_RATE_SCALE, FEE_RATE_SCALE - s.feeRate)
-    q = { amountIn: 0n, amountOut: simulated, feeShares: gross - simulated, next: { ...s, ptReserve: s.ptReserve + ptIn, syReserve: s.syReserve - gross } }
-  }
+  const q = price(simulated)
   const syOut = q.amountOut
   const swapExactness: Exactness = simulated === undefined ? "indicative" : "simulated"
   // What the user ends with: the one step's simulated output, else the swap's SY (withdrawn at
@@ -235,7 +270,7 @@ function quoteSellPt(req: TradeRequest, r: Reads, state: TradeState): TradeQuote
   const outExact: Exactness = first?.role === "final" || (!toUnderlying && simulated !== undefined) ? "simulated" : "indicative"
   const swapStep = state.plans.findIndex((p) => p.action === SWAP_ACTION[req.kind]) + 1
   return {
-    kind: "sell_pt",
+    kind: req.kind,
     out,
     outToken: toUnderlying ? "underlying" : "sy",
     exactness: outExact,
@@ -244,54 +279,269 @@ function quoteSellPt(req: TradeRequest, r: Reads, state: TradeState): TradeQuote
     minOutToken: converted ? "sy" : toUnderlying ? "underlying" : "sy",
     fee: toUnderlying ? previewWithdraw(q.feeShares, exchangeRate) : q.feeShares,
     feeToken: toUnderlying ? "underlying" : "sy",
-    priceImpactPpm: priceImpactPpm("sell", syOut, ptIn, ptSpot(spotPrice(s), s.rate)),
+    priceImpactPpm: priceImpactPpm("sell", syOut, req.amount, spot),
     apyBefore: apyOf(s),
     apyAfter: apyAfterTrade(s, q),
   }
 }
 
+/** `swap_pt_for_sy` (market_pool lib.rs:305-330), from the curve or the simulated SY out. */
+function quoteSellPt(req: TradeRequest, r: Reads, state: TradeState): TradeQuote {
+  const { s } = r
+  const ptIn = req.amount
+  const price = (simulatedSy?: bigint) => (simulatedSy === undefined ? sellPt(s, ptIn) : simulatedPtSale(s, ptIn, simulatedSy))
+  return saleQuote(req, r, state, price, ptSpot(spotPrice(s), s.rate))
+}
+
+/**
+ * `swap_yt_for_sy` (market_pool lib.rs:342-380), the pool's flash-redeem: it buys `yt_in` PT from its
+ * own reserve at the curve's exact-out price (`buyExactPt`), recombines them with the YT and pays the
+ * rest of the SY. The pool's PT reserve falls, so the fixed APY falls (R2-15).
+ */
+function quoteSellYt(req: TradeRequest, r: Reads, state: TradeState): TradeQuote {
+  const { s, oracleRate } = r
+  const ytIn = req.amount
+  const price = (simulatedSy?: bigint): CurveQuote => {
+    const curve = buyExactPt(s, ytIn)
+    const payout = previewSellYt(ytIn, oracleRate, curve.amountIn)
+    if (payout <= 0n) {
+      throw new Error("Selling this YT pays nothing now: the PT the pool must buy back costs at least what the YT recombines into, so the pool refuses the sale.")
+    }
+    if (simulatedSy === undefined) return { ...curve, amountOut: payout }
+    // The pool keeps the recombined SY less the payout: its gross cost, fee included; the reserves
+    // gain that cost net of the fee (`gross · (1e12 − fee_rate) / 1e12`, floored).
+    const gross = previewRecombine(ytIn, oracleRate) - simulatedSy
+    if (gross <= 0n) return { ...curve, amountOut: simulatedSy }
+    const net = (gross * (FEE_RATE_SCALE - s.feeRate)) / FEE_RATE_SCALE
+    return { amountIn: gross, amountOut: simulatedSy, feeShares: gross - net, next: { ...s, ptReserve: s.ptReserve - ytIn, syReserve: s.syReserve + net } }
+  }
+  return saleQuote(req, r, state, price, ytSpot(spotPrice(s), s.rate))
+}
+
+/** Buy YT's sizes: the spend in SY, the solver's answer for it, and a USDY payer's deposit. */
+type BuyYtSize = { feeBps: bigint; solution: YtSolution; depositUnderlying?: bigint }
+
+/**
+ * Sizes a Buy YT (spec §4) from the market's reads, as `plan` and `quote` both do:
+ * - the spend is in the token paid; a USDY spend is converted to SY at the SY rate before solving;
+ * - the solver finds the `sy_in` whose net cost (`sy_in − sy_back`) is the spend, at most;
+ * - a USDY payer deposits the smallest amount whose SY is at least `sy_in`: rounded up, then checked
+ *   with the wrapper's own math (the route's `requires` check is only the backstop).
+ * Throws the plain-words reason when it cannot (the solver can throw on its own guards).
+ */
+function sizeBuyYt(req: TradeRequest, m: MarketReads, ms: MarketState): BuyYtSize {
+  const { s, oracleRate, exchangeRate } = m
+  if (s.secondsToMaturity <= 0n) throw new Error(MATURED)
+  const feeBps = need(ms.fees.tokenizationBps, "the tokenization fee")
+  if (typeof feeBps === "string") throw new Error(feeBps)
+  const payUnderlying = req.pay === "underlying"
+  const spendSy = payUnderlying ? previewDeposit(req.amount, exchangeRate) : req.amount
+  if (spendSy <= 0n) throw new Error("This amount is too small to buy any SY with: enter a larger amount.")
+  let solved: YtSolution | { error: string }
+  try {
+    solved = solveBuyYt(s, { spendSy, oracleRate, tokenizationFeeBps: feeBps })
+  } catch (error) {
+    throw new Error(`This app could not size this purchase (${errorText(error)}), so it is not offered. Try another amount.`)
+  }
+  if ("error" in solved) throw new Error(solved.error)
+  if (!payUnderlying) return { feeBps, solution: solved }
+  const depositUnderlying = ceilDiv(solved.syIn * exchangeRate, SCALE)
+  if (previewDeposit(depositUnderlying, exchangeRate) < solved.syIn) {
+    throw new Error("This app could not size the deposit this purchase needs, so it is not offered. Try another amount.")
+  }
+  return { feeBps, solution: solved, depositUnderlying }
+}
+
+/** The route's first step, when it is the buy and was simulated (an SY payer today): exact YT and SY back. */
+function buyYtSimulation(state: TradeState): { yt_out: bigint; sy_back: bigint } | undefined {
+  const step = state.firstStep
+  const first = state.plans[0]
+  if (!step || !first || step.action !== first.action || first.action !== "buy_yt" || step.output.kind !== "buy_yt") return undefined
+  if (step.output.yt_out <= 0n) throw new Error("The simulation returned no YT for this trade, so it is not offered.")
+  return step.output
+}
+
+/**
+ * `Router.swap_sy_for_yt` (router lib.rs:335-363): mint PT + YT from `sy_in`, sell the PT back
+ * (`swap_pt_for_sy`), keep the YT and the SY the sale returns. The PT sold raises the fixed APY
+ * (R2-15). Every figure is in the token paid; the capital moved is the solver's `sy_in`, never
+ * leverage × spend (R2-59).
+ */
+function quoteBuyYt(req: TradeRequest, r: Reads, state: TradeState): TradeQuote {
+  const { s, oracleRate, exchangeRate, slippageBps } = r
+  const payUnderlying = req.pay === "underlying"
+  const { feeBps, solution, depositUnderlying } = sizeBuyYt(req, r, state.ms)
+  const { syIn } = solution
+  const sim = buyYtSimulation(state)
+  const ytOut = sim?.yt_out ?? solution.ytOut
+  const syBack = sim?.sy_back ?? solution.syBack
+  const netCost = syIn - syBack
+  if (netCost <= 0n) throw new Error("A YT is priced at zero or less here, so buying YT is not offered.")
+
+  // The mint's fee, and the PT it mints (as many as the YT) sold back to the pool.
+  const mint = previewMint(syIn, oracleRate, feeBps)
+  const sale = sim ? simulatedPtSale(s, sim.yt_out, syBack) : sellPt(s, mint.pt)
+
+  const toPaid = (sy: bigint) => (payUnderlying ? previewWithdraw(sy, exchangeRate) : sy)
+  const moved = payUnderlying && depositUnderlying !== undefined ? depositUnderlying : syIn
+  const back = toPaid(syBack)
+  // The step that hands the sale's SY back in the token paid: the withdraw of `sy_back`, or the buy.
+  const backStep =
+    (payUnderlying
+      ? state.plans.findIndex((p) => p.action === "withdraw" && p.amount.from === "step" && p.amount.field === "sy_back")
+      : state.plans.findIndex((p) => p.action === "buy_yt")) + 1
+  // guards.ts signs max_net_cost = ceil(net cost × (1 + slippage)): the sale returns at least the rest.
+  const maxNetCost = ceilDiv(netCost * (BPS + slippageBps), BPS)
+  const minSyBack = maxNetCost >= syIn ? 0n : syIn - maxNetCost
+  // What the YT cost, in the underlying; an SY payer's SY at the SY rate, rounded up, so the
+  // break-even rate is never understated.
+  const spentUnderlying = payUnderlying ? moved - back : ceilDiv(netCost * exchangeRate, SCALE)
+  const spentUsd = (spentUnderlying * oracleRate) / SCALE
+  const spot = spotPrice(s)
+  return {
+    kind: "buy_yt",
+    out: ytOut,
+    outToken: "yt",
+    exactness: sim ? "simulated" : "indicative",
+    minOut: floor(ytOut, slippageBps),
+    minOutToken: "yt",
+    fee: toPaid(mint.feeShares + sale.feeShares),
+    feeToken: payUnderlying ? "underlying" : "sy",
+    // A YT has a price only while the PT is below par.
+    priceImpactPpm: spot < SCALE ? priceImpactPpm("buy", netCost, ytOut, ytSpot(spot, s.rate)) : undefined,
+    apyBefore: apyOf(s),
+    apyAfter: apyAfterTrade(s, sale),
+    effectiveApy: effectiveImpliedApy({ spentUnderlying, oracleRate, ytOut, secondsToMaturity: s.secondsToMaturity }),
+    ...(backStep > 0 ? { capital: { moved, spent: moved - back, back, backStep } } : {}),
+    maxCost: moved - toPaid(minSyBack),
+    yieldOn: (ytOut * SCALE) / oracleRate,
+    leverage: { trade: spentUsd > 0n ? Number(ytOut) / Number(spentUsd) : undefined, spot: leverage(spot) },
+  }
+}
+
 const NOT_YET: Partial<Record<TradeKind, string>> = {
-  buy_yt: "Buy YT",
-  sell_yt: "Sell YT",
   lp_keep_yt: "Adding liquidity (keep YT)",
   lp_only: "Adding liquidity",
   lp_withdraw: "Withdrawing liquidity",
 }
+
+const MATURED = "This market has matured: PT and YT can no longer be traded in the pool."
 
 /** A read the quote needs, or the reason naming it. */
 function need<T>(value: Live<T>, what: string): T | string {
   return value.status === "live" ? value.value : `Could not read ${what} (${value.error}).`
 }
 
+type MarketReads = Omit<Reads, "slippageBps">
+
+/** The pool, the oracle rate and the SY exchange rate, or the reason naming the read that failed. */
+function readsOf(ms: MarketState): MarketReads | string {
+  const pool = need(ms.poolState, "the pool")
+  if (typeof pool === "string") return pool
+  const oracleRate = need(ms.oracleRate, "the oracle rate")
+  if (typeof oracleRate === "string") return oracleRate
+  const exchangeRate = need(ms.exchangeRate, "the SY exchange rate")
+  if (typeof exchangeRate === "string") return exchangeRate
+  const s = curveStateFrom(ms)
+  if (!s) return "Could not read the pool."
+  return { s, oracleRate, exchangeRate }
+}
+
+const QUOTES: Partial<Record<TradeKind, (req: TradeRequest, r: Reads, state: TradeState) => TradeQuote>> = {
+  buy_pt: quoteBuyPt,
+  sell_pt: quoteSellPt,
+  buy_yt: quoteBuyYt,
+  sell_yt: quoteSellYt,
+}
+
 function quote(req: TradeRequest, state: TradeState): Live<TradeQuote> {
   const { ms } = state
-  const pool = need(ms.poolState, "the pool")
-  if (typeof pool === "string") return unavailable(pool)
-  const oracleRate = need(ms.oracleRate, "the oracle rate")
-  if (typeof oracleRate === "string") return unavailable(oracleRate)
-  const exchangeRate = need(ms.exchangeRate, "the SY exchange rate")
-  if (typeof exchangeRate === "string") return unavailable(exchangeRate)
-  const s = curveStateFrom(ms)
-  if (!s) return unavailable("Could not read the pool.")
-  if (s.secondsToMaturity <= 0n) return unavailable("This market has matured: PT and YT can no longer be traded in the pool.")
+  const m = readsOf(ms)
+  if (typeof m === "string") return unavailable(m)
+  if (m.s.secondsToMaturity <= 0n) return unavailable(MATURED)
   if (req.amount <= 0n) return unavailable("Enter an amount greater than zero.")
-  const reads: Reads = { s, oracleRate, exchangeRate, slippageBps: state.slippageBps }
+  const run = QUOTES[req.kind]
+  if (!run) return unavailable(`${NOT_YET[req.kind] ?? "This trade"} is not quoted by this app yet.`)
   try {
-    switch (req.kind) {
-      case "buy_pt":
-        return { status: "live", value: quoteBuyPt(req, reads, state), ledger: ms.poolState.status === "live" ? ms.poolState.ledger : 0 }
-      case "sell_pt":
-        return { status: "live", value: quoteSellPt(req, reads, state), ledger: ms.poolState.status === "live" ? ms.poolState.ledger : 0 }
-      default:
-        return unavailable(`${NOT_YET[req.kind] ?? "This trade"} is not quoted by this app yet.`)
-    }
+    return { status: "live", value: run(req, { ...m, slippageBps: state.slippageBps }, state), ledger: ms.poolState.status === "live" ? ms.poolState.ledger : 0 }
   } catch (error) {
     // A `MathError` is the pool's own refusal, already in plain words.
     return unavailable(errorText(error))
   }
 }
 
-export const currentContractsAdapter: TradeAdapter = {
-  quote,
-  plan: (req, ctx) => planRoute(toRouteRequest(req, ctx), { routerFunctions: ctx.routerFunctions }),
+/**
+ * Today's route for a trade (spec §4). Buy YT's steps are sized here, from the market's reads: the
+ * deposit moves about leverage × the spend and the buy uses the solver's `sy_in`, both as `value`
+ * amounts, so the gates checked before the route starts see what each step moves (R2-57).
+ */
+function plan(req: TradeRequest, ctx: PlanContext): StepPlan[] | RouteDisabled {
+  const route = toRouteRequest(req, ctx)
+  const base = { routerFunctions: ctx.routerFunctions }
+  if (req.kind !== "buy_yt") return planRoute(route, base)
+  // With no amount yet, the route keeps its shape and moves nothing: it cannot start (there is no
+  // request), its gates see nothing to move, and the amount field's own refusal stands.
+  if (req.amount <= 0n) return planRoute(route, { ...base, buyYt: { syIn: 0n, depositUnderlying: 0n } })
+  if (!ctx.ms) return { disabled: "Buy YT is sized from this market's data, which has not loaded yet. Try again in a moment." }
+  const m = readsOf(ctx.ms)
+  if (typeof m === "string") return { disabled: `Buy YT cannot be sized now. ${m}` }
+  try {
+    const { solution, depositUnderlying } = sizeBuyYt(req, m, ctx.ms)
+    return planRoute(route, { ...base, buyYt: { syIn: solution.syIn, ...(depositUnderlying !== undefined ? { depositUnderlying } : {}) } })
+  } catch (error) {
+    return { disabled: `Buy YT is not offered for this amount. ${errorText(error)}` }
+  }
+}
+
+export const currentContractsAdapter: TradeAdapter = { quote, plan }
+
+// ---------------------------------------------------------------------------------------------
+// Max
+// ---------------------------------------------------------------------------------------------
+
+export type MaxSpend = { ok: true; amount: bigint } | { ok: false; reason: string }
+
+/** An empty field's reference spend, as a fraction of the balance. */
+const MAX_REFERENCE_DIVISOR = 100n
+/** After a candidate that moves too much, the next reference is this much smaller. */
+const MAX_BACKOFF = 4n
+/** References tried before Max gives up. */
+const MAX_TRIES = 8
+
+/**
+ * Max for a buy (spec §4: "Max is the balance divided by that ratio"): `balance × spend / moved`,
+ * floored, with `spend / moved` from the trade at the typed spend or, with none, at a reference spend
+ * (a hundredth of the balance). A smaller buy moves a larger multiple of its spend, so a ratio taken
+ * at a spend no larger than the result is the cautious one; one taken at a larger spend (a typed
+ * amount above Max, or a reference above it when the multiple passes 100) would move more than the
+ * balance. So every candidate is quoted again, and one that moves more than the balance is replaced
+ * from a reference four times smaller. The balance gate still checks. A trade whose quote discloses
+ * no capital moves only what it spends: it may spend the whole balance.
+ */
+export function maxSpend(quoteAt: (amount: bigint) => Live<TradeQuote> | null, balance: bigint, typed?: bigint): MaxSpend {
+  if (balance <= 0n) return { ok: true, amount: 0n }
+  const fallback = balance / MAX_REFERENCE_DIVISOR > 0n ? balance / MAX_REFERENCE_DIVISOR : balance
+  let reference = typed !== undefined && typed > 0n && typed <= balance ? typed : fallback
+  const why = (q: Live<TradeQuote> | null) =>
+    `Max could not be worked out: ${q ? (q.status === "unavailable" ? q.error.replace(/\.$/, "") : "the trade could not be priced") : "this market's data has not loaded yet"}.`
+  for (let i = 0; i < MAX_TRIES; i++) {
+    let at = quoteAt(reference)
+    // A typed spend the trade cannot be priced at still leaves the reference spend to try.
+    if ((!at || at.status !== "live") && reference !== fallback) {
+      reference = fallback
+      at = quoteAt(reference)
+    }
+    if (!at || at.status !== "live") return { ok: false, reason: why(at) }
+    const capital = at.value.capital
+    if (!capital) return { ok: true, amount: balance }
+    if (capital.moved <= 0n) return { ok: false, reason: why(null) }
+    const fit = (balance * reference) / capital.moved
+    const candidate = fit < balance ? fit : balance
+    if (candidate <= 0n) return { ok: false, reason: "Your balance does not cover what even the smallest purchase moves." }
+    const check = quoteAt(candidate)
+    if (!check || check.status !== "live") return { ok: false, reason: why(check) }
+    if (!check.value.capital || check.value.capital.moved <= balance) return { ok: true, amount: candidate }
+    reference = candidate / MAX_BACKOFF > 0n ? candidate / MAX_BACKOFF : 1n
+  }
+  return { ok: false, reason: "Max could not be worked out for this balance: enter the amount yourself." }
 }

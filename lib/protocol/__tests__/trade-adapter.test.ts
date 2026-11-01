@@ -7,15 +7,16 @@
  * 93.1966515 SY for a 0.1150419 SY fee (gross 93.3116934) and moves it to 503687.
  */
 import { describe, expect, it } from "vitest"
-import { buyPt, impliedRate, sellPt, type CurveState } from "../curve"
+import { buyExactPt, buyPt, impliedRate, sellPt, spotPrice, type CurveState } from "../curve"
 import { minAfterSlippage } from "../guards"
 import type { MarketState } from "../market-state"
-import { aprToApy, ceilDiv, FEE_RATE_SCALE, SCALE } from "../math"
-import { previewDeposit, previewWithdraw } from "../previews"
-import { effectiveFixedApy, fixedPayoffUsd } from "../rates"
+import { aprToApy, BPS, ceilDiv, FEE_RATE_SCALE, SCALE } from "../math"
+import { previewDeposit, previewMint, previewSellYt, previewWithdraw } from "../previews"
+import { effectiveFixedApy, effectiveImpliedApy, fixedPayoffUsd, leverage } from "../rates"
 import { planRoute, type StepPlan } from "../routes"
-import { currentContractsAdapter, toRouteRequest, type TradeQuote, type TradeRequest } from "../trade-adapter"
+import { currentContractsAdapter, maxSpend, toRouteRequest, type TradeQuote, type TradeRequest } from "../trade-adapter"
 import type { Live } from "../types"
+import { solveBuyYt, type YtSolution } from "../yt-solver"
 
 const A: CurveState = {
   ptReserve: 1000000000000n,
@@ -34,8 +35,11 @@ const PT_100 = 1_000_000_000n
 const live = <T,>(value: T): Live<T> => ({ status: "live", value, ledger: 7 })
 const down: Live<never> = { status: "unavailable", error: "rpc down" }
 
-function market(over: Partial<Record<"poolState" | "oracleRate" | "exchangeRate", Live<unknown>>> = {}): MarketState {
-  return { poolState: live(A), oracleRate: live(ORACLE), exchangeRate: live(SCALE), ...over } as unknown as MarketState
+const FEE_BPS = 10n // tokenization fee 0.10 %
+
+function market(over: Partial<Record<"poolState" | "oracleRate" | "exchangeRate" | "tokenizationBps", Live<unknown>>> = {}): MarketState {
+  const { tokenizationBps = live(FEE_BPS), ...reads } = over
+  return { poolState: live(A), oracleRate: live(ORACLE), exchangeRate: live(SCALE), fees: { tokenizationBps }, ...reads } as unknown as MarketState
 }
 
 const apy = (implied: bigint) => aprToApy(implied, A.secondsToMaturity)
@@ -48,9 +52,9 @@ function quoted(result: Live<TradeQuote>): TradeQuote {
 }
 const CTX = { marketId: "m1", source: "GABC", matured: false, routerFunctions: [] as string[] }
 
-/** Today's route for `req` (adapter #1's plan). */
-function plansFor(req: TradeRequest): StepPlan[] {
-  const plans = currentContractsAdapter.plan(req, CTX)
+/** Today's route for `req` (adapter #1's plan), sized from `ms` (Buy YT's steps are). */
+function plansFor(req: TradeRequest, ms: MarketState = market()): StepPlan[] {
+  const plans = currentContractsAdapter.plan(req, { ...CTX, ms })
   if (!Array.isArray(plans)) throw new Error(plans.disabled)
   return plans
 }
@@ -67,7 +71,7 @@ function oneStep(req: TradeRequest): StepPlan[] {
 }
 
 const quote = (req: TradeRequest, state: Partial<Parameters<typeof currentContractsAdapter.quote>[1]> = {}) =>
-  currentContractsAdapter.quote(req, { ms: market(), slippageBps: 50n, ...state, plans: state.plans ?? plansFor(req) })
+  currentContractsAdapter.quote(req, { ms: market(), slippageBps: 50n, ...state, plans: state.plans ?? plansFor(req, state.ms ?? market()) })
 
 describe("trade adapter #1 — buy PT", () => {
   it("an SY payer gets the curve's PT for the curve's fee, and the fixed APY falls (R2-15)", () => {
@@ -261,7 +265,7 @@ describe("trade adapter #1 — unavailable, never a guess", () => {
   })
 
   it("kinds the later tabs add are not quoted yet", () => {
-    const r = quote({ kind: "buy_yt", amount: SY_100, pay: "sy", receive: "sy" }, { plans: [] })
+    const r = quote({ kind: "lp_keep_yt", amount: SY_100, pay: "underlying", receive: "underlying" }, { plans: [] })
     expect(r.status).toBe("unavailable")
   })
 })
@@ -294,5 +298,212 @@ describe("trade adapter #1 — plan", () => {
       receive: "underlying",
       matured: false,
     })
+  })
+})
+
+// ---------------------------------------------------------------------------------------------
+// YT (Task 17): Buy YT is sized by the solver from the spend; Sell YT is the pool's flash-redeem.
+// ---------------------------------------------------------------------------------------------
+
+const USDY_100 = 1_000_000_000n
+const buyYt = (pay: TradeRequest["pay"], amount = USDY_100): TradeRequest => ({ kind: "buy_yt", amount, pay, receive: pay })
+const sellYt = (receive: TradeRequest["receive"], amount = 1_000_000_000n): TradeRequest => ({ kind: "sell_yt", amount, pay: receive, receive })
+
+/** The solver's answer for a spend of `spendSy` SY on state A, as the adapter must use it. */
+function solved(spendSy: bigint): YtSolution {
+  const r = solveBuyYt(A, { spendSy, oracleRate: ORACLE, tokenizationFeeBps: FEE_BPS })
+  if ("error" in r) throw new Error(r.error)
+  return r
+}
+
+describe("trade adapter #1 — buy YT: the spend in, the solver's sy_in moved", () => {
+  it("a USDY payer's spend is converted to SY at the SY rate before solving, and the deposit yields at least sy_in", () => {
+    const rate = 10_200_000n
+    const ms = market({ exchangeRate: live(rate) })
+    const r = solved(previewDeposit(USDY_100, rate))
+    const plans = plansFor(buyYt("underlying"), ms)
+    expect(plans.map((p) => p.action)).toEqual(["deposit", "buy_yt", "withdraw"])
+    // Rounded up, then checked with the wrapper's own math: the smallest deposit that gives sy_in.
+    const dep = ceilDiv(r.syIn * rate, SCALE)
+    expect(plans[0].amount).toEqual({ from: "value", value: dep })
+    expect(previewDeposit(dep, rate)).toBeGreaterThanOrEqual(r.syIn)
+    expect(previewDeposit(dep - 1n, rate)).toBeLessThan(r.syIn)
+    expect(plans[1].amount).toEqual({ from: "value", value: r.syIn })
+    // The refund of the PT sale is withdrawn from the buy step's own output.
+    expect(plans[2].amount).toEqual({ from: "step", index: 1, field: "sy_back" })
+  })
+
+  it("Buy YT's moved amounts are `value` sources, so the gates before the route starts see them (not a stand-in)", () => {
+    for (const pay of ["underlying", "sy"] as const) {
+      const plans = plansFor(buyYt(pay))
+      for (const p of plans.filter((p) => p.action !== "withdraw")) expect(p.amount.from).toBe("value")
+    }
+  })
+
+  it("an SY payer's route is the buy alone: its refund stays SY (R2-21)", () => {
+    const r = solved(USDY_100)
+    const plans = plansFor(buyYt("sy"))
+    expect(plans).toHaveLength(1)
+    expect(plans[0]).toMatchObject({ action: "buy_yt", amount: { from: "value", value: r.syIn } })
+  })
+
+  it("with no amount yet, the route keeps its shape and moves nothing", () => {
+    const plans = plansFor(buyYt("underlying", 0n))
+    expect(plans.map((p) => p.action)).toEqual(["deposit", "buy_yt", "withdraw"])
+    expect(plans[0].amount).toEqual({ from: "value", value: 0n })
+  })
+
+  it("a spend the solver refuses disables the route with the solver's reason", () => {
+    const plans = currentContractsAdapter.plan(buyYt("sy", 29_000_000_000_000n), { ...CTX, ms: market() })
+    expect(Array.isArray(plans)).toBe(false)
+    expect(!Array.isArray(plans) && plans.disabled).toMatch(/pool cannot absorb/)
+  })
+
+  it("without the market's data the route cannot be sized", () => {
+    const plans = currentContractsAdapter.plan(buyYt("sy"), CTX)
+    expect(!Array.isArray(plans) && plans.disabled).toMatch(/market's data/)
+  })
+
+  it("an SY payer gets the solver's YT, and the capital line is the solver's sy_in and sy_back, never leverage × spend", () => {
+    const r = solved(USDY_100)
+    const q = quoted(quote(buyYt("sy")))
+    expect(q).toMatchObject({ kind: "buy_yt", out: r.ytOut, outToken: "yt", exactness: "indicative", minOut: minAfterSlippage(r.ytOut, 50n), minOutToken: "yt" })
+    // Moves sy_in, spends its net cost; sy_back comes back in the buy step itself (step 1).
+    expect(q.capital).toEqual({ moved: r.syIn, spent: r.netCost, back: r.syBack, backStep: 1 })
+    const spot = leverage(spotPrice(A))!
+    expect(Number(r.syIn) / Number(USDY_100)).toBeLessThan(spot)
+    expect(q.leverage?.spot).toBe(spot)
+  })
+
+  it("a USDY payer's capital is in USDY: the deposit moved, the withdraw back in step 3", () => {
+    const rate = 10_200_000n
+    const ms = market({ exchangeRate: live(rate) })
+    const r = solved(previewDeposit(USDY_100, rate))
+    const q = quoted(quote(buyYt("underlying"), { ms }))
+    const moved = ceilDiv(r.syIn * rate, SCALE)
+    const back = previewWithdraw(r.syBack, rate)
+    expect(q.capital).toEqual({ moved, spent: moved - back, back, backStep: 3 })
+    expect(q.feeToken).toBe("underlying")
+    // The tokenization fee on sy_in and the pool's fee on the PT sold back, in USDY.
+    const mint = previewMint(r.syIn, ORACLE, FEE_BPS)
+    expect(q.fee).toBe(previewWithdraw(mint.feeShares + sellPt(A, mint.pt).feeShares, rate))
+  })
+
+  it("buying YT sells PT into the pool, so the fixed APY rises (R2-15)", () => {
+    const r = solved(USDY_100)
+    const q = quoted(quote(buyYt("sy")))
+    const sale = sellPt(A, previewMint(r.syIn, ORACLE, FEE_BPS).pt)
+    expect(q.apyBefore).toBe(apy(501023n))
+    expect(q.apyAfter).toBe(apy(impliedRate(sale.next)))
+    expect(q.apyAfter).toBeGreaterThan(q.apyBefore)
+  })
+
+  it("the effective implied APY and the break-even inputs come from the spend and the YT received", () => {
+    const r = solved(USDY_100)
+    const q = quoted(quote(buyYt("sy")))
+    // An SY payer's net cost in USDY at the SY rate (1.0), valued in USD at the oracle rate.
+    expect(q.effectiveApy).toBe(effectiveImpliedApy({ spentUnderlying: r.netCost, oracleRate: ORACLE, ytOut: r.ytOut, secondsToMaturity: A.secondsToMaturity }))
+    // The yield-bearing amount: the YT's USD at today's oracle rate, floored (indicative).
+    expect(q.yieldOn).toBe((r.ytOut * SCALE) / ORACLE)
+    expect(q.leverage?.trade).toBe(Number(r.ytOut) / Number((r.netCost * ORACLE) / SCALE))
+  })
+
+  it("spends at most the net cost at the slippage setting, as guards.ts signs max_net_cost (R2-58)", () => {
+    const r = solved(USDY_100)
+    const maxNetCost = ceilDiv(r.netCost * (BPS + 50n), BPS)
+    expect(quoted(quote(buyYt("sy"))).maxCost).toBe(maxNetCost)
+    // A USDY payer: what is moved, less the least SY the sale may return, withdrawn.
+    const usdy = quoted(quote(buyYt("underlying")))
+    expect(usdy.maxCost).toBe(usdy.capital!.moved - previewWithdraw(r.syIn - maxNetCost, SCALE))
+  })
+
+  it("an SY payer's simulated buy is exact: YT out and SY back replace the solver's", () => {
+    const r = solved(USDY_100)
+    const sim = { yt_out: r.ytOut - 1000n, sy_back: r.syBack - 2000n }
+    const q = quoted(quote(buyYt("sy"), { firstStep: { action: "buy_yt", output: { kind: "buy_yt", ...sim } } }))
+    expect(q).toMatchObject({ out: sim.yt_out, exactness: "simulated" })
+    expect(q.capital).toEqual({ moved: r.syIn, spent: r.syIn - sim.sy_back, back: sim.sy_back, backStep: 1 })
+    expect(q.maxCost).toBe(ceilDiv((r.syIn - sim.sy_back) * (BPS + 50n), BPS))
+  })
+
+  it("a USDY payer's buy stays indicative: the simulated deposit is not the buy", () => {
+    const q = quoted(quote(buyYt("underlying"), { firstStep: { action: "deposit", output: { kind: "amount", value: 5n } } }))
+    expect(q.exactness).toBe("indicative")
+    expect(q.out).toBe(solved(USDY_100).ytOut)
+  })
+
+  it("a spend the solver refuses, or a read it needs, is Unavailable with the reason, never a zero", () => {
+    expect(quote(buyYt("sy", 29_000_000_000_000n), { plans: [] })).toEqual({ status: "unavailable", error: expect.stringMatching(/pool cannot absorb/) })
+    expect(quote(buyYt("sy"), { ms: market({ tokenizationBps: down }), plans: [] })).toEqual({
+      status: "unavailable",
+      error: "Could not read the tokenization fee (rpc down).",
+    })
+  })
+})
+
+describe("trade adapter #1 — sell YT: the pool's flash-redeem", () => {
+  const YT_100 = 1_000_000_000n
+  /** swap_yt_for_sy (market_pool lib.rs:342-380): recombine, less the exact-out PT cost. */
+  const curve = buyExactPt(A, YT_100)
+  const payout = previewSellYt(YT_100, ORACLE, curve.amountIn)
+
+  it("an SY receiver gets the recombined SY less the PT's cost, and the fixed APY falls (R2-15)", () => {
+    const q = quoted(quote(sellYt("sy")))
+    expect(payout).toBeGreaterThan(0n)
+    expect(q).toMatchObject({ kind: "sell_yt", out: payout, outToken: "sy", fee: curve.feeShares, feeToken: "sy", exactness: "indicative" })
+    expect(q.minOut).toBe(minAfterSlippage(payout, 50n))
+    expect(q.apyAfter).toBe(apy(impliedRate(curve.next)))
+    expect(q.apyAfter).toBeLessThan(q.apyBefore)
+    expect(q.capital).toBeUndefined()
+  })
+
+  it("a USDY receiver sells, then withdraws: the floor shown is step 1's SY", () => {
+    const rate = 10_200_000n
+    const req = sellYt("underlying")
+    const ms = market({ exchangeRate: live(rate) })
+    expect(plansFor(req, ms).map((p) => p.action)).toEqual(["sell_yt", "withdraw"])
+    const q = quoted(quote(req, { ms }))
+    expect(q).toMatchObject({ out: previewWithdraw(payout, rate), outToken: "underlying", exactness: "indicative", minOut: minAfterSlippage(payout, 50n), minOutToken: "sy" })
+    expect(q.swapOut).toEqual({ amount: payout, token: "sy", exactness: "indicative", step: 1 })
+  })
+
+  it("a simulated sale is exact", () => {
+    const q = quoted(quote(sellYt("sy"), { firstStep: { action: "sell_yt", output: { kind: "amount", value: payout - 10n } } }))
+    expect(q).toMatchObject({ out: payout - 10n, exactness: "simulated" })
+  })
+
+  it("a YT the pool would pay nothing for is not quoted", () => {
+    // A curve exponent of 1 prices PT at par: the PT bought back costs all a YT recombines into, plus the fee.
+    const late = { ...A, exponent: 10n ** 18n }
+    const r = quote(sellYt("sy"), { ms: market({ poolState: live(late) }) })
+    expect(r.status).toBe("unavailable")
+  })
+})
+
+describe("maxSpend — Max is the balance divided by the moved ratio (spec §4)", () => {
+  const quoteAt = (req: TradeRequest, ms = market()) => (amount: bigint) => quote({ ...req, amount }, { ms, plans: plansFor({ ...req, amount }, ms) })
+  const BALANCE = 100_000_000_000n // 10,000
+
+  it("with the field empty: from a reference solve, floored, and what it moves fits the balance", () => {
+    const at = quoteAt(buyYt("underlying"))
+    const ref = BALANCE / 100n
+    const refCapital = quoted(at(ref)).capital!
+    const r = maxSpend(at, BALANCE)
+    expect(r).toEqual({ ok: true, amount: (BALANCE * ref) / refCapital.moved })
+    if (!r.ok) return
+    expect(quoted(at(r.amount)).capital!.moved).toBeLessThanOrEqual(BALANCE)
+  })
+
+  it("from a typed spend larger than Max, it still never moves more than the balance", () => {
+    const at = quoteAt(buyYt("sy"))
+    const r = maxSpend(at, BALANCE, 5_000_000_000n)
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    expect(quoted(at(r.amount)).capital!.moved).toBeLessThanOrEqual(BALANCE)
+    expect(r.amount).toBeLessThan(5_000_000_000n)
+  })
+
+  it("a trade with no capital disclosure may spend the whole balance", () => {
+    expect(maxSpend(quoteAt(sellYt("sy")), BALANCE)).toEqual({ ok: true, amount: BALANCE })
   })
 })
