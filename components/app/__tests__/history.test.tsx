@@ -241,6 +241,23 @@ describe("history table", () => {
     expect(within(row).getByRole("link", { name: /continue/i }).getAttribute("href")).toBe("/app/markets/m1?tab=pt&side=buy")
   })
 
+  it("an interrupted LP route's Continue opens the LP tab on the side where its run resumes", () => {
+    const lp = (kind: "lp_keep_yt" | "lp_withdraw", id: string, at: number): RouteRun =>
+      route({ id, kind, request: { ...route().request, kind }, startedAt: at }, [
+        { action: "deposit", status: "confirmed", hash: H1 },
+        { action: "buy_pt", status: "pending" },
+      ])
+    writeRoute(lp("lp_keep_yt", "r-keep", 2))
+    writeRoute(lp("lp_withdraw", "r-out", 1))
+    render(<HistoryTable />)
+    const href = (label: string) =>
+      within(screen.getByText(label).closest("tr") as HTMLElement)
+        .getByRole("link", { name: /continue/i })
+        .getAttribute("href")
+    expect(href("Add liquidity, keep YT · 2 steps")).toBe("/app/markets/m1?tab=lp&side=deposit")
+    expect(href("Withdraw liquidity · 2 steps")).toBe("/app/markets/m1?tab=lp&side=withdraw")
+  })
+
   it("does not offer Continue on a finished or closed route", () => {
     writeRoute(route())
     writeRoute(route({ id: "r2", closed: true }, [{ action: "deposit", status: "confirmed", hash: H1 }, { action: "buy_pt", status: "pending" }]))

@@ -12,6 +12,7 @@ import {
   breakerReport,
   capCharge,
   evaluateGates,
+  routeCapBlocker,
   withEarlierCapCharges,
   withEarlierReports,
   type Blocker,
@@ -168,16 +169,24 @@ export function useTradeRoute({
     // R2-61: RiskControl counts every step of the route in the same window, and R2-62: every deposit
     // of the route (wrap_and_mint's included) is charged against the same deposit cap. So each later
     // step is checked with what the steps before it report and charge already added.
+    const drafts = plans.map(draftOf)
     let reported: bigint | undefined = firstDraft ? counted(0n, breakerReport(firstDraft.input, base), firstDraft.known) : 0n
     let charged: bigint | undefined = firstDraft ? counted(0n, capCharge(firstDraft.input), firstDraft.known) : 0n
-    plans.slice(1).forEach((plan, k) => {
+    // What the whole route deposits, for a cap refusal said at route level (undefined: not known).
+    const routeDeposits = drafts.reduce<bigint | undefined>((total, d) => counted(total, capCharge(d.input), d.known), 0n)
+    drafts.slice(1).forEach(({ input: draft, known }, k) => {
       const n = k + 2
-      const { input: draft, known } = draftOf(plan)
       const seen = withEarlierCapCharges(withEarlierReports(base, reported, n), charged, n)
       const found = evaluateGates(draft, seen).filter((b) => !LATER_STEP_SKIPS.has(b.code))
-      const label = ACTION_META[plan.action].label
-      const counts = (b: Blocker) => b.code === "risk" || b.code === "cap"
-      list.push(...found.map((b) => (counts(b) ? { ...b, message: `Step ${n} (${label}), counted after the steps before it: ${lowerFirst(b.message)}` } : b)))
+      const label = ACTION_META[draft.action].label
+      for (const b of found) {
+        if (b.code === "risk") list.push({ ...b, message: `Step ${n} (${label}), counted after the steps before it: ${lowerFirst(b.message)}` })
+        else if (b.code === "cap") {
+          // Said for the route: the steps before this one have not deposited anything yet.
+          const total = routeDeposits ?? (charged ?? 0n) + capCharge(draft)
+          list.push(routeCapBlocker(total, base.account) ?? b)
+        } else list.push(b)
+      }
       reported = counted(reported, breakerReport(draft, base), known)
       charged = counted(charged, capCharge(draft), known)
     })

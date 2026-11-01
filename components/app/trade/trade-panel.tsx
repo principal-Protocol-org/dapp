@@ -35,8 +35,8 @@ const SIDES: Record<TabId, { id: SideId; label: string }[]> = {
 const SIDE_TONE: Record<SideId, "buy" | "sell"> = { buy: "buy", deposit: "buy", sell: "sell", withdraw: "sell" }
 /**
  * The pressed side's tint is a tenth of its colour over the surface track: its text keeps at least
- * 4.5:1 in both themes (light: 4.96 green, 4.78 red; dark: 7.6 and 6.9), which a heavier tint, or the
- * page's ground under it, does not.
+ * 4.5:1 in both themes (measured in the browser: light 4.95 green and 4.77 red; dark 6.94 and 6.29),
+ * which a heavier tint, or the page's ground under it, does not.
  */
 const SIDE_BUY = "border-positive bg-positive/10 text-positive"
 const SIDE_SELL = "border-negative bg-negative/10 text-negative"

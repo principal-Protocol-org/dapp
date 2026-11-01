@@ -32,6 +32,26 @@ vi.mock("@/lib/protocol/stellar", async (orig) => ({
   // The fake reviews carry no real XDR; the route logs this hash before "signing".
   transactionEnvelopeHash: (xdr: string) => `hash-of-${xdr}`,
 }))
+// Switches for quotes the live adapter does not give today: no APY on a route that sells, or an APY
+// after that formats apart from the APY before on a trade the adapter says moves no price.
+const stub = vi.hoisted(() => ({ dropApy: false, nudgeApy: false }))
+vi.mock("@/lib/protocol/trade-adapter", async (orig) => {
+  const mod = await orig<typeof import("@/lib/protocol/trade-adapter")>()
+  const real = mod.currentContractsAdapter
+  return {
+    ...mod,
+    currentContractsAdapter: {
+      plan: real.plan,
+      quote: (...args: Parameters<typeof real.quote>) => {
+        const q = real.quote(...args)
+        if (q.status !== "live") return q
+        if (stub.dropApy) return { ...q, value: { ...q.value, apyBefore: undefined, apyAfter: undefined } }
+        if (stub.nudgeApy && q.value.apyBefore !== undefined) return { ...q, value: { ...q.value, apyAfter: q.value.apyBefore + 0.0001 } }
+        return q
+      },
+    },
+  }
+})
 vi.mock("@/lib/protocol/review", async (orig) => ({
   ...(await orig<object>()),
   prepareReview: mocks.prepareReview,
@@ -103,6 +123,8 @@ beforeEach(() => {
   installDefaults(mocks)
   mocks.manifest = usdyManifest as typeof mocks.manifest
   nav.search = ""
+  stub.dropApy = false
+  stub.nudgeApy = false
   mocks.accounts[A] = accountState({
     underlying: live(100_000n * UNIT),
     sy: live(100_000n * UNIT),
@@ -206,7 +228,9 @@ describe("LP tab — Deposit, Keep YT on", () => {
     await renderUi(<LpTab marketId="m1" side="deposit" />)
     await enter("You pay", "100")
     expect(screen.queryByText(/^This would pass your deposit cap/)).toBeNull()
-    expect(screen.getByText(/^Step 2 \(Deposit\), counted after the steps before it: this would pass your deposit cap/)).toBeTruthy()
+    // Said for the route, never as if step 1's planned mint were already deposited.
+    expect(within(gateList()).getByText("This route deposits 100 in total; your cap has 80 left (net of withdrawals). Lower the amount.")).toBeTruthy()
+    expect(screen.queryByText(/counted after the steps before it: this would pass your deposit cap/)).toBeNull()
     expect(reviewButton("Add liquidity (keep YT)").disabled).toBe(true)
     expect(mocks.prepareReview).not.toHaveBeenCalled()
   })
@@ -240,6 +264,53 @@ describe("LP tab — Deposit, Keep YT on", () => {
     expect((keepYt() as HTMLButtonElement).disabled).toBe(true)
     expect(screen.getByText(/Keep YT needs USDY/)).toBeTruthy()
     expect(screen.getByText("Balance: 100000 SY")).toBeTruthy()
+    // The LP-only refusal names the fix an SY payer can take: their Keep YT switch is off.
+    await enter("You pay", "100")
+    const reason = within(gateList()).getAllByRole("listitem")[0].textContent ?? ""
+    expect(reason).toMatch(/^Adding liquidity without keeping YT is unavailable on this release/)
+    expect(reason).toMatch(/Pay in USDY and turn on Keep YT/)
+    expect(reason).not.toMatch(/^.*\. Turn on Keep YT/)
+    expect(screen.queryByText(/Turn on Keep YT to add liquidity from USDY now/)).toBeNull()
+  })
+
+  it("keeps 0001's amount refusals, on Deposit and on Withdraw", async () => {
+    for (const side of ["deposit", "withdraw"] as const) {
+      const { unmount } = render(
+        <Harness>
+          <LpTab marketId="m1" side={side} />
+        </Harness>,
+      )
+      for (let i = 0; i < 3; i++) await settle()
+      const review = side === "deposit" ? "Add liquidity (keep YT)" : "Withdraw liquidity"
+      for (const [text, message] of [
+        ["1e3", /Exponents like 1e3 are not accepted/],
+        ["-1", /cannot be negative/],
+        ["1.12345678", /at most 7 digits after the point/],
+        ["0x10", /Enter a number using digits/],
+        ["200000", /More than your balance/],
+      ] as const) {
+        await enter("You pay", text)
+        expect(screen.getAllByText(message).length).toBeGreaterThan(0)
+        expect(reviewButton(review).disabled).toBe(true)
+        expect(mocks.simulateInvocation).not.toHaveBeenCalled()
+      }
+      unmount()
+    }
+  })
+
+  it("\"(unchanged)\" follows the adapter's word that the price does not move, not two percentages rounding alike", async () => {
+    stub.nudgeApy = true
+    await renderUi(<LpTab marketId="m1" side="deposit" />)
+    await enter("You pay", "100")
+    expect(detail("Price impact")).toBe("None")
+    expect(detail("Fixed APY")).toBe(`${apy(501023n)} (unchanged)`)
+  })
+
+  it("a deposit quote with no APY shows the Fixed APY row as Unavailable, never drops it", async () => {
+    stub.dropApy = true
+    await renderUi(<LpTab marketId="m1" side="deposit" />)
+    await enter("You pay", "100")
+    expect(detail("Fixed APY")).toBe("Unavailable")
   })
 
   it("the amount resets once a step reaches the network (R2-3)", async () => {
@@ -338,6 +409,20 @@ describe("LP tab — Withdraw", () => {
     const two = await screen.findByRole("dialog", { name: "Review route: Withdraw liquidity" })
     expect(stepsIn(two)).toHaveLength(2)
     expect(mocks.executeReview).not.toHaveBeenCalled()
+  })
+
+  it("a withdraw that sells, quoted with no APY, shows Unavailable and never the redeem story (R2-55)", async () => {
+    // Whether the PT is redeemed comes from the planned route (here: sold), never from the quote's
+    // optional fields.
+    stub.dropApy = true
+    await renderUi(<LpTab marketId="m1" side="withdraw" />)
+    await pick("Receive as", /SY/)
+    await enter("You pay", "1000")
+    expect(detail("Fixed APY")).toBe("Unavailable")
+    expect(detail("Fees")).toBe(`${amount(sale.feeShares)} SY`)
+    expect(screen.queryByText("Your PT")).toBeNull()
+    expect(screen.queryByText(/Redeemed, not sold/)).toBeNull()
+    expect(screen.queryByText(/redeemed/i)).toBeNull()
   })
 
   it("pool share before → after", async () => {

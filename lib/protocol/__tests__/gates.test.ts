@@ -3,7 +3,17 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import type { AccountState } from "../account-state"
 import { ACTION_META, type ActionId, type ActionInput } from "../actions"
 import type { ComplianceItem } from "../compliance"
-import { BLOCKER_ORDER, breakerReport, capCharge, evaluateGates, withEarlierCapCharges, withEarlierReports, type Blocker, type GateContext } from "../gates"
+import {
+  BLOCKER_ORDER,
+  breakerReport,
+  capCharge,
+  evaluateGates,
+  routeCapBlocker,
+  withEarlierCapCharges,
+  withEarlierReports,
+  type Blocker,
+  type GateContext,
+} from "../gates"
 import type { MarketState } from "../market-state"
 import { SCALE } from "../math"
 import type { SimulationOutcome } from "../stellar"
@@ -1046,6 +1056,23 @@ describe("withEarlierCapCharges — a later route step is checked with the earli
     // With the cap off there is nothing to verify.
     const off = withEarlierCapCharges(ctxWith((x) => (x.account!.depositCap = live(0n))), undefined, 3)
     expect(evaluateGates(inputFor("deposit"), off)).toEqual([])
+  })
+
+  it("a route whose deposits pass the cap together is refused for the route, with today's room (fix round 1)", () => {
+    const acc = healthyAccount()
+    acc.depositCap = live(100n * UNIT)
+    acc.netDeposited = live(85n * UNIT)
+    expect(routeCapBlocker(20n * UNIT, acc)).toEqual({
+      code: "cap",
+      message: "This route deposits 20 in total; your cap has 15 left (net of withdrawals). Lower the amount.",
+    })
+    // Over the cap already: no room, never a negative one.
+    acc.netDeposited = live(120n * UNIT)
+    expect(routeCapBlocker(20n * UNIT, acc)?.message).toMatch(/your cap has 0 left/)
+    // A cap that is off, or reads that are missing, give no such refusal.
+    expect(routeCapBlocker(20n * UNIT, { ...acc, depositCap: live(0n) })).toBeUndefined()
+    expect(routeCapBlocker(20n * UNIT, { ...acc, netDeposited: down() })).toBeUndefined()
+    expect(routeCapBlocker(20n * UNIT, undefined)).toBeUndefined()
   })
 
   it("does not touch the circuit breaker's windows, nor withEarlierReports the cap", () => {

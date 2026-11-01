@@ -636,6 +636,23 @@ describe("trade adapter #1 — LP Keep YT: the split at the pool's ratio", () =>
     expect(quote(keepYt(), { ms: noFee, plans: [] })).toEqual({ status: "unavailable", error: "Could not read the tokenization fee (rpc down)." })
   })
 
+  it("an amount too small to split, or a pool that would mint no LP for it, is disabled and Unavailable, never a throw", () => {
+    const tiny = market({ poolState: live({ ...A, totalLp: 1n }) })
+    for (const [req, ms] of [
+      [keepYt("underlying", 1n), market()],
+      [keepYt("underlying", 2n), market()],
+      // One LP for a million PT: 100 USDY's legs mint no LP at all.
+      [keepYt(), tiny],
+    ] as const) {
+      let plans: ReturnType<typeof currentContractsAdapter.plan> | undefined
+      expect(() => (plans = currentContractsAdapter.plan(req, { ...CTX, ms }))).not.toThrow()
+      expect(plans).toEqual({ disabled: expect.stringMatching(/too small to add any liquidity/) })
+      let r: Live<TradeQuote> | undefined
+      expect(() => (r = currentContractsAdapter.quote(req, { ms, slippageBps: 50n, plans: [] }))).not.toThrow()
+      expect(r).toEqual({ status: "unavailable", error: expect.stringMatching(/too small to add any liquidity/) })
+    }
+  })
+
   it("after maturity adding liquidity is closed, and says withdrawing still works", () => {
     const r = quote(keepYt(), { ms: market({ poolState: live({ ...A, secondsToMaturity: 0n }) }), plans: [] })
     expect(r).toEqual({ status: "unavailable", error: expect.stringMatching(/Adding liquidity closed at maturity.*withdraw/) })
@@ -653,6 +670,17 @@ describe("trade adapter #1 — LP only (Keep YT off)", () => {
     const reason = ACTION_META.add_liquidity_sy.disabled!.reason
     expect(reason).not.toMatch(/PT and SY together/)
     expect(reason).toMatch(/Keep YT/)
+  })
+
+  it("an SY payer, whose Keep YT is off (R2-22), is told to pay in USDY and turn Keep YT on", () => {
+    const sy: TradeRequest = { kind: "lp_only", amount: USDY_100_LP, pay: "sy", receive: "sy" }
+    const plan = currentContractsAdapter.plan(sy, { ...CTX, ms: market() })
+    const q = quote(sy, { plans: [] })
+    for (const reason of [!Array.isArray(plan) ? plan.disabled : "", q.status === "unavailable" ? q.error : ""]) {
+      expect(reason).toMatch(/^Adding liquidity without keeping YT is unavailable on this release/)
+      expect(reason).toMatch(/Pay in USDY and turn on Keep YT/)
+      expect(reason).not.toMatch(/\. Turn on Keep YT/)
+    }
   })
 })
 
