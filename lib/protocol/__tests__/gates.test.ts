@@ -882,6 +882,35 @@ describe("gate matrix", () => {
 
 // ---------------------------------------------------------------- Review Focus 1 (R23)
 
+describe("Buy YT is gated on what it moves, not on what it spends (R2-57)", () => {
+  // Today's Buy YT moves about 42x its spend (trade-adapter's state A: 100 SY spent mint from
+  // 4215.6518764 SY), and its route carries those moved amounts as the step amounts: the deposit
+  // step's is the USDY deposited, the buy step's the solver's sy_in. The gates read the step amount.
+  const SPEND = 100n * UNIT
+  const SY_IN = 42_156_518_764n
+
+  it("a buy_yt step reports its sy_in, at the SY rate, to the circuit breaker", () => {
+    const room200 = (c: GateContext) => {
+      c.market.exchangeRate = live(SCALE)
+      c.market.cb.limit = live(1_000n * UNIT)
+      c.market.cb.volume = live(800n * UNIT)
+    }
+    // The spend alone would fit the 200 left in the window; what the step moves does not.
+    expect(gates("buy_yt", room200, { amount: SPEND })).toEqual([])
+    expect(gates("buy_yt", room200, { amount: SY_IN })).toEqual([{ code: "risk", message: expect.stringContaining("this adds 4215.6518764") }])
+  })
+
+  it("a USDY payer's deposit step is checked against the deposit cap with the deposit, not the spend", () => {
+    // 6000 of the cap left: a 200 USDY spend fits, the 8431.30 USDY its deposit step moves does not.
+    const room6000 = (c: GateContext) => {
+      c.account!.depositCap = live(10_000n * UNIT)
+      c.account!.netDeposited = live(4_000n * UNIT)
+    }
+    expect(gates("deposit", room6000, { amount: 2n * SPEND })).toEqual([])
+    expect(codes(gates("deposit", room6000, { amount: 2n * SY_IN }))).toEqual(["cap"])
+  })
+})
+
 describe("unavailable read blocks", () => {
   type Dep = { field: string; set: Mutate; label: RegExp; needs: ActionId[] }
   const m = (set: (market: MarketState) => void): Mutate => (c) => set(c.market)
