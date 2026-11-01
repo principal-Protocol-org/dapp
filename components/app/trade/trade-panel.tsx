@@ -11,10 +11,8 @@ import { LpTab } from "@/components/app/trade/lp-tab"
 import { PtTab } from "@/components/app/trade/pt-tab"
 import { QuickActions, type QuickActionId } from "@/components/app/trade/quick-actions"
 import { YtTab } from "@/components/app/trade/yt-tab"
-import { useManifest } from "@/components/app/manifest-provider"
 import { useHydrated } from "@/hooks/use-hydrated"
 import { useMatured } from "@/hooks/use-matured"
-import { getMarket } from "@/lib/protocol/manifest"
 import type { Market } from "@/lib/protocol/types"
 
 type TabId = "pt" | "yt" | "lp"
@@ -92,7 +90,6 @@ function TradePanelView({ marketId }: { marketId: string }) {
   const urlTab = params?.get("tab")
   const urlSide = params?.get("side")
   const matured = useMatured(marketId)
-  const market = getMarket(useManifest(), marketId)
   const panels = usePanels(marketId, bodies)
   const [chosenTab, setChosenTab] = useState<TabId | null>(null)
   const [chosenSide, setChosenSide] = useState<SideId | null>(null)
@@ -102,7 +99,6 @@ function TradePanelView({ marketId }: { marketId: string }) {
   const tab: TabId = chosenTab ?? (isTab(urlTab) ? urlTab : "pt")
   // A tab the user picked starts on its first side; the URL's side applies to the URL's tab.
   const side = sideOr(tab, chosenSide ?? (chosenTab ? null : urlSide), matured === true)
-  const code = market?.underlying.code ?? "USDY"
   // After maturity the PT tab offers Redeem only (spec §3), through 0001's panel, and the YT tab
   // says its trading has closed (R2-60).
   const ptTrade = tab === "pt" && !matured
@@ -173,12 +169,6 @@ function TradePanelView({ marketId }: { marketId: string }) {
           ) : null}
         </TabsContent>
       </Tabs>
-      <p className="flex flex-wrap gap-x-4 gap-y-1 text-sm text-ink-muted">
-        {/* Every tab pays the underlying directly, so none needs SY first; Quick actions still deposits. */}
-        <button type="button" onClick={() => setTool("split")} className="underline underline-offset-2 hover:text-ink">
-          Split {code} into PT + YT
-        </button>
-      </p>
     </section>
   )
 }

@@ -10,7 +10,8 @@ import { PreviewList } from "@/components/app/actions/preview-lines"
 import { TxNoticeView } from "@/components/app/actions/tx-feedback"
 import { UNAVAILABLE } from "@/components/app/live"
 import { RouteFlow } from "@/components/app/route/route-flow"
-import { routeNote } from "@/components/app/trade/route-note"
+import { InfoTip, LabelWithTip } from "@/components/app/info-tip"
+import { routeNote, signaturesLine } from "@/components/app/trade/route-note"
 import { TokenPicker, type PayToken } from "@/components/app/trade/token-picker"
 import { useTradeRoute } from "@/components/app/trade/use-trade-route"
 import { useManifest } from "@/components/app/manifest-provider"
@@ -106,8 +107,20 @@ export function LpTab({ marketId, side }: { marketId: string; side: LpSide }) {
   // planned, as `routeNote` and the adapter read it, never from which quote fields are present (R2-55).
   const redeems = route.plans.some((p) => p.action === "redeem")
   const ctx: LineContext = { code, slippage: formatBps(slippageBps), steps, paid: trade.amount, connected: route.source !== null, amountText }
-  const details: PreviewLine[] = q ? (side === "deposit" ? depositLines(q, ctx) : withdrawLines(q, ctx, redeems)) : []
   const note = routeNote({ plans: route.plans, q, connected: route.source !== null, pending: route.sim.pending })
+  const details: PreviewLine[] = q ? (side === "deposit" ? depositLines(q, ctx) : withdrawLines(q, ctx, redeems)) : []
+  if (q && side === "withdraw" && redeems && token === "sy") {
+    details.push({
+      label: "Redeemed part",
+      value: q.alsoOut ? amountText(q.alsoOut.amount, q.alsoOut.token) : code,
+      hint: q.alsoOut
+        ? `The redeemed part, ${amountText(q.alsoOut.amount, q.alsoOut.token)}, is paid in ${unitOf(q.alsoOut.token)} even when you receive SY: after maturity your PT is redeemed, not sold.`
+        : `The redeemed part is paid in ${code} even when you receive SY: after maturity your PT is redeemed, not sold.`,
+    })
+  }
+  if (q) details.push({ label: "LP earns", value: "PT convergence", hint: LP_NOTE })
+  if (q && note) details.push(signaturesLine(note))
+  const exactLabel = q?.exactness === "simulated" ? "Exact (simulated)" : "Indicative"
   const receivedText = q ? `${amountText(q.out, q.outToken)}${q.alsoOut ? ` + ${amountText(q.alsoOut.amount, q.alsoOut.token)}` : ""}` : route.quote ? UNAVAILABLE : null
 
   return (
@@ -148,13 +161,14 @@ export function LpTab({ marketId, side }: { marketId: string; side: LpSide }) {
                 checked={keep}
                 disabled={token !== "underlying"}
                 onChange={() => setKeepYt((on) => !on)}
-                hint={
+                reason={
                   token !== "underlying"
                     ? `Keep YT needs ${code}: it splits ${code} into PT + YT with the Router, which takes ${code}. Pay in ${code} to keep the YT.`
                     : keep
-                      ? `Part of your ${code} is split into PT + YT; the PT and the rest go into the pool at its ratio, and you keep the YT.`
+                      ? undefined
                       : `LP only: all your ${code} would go into the pool and no YT kept. It is not offered on this release.`
                 }
+                hint={keep ? `Part of your ${code} is split into PT + YT; the PT and the rest go into the pool at its ratio, and you keep the YT.` : undefined}
               />
             ) : null}
 
@@ -169,13 +183,6 @@ export function LpTab({ marketId, side }: { marketId: string; side: LpSide }) {
               >
                 {receivedText}
               </output>
-              {q && side === "withdraw" && redeems && token === "sy" ? (
-                <p className="text-xs text-ink-muted wrap-anywhere">
-                  {q.alsoOut
-                    ? `The redeemed part, ${amountText(q.alsoOut.amount, q.alsoOut.token)}, is paid in ${unitOf(q.alsoOut.token)} even when you receive SY: after maturity your PT is redeemed, not sold.`
-                    : `The redeemed part is paid in ${code} even when you receive SY: after maturity your PT is redeemed, not sold.`}
-                </p>
-              ) : null}
             </div>
 
             <section aria-label="Liquidity details" className="grid gap-2">
@@ -191,14 +198,15 @@ export function LpTab({ marketId, side }: { marketId: string; side: LpSide }) {
                 <p className="text-sm text-ink wrap-anywhere">{`${UNAVAILABLE}: ${route.quote.error}`}</p>
               ) : q ? (
                 <>
-                  <p className="label">{q.exactness === "simulated" ? "Exact (simulated)" : "Indicative"}</p>
+                  <p className="label">
+                    <LabelWithTip label={exactLabel} tip={note?.exactness ?? undefined} />
+                  </p>
                   <PreviewList lines={details} />
                 </>
               ) : (
                 <p className="text-sm text-ink-muted">Enter an amount to see the details.</p>
               )}
-              {note ? <p className="text-xs text-ink-muted">{note}</p> : null}
-              <p className="text-xs text-ink-muted">{LP_NOTE}</p>
+              {!q && note ? <PreviewList lines={[signaturesLine(note)]} /> : null}
             </section>
           </>
         )}
@@ -223,20 +231,24 @@ export function LpTab({ marketId, side }: { marketId: string; side: LpSide }) {
   )
 }
 
-/** The Keep YT switch (spec §3), with what it does now, or why it is off. */
-function KeepYtSwitch({ id, checked, disabled, onChange, hint }: { id: string; checked: boolean; disabled: boolean; onChange: () => void; hint: string }) {
+/**
+ * The Keep YT switch (spec §3). Why it is off (a payment in SY, or the R47 refusal) stays visible
+ * under it; what it does while on goes behind an info tip (R2-65).
+ */
+function KeepYtSwitch({ id, checked, disabled, onChange, hint, reason }: { id: string; checked: boolean; disabled: boolean; onChange: () => void; hint?: string; reason?: string }) {
   return (
     <div className="grid gap-1">
       <div className="flex items-center justify-between gap-3">
-        <span id={id} className="text-sm leading-none font-medium text-ink">
-          Keep YT
+        <span id={id} className="inline-flex items-center gap-1.5 text-sm leading-none font-medium text-ink">
+          <span>Keep YT</span>
+          {hint ? <InfoTip label="Keep YT">{hint}</InfoTip> : null}
         </span>
         <button
           type="button"
           role="switch"
           aria-checked={checked}
-          aria-labelledby={id}
-          aria-describedby={`${id}-hint`}
+          aria-label="Keep YT"
+          aria-describedby={reason ? `${id}-hint` : undefined}
           disabled={disabled}
           onClick={onChange}
           className={cn(
@@ -247,9 +259,11 @@ function KeepYtSwitch({ id, checked, disabled, onChange, hint }: { id: string; c
           <span aria-hidden="true" className={cn("inline-block size-4 rounded-full bg-surface shadow-sm transition-transform", checked ? "translate-x-6" : "translate-x-1")} />
         </button>
       </div>
-      <p id={`${id}-hint`} className="text-xs text-ink-muted wrap-anywhere">
-        {hint}
-      </p>
+      {reason ? (
+        <p id={`${id}-hint`} className="text-xs text-ink-muted wrap-anywhere">
+          {reason}
+        </p>
+      ) : null}
     </div>
   )
 }

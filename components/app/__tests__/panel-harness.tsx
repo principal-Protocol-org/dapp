@@ -77,7 +77,23 @@ export const reviewButton = (label: string) => screen.getByRole("button", { name
 export const gateList = () => screen.getByText("Signing is off").parentElement!
 
 /** The value shown beside a preview label, or the error if the label is missing. */
-export const valueOf = (label: string | RegExp) => screen.getByText(label).nextSibling?.textContent ?? null
+export const valueOf = (label: string | RegExp) => cellAfter(screen.getByText(label))
+
+/** The value cell beside a label: the label may sit in a <dt> beside an info tip (R2-65). */
+export const cellAfter = (label: HTMLElement) => (label.closest("dt") ?? label).nextSibling?.textContent ?? null
+
+/**
+ * The text of the info tip behind "More about <label>": opens it with a click (the tap path), reads the
+ * tooltip Radix portals into document.body, and closes it again with Escape.
+ */
+export async function tipOf(label: string | RegExp, within_: HTMLElement | Document = document): Promise<string> {
+  const name = typeof label === "string" ? `More about ${label}` : new RegExp(`More about ${label.source}`)
+  const button = within(within_ instanceof Document ? document.body : within_).getByRole("button", { name })
+  await user().click(button)
+  const text = (await screen.findByRole("tooltip")).textContent ?? ""
+  await user().keyboard("{Escape}")
+  return text
+}
 
 /** The rows of the preview section headed `heading` ("Indicative", "Exact (simulated)", "Market (indicative)"…). */
 export function section(heading: string): HTMLElement {
@@ -87,7 +103,7 @@ export function section(heading: string): HTMLElement {
   return list
 }
 
-export const valueIn = (heading: string, label: string | RegExp) => within(section(heading)).getByText(label).nextSibling?.textContent ?? null
+export const valueIn = (heading: string, label: string | RegExp) => cellAfter(within(section(heading)).getByText(label))
 
 function fakeReview(input: ActionInput): Review {
   const now = Date.now()

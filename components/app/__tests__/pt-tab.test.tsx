@@ -55,7 +55,7 @@ vi.mock("@/lib/protocol/review", async (orig) => ({
 }))
 
 import { A, MANIFEST, MARKET } from "./panel-mocks"
-import { enter, installDefaults, renderUi, settle, simulateReturns, teardown, user } from "./panel-harness"
+import { enter, installDefaults, renderUi, settle, simulateReturns, teardown, tipOf, user } from "./panel-harness"
 import { PtTab } from "../trade/pt-tab"
 import { TradePanel } from "../trade/trade-panel"
 
@@ -103,7 +103,7 @@ beforeEach(() => {
 afterEach(teardown)
 
 /** The value beside a details label. */
-const detail = (label: string) => within(screen.getByRole("region", { name: "Trading details" })).getByText(label).nextSibling?.textContent
+const detail = (label: string) => within(screen.getByRole("region", { name: "Trading details" })).getByText(label).closest("dt")?.nextSibling?.textContent
 const received = () => screen.getByLabelText("You receive (preview)").textContent
 const picker = (name: string) => screen.getByRole("radiogroup", { name })
 const pick = async (group: string, option: RegExp) => {
@@ -121,7 +121,10 @@ describe("PT tab — Buy", () => {
     // 100 USDY deposit to 100 SY at an SY rate of 1, which buy 107.0237019 PT on the curve.
     expect(received()).toBe("107.0237019 PT")
     // 107.0237019 PT at the pool's 0.9798253 USD each, in USDY at 1.05: 99.8709817 USDY.
-    expect(screen.getByText("Worth about 99.8709817 USDY today, at the pool's price.")).toBeTruthy()
+    expect(detail("Value today")).toBe("≈ 99.8709817 USDY")
+    expect(await tipOf("Value today")).toMatch(/at the pool's price/)
+    // The old sentence is no longer inline text.
+    expect(screen.queryByText(/Worth about/)).toBeNull()
 
     await pick("Pay with", /SY/)
     expect(screen.getByText("Balance: 1000 SY")).toBeTruthy()
@@ -149,9 +152,11 @@ describe("PT tab — Buy", () => {
     await renderUi(<PtTab marketId="m1" side="buy" />)
     await pick("Pay with", /SY/)
     await enter("You pay", "100.1")
-    expect(screen.getByText("At maturity: +$5.53 (5.26%), fixed in USD whatever USDY's price does.")).toBeTruthy()
+    expect(detail("At maturity")).toBe("+$5.53 (5.26%)")
+    const payoffTip = await tipOf("At maturity")
+    expect(payoffTip).toMatch(/Fixed in USD whatever USDY's price does/)
     // $5.53 at 1.05 USD per USDY.
-    expect(screen.getByText(/About 5\.2666 USDY at today's USDY price \(indicative\)/)).toBeTruthy()
+    expect(payoffTip).toMatch(/About 5\.2666 USDY at today's USDY price \(indicative\)/)
   })
 
   it("simulated output replaces the indicative one and the APY after is recomputed from it", async () => {
@@ -178,14 +183,15 @@ describe("PT tab — Buy", () => {
     simulateReturns(mocks, 1_000_000_000n)
     await renderUi(<PtTab marketId="m1" side="buy" />)
     await enter("You pay", "100")
-    expect(
-      screen.getByText(/This takes 2 signatures, one per step: step 1, Deposit \(you give USDY, you get SY\); step 2, Buy PT \(you give SY, you get PT\)\./),
-    ).toBeTruthy()
+    // The count is the row's value, from the planned steps; the steps are behind its tip.
+    expect(detail("Signatures")).toBe("2")
+    expect(await tipOf("Signatures")).toMatch(/This takes 2 signatures, one per step: step 1, Deposit \(you give USDY, you get SY\); step 2, Buy PT \(you give SY, you get PT\)\./)
 
     await pick("Pay with", /SY/)
     await settle(400)
     await settle()
-    expect(screen.getByText(/This is one step, one signature: Buy PT \(you give SY, you get PT\)\./)).toBeTruthy()
+    expect(detail("Signatures")).toBe("1")
+    expect(await tipOf("Signatures")).toMatch(/This is one step, one signature: Buy PT \(you give SY, you get PT\)\./)
     await user().click(screen.getByRole("button", { name: "Review Buy PT" }))
     await settle()
     const dialog = await screen.findByRole("dialog", { name: "Review route: Buy PT" })
@@ -275,17 +281,20 @@ describe("PT tab — Sell", () => {
     await enter("You pay", "100")
     expect(received()).toBe("93.1966515 USDY")
     // The USDY comes from step 2's withdraw at today's SY rate: never shown as exact.
-    expect(screen.getByText("Indicative: the steps after step 1 turn its SY into USDY at today's rate.")).toBeTruthy()
+    expect(await tipOf("Indicative")).toContain("Indicative: the steps after step 1 turn its SY into USDY at today's rate.")
+    expect(screen.queryByText(/the steps after step 1 turn/)).toBeNull()
     // Selling PT raises the fixed APY (R2-15).
     expect(detail("Fixed APY")).toBe(`${apy(501023n)} → ${apy(503687n)}`)
     expect(detail("Fees")).toBe("0.1150419 USDY")
     // The floor shown is step 1's, in SY: step 2's does not exist before it is prepared.
     expect(detail("Minimum received")).toBe("92.7306682 SY")
-    expect(screen.getByText(/This takes 2 signatures, one per step: step 1, Sell PT \(you give PT, you get SY\); step 2, Withdraw \(you give SY, you get USDY\)\./)).toBeTruthy()
+    expect(detail("Signatures")).toBe("2")
+    expect(await tipOf("Signatures")).toMatch(/This takes 2 signatures, one per step: step 1, Sell PT \(you give PT, you get SY\); step 2, Withdraw \(you give SY, you get USDY\)\./)
 
     await pick("Receive as", /SY/)
     expect(received()).toBe("93.1966515 SY")
-    expect(screen.getByText(/This is one step, one signature: Sell PT \(you give PT, you get SY\)\./)).toBeTruthy()
+    expect(detail("Signatures")).toBe("1")
+    expect(await tipOf("Signatures")).toMatch(/This is one step, one signature: Sell PT \(you give PT, you get SY\)\./)
     expect(screen.queryByText(/At maturity/)).toBeNull()
   })
 })
@@ -298,7 +307,8 @@ describe("PT tab — whatever the route's shape", () => {
     await renderUi(<PtTab marketId="m1" side="buy" />)
     await enter("You pay", "100")
     // The copy comes from the plan: one step, never "step 1 …, step 2 …".
-    expect(screen.getByText(/This is one step, one signature: Buy PT \(you give USDY, you get PT\)\./)).toBeTruthy()
+    expect(detail("Signatures")).toBe("1")
+    expect(await tipOf("Signatures")).toMatch(/This is one step, one signature: Buy PT \(you give USDY, you get PT\)\./)
     expect(screen.queryByText(/step 2/i)).toBeNull()
     expect(screen.getByText("Indicative")).toBeTruthy()
     expect(received()).toBe("107.0237019 PT")
@@ -307,7 +317,7 @@ describe("PT tab — whatever the route's shape", () => {
     await settle()
     expect(screen.getByText("Exact (simulated)")).toBeTruthy()
     expect(received()).toBe("106.0000 PT")
-    expect(screen.getByText(/The amount you receive is exact: it was simulated as your account\./)).toBeTruthy()
+    expect(await tipOf("Exact (simulated)")).toMatch(/The amount you receive is exact: it was simulated as your account\./)
     // The one step was simulated with the USDY typed.
     expect(mocks.simulateInvocation.mock.calls.at(-1)?.[0].invocation.functionName).toBe("swap_sy_for_pt")
   })

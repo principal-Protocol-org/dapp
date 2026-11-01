@@ -55,7 +55,7 @@ vi.mock("@/lib/protocol/review", async (orig) => ({
 }))
 
 import { A, MANIFEST, MARKET } from "./panel-mocks"
-import { enter, gateList, installDefaults, renderUi, settle, simulateReturns, teardown, user } from "./panel-harness"
+import { enter, gateList, installDefaults, renderUi, settle, simulateReturns, teardown, tipOf, user } from "./panel-harness"
 import { YtTab } from "../trade/yt-tab"
 import { TradePanel } from "../trade/trade-panel"
 
@@ -126,7 +126,7 @@ beforeEach(() => {
 afterEach(teardown)
 
 /** The value beside a details label. */
-const detail = (label: string) => within(screen.getByRole("region", { name: "Trading details" })).getByText(label).nextSibling?.textContent
+const detail = (label: string) => within(screen.getByRole("region", { name: "Trading details" })).getByText(label).closest("dt")?.nextSibling?.textContent
 const received = () => screen.getByLabelText("You receive (preview)").textContent
 const picker = (name: string) => screen.getByRole("radiogroup", { name })
 const pick = async (group: string, option: RegExp) => {
@@ -162,9 +162,14 @@ describe("YT tab — Buy", () => {
     const back = previewWithdraw(r.syBack, SCALE)
     await renderUi(<YtTab marketId="m1" side="buy" />)
     await enter("You pay", "100")
-    expect(screen.getByText(`Moves ${amount(moved)} USDY, spends ${amount(moved - back)} USDY; ${amount(back)} come back in step 3.`)).toBeTruthy()
+    expect(detail("Moves")).toBe(`${amount(moved)} USDY`)
+    expect(detail("Spends")).toBe(`${amount(moved - back)} USDY`)
+    // The step number comes from the plan (R2-59), not a literal.
+    expect(detail("Comes back (step 3)")).toBe(`${amount(back)} USDY`)
     // Never leverage × spend: the pool fee makes sy_in well under it.
-    expect(screen.queryByText(/Moves 4,500/)).toBeNull()
+    expect(detail("Moves")).not.toMatch(/4,500/)
+    expect(await tipOf("Moves")).toMatch(/your balance must cover what is moved, not only what is spent/)
+    expect(screen.queryByText(/Buying YT today mints/)).toBeNull()
   })
 
   it("max divides balance by moved ratio, from a reference solve when the field is empty", async () => {
@@ -303,13 +308,15 @@ describe("YT tab — Buy", () => {
     await renderUi(<YtTab marketId="m1" side="buy" />)
     await enter("You pay", "100")
     const yieldOn = (r.ytOut * SCALE) / ORACLE
-    expect(
-      screen.getByText(
-        `You receive USDY's variable yield on ${amount(yieldOn)} USDY until maturity, for ${amount(spent)} USDY. You gain if USDY's average APY until then exceeds ${formatPercent(e)}. At maturity the YT is worth 0.`,
-      ),
-    ).toBeTruthy()
-    expect(screen.getByText(`Indicative: ${amount(yieldOn)} USDY is your ${amount(r.ytOut)} YT (USD) at today's USDY oracle rate.`)).toBeTruthy()
-    expect(detail("Effective implied APY")).toBe(formatPercent(e))
+    expect(await tipOf("Break-even APY")).toBe(
+      `You receive USDY's variable yield on ${amount(yieldOn)} USDY until maturity, for ${amount(spent)} USDY. You gain if USDY's average APY until then exceeds ${formatPercent(e)}.`,
+    )
+    // "At maturity the YT is worth 0" is a visible row, with the indicative USDY figure in its tip.
+    expect(detail("At maturity")).toBe("YT worth 0")
+    expect(await tipOf("At maturity")).toMatch(
+      new RegExp(`Indicative: ${amount(yieldOn)} USDY is your ${amount(r.ytOut)} YT \\(USD\\) at today's USDY oracle rate\\.`),
+    )
+    expect(detail("Break-even APY")).toBe(formatPercent(e))
   })
 
   it("details: the fixed APY rises, with leverage, fees, the minimum YT and the most it may spend", async () => {
@@ -338,15 +345,20 @@ describe("YT tab — Buy", () => {
     await pick("Pay with", /SY/)
     expect(screen.getByText("Balance: 100000 SY")).toBeTruthy()
     await enter("You pay", "100")
-    expect(screen.getByText(/This is one step, one signature: Buy YT \(you give SY, you get YT\)\./)).toBeTruthy()
-    expect(screen.getByText(`Moves ${amount(r.syIn)} SY, spends ${amount(r.netCost)} SY; ${amount(r.syBack)} come back in step 1.`)).toBeTruthy()
+    expect(detail("Signatures")).toBe("1")
+    expect(await tipOf("Signatures")).toMatch(/This is one step, one signature: Buy YT \(you give SY, you get YT\)\./)
+    expect(detail("Moves")).toBe(`${amount(r.syIn)} SY`)
+    expect(detail("Spends")).toBe(`${amount(r.netCost)} SY`)
+    expect(detail("Comes back (step 1)")).toBe(`${amount(r.syBack)} SY`)
     expect(screen.getByText("Indicative")).toBeTruthy()
 
     answer({ ok: true, retval: [r.ytOut - 5n, r.syBack - 7n], latestLedger: 1, minResourceFee: "100" })
     await settle()
     expect(screen.getByText("Exact (simulated)")).toBeTruthy()
     expect(received()).toBe(`${amount(r.ytOut - 5n)} YT`)
-    expect(screen.getByText(`Moves ${amount(r.syIn)} SY, spends ${amount(r.netCost + 7n)} SY; ${amount(r.syBack - 7n)} come back in step 1.`)).toBeTruthy()
+    expect(detail("Moves")).toBe(`${amount(r.syIn)} SY`)
+    expect(detail("Spends")).toBe(`${amount(r.netCost + 7n)} SY`)
+    expect(detail("Comes back (step 1)")).toBe(`${amount(r.syBack - 7n)} SY`)
   })
 
   it("Buy with SY reaches the route review on its one step, sized by the solver", async () => {
@@ -381,9 +393,12 @@ describe("YT tab — Buy", () => {
     stub.noBreakEven = true
     await renderUi(<YtTab marketId="m1" side="buy" />)
     await enter("You pay", "100")
-    expect(detail("Effective implied APY")).toBe("Unavailable")
-    expect(screen.getByText(/The break-even rate is unavailable: this app could not work it out from these amounts\. At maturity the YT is worth 0\./)).toBeTruthy()
-    expect(screen.queryByText(/You gain if USDY's average APY until then exceeds/)).toBeNull()
+    expect(detail("Break-even APY")).toBe("Unavailable")
+    // The reason stays reachable in the row's tip; "worth 0 at maturity" is its own visible row.
+    const reason = await tipOf("Break-even APY")
+    expect(reason).toMatch(/The break-even rate is unavailable: this app could not work it out from these amounts\./)
+    expect(reason).not.toMatch(/You gain if USDY's average APY until then exceeds/)
+    expect(detail("At maturity")).toBe("YT worth 0")
   })
 
   it("a solver that throws makes the quote Unavailable and the route disabled, never 0 YT", async () => {
@@ -456,15 +471,14 @@ describe("YT tab — Sell", () => {
     expect(within(picker("Receive as")).getByRole("radio", { name: "USDY" }).getAttribute("aria-checked")).toBe("true")
     await enter("You pay", "100")
     expect(received()).toBe(`${amount(previewWithdraw(payout, SCALE))} USDY`)
-    expect(
-      screen.getByText(/This takes 2 signatures, one per step: step 1, Sell YT \(you give YT, you get SY\); step 2, Withdraw \(you give SY, you get USDY\)\./),
-    ).toBeTruthy()
+    expect(detail("Signatures")).toBe("2")
+    expect(await tipOf("Signatures")).toMatch(/This takes 2 signatures, one per step: step 1, Sell YT \(you give YT, you get SY\); step 2, Withdraw \(you give SY, you get USDY\)\./)
     // Selling YT buys PT from the pool: the fixed APY falls (R2-15).
     const after = impliedRate(buyExactPt(POOL, ytIn).next)
     expect(after).toBeLessThan(501023n)
     expect(detail("Fixed APY")).toBe(`${apy(501023n)} → ${apy(after)}`)
     expect(detail("Minimum received")).toBe(`${amount(minAfterSlippage(payout, 50n))} SY`)
-    expect(screen.queryByText(/^Moves /)).toBeNull()
+    expect(screen.queryByText("Moves")).toBeNull()
     await user().click(reviewButton("Sell YT"))
     await settle()
     const dialog = await screen.findByRole("dialog", { name: "Review route: Sell YT" })
@@ -475,7 +489,8 @@ describe("YT tab — Sell", () => {
 
     await pick("Receive as", /SY/)
     expect(received()).toBe(`${amount(payout)} SY`)
-    expect(screen.getByText(/This is one step, one signature: Sell YT \(you give YT, you get SY\)\./)).toBeTruthy()
+    expect(detail("Signatures")).toBe("1")
+    expect(await tipOf("Signatures")).toMatch(/This is one step, one signature: Sell YT \(you give YT, you get SY\)\./)
     await user().click(reviewButton("Sell YT"))
     await settle()
     const one = await screen.findByRole("dialog", { name: "Review route: Sell YT" })
