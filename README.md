@@ -237,3 +237,8 @@ Fine on Testnet; each needs a change before mainnet traffic (R2-79).
 - **Step quote against the route preview.** A later step is signed with the floor from its own fresh
   simulation, which the step review shows. Warn when that quote is worse than the route preview by
   more than the slippage setting.
+- **Refundable-fee margin.** A transaction's Soroban resource fee is the simulation's own figure,
+  with no margin. If ledger state moves between simulation and inclusion, a step can fail with
+  `invokeHostFunctionInsufficientRefundableFee` (seen once in the integration suite, then passing on
+  retry). The app already says "prepare it again" and the route stays continuable. Add a small
+  refundable-fee margin under the existing fee cap (R2-80).
