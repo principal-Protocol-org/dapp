@@ -152,6 +152,38 @@ describe("TradePanel tabs", () => {
   })
 })
 
+describe("Side toggle", () => {
+  const classes = (el: HTMLElement) => el.className.split(/\s+/)
+  const GREEN = ["border-positive", "bg-positive/10", "text-positive"]
+  const RED = ["border-negative", "bg-negative/10", "text-negative"]
+  const OFF = ["border-transparent", "text-ink-muted", "hover:text-ink"]
+  const tinted = (el: HTMLElement) => classes(el).some((c) => /positive|negative/.test(c))
+
+  it("spans the column in two equal cells: green on a pressed Buy or Deposit, red on a pressed Sell or Withdraw", async () => {
+    render(<TradePanel marketId="m1" />)
+    await screen.findByText("pt tab: buy")
+    const group = () => screen.getByRole("group", { name: "Side" })
+    expect(classes(group())).toEqual(expect.arrayContaining(["grid", "w-full", "grid-cols-2", "gap-1"]))
+    const side = (name: string) => within(group()).getByRole("button", { name }) as HTMLButtonElement
+
+    for (const [tab, green, red] of [["PT", "Buy", "Sell"], ["YT", "Buy", "Sell"], ["LP", "Deposit", "Withdraw"]] as const) {
+      await userEvent.click(screen.getByRole("tab", { name: tab }))
+      for (const name of [green, red]) expect(classes(side(name))).toEqual(expect.arrayContaining(["w-full", "min-h-10", "font-medium"]))
+      expect(side(green).getAttribute("aria-pressed")).toBe("true")
+      expect(classes(side(green))).toEqual(expect.arrayContaining(GREEN))
+      expect(classes(side(red))).toEqual(expect.arrayContaining(OFF))
+      expect(tinted(side(red))).toBe(false)
+      await userEvent.click(side(red))
+      expect(side(red).getAttribute("aria-pressed")).toBe("true")
+      expect(classes(side(red))).toEqual(expect.arrayContaining(RED))
+      expect(classes(side(green))).toEqual(expect.arrayContaining(OFF))
+      expect(tinted(side(green))).toBe(false)
+      // The focus ring stays.
+      expect(classes(side(red))).toEqual(expect.arrayContaining(["focus-visible:outline-2", "focus-visible:outline-ring"]))
+    }
+  })
+})
+
 describe("TokenPicker", () => {
   it("offers USDY and USDY SY, with an SY badge", () => {
     const onChange = vi.fn()
