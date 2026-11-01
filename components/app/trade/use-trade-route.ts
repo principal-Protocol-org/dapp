@@ -175,11 +175,6 @@ export function useRouteStart({
   const onlyArchived = blockers.length > 0 && blockers.every((b) => b.code === "archived")
   const canStart = gate.base !== null && simInput !== null && plans.length > 0 && ((blockers.length === 0 && sim.guards?.ok === true) || onlyArchived)
 
-  const routeGate: RouteGate = (input, simulation) => {
-    if (gate.base) return evaluateGates(input, { ...gate.base, simulation })
-    return gate.unavailable.length > 0 ? gate.unavailable : [NO_CONTEXT]
-  }
-
   return {
     source,
     request: complete && source !== null && plans.length > 0 ? { ...request, source } : null,
@@ -187,6 +182,17 @@ export function useRouteStart({
     simInput,
     blockers,
     canStart,
-    gate: routeGate,
+    gate: stepGate(gate),
+  }
+}
+
+/**
+ * The per-step gate a route host hands `useRoute` (through `RouteFlow`): 0001's gates on the panel's
+ * live context, with the step's own simulation. Without a trusted context every step is refused.
+ */
+export function stepGate(gate: GateInputs): RouteGate {
+  return (input, simulation) => {
+    if (gate.base) return evaluateGates(input, { ...gate.base, simulation })
+    return gate.unavailable.length > 0 ? gate.unavailable : [NO_CONTEXT]
   }
 }

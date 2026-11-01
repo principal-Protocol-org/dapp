@@ -40,13 +40,14 @@ vi.mock("@/components/app/trade/pt-tab", async () => {
   const { useEffect } = await import("react")
   const { GateList } = await import("@/components/app/actions/gate-list")
   return {
-    PtTab: ({ side }: { side: string }) => {
+    PtTab: ({ side, routeId }: { side: string; routeId?: string | null }) => {
       useEffect(() => {
         mocks.ptMounts++
       }, [])
       return (
         <div>
           <p>{`pt tab: ${side}`}</p>
+          {routeId ? <p>{`pt tab route: ${routeId}`}</p> : null}
           <GateList blockers={mocks.blockers} />
         </div>
       )
@@ -57,9 +58,10 @@ vi.mock("@/components/app/trade/pt-tab", async () => {
 // The recombine route form has its own tests (recombine-action.test.tsx); here it says it is there.
 vi.mock("@/components/app/trade/recombine-action", async (orig) => ({
   ...(await orig<object>()),
-  RecombineAction: ({ onRedeem }: { onRedeem?: () => void }) => (
+  RecombineAction: ({ onRedeem, routeId }: { onRedeem?: () => void; routeId?: string | null }) => (
     <div>
       <p>recombine route form</p>
+      {routeId ? <p>{`recombine route: ${routeId}`}</p> : null}
       {onRedeem ? (
         <button type="button" onClick={onRedeem}>
           Redeem in the PT tab
@@ -67,6 +69,12 @@ vi.mock("@/components/app/trade/recombine-action", async (orig) => ({
       ) : null}
     </div>
   ),
+}))
+
+// The resume-only route host has its own tests (pt-tab and yt-tab, after maturity); here it says which
+// route kinds it hosts.
+vi.mock("@/components/app/trade/route-resume", () => ({
+  RouteResume: ({ kinds }: { kinds: readonly string[] }) => <p>{`resumes: ${kinds.join(", ")}`}</p>,
 }))
 
 // The YT tab has its own tests (yt-tab.test.tsx); here it shows its side.
@@ -145,11 +153,21 @@ describe("TradePanel tabs", () => {
     expect(screen.getByText("pt tab: buy")).toBeTruthy()
   })
 
-  it("after maturity the PT tab hosts Redeem (0001 behaviour)", async () => {
+  it("after maturity the PT tab hosts Redeem (0001 behaviour), beside a resume-only host for PT routes (R2-77)", async () => {
     mocks.matured = true
     render(<TradePanel marketId="m1" />)
     expect(await screen.findByText("panel: redeem")).toBeTruthy()
+    expect(screen.getByText("resumes: buy_pt, sell_pt")).toBeTruthy()
     expect(screen.queryByRole("button", { name: "Sell" })).toBeNull()
+  })
+
+  it("?route= (History's Continue) reaches the tab and the Recombine dialog", async () => {
+    mocks.search = "tab=pt&side=buy&route=run-9"
+    render(<TradePanel marketId="m1" />)
+    expect(await screen.findByText("pt tab route: run-9")).toBeTruthy()
+    await userEvent.click(screen.getByRole("button", { name: "Quick actions" }))
+    await userEvent.click(screen.getByRole("menuitem", { name: "Recombine PT + YT" }))
+    expect(await screen.findByText("recombine route: run-9")).toBeTruthy()
   })
 
   it("after maturity the YT tab has no Buy/Sell toggle (R2-60)", async () => {
@@ -324,7 +342,7 @@ describe("Quick actions", () => {
     expect(screen.queryByRole("dialog")).toBeNull()
   })
 
-  it("closing the Recombine dialog remounts the tab, so its RouteFlow reads the route log again", async () => {
+  it("closing the Recombine dialog leaves the tab mounted: hosts are disjoint by kind, so they never share a run (R2-77)", async () => {
     render(<TradePanel marketId="m1" />)
     await screen.findByText("pt tab: buy")
     expect(mocks.ptMounts).toBe(1)
@@ -335,13 +353,14 @@ describe("Quick actions", () => {
     expect(mocks.ptMounts).toBe(1)
     await userEvent.keyboard("{Escape}")
     expect(screen.queryByRole("dialog")).toBeNull()
-    expect(mocks.ptMounts).toBe(2)
+    // No remount: the amounts typed in the tab stay (the old remount cleared them).
+    expect(mocks.ptMounts).toBe(1)
     // A 0001 panel's dialog hosts no route: closing it leaves the tab alone.
     await userEvent.click(screen.getByRole("button", { name: "Quick actions" }))
     await userEvent.click(screen.getByRole("menuitem", { name: "Deposit USDY → SY" }))
     await screen.findByRole("dialog", { name: "Deposit USDY → SY" })
     await userEvent.keyboard("{Escape}")
-    expect(mocks.ptMounts).toBe(2)
+    expect(mocks.ptMounts).toBe(1)
   })
 
   it("after maturity the Recombine dialog's pointer to Redeem closes it and opens the PT tab", async () => {

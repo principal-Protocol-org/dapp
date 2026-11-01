@@ -238,7 +238,8 @@ describe("history table", () => {
     const row = screen.getByText("Buy PT · 2 steps").closest("tr") as HTMLElement
     expect(within(row).getByText("Interrupted")).toBeTruthy()
     expect(within(row).getByText("You hold 1,500 SY")).toBeTruthy()
-    expect(within(row).getByRole("link", { name: /continue/i }).getAttribute("href")).toBe("/app/markets/m1?tab=pt&side=buy")
+    // Continue names the run (R2-77), so the market page opens this one, not the newest.
+    expect(within(row).getByRole("link", { name: /continue/i }).getAttribute("href")).toBe("/app/markets/m1?tab=pt&side=buy&route=r1")
   })
 
   it("an interrupted LP route's Continue opens the LP tab on the side where its run resumes", () => {
@@ -254,8 +255,8 @@ describe("history table", () => {
       within(screen.getByText(label).closest("tr") as HTMLElement)
         .getByRole("link", { name: /continue/i })
         .getAttribute("href")
-    expect(href("Add liquidity, keep YT · 2 steps")).toBe("/app/markets/m1?tab=lp&side=deposit")
-    expect(href("Withdraw liquidity · 2 steps")).toBe("/app/markets/m1?tab=lp&side=withdraw")
+    expect(href("Add liquidity, keep YT · 2 steps")).toBe("/app/markets/m1?tab=lp&side=deposit&route=r-keep")
+    expect(href("Withdraw liquidity · 2 steps")).toBe("/app/markets/m1?tab=lp&side=withdraw&route=r-out")
   })
 
   it("an interrupted recombine's Continue opens the Recombine quick action, where its form and run are", () => {
@@ -277,15 +278,63 @@ describe("history table", () => {
     render(<HistoryTable />)
     const row = screen.getByText("Recombine · 2 steps").closest("tr") as HTMLElement
     expect(within(row).getByText("You hold 95 SY")).toBeTruthy()
-    expect(within(row).getByRole("link", { name: /continue/i }).getAttribute("href")).toBe("/app/markets/m1?quick=recombine")
+    expect(within(row).getByRole("link", { name: /continue/i }).getAttribute("href")).toBe("/app/markets/m1?quick=recombine&route=r-recombine")
   })
 
-  it("does not offer Continue on a finished or closed route", () => {
+  it("does not offer Continue on a finished route, nor on one closed with nothing held", () => {
     writeRoute(route())
-    writeRoute(route({ id: "r2", closed: true }, [{ action: "deposit", status: "confirmed", hash: H1 }, { action: "buy_pt", status: "pending" }]))
+    writeRoute(route({ id: "r2", closed: true, outputs: [] }, [{ action: "deposit", status: "failed", hash: H1 }, { action: "buy_pt", status: "pending" }]))
     render(<HistoryTable />)
     expect(screen.queryByRole("link", { name: /continue/i })).toBeNull()
+    expect(screen.getByText("Completed")).toBeTruthy()
     expect(screen.getByText("Stopped")).toBeTruthy()
+  })
+
+  it("a route closed anyway while it held funds keeps its holdings and Continue (R2-76)", () => {
+    writeRoute(route({ id: "r-dismissed", dismissed: true }, [{ action: "deposit", status: "confirmed", hash: H1 }, { action: "buy_pt", status: "pending" }]))
+    render(<HistoryTable />)
+    const row = screen.getByText("Buy PT · 2 steps").closest("tr") as HTMLElement
+    expect(within(row).getByText("Interrupted")).toBeTruthy()
+    expect(within(row).getByText("You hold 1,500 SY")).toBeTruthy()
+    expect(within(row).getByRole("link", { name: /continue/i }).getAttribute("href")).toBe("/app/markets/m1?tab=pt&side=buy&route=r-dismissed")
+  })
+
+  it("a route whose first step went nowhere offers no Continue: there is nothing to continue (M5)", () => {
+    writeRoute(route({ outputs: [] }, [{ action: "deposit", status: "failed", hash: H1 }, { action: "buy_pt", status: "pending" }]))
+    render(<HistoryTable />)
+    const row = screen.getByText("Buy PT · 2 steps").closest("tr") as HTMLElement
+    expect(within(row).getByText("Stopped")).toBeTruthy()
+    expect(within(row).queryByRole("link", { name: /continue/i })).toBeNull()
+  })
+
+  it("a step whose result is not known yet keeps Continue, which re-checks it by its hash", () => {
+    writeRoute(route({ outputs: [] }, [{ action: "deposit", status: "unknown", hash: H1 }, { action: "buy_pt", status: "pending" }]))
+    render(<HistoryTable />)
+    const row = screen.getByText("Buy PT · 2 steps").closest("tr") as HTMLElement
+    expect(within(row).getByText("Waiting for the network")).toBeTruthy()
+    expect(within(row).getByRole("link", { name: /continue/i }).getAttribute("href")).toBe("/app/markets/m1?tab=pt&side=buy&route=r1")
+  })
+
+  it("a route turned back into USDY reads Returned to USDY, not Completed (M1)", () => {
+    writeRoute(
+      route({ unwound: true, plans: [route().plans[0], { action: "withdraw", amount: { from: "step", index: 0, field: "value" }, gives: "SY", takes: "STA" }] }, [
+        { action: "deposit", status: "confirmed", hash: H1 },
+        { action: "withdraw", status: "confirmed", hash: H2 },
+      ]),
+    )
+    render(<HistoryTable />)
+    const row = screen.getByText("Buy PT · 2 steps").closest("tr") as HTMLElement
+    expect(within(row).getByText("Returned to USDY")).toBeTruthy()
+    expect(within(row).queryByText("Completed")).toBeNull()
+  })
+
+  it("an older route closed with funds before closing became continuable still says what it left, without Continue", () => {
+    writeRoute(route({ closed: true }, [{ action: "deposit", status: "confirmed", hash: H1 }, { action: "buy_pt", status: "pending" }]))
+    render(<HistoryTable />)
+    const row = screen.getByText("Buy PT · 2 steps").closest("tr") as HTMLElement
+    expect(within(row).getByText("Stopped")).toBeTruthy()
+    expect(within(row).getByText("You hold 1,500 SY")).toBeTruthy()
+    expect(within(row).queryByRole("link", { name: /continue/i })).toBeNull()
   })
 
   it("amounts are grouped", () => {

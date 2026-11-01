@@ -9,7 +9,7 @@ import type { PreviewLine } from "@/components/app/actions/panel-config"
 import { PreviewList } from "@/components/app/actions/preview-lines"
 import { TxNoticeView } from "@/components/app/actions/tx-feedback"
 import { UNAVAILABLE } from "@/components/app/live"
-import { RouteFlow } from "@/components/app/route/route-flow"
+import { ROUTE_HOSTS, RouteFlow } from "@/components/app/route/route-flow"
 import { InfoTip, LabelWithTip } from "@/components/app/info-tip"
 import { routeNote, signaturesLine } from "@/components/app/trade/route-note"
 import { TokenPicker, type PayToken } from "@/components/app/trade/token-picker"
@@ -47,11 +47,11 @@ const shareText = (share: number) => (share > 0 && share < 0.0001 ? "<0.01%" : f
  *   APY (R2-15), or redeemed after maturity (R2-20).
  *
  * One `RouteFlow` serves both sides and stays mounted after maturity, when Deposit has closed, so a
- * route started here (or resumed from History's Continue) stays on screen. The amounts reset once a
- * step reaches the network (R2-3). The split and every figure come from the adapter, and the route's
- * copy from the steps it planned.
+ * route started here (or resumed from History's Continue) stays on screen; it shows only LP routes
+ * (R2-77). The amounts reset once a step reaches the network (R2-3). The split and every figure come
+ * from the adapter, and the route's copy from the steps it planned.
  */
-export function LpTab({ marketId, side }: { marketId: string; side: LpSide }) {
+export function LpTab({ marketId, side, routeId }: { marketId: string; side: LpSide; routeId?: string | null }) {
   const baseId = useId()
   const market = getMarket(useManifest(), marketId)
   const { slippageBps } = useSettings()
@@ -218,6 +218,8 @@ export function LpTab({ marketId, side }: { marketId: string; side: LpSide }) {
         <RouteFlow
           account={route.source}
           marketId={marketId}
+          kinds={ROUTE_HOSTS.lp}
+          routeId={routeId}
           gate={route.gate}
           request={route.request}
           kind={trade.kind}

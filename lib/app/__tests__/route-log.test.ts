@@ -1,6 +1,20 @@
 // @vitest-environment node
 import { describe, expect, it, vi } from "vitest"
-import { readRoutes, ROUTES_KEY, ROUTES_LIMIT, subscribeRoutes, writeRoute, type RouteRun } from "../route-log"
+import {
+  closedCopy,
+  firstOpen,
+  holdsFunds,
+  isDone,
+  pickRun,
+  readRoutes,
+  resumable,
+  ROUTES_KEY,
+  ROUTES_LIMIT,
+  sameProgress,
+  subscribeRoutes,
+  writeRoute,
+  type RouteRun,
+} from "../route-log"
 
 /** A Map-backed `Storage`, so the log is tested without a browser. */
 function memoryStorage(initial: Record<string, string> = {}): Storage {
@@ -125,5 +139,84 @@ describe("route log", () => {
     off()
     writeRoute(run(), s)
     expect(fn).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe("route runs (R2-76, R2-77)", () => {
+  const H = "a".repeat(64)
+  const done = (over: Partial<RouteRun> = {}) =>
+    run({ steps: [{ action: "deposit", status: "confirmed", hash: H }, { action: "buy_pt", status: "confirmed", hash: "b".repeat(64) }], ...over })
+  const nothingMoved = (over: Partial<RouteRun> = {}) =>
+    run({ outputs: [], steps: [{ action: "deposit", status: "failed", hash: H }, { action: "buy_pt", status: "pending" }], ...over })
+
+  it("a dismissed run keeps a 'dismissed' flag through the log, distinct from 'closed'", () => {
+    const s = memoryStorage()
+    writeRoute(run({ dismissed: true }), s)
+    expect(readRoutes(A, s)[0]).toMatchObject({ dismissed: true })
+    expect(readRoutes(A, s)[0].closed).toBeUndefined()
+    const raw = JSON.parse(s.getItem("pp-routes")!) as Record<string, Record<string, unknown>[]>
+    raw[A][0].dismissed = "yes"
+    expect(readRoutes(A, memoryStorage({ "pp-routes": JSON.stringify(raw) }))).toEqual([])
+  })
+
+  it("isDone and firstOpen read the steps", () => {
+    expect(isDone(done())).toBe(true)
+    expect(isDone(run())).toBe(false)
+    expect(firstOpen(run())).toBe(1)
+    expect(firstOpen(done())).toBe(2)
+    expect(firstOpen(nothingMoved())).toBe(0)
+  })
+
+  it("holdsFunds: a confirmed or unknown step of an unfinished, unclosed run; a dismissed run still holds them", () => {
+    expect(holdsFunds(run())).toBe(true)
+    expect(holdsFunds(run({ dismissed: true }))).toBe(true)
+    expect(holdsFunds(run({ steps: [{ action: "deposit", status: "unknown", hash: H }, { action: "buy_pt", status: "pending" }] }))).toBe(true)
+    expect(holdsFunds(run({ closed: true }))).toBe(false)
+    expect(holdsFunds(done())).toBe(false)
+    expect(holdsFunds(nothingMoved())).toBe(false)
+  })
+
+  it("resumable: holds funds and was not dismissed", () => {
+    expect(resumable(run())).toBe(true)
+    expect(resumable(run({ dismissed: true }))).toBe(false)
+    expect(resumable(nothingMoved())).toBe(false)
+  })
+
+  it("sameProgress compares each step's status and hash, and whether the run was unwound; never the flags", () => {
+    expect(sameProgress(run(), run({ dismissed: true, closed: true }))).toBe(true)
+    expect(sameProgress(run(), done())).toBe(false)
+    expect(sameProgress(run(), run({ steps: [{ action: "deposit", status: "confirmed", hash: "c".repeat(64) }, { action: "buy_pt", status: "pending" }] }))).toBe(false)
+    expect(sameProgress(run(), run({ unwound: true }))).toBe(false)
+    expect(sameProgress(run(), run({ steps: [run().steps[0]], plans: [run().plans[0]] }))).toBe(false)
+  })
+
+  describe("pickRun", () => {
+    const PT = ["buy_pt", "sell_pt"] as const
+    const sellPt = (over: Partial<RouteRun> = {}) => run({ kind: "sell_pt", request: { ...run().request, kind: "sell_pt" }, ...over })
+    const recombine = (over: Partial<RouteRun> = {}) => run({ kind: "recombine", request: { ...run().request, kind: "recombine" }, ...over })
+
+    it("picks the newest resumable run of the host's kinds on the market; never another kind's", () => {
+      const runs = [recombine({ id: "rc", startedAt: 9 }), sellPt({ id: "new", startedAt: 5 }), run({ id: "old", startedAt: 1 })]
+      expect(pickRun(runs, { marketId: "m1", kinds: PT })?.id).toBe("new")
+      expect(pickRun(runs, { marketId: "m1", kinds: ["recombine"] })?.id).toBe("rc")
+      expect(pickRun(runs, { marketId: "m2", kinds: PT })).toBeUndefined()
+      expect(pickRun([run({ dismissed: true }), nothingMoved({ id: "x" }), done({ id: "y" })], { marketId: "m1", kinds: PT })).toBeUndefined()
+    })
+
+    it("prefers the run History's Continue names, dismissed included, when it is this host's and holds funds", () => {
+      const runs = [sellPt({ id: "new", startedAt: 5 }), run({ id: "old", startedAt: 1, dismissed: true }), recombine({ id: "rc" })]
+      expect(pickRun(runs, { marketId: "m1", kinds: PT, preferId: "old" })?.id).toBe("old")
+      // Another host's run, a finished one or an unknown id: the newest resumable instead.
+      expect(pickRun(runs, { marketId: "m1", kinds: PT, preferId: "rc" })?.id).toBe("new")
+      expect(pickRun([done({ id: "d" }), run({ id: "o", startedAt: 0 })], { marketId: "m1", kinds: PT, preferId: "d" })?.id).toBe("o")
+      expect(pickRun(runs, { marketId: "m1", kinds: PT, preferId: "nope" })?.id).toBe("new")
+      expect(pickRun(runs, { marketId: "m2", kinds: PT, preferId: "old" })).toBeUndefined()
+    })
+  })
+
+  it("closedCopy: a funded run is dismissed (continuable), one with nothing held is closed for good, a finished one is left as it is", () => {
+    expect(closedCopy(run())).toEqual({ ...run(), dismissed: true })
+    expect(closedCopy(nothingMoved())).toEqual({ ...nothingMoved(), closed: true })
+    expect(closedCopy(done())).toEqual(done())
   })
 })

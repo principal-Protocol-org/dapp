@@ -56,6 +56,13 @@ import type { Manifest, Market } from "./types"
 export const REVIEW_TTL_MS = 60_000
 
 /**
+ * A review is not sent to Freighter with less than this left before it expires: approving it takes
+ * time, and a signature that lands after expiry is refused and wasted. It is prepared again instead.
+ * Shared by every sign path (0001's SignFlow, the route runner, the manager view).
+ */
+export const SIGN_MARGIN_MS = 20_000
+
+/**
  * R31: what `prepareReview`, `prepareManagerReview` and `prepareRestore` issued, keyed by the very
  * object they returned. `executeReview` and `executeRestore` refuse any other object, and read the
  * preparation time, the XDR hash and (for a review) the origin object from here, never from the

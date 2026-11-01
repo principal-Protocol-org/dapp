@@ -71,17 +71,20 @@ const describe = (id: QuickActionId, code: string) => DESCRIPTIONS[id].replace("
  * (its accessible description). The open action (`tool`) is controlled by the parent, so plain-word
  * links elsewhere on the page, and `?quick=`, open the same dialogs. `onRedeem` takes the user to
  * the PT tab's Redeem (the Recombine dialog points there after maturity); the dialog closes first.
+ * `routeId` is the run History's Continue names, for the Recombine dialog.
  */
 export function QuickActions({
   marketId,
   tool,
   onToolChange,
   onRedeem,
+  routeId,
 }: {
   marketId: string
   tool: QuickActionId | null
   onToolChange: (tool: QuickActionId | null) => void
   onRedeem?: () => void
+  routeId?: string | null
 }) {
   const baseId = useId()
   const panels = usePanels(marketId, actionPanels)
@@ -135,6 +138,7 @@ export function QuickActions({
           {tool === "recombine" ? (
             <RecombineAction
               marketId={marketId}
+              routeId={routeId}
               onRedeem={
                 onRedeem
                   ? () => {

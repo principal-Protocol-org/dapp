@@ -8,7 +8,8 @@ import type { PreviewLine } from "@/components/app/actions/panel-config"
 import { PreviewList } from "@/components/app/actions/preview-lines"
 import { TxNoticeView } from "@/components/app/actions/tx-feedback"
 import { UNAVAILABLE } from "@/components/app/live"
-import { RouteFlow } from "@/components/app/route/route-flow"
+import { ROUTE_HOSTS, RouteFlow } from "@/components/app/route/route-flow"
+import { RouteResume } from "@/components/app/trade/route-resume"
 import { LabelWithTip } from "@/components/app/info-tip"
 import { routeNote, signaturesLine } from "@/components/app/trade/route-note"
 import { TokenPicker, type PayToken } from "@/components/app/trade/token-picker"
@@ -37,16 +38,21 @@ const TOKEN_DECIMALS = 7
  * and a plain sentence on what the YT pays. After maturity there is no form (R2-60).
  *
  * One `RouteFlow` serves both sides, so a route started on one side (or resumed from History) stays
- * on screen when the side changes. The amounts reset once a step reaches the network (R2-3).
+ * on screen when the side changes; it shows only YT routes (R2-77). The amounts reset once a step
+ * reaches the network (R2-3). After maturity a `RouteResume` keeps a YT route stopped between its
+ * steps on screen, beside "YT trading has closed".
  */
-export function YtTab({ marketId, side, onRedeem }: { marketId: string; side: YtSide; onRedeem?: () => void }) {
+export function YtTab({ marketId, side, onRedeem, routeId }: { marketId: string; side: YtSide; onRedeem?: () => void; routeId?: string | null }) {
   const matured = useMatured(marketId) === true
-  if (matured) return <YtClosed onRedeem={onRedeem} />
-  return <YtTrade marketId={marketId} side={side} />
+  if (matured) return <YtClosed marketId={marketId} onRedeem={onRedeem} routeId={routeId} />
+  return <YtTrade marketId={marketId} side={side} routeId={routeId} />
 }
 
-/** R2-60: trades close at maturity; the yield a YT earned before it is paid by Redeem. */
-function YtClosed({ onRedeem }: { onRedeem?: () => void }) {
+/**
+ * R2-60: trades close at maturity; the yield a YT earned before it is paid by Redeem. A YT route
+ * interrupted between its steps still shows here, with "Back to USDY" (R2-77).
+ */
+function YtClosed({ marketId, onRedeem, routeId }: { marketId: string; onRedeem?: () => void; routeId?: string | null }) {
   return (
     <Card>
       <CardHeader>
@@ -62,12 +68,13 @@ function YtClosed({ onRedeem }: { onRedeem?: () => void }) {
             Redeem in the PT tab
           </button>
         ) : null}
+        <RouteResume marketId={marketId} kinds={ROUTE_HOSTS.yt} routeId={routeId} />
       </CardContent>
     </Card>
   )
 }
 
-function YtTrade({ marketId, side }: { marketId: string; side: YtSide }) {
+function YtTrade({ marketId, side, routeId }: { marketId: string; side: YtSide; routeId?: string | null }) {
   const baseId = useId()
   const market = getMarket(useManifest(), marketId)
   const { slippageBps } = useSettings()
@@ -241,6 +248,8 @@ function YtTrade({ marketId, side }: { marketId: string; side: YtSide }) {
         <RouteFlow
           account={route.source}
           marketId={marketId}
+          kinds={ROUTE_HOSTS.yt}
+          routeId={routeId}
           gate={route.gate}
           request={route.request}
           kind={trade.kind}

@@ -3,13 +3,12 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { Button } from "@/components/ui/button"
 import { ReviewDialog } from "@/components/app/actions/review-dialog"
-import { SIGN_MARGIN_MS } from "@/components/app/actions/sign-flow"
 import { showTxToast } from "@/components/app/actions/tx-feedback"
 import { useExecute } from "@/hooks/use-execute"
 import { noticeForError, noticeForResult } from "@/lib/app/tx-notice"
 import type { Blocker } from "@/lib/protocol/gates"
 import type { ManagerCall } from "@/lib/protocol/manager-calls"
-import { isExpired, type ManagerReview } from "@/lib/protocol/review"
+import { isExpired, SIGN_MARGIN_MS, type ManagerReview } from "@/lib/protocol/review"
 import type { Network } from "@/lib/protocol/types"
 
 type Flow =

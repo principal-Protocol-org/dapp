@@ -8,7 +8,7 @@ import type { PreviewLine } from "@/components/app/actions/panel-config"
 import { PreviewList } from "@/components/app/actions/preview-lines"
 import { TxNoticeView } from "@/components/app/actions/tx-feedback"
 import { UNAVAILABLE } from "@/components/app/live"
-import { RouteFlow } from "@/components/app/route/route-flow"
+import { ROUTE_HOSTS, RouteFlow } from "@/components/app/route/route-flow"
 import { LabelWithTip } from "@/components/app/info-tip"
 import { routeNote, signaturesLine } from "@/components/app/trade/route-note"
 import { TokenPicker, type PayToken } from "@/components/app/trade/token-picker"
@@ -35,10 +35,11 @@ const TOKEN_DECIMALS = 7
  * received and the payoff at maturity, fixed in USD.
  *
  * One `RouteFlow` serves both sides, so a route started on one side (or resumed from History)
- * stays on screen when the side changes. The amounts reset once a step reaches the network (R2-3).
- * After maturity the trade panel hosts 0001's Redeem panel in this tab's place.
+ * stays on screen when the side changes; it shows only PT routes (R2-77). The amounts reset once a
+ * step reaches the network (R2-3). After maturity the trade panel hosts 0001's Redeem panel in this
+ * tab's place, with a `RouteResume` for the PT routes still waiting.
  */
-export function PtTab({ marketId, side }: { marketId: string; side: PtSide }) {
+export function PtTab({ marketId, side, routeId }: { marketId: string; side: PtSide; routeId?: string | null }) {
   const baseId = useId()
   const market = getMarket(useManifest(), marketId)
   const { slippageBps } = useSettings()
@@ -157,6 +158,8 @@ export function PtTab({ marketId, side }: { marketId: string; side: PtSide }) {
         <RouteFlow
           account={route.source}
           marketId={marketId}
+          kinds={ROUTE_HOSTS.pt}
+          routeId={routeId}
           gate={route.gate}
           request={route.request}
           kind={trade.kind}

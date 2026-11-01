@@ -3,6 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { impliedRate, type CurveState } from "@/lib/protocol/curve"
 import { formatPercent } from "@/lib/protocol/format"
 import { aprToApy } from "@/lib/protocol/math"
+import { writeRoute, type RouteRun } from "@/lib/app/route-log"
+import { planRoute, type RouteRequest, type StepPlan } from "@/lib/protocol/routes"
 import { accountState, live, marketState, MATURITY } from "./fixtures"
 
 const mocks = await vi.hoisted(async () => (await import("./panel-mocks")).createPanelMocks())
@@ -339,6 +341,54 @@ describe("PT tab — a quote it cannot work out", () => {
     await enter("You pay", "2900000")
     expect(received()).toBe("Unavailable")
     expect(screen.getByText("Unavailable: the pool does not have enough liquidity for this trade")).toBeTruthy()
+  })
+})
+
+/** A Buy PT paid in USDY whose deposit confirmed: the user holds its SY between the steps. */
+function buyPtRun(id: string, startedAt: number, sy: bigint): RouteRun {
+  const request: RouteRequest = { kind: "buy_pt", marketId: "m1", source: A, amount: 100n * 10_000_000n, pay: "underlying", receive: "underlying", matured: false }
+  return {
+    id,
+    account: A,
+    marketId: "m1",
+    kind: "buy_pt",
+    request,
+    plans: planRoute(request, { routerFunctions: [] }) as StepPlan[],
+    outputs: [{ kind: "amount", value: sy }],
+    steps: [
+      { action: "deposit", status: "confirmed", hash: "1".repeat(64) },
+      { action: "buy_pt", status: "pending" },
+    ],
+    startedAt,
+  }
+}
+
+describe("PT tab — a Buy PT interrupted between its steps (R2-77)", () => {
+  const AFTER = async () => ({ sequence: 1, closeTime: Number(MATURITY) + 100, readAtMs: Date.now() })
+
+  it("after maturity it resumes beside Redeem, with its holdings and Back to USDY (withdraw stays open)", async () => {
+    mocks.getLedgerClock.mockImplementation(AFTER)
+    writeRoute(buyPtRun("run-pt", 1, 95n * 10_000_000n))
+    simulateReturns(mocks, 97n * 10_000_000n)
+    nav.search = "tab=pt&side=buy&route=run-pt"
+    await renderUi(<TradePanel marketId="m1" />)
+    expect(screen.getByText("Redeem at maturity")).toBeTruthy()
+    const progress = screen.getByRole("region", { name: "Route progress" })
+    expect(within(progress).getByRole("heading", { name: "Step 2 of 2" })).toBeTruthy()
+    expect(within(progress).getByText("You hold 95 SY")).toBeTruthy()
+    // Nothing is prepared on landing: the user chooses.
+    expect(mocks.prepareReview).not.toHaveBeenCalled()
+    await user().click(within(progress).getByRole("button", { name: "Back to USDY" }))
+    await settle()
+    expect(mocks.prepareReview.mock.calls[0][0].input).toMatchObject({ action: "withdraw", amount: 95n * 10_000_000n })
+  })
+
+  it("History's Continue (route=<id>) opens the run it names, not the newest", async () => {
+    writeRoute(buyPtRun("older", 1, 95n * 10_000_000n))
+    writeRoute(buyPtRun("newer", 2, 42n * 10_000_000n))
+    nav.search = "tab=pt&side=buy&route=older"
+    await renderUi(<TradePanel marketId="m1" />)
+    expect(within(screen.getByRole("region", { name: "Route progress" })).getByText("You hold 95 SY")).toBeTruthy()
   })
 })
 
