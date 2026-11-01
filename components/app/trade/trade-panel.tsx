@@ -9,7 +9,7 @@ import { redeemPanel } from "@/components/app/actions/redeem-tab"
 import { usePanels, type PanelEntry } from "@/components/app/actions/panel-group"
 import { LpTab } from "@/components/app/trade/lp-tab"
 import { PtTab } from "@/components/app/trade/pt-tab"
-import { ToolsMenu, type ToolId } from "@/components/app/trade/tools-menu"
+import { QuickActions, type QuickActionId } from "@/components/app/trade/quick-actions"
 import { YtTab } from "@/components/app/trade/yt-tab"
 import { useManifest } from "@/components/app/manifest-provider"
 import { useHydrated } from "@/hooks/use-hydrated"
@@ -58,8 +58,9 @@ const sideOr = (tab: TabId, v: string | null | undefined, matured: boolean): Sid
 const bodies = (market: Market): PanelEntry[] => [{ id: "pt:redeem", label: "Redeem", config: redeemPanel(market) }]
 
 /**
- * The market page's action panel: PT, YT and LP tabs, a side toggle, a token picker and the Tools
- * menu. `?tab=` and `?side=` choose where it opens, so it sits in a Suspense boundary.
+ * The market page's action panel: PT, YT and LP tabs, a side toggle, and the Quick actions menu
+ * (each tab's fields carry their own token picker). `?tab=` and `?side=` choose where it opens, so it
+ * sits in a Suspense boundary.
  */
 export function TradePanel({ marketId }: { marketId: string }) {
   return (
@@ -95,7 +96,7 @@ function TradePanelView({ marketId }: { marketId: string }) {
   const panels = usePanels(marketId, bodies)
   const [chosenTab, setChosenTab] = useState<TabId | null>(null)
   const [chosenSide, setChosenSide] = useState<SideId | null>(null)
-  const [tool, setTool] = useState<ToolId | null>(null)
+  const [tool, setTool] = useState<QuickActionId | null>(null)
   if (!hydrated) return <PanelFallback />
 
   const tab: TabId = chosenTab ?? (isTab(urlTab) ? urlTab : "pt")
@@ -117,7 +118,7 @@ function TradePanelView({ marketId }: { marketId: string }) {
         <h2 id={headingId} className="font-serif text-2xl text-ink">
           Trade
         </h2>
-        <ToolsMenu marketId={marketId} tool={tool} onToolChange={setTool} />
+        <QuickActions marketId={marketId} tool={tool} onToolChange={setTool} />
       </div>
       <Tabs
         value={tab}
@@ -173,7 +174,7 @@ function TradePanelView({ marketId }: { marketId: string }) {
         </TabsContent>
       </Tabs>
       <p className="flex flex-wrap gap-x-4 gap-y-1 text-sm text-ink-muted">
-        {/* Every tab pays the underlying directly, so none needs SY first; the Tools menu still deposits. */}
+        {/* Every tab pays the underlying directly, so none needs SY first; Quick actions still deposits. */}
         <button type="button" onClick={() => setTool("split")} className="underline underline-offset-2 hover:text-ink">
           Split {code} into PT + YT
         </button>
