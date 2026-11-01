@@ -1,4 +1,4 @@
-import { ACTION_META, type ActionId } from "./actions"
+import { ACTION_META, ADD_LIQUIDITY_SY_DISABLED_PAYING_SY, type ActionId } from "./actions"
 import { formatAmount } from "./format"
 import type { ActionOutput } from "./guards"
 
@@ -202,7 +202,8 @@ export function planRoute(req: RouteRequest, ctx: RouteContext): StepPlan[] | Ro
     }
     case "lp_only": {
       const reason = ACTION_META.add_liquidity_sy.disabled?.reason
-      if (reason) return disabledIf(reason)
+      // An SY payer's Keep YT is off (R2-22): their fix is to pay in USDY, then turn it on.
+      if (reason) return disabledIf(payUnderlying ? reason : ADD_LIQUIDITY_SY_DISABLED_PAYING_SY)
       // Once R47 is lifted: [deposit?] -> add_liquidity_sy.
       const add: StepPlan = {
         action: "add_liquidity_sy",

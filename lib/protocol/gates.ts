@@ -518,6 +518,22 @@ export function withEarlierCapCharges<C extends Pick<GateContext, "account">>(ct
   return { ...ctx, account: { ...acc, netDeposited } }
 }
 
+/**
+ * A route whose deposits (`total`, a mint's included) pass the deposit cap together, refused for the
+ * route (R2-62, fix round 1): today's room is `cap − net`, and nothing the route plans is counted as
+ * deposited before it runs. Undefined when the cap is off or a read it needs is missing; those cases
+ * are `capGate`'s and `withEarlierCapCharges`'s.
+ */
+export function routeCapBlocker(total: bigint, acc: AccountState | undefined): Blocker | undefined {
+  if (!acc || acc.depositCap.status !== "live" || acc.netDeposited.status !== "live") return undefined
+  const cap = acc.depositCap.value
+  if (cap <= 0n) return undefined
+  return {
+    code: "cap",
+    message: `This route deposits ${fmt(total)} in total; your cap has ${fmt(max0(cap - acc.netDeposited.value))} left (net of withdrawals). Lower the amount.`,
+  }
+}
+
 /** `RiskControl.check_deposit`: each limit trips on `volume + amount > limit`; a limit of 0 disables it. */
 function breakerGate(input: ActionInput, ctx: GateContext, g: Gates): void {
   const a = input.action

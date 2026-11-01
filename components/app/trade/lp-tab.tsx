@@ -102,8 +102,11 @@ export function LpTab({ marketId, side }: { marketId: string; side: LpSide }) {
     <TokenPicker label={label} value={token} onChange={(t) => setTokens((all) => ({ ...all, [side]: t }))} options={["underlying", "sy"]} code={code} />
   )
 
+  // Whether a withdraw redeems its PT (after maturity) or sells it is read from the route the adapter
+  // planned, as `routeNote` and the adapter read it, never from which quote fields are present (R2-55).
+  const redeems = route.plans.some((p) => p.action === "redeem")
   const ctx: LineContext = { code, slippage: formatBps(slippageBps), steps, paid: trade.amount, connected: route.source !== null, amountText }
-  const details: PreviewLine[] = q ? (side === "deposit" ? depositLines(q, ctx) : withdrawLines(q, ctx)) : []
+  const details: PreviewLine[] = q ? (side === "deposit" ? depositLines(q, ctx) : withdrawLines(q, ctx, redeems)) : []
   const note = routeNote({ plans: route.plans, q, connected: route.source !== null, pending: route.sim.pending })
   const receivedText = q ? `${amountText(q.out, q.outToken)}${q.alsoOut ? ` + ${amountText(q.alsoOut.amount, q.alsoOut.token)}` : ""}` : route.quote ? UNAVAILABLE : null
 
@@ -116,7 +119,7 @@ export function LpTab({ marketId, side }: { marketId: string; side: LpSide }) {
             ? closed
               ? "Adding liquidity closed at maturity: the pool takes no new PT or SY. You can still withdraw your liquidity: choose Withdraw."
               : `Deposit ${code} into the pool for LP tokens.`
-            : matured
+            : redeems
               ? `Withdraw your LP for ${code} or its SY. After maturity your PT is redeemed, not sold.`
               : `Withdraw your LP for ${code} or its SY. The PT you get back is sold into the pool.`}
         </CardDescription>
@@ -166,8 +169,12 @@ export function LpTab({ marketId, side }: { marketId: string; side: LpSide }) {
               >
                 {receivedText}
               </output>
-              {q && side === "withdraw" && q.alsoOut ? (
-                <p className="text-xs text-ink-muted wrap-anywhere">{`The redeemed part, ${amountText(q.alsoOut.amount, q.alsoOut.token)}, is paid in ${unitOf(q.alsoOut.token)} even when you receive SY: after maturity your PT is redeemed, not sold.`}</p>
+              {q && side === "withdraw" && redeems && token === "sy" ? (
+                <p className="text-xs text-ink-muted wrap-anywhere">
+                  {q.alsoOut
+                    ? `The redeemed part, ${amountText(q.alsoOut.amount, q.alsoOut.token)}, is paid in ${unitOf(q.alsoOut.token)} even when you receive SY: after maturity your PT is redeemed, not sold.`
+                    : `The redeemed part is paid in ${code} even when you receive SY: after maturity your PT is redeemed, not sold.`}
+                </p>
               ) : null}
             </div>
 
@@ -270,6 +277,13 @@ const poolShareLine = (q: TradeQuote, connected: boolean): PreviewLine =>
         hint: connected ? "Your LP balance has not been read, so your share cannot be worked out yet." : "Connect a wallet: your share needs your LP balance.",
       }
 
+/** A fee as the quote gives it: "None" only when it is 0. */
+const feeValue = (q: TradeQuote, c: LineContext) => (q.fee === 0n ? "None" : c.amountText(q.fee, q.feeToken))
+
+/** The fixed APY before → after; Unavailable when the quote has none, never dropped (as the PT and YT tabs). */
+const apyValue = (q: TradeQuote) =>
+  q.apyBefore === undefined || q.apyAfter === undefined ? UNAVAILABLE : `${formatPercent(q.apyBefore)} → ${formatPercent(q.apyAfter)}`
+
 const minimumLine = (q: TradeQuote, c: LineContext): PreviewLine => ({
   label: "Minimum received",
   value: c.amountText(q.minOut, q.minOutToken),
@@ -283,15 +297,14 @@ const minimumLine = (q: TradeQuote, c: LineContext): PreviewLine => ({
 function depositLines(q: TradeQuote, c: LineContext): PreviewLine[] {
   const { code, amountText } = c
   const lines: PreviewLine[] = []
-  if (q.apyBefore !== undefined && q.apyAfter !== undefined) {
-    const before = formatPercent(q.apyBefore)
-    const after = formatPercent(q.apyAfter)
-    lines.push({
-      label: "Fixed APY",
-      value: before === after ? `${before} (unchanged)` : `${before} → ${after}`,
-      hint: "PT and SY go into the pool at its ratio, so its price, and the fixed APY, do not move.",
-    })
-  }
+  // "(unchanged)" is the adapter's word that the trade moves no price (no price impact), not two
+  // percentages that happen to round alike.
+  const unchanged = q.priceImpactPpm === 0n && q.apyBefore !== undefined ? `${formatPercent(q.apyBefore)} (unchanged)` : undefined
+  lines.push({
+    label: "Fixed APY",
+    value: unchanged ?? apyValue(q),
+    hint: "PT and SY go into the pool at its ratio, so its price, and the fixed APY, do not move.",
+  })
   lines.push({
     label: "Price impact",
     value: q.priceImpactPpm === undefined ? UNAVAILABLE : q.priceImpactPpm === 0n ? "None" : formatImpact(q.priceImpactPpm),
@@ -306,7 +319,7 @@ function depositLines(q: TradeQuote, c: LineContext): PreviewLine[] {
   }
   lines.push({
     label: "Fees",
-    value: amountText(q.fee, q.feeToken),
+    value: feeValue(q, c),
     hint:
       q.splitPart !== undefined
         ? `The tokenization fee on the ${amountText(q.splitPart, "underlying")} split into PT + YT. There is no swap fee: nothing is swapped.`
@@ -330,15 +343,18 @@ function depositLines(q: TradeQuote, c: LineContext): PreviewLine[] {
   return lines
 }
 
-/** Withdraw: the PT sale's effect on the fixed APY, or, after maturity, the redeem that replaces it. */
-function withdrawLines(q: TradeQuote, c: LineContext): PreviewLine[] {
-  const { code, amountText } = c
+/**
+ * Withdraw: the PT sale's effect on the fixed APY, or, when the route redeems the PT (after
+ * maturity), the redeem that replaces the sale. `redeems` is read from the planned route.
+ */
+function withdrawLines(q: TradeQuote, c: LineContext, redeems: boolean): PreviewLine[] {
+  const { code } = c
   const lines: PreviewLine[] = []
-  if (q.apyBefore !== undefined && q.apyAfter !== undefined) {
+  if (!redeems) {
     lines.push(
       {
         label: "Fixed APY",
-        value: `${formatPercent(q.apyBefore)} → ${formatPercent(q.apyAfter)}`,
+        value: apyValue(q),
         hint: "The pool's fixed APY now, and once your withdraw lands: the PT you get back is sold into the pool, so the fixed APY rises.",
       },
       {
@@ -346,7 +362,7 @@ function withdrawLines(q: TradeQuote, c: LineContext): PreviewLine[] {
         value: q.priceImpactPpm === undefined ? UNAVAILABLE : formatImpact(q.priceImpactPpm),
         hint: "The PT sale's price against the pool's spot price, swap fee included.",
       },
-      { label: "Fees", value: amountText(q.fee, q.feeToken), hint: "The pool's swap fee on the PT sold." },
+      { label: "Fees", value: feeValue(q, c), hint: "The pool's swap fee on the PT sold." },
     )
   } else {
     lines.push(
@@ -355,7 +371,7 @@ function withdrawLines(q: TradeQuote, c: LineContext): PreviewLine[] {
         value: "Redeemed, not sold",
         hint: `After maturity the PT you withdraw is redeemed for ${code} at the settlement rate, so nothing moves the pool's price. The redeem pays ${code}, whichever token you receive.`,
       },
-      { label: "Fees", value: "None", hint: "Redeeming PT at maturity has no fee, and nothing is swapped." },
+      { label: "Fees", value: feeValue(q, c), hint: "Redeeming PT at maturity takes no fee, and nothing is swapped." },
     )
   }
   lines.push(poolShareLine(q, c.connected), minimumLine(q, c))

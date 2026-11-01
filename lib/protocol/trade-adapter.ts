@@ -32,7 +32,7 @@
  * Keep YT off is not offered (R47), so it is not quoted. A withdraw removes, then sells the PT, or
  * redeems it after maturity (R2-20), and the quote reads which from the route.
  */
-import { ACTION_META, type ActionId } from "./actions"
+import { ACTION_META, ADD_LIQUIDITY_SY_DISABLED_PAYING_SY, type ActionId } from "./actions"
 import { buyExactPt, buyPt, curveStateFrom, impliedRate, sellPt, spotPrice, type CurveQuote, type CurveState } from "./curve"
 import { minAfterSlippage, type ActionOutput } from "./guards"
 import type { MarketState } from "./market-state"
@@ -85,9 +85,13 @@ export type TradeQuote = {
   /** The swap step's own output, when later steps convert it (a sale to USDY: its SY); `step` is 1-based. */
   swapOut?: { amount: bigint; token: TradeToken; exactness: Exactness; step: number }
   /**
-   * The swap's output at the slippage tolerance: the floor that step is signed with, in `minOutToken`
-   * (`swapOut`'s token when later steps convert it). A later step's floor does not exist before that
-   * step is prepared, so none is shown.
+   * A minimum at the user's slippage tolerance, in `minOutToken`. Two cases, and the tab says which:
+   * - with `swapOut` (a sale converted by later steps) or a one-step route: the floor the swap's step
+   *   is signed with, on this quote;
+   * - otherwise, on a multi-step route (Buy YT paid in USDY, every LP route today): the floor of `out`
+   *   itself on this preview, the final LP or USDY. No step is signed with it: each step gets its own
+   *   floor from its own simulation once the step before it is confirmed, and a later step's floor does
+   *   not exist before then.
    */
   minOut: bigint
   minOutToken: TradeToken
@@ -558,6 +562,7 @@ function quoteKeepYt(req: TradeRequest, r: Reads, state: TradeState): TradeQuote
     outToken: "lp",
     exactness: "indicative",
     alsoOut: { amount: yt, token: "yt", exactness: sim ? "simulated" : "indicative" },
+    // The floor of the LP on this preview: step 3 is signed with its own, from its own simulation.
     minOut: floor(add.lp, slippageBps),
     minOutToken: "lp",
     fee: previewWithdraw(feeShares, exchangeRate),
@@ -602,6 +607,7 @@ function quoteLpWithdraw(req: TradeRequest, r: Reads, state: TradeState): TradeQ
       outToken,
       exactness: "indicative",
       ...(toUnderlying ? {} : { alsoOut: { amount: redeemed, token: "underlying" as const, exactness: "indicative" as const } }),
+      // The floor of the final amount on this preview, not a signed step floor (see `minOut`).
       minOut: floor(out, slippageBps),
       minOutToken: outToken,
       // Redeeming PT at maturity takes no fee (principal_manager:494-504), and nothing is swapped.
@@ -621,6 +627,7 @@ function quoteLpWithdraw(req: TradeRequest, r: Reads, state: TradeState): TradeQ
     out,
     outToken,
     exactness: "indicative",
+    // The floor of the final amount on this preview, not a signed step floor (see `minOut`).
     minOut: floor(out, slippageBps),
     minOutToken: outToken,
     fee: toUnderlying ? previewWithdraw(sale.feeShares, exchangeRate) : sale.feeShares,
@@ -664,7 +671,11 @@ const QUOTES: Partial<Record<TradeKind, (req: TradeRequest, r: Reads, state: Tra
 function quote(req: TradeRequest, state: TradeState): Live<TradeQuote> {
   // Keep YT off (LP only) is not offered on this release (R47): its reason alone, never a figure for
   // a trade it never allows (0001 R51 M1).
-  if (req.kind === "lp_only") return unavailable(ACTION_META.add_liquidity_sy.disabled?.reason ?? "Adding liquidity without keeping YT is not quoted by this app yet.")
+  if (req.kind === "lp_only") {
+    const reason = ACTION_META.add_liquidity_sy.disabled?.reason
+    if (!reason) return unavailable("Adding liquidity without keeping YT is not quoted by this app yet.")
+    return unavailable(req.pay === "underlying" ? reason : ADD_LIQUIDITY_SY_DISABLED_PAYING_SY)
+  }
   const { ms } = state
   const m = readsOf(ms)
   if (typeof m === "string") return unavailable(m)
