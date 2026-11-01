@@ -41,6 +41,7 @@ import {
   settle,
   simulateReturns,
   teardown,
+  tipOf,
   user,
   valueIn,
 } from "./panel-harness"
@@ -194,7 +195,7 @@ describe("Redeem tab — redeem at maturity", () => {
     expect(valueIn("Indicative", "From PT")).toBe("95.4545454 STA")
     // max(last_oracle_rate 1.05, live oracle 1.10)
     expect(valueIn("Settlement", "Settlement rate")).toBe("1.1000")
-    expect(screen.getByText(INDICATIVE_LABEL)).toBeTruthy()
+    expect(await tipOf("Settlement rate")).toBe(INDICATIVE_LABEL)
     expect(screen.getByText("The first redemption settles the market for everyone, at the oracle rate of that moment.")).toBeTruthy()
   })
 
@@ -205,8 +206,8 @@ describe("Redeem tab — redeem at maturity", () => {
     await openTab("Redeem")
     await enter("PT to redeem", "105")
     expect(valueIn("Settlement", "Settlement rate")).toBe("1.1000")
-    expect(screen.getByText("Final: fixed when the market settled.")).toBeTruthy()
-    expect(screen.queryByText(INDICATIVE_LABEL)).toBeNull()
+    expect(await tipOf("Settlement rate")).toBe("Final: fixed when the market settled.")
+    expect(await tipOf("Settlement rate")).not.toBe(INDICATIVE_LABEL)
     expect(valueIn("Indicative", "From PT")).toBe("95.4545454 STA")
   })
 
@@ -271,7 +272,7 @@ describe("Redeem tab — redeem at maturity", () => {
     await openTab("Redeem")
     await enter("PT to redeem", "10")
     expect(screen.getByText("Every check passes.")).toBeTruthy()
-    expect(screen.getByText(/^Fixed: the YT yield index froze at maturity/)).toBeTruthy()
+    expect(await tipOf("Settlement rate")).toMatch(/^Fixed: the YT yield index froze at maturity/)
     expect(screen.queryByText(/stale/)).toBeNull()
     expect(reviewButton("Redeem at maturity").disabled).toBe(false)
   })

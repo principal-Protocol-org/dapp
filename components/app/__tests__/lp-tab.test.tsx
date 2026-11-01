@@ -63,7 +63,7 @@ vi.mock("@/lib/protocol/review", async (orig) => ({
 import { useGateContext } from "@/hooks/use-gate-context"
 import { checkAmount } from "@/lib/app/amounts"
 import { A, MANIFEST, MARKET } from "./panel-mocks"
-import { disconnect, enter, gateList, Harness, installDefaults, renderUi, settle, simulateReturns, teardown, user } from "./panel-harness"
+import { disconnect, enter, gateList, Harness, installDefaults, renderUi, settle, simulateReturns, teardown, tipOf, user } from "./panel-harness"
 import { LpTab } from "../trade/lp-tab"
 import { TradePanel } from "../trade/trade-panel"
 import { useTradeRoute } from "../trade/use-trade-route"
@@ -138,8 +138,7 @@ beforeEach(() => {
 afterEach(teardown)
 
 /** The value beside a details label. */
-const detail = (label: string) => within(screen.getByRole("region", { name: "Liquidity details" })).getByText(label).nextSibling?.textContent
-const hintOf = (label: string) => within(screen.getByRole("region", { name: "Liquidity details" })).getByText(label).parentElement?.textContent
+const detail = (label: string) => within(screen.getByRole("region", { name: "Liquidity details" })).getByText(label).closest("dt")?.nextSibling?.textContent
 const received = () => screen.getByLabelText("You receive (preview)").textContent
 const picker = (name: string) => screen.getByRole("radiogroup", { name })
 const pick = async (group: string, option: RegExp) => {
@@ -161,16 +160,22 @@ describe("LP tab — Deposit, Keep YT on", () => {
     expect(detail("Fixed APY")).toBe(`${apy(501023n)} (unchanged)`)
     // Nothing is swapped: no price impact, and the floors still come from each step's simulation.
     expect(detail("Price impact")).toBe("None")
-    expect(hintOf("Price impact")).toMatch(/nothing is swapped.*slippage minimum from its own simulation/i)
+    expect(await tipOf("Price impact")).toMatch(/nothing is swapped.*slippage minimum from its own simulation/i)
     // The only fee is the tokenization fee, on the part split into PT + YT.
     expect(detail("Fees")).toBe(`${amount(previewWithdraw(minted.feeShares, SCALE))} USDY`)
-    expect(hintOf("Fees")).toMatch(new RegExp(`tokenization fee on the ${amount(MINT_USDY).replace(".", "\\.")} USDY split into PT \\+ YT`))
+    expect(await tipOf("Fees")).toMatch(new RegExp(`tokenization fee on the ${amount(MINT_USDY).replace(".", "\\.")} USDY split into PT \\+ YT`))
     expect(detail("Split into PT + YT")).toBe(`${amount(MINT_USDY)} USDY`)
     expect(detail("YT you keep")).toBe(`${amount(minted.yt)} YT`)
     expect(detail("Minimum received")).toBe(`${amount(minAfterSlippage(added.lp, 50n))} LP`)
-    expect(screen.getByText(/This takes 3 signatures, one per step: step 1, Mint PT \+ YT .*; step 2, Deposit .*; step 3, Add liquidity \(you give PT \+ SY, you get LP\)\./)).toBeTruthy()
-    // The 0001 LP note stays: LPs earn no fee share.
-    expect(screen.getByText("LPs earn PT convergence; swap fees go to the protocol and the market creator.")).toBeTruthy()
+    expect(detail("Signatures")).toBe("3")
+    expect(await tipOf("Signatures")).toMatch(/This takes 3 signatures, one per step: step 1, Mint PT \+ YT .*; step 2, Deposit .*; step 3, Add liquidity \(you give PT \+ SY, you get LP\)\./)
+    // The 0001 LP note stays (LPs earn no fee share), now behind its row's tip.
+    expect(detail("LP earns")).toBe("PT convergence")
+    expect(await tipOf("LP earns")).toBe("LPs earn PT convergence; swap fees go to the protocol and the market creator.")
+    expect(screen.queryByText(/LPs earn PT convergence/)).toBeNull()
+    // Keep YT while on: what it does is in its tip, not under the switch.
+    expect(await tipOf("Keep YT")).toMatch(/Part of your USDY is split into PT \+ YT/)
+    expect(screen.queryByText(/Part of your USDY is split/)).toBeNull()
   })
 
   it("Keep YT split puts PT and SY in the pool ratio: the route mints 62.1739366 USDY and deposits 37.8260634 USDY", async () => {
@@ -213,7 +218,7 @@ describe("LP tab — Deposit, Keep YT on", () => {
     await renderUi(<LpTab marketId="m1" side="deposit" />)
     await enter("You pay", "100")
     expect(detail("Pool share")).toBe("Unavailable")
-    expect(hintOf("Pool share")).toMatch(/Connect a wallet/)
+    expect(await tipOf("Pool share")).toMatch(/Connect a wallet/)
   })
 
   it("the deposit cap counts the mint and the deposit both: a route that fits step by step but not in total is refused before its first signature (R2-62)", async () => {
@@ -365,11 +370,10 @@ describe("LP tab — Withdraw", () => {
     const after = impliedRate(sale.next)
     expect(after).toBeGreaterThan(501023n)
     expect(detail("Fixed APY")).toBe(`${apy(501023n)} → ${apy(after)}`)
-    expect(hintOf("Fixed APY")).toMatch(/sold into the pool, so the fixed APY rises/)
+    expect(await tipOf("Fixed APY")).toMatch(/sold into the pool, so the fixed APY rises/)
     expect(detail("Fees")).toBe(`${amount(previewWithdraw(sale.feeShares, SCALE))} USDY`)
-    expect(
-      screen.getByText(/This takes 3 signatures, one per step: step 1, Remove liquidity \(you give LP, you get PT \+ SY\); step 2, Sell PT \(you give PT, you get SY\); step 3, Withdraw/),
-    ).toBeTruthy()
+    expect(detail("Signatures")).toBe("3")
+    expect(await tipOf("Signatures")).toMatch(/This takes 3 signatures, one per step: step 1, Remove liquidity \(you give LP, you get PT \+ SY\); step 2, Sell PT \(you give PT, you get SY\); step 3, Withdraw/)
     unmount()
 
     // After maturity: the PT is redeemed, not sold (R2-20), so the fixed APY is not a figure of it.
@@ -384,7 +388,7 @@ describe("LP tab — Withdraw", () => {
     expect(screen.queryByText("Fixed APY")).toBeNull()
     expect(detail("Your PT")).toBe("Redeemed, not sold")
     expect(detail("Fees")).toBe("None")
-    expect(screen.getByText(/step 2, Redeem at maturity \(you give PT, you get USDY \(paid out as USDY even when you receive SY\)\); step 3, Withdraw/)).toBeTruthy()
+    expect(await tipOf("Signatures")).toMatch(/step 2, Redeem at maturity \(you give PT, you get USDY \(paid out as USDY even when you receive SY\)\); step 3, Withdraw/)
   })
 
   it("Withdraw to USDY reaches the route review on its three steps; to SY it is two", async () => {
@@ -441,7 +445,8 @@ describe("LP tab — Withdraw", () => {
     await enter("You pay", "1000")
     const redeemed = previewRedeemPt(removed.pt, ORACLE, SCALE)
     expect(received()).toBe(`${amount(removed.sy)} SY + ${amount(redeemed)} USDY`)
-    expect(screen.getByText(/The redeemed part, .* USDY, is paid in USDY even when you receive SY/)).toBeTruthy()
+    expect(detail("Redeemed part")).toBe(`${amount(redeemed)} USDY`)
+    expect(await tipOf("Redeemed part")).toMatch(/The redeemed part, .* USDY, is paid in USDY even when you receive SY/)
     // The pool pause never holds LPs in after maturity (market_pool:522-526).
     expect(reviewButton("Withdraw liquidity").disabled).toBe(false)
   })

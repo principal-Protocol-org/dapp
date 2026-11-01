@@ -9,7 +9,8 @@ import { PreviewList } from "@/components/app/actions/preview-lines"
 import { TxNoticeView } from "@/components/app/actions/tx-feedback"
 import { UNAVAILABLE } from "@/components/app/live"
 import { RouteFlow } from "@/components/app/route/route-flow"
-import { routeNote } from "@/components/app/trade/route-note"
+import { LabelWithTip } from "@/components/app/info-tip"
+import { routeNote, signaturesLine } from "@/components/app/trade/route-note"
 import { TokenPicker, type PayToken } from "@/components/app/trade/token-picker"
 import { useTradeRoute } from "@/components/app/trade/use-trade-route"
 import { useManifest } from "@/components/app/manifest-provider"
@@ -145,9 +146,36 @@ function YtTrade({ marketId, side }: { marketId: string; side: YtSide }) {
     />
   )
 
-  const details: PreviewLine[] = q ? detailLines(q, side, code, slippageBps, steps, amountText, unitOf) : []
   const note = routeNote({ plans: route.plans, q, connected: route.source !== null, pending: route.sim.pending })
   const spentText = (raw: bigint) => amountText(raw, token)
+  const details: PreviewLine[] = []
+  if (q) {
+    // R2-59: the capital rows only when the adapter reports a capital; the step is the planned one.
+    if (q.capital) {
+      details.push(
+        {
+          label: "Moves",
+          value: spentText(q.capital.moved),
+          hint: "Buying YT today mints PT + YT from the whole amount moved and sells the PT straight back, so your balance must cover what is moved, not only what is spent. The cap and limits are checked on what is moved.",
+        },
+        { label: "Spends", value: spentText(q.capital.spent) },
+        { label: `Comes back (step ${q.capital.backStep})`, value: spentText(q.capital.back) },
+      )
+    }
+    details.push(...detailLines(q, side, code, slippageBps, steps, amountText, unitOf, side === "buy" && q.yieldOn !== undefined ? breakEven(q, code, spentText(q.capital?.spent ?? trade.amount), amountText(q.yieldOn, "underlying")) : undefined))
+    if (side === "buy" && q.yieldOn !== undefined) {
+      details.push({
+        label: "At maturity",
+        value: "YT worth 0",
+        hint: `Indicative: ${amountText(q.yieldOn, "underlying")} is your ${amountText(q.out, "yt")} (USD) at today's ${code} oracle rate. From maturity a YT earns nothing more.`,
+      })
+    }
+    if (note) details.push(signaturesLine(note))
+  }
+  const exactLabel = swapExact ? (q?.swapOut ? `Step ${q.swapOut.step} exact (simulated)` : "Exact (simulated)") : "Indicative"
+  const exactnessTip = [q?.swapOut ? `Indicative: the steps after step ${q.swapOut.step} turn its ${unitOf(q.swapOut.token)} into ${unitOf(q.outToken)} at today's rate.` : null, note?.exactness]
+    .filter(Boolean)
+    .join(" ")
 
   return (
     <Card className="@container">
@@ -184,21 +212,7 @@ function YtTrade({ marketId, side }: { marketId: string; side: YtSide }) {
           >
             {q ? amountText(q.out, q.outToken) : route.quote ? UNAVAILABLE : null}
           </output>
-          {q && q.swapOut ? (
-            <p className="text-xs text-ink-muted">{`Indicative: the steps after step ${q.swapOut.step} turn its ${unitOf(q.swapOut.token)} into ${unitOf(q.outToken)} at today's rate.`}</p>
-          ) : null}
         </div>
-
-        {q && q.capital ? (
-          <section aria-label="Capital this route moves" className="grid gap-1 rounded-lg border border-line p-3">
-            <p className="text-sm font-medium text-ink wrap-anywhere">
-              {`Moves ${spentText(q.capital.moved)}, spends ${spentText(q.capital.spent)}; ${formatTokenAmount(q.capital.back, decimalsOf(token), true)} come back in step ${q.capital.backStep}.`}
-            </p>
-            <p className="text-xs text-ink-muted">
-              {`Buying YT today mints PT + YT from the whole amount moved and sells the PT straight back, so your balance must cover what is moved, not only what is spent. The cap and limits are checked on what is moved.`}
-            </p>
-          </section>
-        ) : null}
 
         <section aria-label="Trading details" className="grid gap-2">
           {!ms ? (
@@ -213,21 +227,15 @@ function YtTrade({ marketId, side }: { marketId: string; side: YtSide }) {
             <p className="text-sm text-ink wrap-anywhere">{`${UNAVAILABLE}: ${route.quote.error}`}</p>
           ) : q ? (
             <>
-              <p className="label">{swapExact ? (q.swapOut ? `Step ${q.swapOut.step} exact (simulated)` : "Exact (simulated)") : "Indicative"}</p>
+              <p className="label">
+                <LabelWithTip label={exactLabel} tip={exactnessTip || undefined} />
+              </p>
               <PreviewList lines={details} />
-              {side === "buy" && q.yieldOn !== undefined ? (
-                <div className="grid gap-1 rounded-lg border border-line p-3">
-                  <p className="text-sm font-medium text-ink wrap-anywhere">{breakEven(q, code, spentText(q.capital?.spent ?? trade.amount), amountText(q.yieldOn, "underlying"))}</p>
-                  <p className="text-xs text-ink-muted wrap-anywhere">
-                    {`Indicative: ${amountText(q.yieldOn, "underlying")} is your ${amountText(q.out, "yt")} (USD) at today's ${code} oracle rate.`}
-                  </p>
-                </div>
-              ) : null}
             </>
           ) : (
             <p className="text-sm text-ink-muted">Enter an amount to see the trade&apos;s details.</p>
           )}
-          {note ? <p className="text-xs text-ink-muted">{note}</p> : null}
+          {!q && note ? <PreviewList lines={[signaturesLine(note)]} /> : null}
         </section>
 
         <RouteFlow
@@ -256,7 +264,7 @@ function breakEven(q: TradeQuote, code: string, spent: string, yieldOn: string):
     q.effectiveApy === undefined
       ? "The break-even rate is unavailable: this app could not work it out from these amounts."
       : `You gain if ${code}'s average APY until then exceeds ${formatPercent(q.effectiveApy)}.`
-  return `${head} ${gain} At maturity the YT is worth 0.`
+  return `${head} ${gain}`
 }
 
 const timesText = (x: number | undefined) => (x === undefined ? UNAVAILABLE : `${Math.round(x)}x`)
@@ -269,6 +277,7 @@ function detailLines(
   steps: number,
   amountText: (raw: bigint, t: TradeToken) => string,
   unitOf: (t: TradeToken) => string,
+  breakEvenTip: string | undefined,
 ): PreviewLine[] {
   const slippage = formatBps(slippageBps)
   const lines: PreviewLine[] = [
@@ -284,9 +293,11 @@ function detailLines(
   if (side === "buy") {
     lines.push(
       {
-        label: "Effective implied APY",
+        label: "Break-even APY",
         value: q.effectiveApy === undefined ? UNAVAILABLE : formatPercent(q.effectiveApy),
-        hint: `The fixed rate at which what you pay for the YT is fair: your break-even. You gain if ${code}'s average APY until maturity is higher.`,
+        hint:
+          breakEvenTip ??
+          `The fixed rate at which what you pay for the YT is fair: your break-even. You gain if ${code}'s average APY until maturity is higher.`,
       },
       {
         label: "Leverage",

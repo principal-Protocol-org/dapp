@@ -206,6 +206,14 @@ async function settle(ms = 0) {
 }
 
 const user = () => userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+
+/** The text of the info tip behind "More about <label>" (R2-65): a click opens it, Escape closes it. */
+async function tipOf(label: string): Promise<string> {
+  await user().click(screen.getByRole("button", { name: `More about ${label}` }))
+  const text = (await screen.findByRole("tooltip")).textContent ?? ""
+  await user().keyboard("{Escape}")
+  return text
+}
 const reviewButton = (label = "Buy PT") => screen.getByRole("button", { name: `Review ${label}` }) as HTMLButtonElement
 const signButton = () => screen.getByRole("button", { name: "Sign transaction" }) as HTMLButtonElement
 /** The inline message under a field, or null. */
@@ -339,7 +347,7 @@ describe("ActionPanel — previews", () => {
     await renderPanel()
     await enter("SY to spend", "10")
     expect(screen.getByText("Indicative")).toBeTruthy()
-    expect(screen.getByText("PT price").nextSibling?.textContent).toBe("0.9800")
+    expect(screen.getByText("PT price").closest("dt")?.nextSibling?.textContent).toBe("0.9800")
     expect(screen.getByText(/No wallet is connected/)).toBeTruthy()
     expect(mocks.simulateInvocation).not.toHaveBeenCalled()
     expect(reviewButton().disabled).toBe(true)
@@ -353,10 +361,10 @@ describe("ActionPanel — previews", () => {
     expect(Object.keys(exact.mock.calls.at(-1)![1]).sort()).toEqual(["guards", "inputs"])
     expect(screen.getByText("Exact (simulated)")).toBeTruthy()
     expect(screen.queryByText("Indicative")).toBeNull()
-    expect(screen.getByText("PT received").nextSibling?.textContent).toBe("100 PT")
+    expect(screen.getByText("PT received").closest("dt")?.nextSibling?.textContent).toBe("100 PT")
     // floor(100 PT · (10000 − 50) / 10000) = 99.5 PT
-    expect(screen.getByText("Minimum PT received").nextSibling?.textContent).toBe("99.5 PT")
-    expect(screen.getByText(/0\.50% slippage tolerance/)).toBeTruthy()
+    expect(screen.getByText("Minimum PT received").closest("dt")?.nextSibling?.textContent).toBe("99.5 PT")
+    expect(await tipOf("Minimum PT received")).toMatch(/0\.50% slippage tolerance/)
   })
 
   it("simulates the real call as the user, with open guards (R28: simulated before signing)", async () => {
@@ -433,8 +441,8 @@ describe("ActionPanel — market section (R38)", () => {
     await renderPanel({ ...buyPt, market })
     await enter("SY to spend", "10")
     expect(screen.getByText("Exact (simulated)")).toBeTruthy()
-    expect(within(marketList()).getByText("Spot PT price").nextSibling?.textContent).toBe("0.9800")
-    expect(within(marketList()).getByText("Exact PT seen").nextSibling?.textContent).toBe("100")
+    expect(within(marketList()).getByText("Spot PT price").closest("dt")?.nextSibling?.textContent).toBe("0.9800")
+    expect(within(marketList()).getByText("Exact PT seen").closest("dt")?.nextSibling?.textContent).toBe("100")
     const ctx = market.mock.calls.at(-1)![1]
     expect(ctx.inputs).toEqual({ amount: 100_000_000n })
     expect(ctx.output).toEqual({ kind: "amount", value: SY_100 })
@@ -469,10 +477,10 @@ describe("ActionPanel — market section (R38)", () => {
     await renderPanel({ ...buyPt, market: spot, marketLabel: "Your yield (indicative)" })
     expect(screen.queryByText("Market (indicative)")).toBeNull()
     const list = screen.getByText("Your yield (indicative)", { selector: "p" }).nextElementSibling as HTMLElement
-    expect(within(list).getByText("Spot PT price").nextSibling?.textContent).toBe("Unavailable")
+    expect(within(list).getByText("Spot PT price").closest("dt")?.nextSibling?.textContent).toBe("Unavailable")
     cleanup()
     await renderPanel({ ...buyPt, market: broken })
-    expect(within(marketList()).getByText("Preview unavailable").nextSibling?.textContent).toBe("oracle rate is not positive")
+    expect(within(marketList()).getByText("Preview unavailable").closest("dt")?.nextSibling?.textContent).toBe("oracle rate is not positive")
   })
 
   it("is not shown without live market data", async () => {
@@ -577,7 +585,7 @@ describe("ActionPanel — owner binding (Review Focus 2)", () => {
     expect(screen.queryByRole("dialog")).toBeNull()
     expect(mocks.executeReview).not.toHaveBeenCalled()
     // The floor is re-derived at the new tolerance: floor(100 PT · 9900 / 10000).
-    expect(screen.getByText("Minimum PT received").nextSibling?.textContent).toBe("99 PT")
+    expect(screen.getByText("Minimum PT received").closest("dt")?.nextSibling?.textContent).toBe("99 PT")
   })
 
   it("the signer is refused before Freighter opens if it is not the connected account", async () => {
@@ -935,7 +943,7 @@ describe("ActionPanel — unavailable data (Review Focus 1)", () => {
     mocks.fetchMarketState.mockResolvedValue(marketState({ ptPrice: down() }))
     await renderPanel()
     await enter("SY to spend", "10")
-    expect(screen.getByText("PT price").nextSibling?.textContent).toBe("Unavailable")
+    expect(screen.getByText("PT price").closest("dt")?.nextSibling?.textContent).toBe("Unavailable")
   })
 
   it("R32: waits for the network clock without evaluating the gates", async () => {

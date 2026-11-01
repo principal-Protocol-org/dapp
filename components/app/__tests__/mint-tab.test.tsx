@@ -29,7 +29,7 @@ vi.mock("@/lib/protocol/review", async (orig) => ({
 }))
 
 import { A, MARKET } from "./panel-mocks"
-import { disconnect, enter, gateList, installDefaults, openTab, renderUi, reviewButton, simulateReturns, teardown, valueIn } from "./panel-harness"
+import { disconnect, enter, gateList, installDefaults, openTab, renderUi, reviewButton, simulateReturns, teardown, tipOf, valueIn } from "./panel-harness"
 import { depositPanel, mintPanel, MintTab, withdrawPanel } from "../actions/mint-tab"
 
 const STA_100 = 1_000_000_000n
@@ -184,7 +184,8 @@ describe("Mint tab — mint PT + YT", () => {
     await openTab("Mint PT + YT")
     await enter("STA to mint with", "100")
     expect(valueIn("Market (indicative)", "Circuit breaker, protocol-wide")).toBe("200.0000 STA of 75000.0000 STA left")
-    expect(screen.getByText(/Minting from STA counts twice: once for the deposit, once for the mint\./)).toBeTruthy()
+    // The explanation sits behind the row's info tip (R2-65), not under it.
+    expect(await tipOf("Circuit breaker, protocol-wide")).toMatch(/Minting from STA counts twice: once for the deposit, once for the mint\./)
   })
 
   it("a mint that fits once but not twice is refused by the breaker, as the preview says", async () => {

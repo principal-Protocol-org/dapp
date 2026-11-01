@@ -9,7 +9,8 @@ import { PreviewList } from "@/components/app/actions/preview-lines"
 import { TxNoticeView } from "@/components/app/actions/tx-feedback"
 import { UNAVAILABLE } from "@/components/app/live"
 import { RouteFlow } from "@/components/app/route/route-flow"
-import { routeNote } from "@/components/app/trade/route-note"
+import { LabelWithTip } from "@/components/app/info-tip"
+import { routeNote, signaturesLine } from "@/components/app/trade/route-note"
 import { TokenPicker, type PayToken } from "@/components/app/trade/token-picker"
 import { useTradeRoute } from "@/components/app/trade/use-trade-route"
 import { useManifest } from "@/components/app/manifest-provider"
@@ -69,6 +70,7 @@ export function PtTab({ marketId, side }: { marketId: string; side: PtSide }) {
   const q = route.quote?.status === "live" ? route.quote.value : undefined
   const swapExact = q ? (q.swapOut ?? q).exactness === "simulated" : false
   const steps = route.plans.length
+  const exactLabel = swapExact ? (q?.swapOut ? `Step ${q.swapOut.step} exact (simulated)` : "Exact (simulated)") : "Indicative"
 
   const owner = JSON.stringify(gate.wallet)
   const reset = () => {
@@ -82,8 +84,12 @@ export function PtTab({ marketId, side }: { marketId: string; side: PtSide }) {
     <TokenPicker label={label} value={token} onChange={(t) => setTokens((all) => ({ ...all, [side]: t }))} options={["underlying", "sy"]} code={code} />
   )
 
-  const details: PreviewLine[] = q ? detailLines(q, side, code, slippageBps, steps, amountText, unitOf) : []
   const note = routeNote({ plans: route.plans, q, connected: route.source !== null, pending: route.sim.pending })
+  const details: PreviewLine[] = q ? detailLines(q, side, code, slippageBps, steps, amountText, unitOf, underlyingDecimals) : []
+  if (note) details.push(signaturesLine(note))
+  const exactnessTip = [q?.swapOut ? `Indicative: the steps after step ${q.swapOut.step} turn its ${unitOf(q.swapOut.token)} into ${unitOf(q.outToken)} at today's rate.` : null, note?.exactness]
+    .filter(Boolean)
+    .join(" ")
 
   return (
     <Card className="@container">
@@ -122,12 +128,6 @@ export function PtTab({ marketId, side }: { marketId: string; side: PtSide }) {
           >
             {q ? amountText(q.out, q.outToken) : route.quote ? UNAVAILABLE : null}
           </output>
-          {q && q.valueToday !== undefined ? (
-            <p className="text-xs text-ink-muted">{`Worth about ${amountText(q.valueToday, "underlying")} today, at the pool's price.`}</p>
-          ) : null}
-          {q && q.swapOut ? (
-            <p className="text-xs text-ink-muted">{`Indicative: the steps after step ${q.swapOut.step} turn its ${unitOf(q.swapOut.token)} into ${unitOf(q.outToken)} at today's rate.`}</p>
-          ) : null}
         </div>
 
         <section aria-label="Trading details" className="grid gap-2">
@@ -143,23 +143,15 @@ export function PtTab({ marketId, side }: { marketId: string; side: PtSide }) {
             <p className="text-sm text-ink wrap-anywhere">{`${UNAVAILABLE}: ${route.quote.error}`}</p>
           ) : q ? (
             <>
-              <p className="label">{swapExact ? (q.swapOut ? `Step ${q.swapOut.step} exact (simulated)` : "Exact (simulated)") : "Indicative"}</p>
+              <p className="label">
+                <LabelWithTip label={exactLabel} tip={exactnessTip || undefined} />
+              </p>
               <PreviewList lines={details} />
-              {q.payoff ? (
-                <div className="grid gap-1 rounded-lg border border-line p-3">
-                  <p className="text-sm font-medium text-ink">
-                    {`At maturity: ${formatUsdCents(q.payoff.gainUsd, TOKEN_DECIMALS)} (${formatPercent(q.payoff.pct)}), fixed in USD whatever ${code}'s price does.`}
-                  </p>
-                  <p className="text-xs text-ink-muted">
-                    {`About ${formatGainLoss(q.payoff.gainUnderlying, underlyingDecimals, 4, { group: true })} ${code} at today's ${code} price (indicative). Counted in ${code}, this falls as ${code}'s price rises, so only the USD figure is fixed.`}
-                  </p>
-                </div>
-              ) : null}
             </>
           ) : (
             <p className="text-sm text-ink-muted">Enter an amount to see the trade&apos;s details.</p>
           )}
-          {note ? <p className="text-xs text-ink-muted">{note}</p> : null}
+          {!q && note ? <PreviewList lines={[signaturesLine(note)]} /> : null}
         </section>
 
         <RouteFlow
@@ -189,9 +181,14 @@ function detailLines(
   steps: number,
   amountText: (raw: bigint, t: TradeToken) => string,
   unitOf: (t: TradeToken) => string,
+  underlyingDecimals: number,
 ): PreviewLine[] {
   const slippage = formatBps(slippageBps)
-  const lines: PreviewLine[] = [
+  const lines: PreviewLine[] = []
+  if (q.valueToday !== undefined) {
+    lines.push({ label: "Value today", value: `≈ ${amountText(q.valueToday, "underlying")}`, hint: "Worth this much at the pool's price today. Indicative." })
+  }
+  lines.push(
     {
       label: "Fixed APY",
       value: q.apyBefore === undefined || q.apyAfter === undefined ? UNAVAILABLE : `${formatPercent(q.apyBefore)} → ${formatPercent(q.apyAfter)}`,
@@ -200,7 +197,7 @@ function detailLines(
           ? "The pool's fixed APY now, and once your trade lands: buying PT raises its price, so the fixed APY falls."
           : "The pool's fixed APY now, and once your trade lands: selling PT lowers its price, so the fixed APY rises.",
     },
-  ]
+  )
   if (side === "buy") {
     lines.push({
       label: "Your effective fixed APY",
@@ -232,5 +229,12 @@ function detailLines(
           : `Signed into the transaction at your ${slippage} slippage tolerance: it fails rather than give less.`,
     },
   )
+  if (q.payoff) {
+    lines.push({
+      label: "At maturity",
+      value: `${formatUsdCents(q.payoff.gainUsd, TOKEN_DECIMALS)} (${formatPercent(q.payoff.pct)})`,
+      hint: `Fixed in USD whatever ${code}'s price does. About ${formatGainLoss(q.payoff.gainUnderlying, underlyingDecimals, 4, { group: true })} ${code} at today's ${code} price (indicative). Counted in ${code}, this falls as ${code}'s price rises, so only the USD figure is fixed.`,
+    })
+  }
   return lines
 }

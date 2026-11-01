@@ -5,16 +5,18 @@ import { SIMULATION_DEBOUNCE_MS } from "@/hooks/use-simulation"
 import type { AccountState } from "@/lib/protocol/account-state"
 import { ACTION_META } from "@/lib/protocol/actions"
 import type { MarketState } from "@/lib/protocol/market-state"
+import { LabelWithTip } from "@/components/app/info-tip"
 import type { IndicativeContext, PanelConfig, PanelInputs, PreviewLine } from "@/components/app/actions/panel-config"
 
 export function PreviewList({ lines }: { lines: PreviewLine[] }) {
   return (
     <dl className="grid gap-2">
       {lines.map((line, i) => (
-        <div key={`${line.label}-${i}`} className="grid grid-cols-[1fr_auto] items-baseline gap-x-4 gap-y-0.5">
-          <dt className="text-sm text-ink-muted">{line.label}</dt>
-          <dd className="text-right font-mono text-sm text-ink tabular-nums">{line.value}</dd>
-          {line.hint ? <dd className="col-span-2 text-xs text-ink-muted">{line.hint}</dd> : null}
+        <div key={`${line.label}-${i}`} className="grid grid-cols-[1fr_auto] items-baseline gap-x-4">
+          <dt className="text-sm text-ink-muted">
+            <LabelWithTip label={line.label} tip={line.hint} />
+          </dt>
+          <dd className="text-right font-mono text-sm text-ink tabular-nums wrap-anywhere">{line.value}</dd>
         </div>
       ))}
     </dl>

@@ -218,7 +218,8 @@ describe("TokenPicker", () => {
     render(<TradePanel marketId="m1" />)
     await screen.findByText("pt tab: buy")
     expect(screen.queryByRole("button", { name: "Need SY? Deposit USDY" })).toBeNull()
-    expect(screen.getByRole("button", { name: "Split USDY into PT + YT" })).toBeTruthy()
+    // R2-66: the isolated Split link is gone; Split is in Quick actions only.
+    expect(screen.queryByRole("button", { name: "Split USDY into PT + YT" })).toBeNull()
     for (const tab of ["YT", "LP"]) {
       await userEvent.click(screen.getByRole("tab", { name: tab }))
       expect(screen.queryByRole("button", { name: /Need SY\?/ })).toBeNull()
@@ -270,11 +271,13 @@ describe("Quick actions", () => {
     }
   })
 
-  it("links plain words on the page to the split dialog", async () => {
+  it("opens the split dialog through Quick actions; no separate link on the page (R2-66)", async () => {
     mocks.search = "tab=lp"
     render(<TradePanel marketId="m1" />)
     await screen.findByText("lp tab: deposit")
-    await userEvent.click(screen.getByRole("button", { name: "Split USDY into PT + YT" }))
+    expect(screen.queryByRole("button", { name: "Split USDY into PT + YT" })).toBeNull()
+    await userEvent.click(screen.getByRole("button", { name: "Quick actions" }))
+    await userEvent.click(screen.getByRole("menuitem", { name: "Split USDY → PT + YT" }))
     expect(within(await screen.findByRole("dialog")).getByText("panel: mint")).toBeTruthy()
   })
 })
