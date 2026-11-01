@@ -5,7 +5,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { GateList } from "@/components/app/actions/gate-list"
 import { TechnicalDetails, TimeLimit } from "@/components/app/actions/review-parts"
 import type { Blocker } from "@/lib/protocol/gates"
-import type { Review } from "@/lib/protocol/review"
+import type { AnyReview } from "@/lib/protocol/review"
 
 export type ReviewPhase = "preparing" | "review" | "signing" | "error"
 
@@ -23,10 +23,16 @@ function Group({ title, items }: { title: string; items: string[] }) {
   )
 }
 
-function Body({ review, ledgerTime, secondsLeft }: { review: Review; ledgerTime: number | null; secondsLeft: number | null }) {
+function Body({ review, ledgerTime, secondsLeft }: { review: AnyReview; ledgerTime: number | null; secondsLeft: number | null }) {
   const { summary } = review
   return (
     <div className="grid gap-4">
+      {review.origin.type === "manager" ? (
+        <div className="grid gap-1 rounded-lg border border-line bg-surface p-3">
+          <h3 className="label">You are signing</h3>
+          <p className="text-base font-medium break-words text-ink">{review.origin.call.label}</p>
+        </div>
+      ) : null}
       <Group title="You give" items={summary.give} />
       <Group title="You get at least" items={summary.getAtLeast} />
       <Group title="Fees" items={summary.fees} />
@@ -57,13 +63,14 @@ export function ReviewDialog({
   secondsLeft,
   pending,
   canSign,
+  note,
   onSign,
   onClose,
 }: {
   open: boolean
   title: string
   phase: ReviewPhase
-  review: Review | null
+  review: AnyReview | null
   error?: string
   blockers: Blocker[]
   ledgerTime: number | null
@@ -72,6 +79,8 @@ export function ReviewDialog({
   pending: boolean
   /** Every gate was evaluated and passes, with floors from this input's simulation. */
   canSign: boolean
+  /** A line above the review, e.g. "Step 1 of 2". */
+  note?: string
   onSign(): void
   onClose(): void
 }) {
@@ -82,9 +91,12 @@ export function ReviewDialog({
         <DialogHeader>
           <DialogTitle>Review: {title}</DialogTitle>
           <DialogDescription>
-            Your wallet asks you to sign exactly this transaction. Check what you give and the least you get.
+            {review?.origin.type === "manager"
+              ? "Your wallet asks you to sign exactly this transaction. Check what it does below."
+              : "Your wallet asks you to sign exactly this transaction. Check what you give and the least you get."}
           </DialogDescription>
         </DialogHeader>
+        {note ? <p className="text-sm font-medium text-ink">{note}</p> : null}
         {phase === "preparing" ? <p className="text-sm text-ink">Preparing the transaction with the network…</p> : null}
         {phase === "error" ? (
           <p role="alert" className="text-sm text-negative">

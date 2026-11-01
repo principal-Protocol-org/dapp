@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
     network: "testnet" as "testnet" | "local" | "mainnet",
     networkPassphrase: "Test SDF Network ; September 2015",
     rpcUrl: "https://rpc.example",
+    markets: [] as unknown[],
   },
   adapter: {
     restore: vi.fn(),

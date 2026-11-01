@@ -58,6 +58,8 @@ export function useExecute(): Execute {
     const { network } = manifest
     void queryClient.invalidateQueries({ queryKey: ["market", network] })
     void queryClient.invalidateQueries({ queryKey: ["account", network] })
+    // The manager view's roles, fees and paused flags (the paused flags are in the market reads).
+    void queryClient.invalidateQueries({ queryKey: ["manage", network] })
   }, [queryClient, manifest])
 
   const track = useCallback(async <T,>(run: () => Promise<T>): Promise<T> => {

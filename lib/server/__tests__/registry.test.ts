@@ -197,6 +197,7 @@ function manifestWith(markets: Market[], overrides: Partial<Manifest> = {}): Man
 
 import {
   discover,
+  invalidMarkets,
   marketFromPool,
   publishMarket,
   resolvedMarkets,
@@ -827,5 +828,34 @@ describe("GET /api/markets", () => {
     expect(res.status).toBe(200)
     expect((await res.json()).markets).toEqual([seed])
     expect(error).toHaveBeenCalled()
+  })
+})
+
+describe("invalidMarkets (R2-38: the manager view lists them with their reason)", () => {
+  it("lists rows with valid = false and their reason, a hidden seed too, and no listed or unknown row", async () => {
+    const seed = seedMarket(chain.deploy(10))
+    const manifest = manifestWith([seed])
+    const gone = chain.deploy(20)
+    const unknown = chain.deploy(30)
+    const fine = chain.deploy(40)
+    await store.record({ pool: seed.contracts.pool, source: "seed", valid: false, reason: "its PT is not wired to the manager", market: seed })
+    await store.record({ pool: gone.pool, source: "discovered", valid: false, reason: "Unregistered from the Router.", market: null })
+    await store.record({ pool: unknown.pool, source: "discovered", valid: null, reason: "could not be checked", market: null })
+    await store.record({ pool: fine.pool, source: "discovered", valid: true, reason: null, market: null })
+
+    const result = await invalidMarkets({ store, manifest })
+    expect(result.status).toBe("ok")
+    if (result.status !== "ok") return
+    expect(result.rows).toEqual([
+      { pool: seed.contracts.pool, name: seed.displayName, reason: "its PT is not wired to the manager" },
+      { pool: gone.pool, name: null, reason: "Unregistered from the Router." },
+    ])
+  })
+
+  it("says it is unavailable when the registry cannot be read, instead of an empty list", async () => {
+    store.fail = new Error("connection refused at 10.0.0.1")
+    vi.spyOn(console, "error").mockImplementation(() => {})
+    const result = await invalidMarkets({ store, manifest: manifestWith([]) })
+    expect(result).toEqual({ status: "unavailable" })
   })
 })
