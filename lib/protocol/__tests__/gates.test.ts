@@ -883,8 +883,8 @@ describe("gate matrix", () => {
 // ---------------------------------------------------------------- Review Focus 1 (R23)
 
 describe("Buy YT is gated on what it moves, not on what it spends (R2-57)", () => {
-  // Today's Buy YT moves about 42x its spend (trade-adapter's state A: 100 SY spent mint from
-  // 4215.6518764 SY), and its route carries those moved amounts as the step amounts: the deposit
+  // Today's Buy YT moves about 42x its spend (on curve.test.ts's state A, 100 SY spent mint from
+  // about 4,216 SY), and its route carries those moved amounts as the step amounts: the deposit
   // step's is the USDY deposited, the buy step's the solver's sy_in. The gates read the step amount.
   const SPEND = 100n * UNIT
   const SY_IN = 42_156_518_764n
