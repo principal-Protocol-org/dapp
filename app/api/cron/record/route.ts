@@ -39,28 +39,23 @@ function bearerMatches(header: string | null): boolean {
 }
 
 /**
- * The URL QStash signs for this route: `QSTASH_RECORD_URL`, else the production domain Vercel
- * provides. Without either the QStash path refuses (fail closed): a signature issued for another
- * destination of the same QStash account must not be accepted here.
+ * A QStash signature is bound to the URL it was sent to, so it is checked against the URL this
+ * request came in on (R2-29, amended): a signature issued for another destination of the same QStash
+ * account fails. On Vercel the platform sets the host, and a request reaches this deployment only
+ * through one of its own domains, so Production, testnet and previews all work with no variable to
+ * set. Off Vercel (`VERCEL` unset), a proxy could pass a client's Host header through and let the
+ * caller choose that URL, so the QStash path refuses there; the Bearer path still works.
  */
-function expectedUrl(): string | null {
-  const configured = process.env.QSTASH_RECORD_URL
-  if (configured) return configured
-  const host = process.env.VERCEL_PROJECT_PRODUCTION_URL
-  return host ? `https://${host}/api/cron/record` : null
-}
-
 async function signatureValid(request: Request): Promise<boolean> {
   const signature = request.headers.get("upstash-signature")
   const currentSigningKey = process.env.QSTASH_CURRENT_SIGNING_KEY
   const nextSigningKey = process.env.QSTASH_NEXT_SIGNING_KEY
-  const url = expectedUrl()
-  if (!signature || !currentSigningKey || !nextSigningKey || !url) return false
+  if (process.env.VERCEL !== "1" || !signature || !currentSigningKey || !nextSigningKey) return false
   try {
     return await new Receiver({ currentSigningKey, nextSigningKey }).verify({
       signature,
       body: await request.text(),
-      url,
+      url: request.url,
     })
   } catch {
     return false

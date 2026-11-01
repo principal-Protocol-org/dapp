@@ -47,17 +47,17 @@ vi.mock("@/lib/protocol/stellar", () => ({ createRpcServer: () => ({}) }))
 import { GET, POST } from "../route"
 
 const SECRET = "test-cron-secret-0123456789"
-const call = (headers: Record<string, string> = {}) =>
-  GET(new Request("http://localhost/api/cron/record", { headers }))
+const URL_ = "https://app.example/api/cron/record"
+const call = (headers: Record<string, string> = {}, url = URL_) => GET(new Request(url, { headers }))
 const post = (headers: Record<string, string> = {}) =>
-  POST(new Request("http://localhost/api/cron/record", { method: "POST", headers, body: "" }))
+  POST(new Request(URL_, { method: "POST", headers, body: "" }))
 
 describe("GET /api/cron/record", () => {
   beforeEach(() => {
     process.env.CRON_SECRET = SECRET
     process.env.QSTASH_CURRENT_SIGNING_KEY = "current"
     process.env.QSTASH_NEXT_SIGNING_KEY = "next"
-    process.env.QSTASH_RECORD_URL = "https://app.example/api/cron/record"
+    process.env.VERCEL = "1"
     mocks.recordAll.mockResolvedValue({ recorded: 1, failed: [] })
     mocks.verify.mockReset()
     mocks.recordAll.mockClear()
@@ -69,8 +69,7 @@ describe("GET /api/cron/record", () => {
     delete process.env.CRON_SECRET
     delete process.env.QSTASH_CURRENT_SIGNING_KEY
     delete process.env.QSTASH_NEXT_SIGNING_KEY
-    delete process.env.QSTASH_RECORD_URL
-    delete process.env.VERCEL_PROJECT_PRODUCTION_URL
+    delete process.env.VERCEL
   })
 
   it("401 without credentials", async () => {
@@ -126,18 +125,15 @@ describe("GET /api/cron/record", () => {
     expect((await call({ "upstash-signature": "sig" })).status).toBe(401)
   })
 
-  it("verifies the signature against the configured URL", async () => {
+  it("verifies the signature against the URL the request came in on", async () => {
     mocks.verify.mockResolvedValue(true)
     await call({ "upstash-signature": "sig" })
     expect(mocks.verify).toHaveBeenCalledWith(expect.objectContaining({ url: "https://app.example/api/cron/record" }))
   })
 
-  it("falls back to the Vercel production domain", async () => {
-    delete process.env.QSTASH_RECORD_URL
-    process.env.VERCEL_PROJECT_PRODUCTION_URL = "principal.example"
-    mocks.verify.mockResolvedValue(true)
-    expect((await call({ "upstash-signature": "sig" })).status).toBe(200)
-    expect(mocks.verify).toHaveBeenCalledWith(expect.objectContaining({ url: "https://principal.example/api/cron/record" }))
+  it("follows whichever domain the request came in on, with no variable to set (testnet, preview)", async () => {
+    mocks.verify.mockImplementation(async ({ url }: { url: string }) => url === "https://testnet.example/api/cron/record")
+    expect((await call({ "upstash-signature": "sig" }, "https://testnet.example/api/cron/record")).status).toBe(200)
   })
 
   it("401 when the signature was issued for a different url", async () => {
@@ -145,11 +141,18 @@ describe("GET /api/cron/record", () => {
     expect((await call({ "upstash-signature": "sig" })).status).toBe(401)
   })
 
-  it("401 on the QStash path when no url is configured (fails closed)", async () => {
-    delete process.env.QSTASH_RECORD_URL
+  it("refuses the QStash path off Vercel, where a client's Host header could choose the URL; Bearer still works", async () => {
+    delete process.env.VERCEL
     mocks.verify.mockResolvedValue(true)
     expect((await call({ "upstash-signature": "sig" })).status).toBe(401)
     expect(mocks.verify).not.toHaveBeenCalled()
+    expect((await call({ authorization: `Bearer ${SECRET}` })).status).toBe(200)
+  })
+
+  it("matches the URL exactly: a signature for the bare URL fails with a query added", async () => {
+    mocks.verify.mockImplementation(async ({ url }: { url: string }) => url === URL_)
+    expect((await call({ "upstash-signature": "sig" }, `${URL_}?x=1`)).status).toBe(401)
+    expect(mocks.recordAll).not.toHaveBeenCalled()
   })
 
   it("503 not_configured when the database is not configured", async () => {
