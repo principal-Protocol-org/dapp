@@ -1,7 +1,8 @@
 /**
  * The app's route pipeline without React, for the live suites: what `useTradeRoute` checks before a
- * route starts, then what `useRoute` does for each step (`prepareStep`, then `sign`), with a keypair
- * in place of Freighter.
+ * route starts (`routePreStartBlockers`, the hook's own function, fed this runner's simulation of
+ * step 1), then what `useRoute` does for each step (`prepareStep`, then `sign`), with a keypair in
+ * place of Freighter.
  *
  * Per step, as `useRoute.prepareStep` does it: fresh reads, `resolveStep` from the outputs the
  * confirmed steps really produced, a draft with open guards and a deadline from the ledger clock,
@@ -14,24 +15,15 @@ import { derive, simulate } from "@/hooks/use-simulation"
 import { fetchAccountState, type AccountState, type ComplianceKind } from "@/lib/protocol/account-state"
 import { ACTION_META, type ActionInput, type GuardValues } from "@/lib/protocol/actions"
 import { evaluateAccountCompliance, type ComplianceItem } from "@/lib/protocol/compliance"
-import {
-  BLOCKER_ORDER,
-  breakerReport,
-  capCharge,
-  evaluateGates,
-  withEarlierCapCharges,
-  withEarlierReports,
-  type Blocker,
-  type BlockerCode,
-  type GateContext,
-} from "@/lib/protocol/gates"
+import { evaluateGates, type Blocker, type GateContext } from "@/lib/protocol/gates"
 import { openGuards, type ActionOutput } from "@/lib/protocol/guards"
 import { createHorizon } from "@/lib/protocol/horizon"
 import { fetchMarketState, type MarketState } from "@/lib/protocol/market-state"
 import { BPS, ceilDiv } from "@/lib/protocol/math"
 import { createRpcReader } from "@/lib/protocol/reader"
 import { executeReview, prepareReview, type Review } from "@/lib/protocol/review"
-import { resolveStep, type AmountSource, type RouteRequest, type StepPlan } from "@/lib/protocol/routes"
+import { preStartDraft, routePreStartBlockers } from "@/lib/protocol/route-gates"
+import { resolveStep, type RouteRequest, type StepPlan } from "@/lib/protocol/routes"
 import type { SimulationOutcome } from "@/lib/protocol/stellar"
 import type { Finding, Manifest, Market } from "@/lib/protocol/types"
 import type { KeypairSigner } from "./keypair-signer"
@@ -63,11 +55,6 @@ export const showOutput = (out: ActionOutput) =>
     .filter(([k]) => k !== "kind")
     .map(([k, v]) => `${k}=${String(v)}`)
     .join(" ")
-
-/** Blockers `useTradeRoute` does not check before the start for a later step (they need step outputs). */
-const LATER_STEP_SKIPS = new Set<BlockerCode>(["amount", "balance", "quote", "archived"])
-
-const readsOnlyFirst = (src: AmountSource): boolean => (src.from === "step" ? src.index === 0 : src.from === "sum" ? src.parts.every(readsOnlyFirst) : true)
 
 export function createRunner(p: {
   manifest: Manifest
@@ -105,66 +92,25 @@ export function createRunner(p: {
   }
 
   /**
-   * `useTradeRoute`'s refusals before the start, for `plans` (expected empty): step 1 with its own
-   * simulation, the later steps on what does not need earlier outputs, the circuit breaker and the
-   * deposit cap counted across the steps (R2-61, R2-62), and a later step's `requires` that reads only
-   * step 1 checked against step 1's simulated output.
+   * `useTradeRoute`'s refusals before the start, for `plans` (expected empty): step 1 is simulated as
+   * the user, as the hook's `useSimulation` does it (open guards, a deadline from the ledger clock),
+   * and `routePreStartBlockers` does the rest, exactly as the hook calls it.
    */
   async function preStart(req: RouteRequest, plans: StepPlan[]): Promise<{ blockers: Blocker[]; firstOutput?: ActionOutput }> {
     const s = await snapshot()
-    const ctx = base(s)
-    const draftOf = (plan: StepPlan): { input: ActionInput; known: boolean } => {
-      let amounts: { amount: bigint; secondaryAmount?: bigint }
-      let known = true
-      try {
-        amounts = resolveStep({ ...plan, requires: [] }, req, [])
-      } catch {
-        amounts = { amount: req.amount }
-        known = false
-      }
-      return {
-        input: {
-          action: plan.action,
-          marketId: market.marketId,
-          source: account,
-          amount: amounts.amount,
-          ...(amounts.secondaryAmount !== undefined ? { secondaryAmount: amounts.secondaryAmount } : {}),
-          guards: {},
-          deadline: 0n,
-        },
-        known,
-      }
-    }
-    const counted = (total: bigint | undefined, adds: bigint | undefined, known: boolean) =>
-      total === undefined || adds === undefined || (!known && adds !== 0n) ? undefined : total + adds
-    const drafts = plans.map(draftOf)
-    const first = drafts[0]
-    const simInput: ActionInput = { ...first.input, guards: openGuards(first.input.action, first.input.amount), deadline: BigInt(Math.floor(s.ledgerTime) + DEADLINE_SECONDS) }
+    const first = preStartDraft(plans[0], req).input
+    const simInput: ActionInput = { ...first, guards: openGuards(first.action, first.amount), deadline: BigInt(Math.floor(s.ledgerTime) + DEADLINE_SECONDS) }
     const outcome = await simulate(manifest, simInput)
     const { output, guards } = derive(simInput, outcome, SLIPPAGE_BPS)
-    const list: Blocker[] = [...evaluateGates(first.input, { ...ctx, simulation: outcome })]
-    if (guards && !guards.ok) list.push({ code: "quote", message: guards.reason })
-    let reported = counted(0n, breakerReport(first.input, ctx), first.known)
-    let charged = counted(0n, capCharge(first.input), first.known)
-    drafts.slice(1).forEach(({ input, known }, k) => {
-      const n = k + 2
-      const seen = withEarlierCapCharges(withEarlierReports(ctx, reported, n), charged, n)
-      list.push(...evaluateGates(input, seen).filter((b) => !LATER_STEP_SKIPS.has(b.code)))
-      reported = counted(reported, breakerReport(input, ctx), known)
-      charged = counted(charged, capCharge(input), known)
+    const blockers = routePreStartBlockers({
+      plans,
+      request: req,
+      base: base(s),
+      simOutcome: outcome,
+      ...(output ? { simOutput: output } : {}),
+      ...(guards ? { simGuards: guards } : {}),
     })
-    if (output) {
-      plans.slice(1).forEach((plan, k) => {
-        const checks = (plan.requires ?? []).filter((r) => readsOnlyFirst(r.value) && readsOnlyFirst(r.atLeast))
-        if (checks.length === 0) return
-        try {
-          resolveStep({ ...plan, amount: { from: "value", value: 0n }, secondaryAmount: undefined, requires: checks }, req, [output])
-        } catch (error) {
-          list.push({ code: "quote", message: `step ${k + 2}: ${error instanceof Error ? error.message : String(error)}` })
-        }
-      })
-    }
-    return { blockers: list.sort((a, b) => BLOCKER_ORDER.indexOf(a.code) - BLOCKER_ORDER.indexOf(b.code)), ...(output ? { firstOutput: output } : {}) }
+    return { blockers, ...(output ? { firstOutput: output } : {}) }
   }
 
   /** Step `i` of a route, prepared and signed as `useRoute` does it; `name` labels the log lines. */
