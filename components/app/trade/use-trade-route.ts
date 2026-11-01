@@ -33,6 +33,11 @@ export type TradeRoute = {
   plans: StepPlan[]
   /** The adapter's figures for this trade; null while there is no amount or no market data. */
   quote: Live<TradeQuote> | null
+  /**
+   * The adapter's figures for the same trade at another amount, on the indicative path (no
+   * simulation): what Max asks before it fills the field. Null without market data.
+   */
+  quoteFor(amount: bigint): Live<TradeQuote> | null
   /** 0001's simulation of the route's first step, as the user, for this exact request. */
   sim: Simulation
   /** Every reason the route may not start now, in 0001's order; the amount field's own refusal first. */
@@ -87,11 +92,16 @@ export function useTradeRoute({
   const disabled = Array.isArray(planned) ? undefined : planned.disabled
   const request = toRouteRequest(trade, ctx)
 
-  /** A step's input with open guards; a step whose amount comes from an earlier one stands in with the request's. */
+  /**
+   * A step's input with open guards. Its `requires` checks (what an earlier step must have produced)
+   * run when the route prepares it; before the start they are left out, so a step whose amount is a
+   * value (Buy YT's sy_in) is gated on that amount. A step whose amount comes from an earlier one
+   * stands in with the request's.
+   */
   const draftOf = (plan: StepPlan): ActionInput => {
     let amounts: { amount: bigint; secondaryAmount?: bigint }
     try {
-      amounts = resolveStep(plan, request, [])
+      amounts = resolveStep({ ...plan, requires: [] }, request, [])
     } catch {
       amounts = { amount: trade.amount }
     }
@@ -114,6 +124,12 @@ export function useTradeRoute({
   const firstStep: TradeState["firstStep"] = simInput && sim.output ? { action: simInput.action, output: sim.output } : undefined
 
   const quote = ms && trade.amount > 0n ? adapter.quote(trade, { ms, slippageBps, plans, ...(firstStep ? { firstStep } : {}) }) : null
+  const quoteFor = (amount: bigint): Live<TradeQuote> | null => {
+    if (!ms) return null
+    const at = { ...trade, amount }
+    const p = adapter.plan(at, ctx)
+    return adapter.quote(at, { ms, slippageBps, plans: Array.isArray(p) ? p : [] })
+  }
 
   let blockers: Blocker[] = gate.unavailable
   if (gate.base) {
@@ -148,6 +164,7 @@ export function useTradeRoute({
     request: complete && source !== null && plans.length > 0 ? { ...request, source } : null,
     plans,
     quote,
+    quoteFor,
     sim,
     blockers,
     canStart,

@@ -22,6 +22,7 @@ export function AmountField({
   onChange,
   onBlur,
   picker,
+  onMax,
 }: {
   id: string
   spec: FieldSpec
@@ -34,6 +35,11 @@ export function AmountField({
   onBlur(): void
   /** A token picker shown under the label (the trade tabs' "You pay" field). */
   picker?: React.ReactNode
+  /**
+   * What MAX does instead of filling the balance (Buy YT: the most whose moved amount fits it). It
+   * stays off unless the balance is live.
+   */
+  onMax?: () => void
 }) {
   const errorId = `${id}-error`
   const balanceId = `${id}-balance`
@@ -75,7 +81,11 @@ export function AmountField({
           aria-label={`Max ${spec.label}`}
           title={usable === undefined ? "Your balance is not available" : undefined}
           disabled={usable === undefined}
-          onClick={() => usable !== undefined && onChange(maxText(usable, decimals))}
+          onClick={() => {
+            if (usable === undefined) return
+            if (onMax) onMax()
+            else onChange(maxText(usable, decimals))
+          }}
         >
           Max
         </Button>
