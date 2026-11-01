@@ -503,6 +503,23 @@ describe("maxSpend — Max is the balance divided by the moved ratio (spec §4)"
     expect(r.amount).toBeLessThan(5_000_000_000n)
   })
 
+  /** A stand-in trade: it moves `multiple` × the spend, and cannot be priced above `limit`. */
+  const stubTrade = (multiple: bigint, limit: bigint) => (amount: bigint): Live<TradeQuote> =>
+    amount > limit
+      ? { status: "unavailable", error: "The pool cannot absorb the PT this purchase would sell." }
+      : ({ status: "live", value: { capital: { moved: amount * multiple, spent: amount, back: 0n, backStep: 1 } }, ledger: 1 } as unknown as Live<TradeQuote>)
+
+  it("a candidate the trade cannot price backs off to a smaller spend, as one that moves too much does", () => {
+    // Moving 10x, 1000 would allow 100; above 50 the pool refuses: Max is 100 / 4.
+    expect(maxSpend(stubTrade(10n, 50n), 1000n)).toEqual({ ok: true, amount: 25n })
+  })
+
+  it("a trade that reports nothing moved has its own reason", () => {
+    const r = maxSpend(stubTrade(0n, 10_000n), 1000n)
+    expect(r).toEqual({ ok: false, reason: expect.stringMatching(/reports nothing moved/) })
+    expect(!r.ok && r.reason).not.toMatch(/has not loaded/)
+  })
+
   it("a trade with no capital disclosure may spend the whole balance", () => {
     expect(maxSpend(quoteAt(sellYt("sy")), BALANCE)).toEqual({ ok: true, amount: BALANCE })
   })
