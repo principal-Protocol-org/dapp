@@ -34,6 +34,11 @@ export type RouteFlowProps = {
   canStart: boolean
   /** Why starting is off (shown while idle). */
   blockers: Blocker[]
+  /**
+   * False: no start button nor refusals while idle, for a form that is closed (the LP tab's Deposit
+   * after maturity). A route resumed from the log still shows its progress. Default true.
+   */
+  showStart?: boolean
   onNotice(notice: TxNotice): void
   /** Step 1 reached the network (R2-3): the panel resets its amount fields here. */
   onReachedNetwork?: UseRouteOptions["onReachedNetwork"]
@@ -126,7 +131,7 @@ export function RouteFlow(props: RouteFlowProps) {
 
   return (
     <div className="grid gap-3">
-      {state.phase === "idle" ? (
+      {state.phase === "idle" && props.showStart !== false ? (
         <>
           <Button type="button" className="w-full" disabled={!props.canStart || !props.request || props.plans.length === 0} onClick={start}>
             Review {label}
