@@ -112,10 +112,10 @@ export function LpTab({ marketId, side }: { marketId: string; side: LpSide }) {
   if (q && side === "withdraw" && redeems && token === "sy") {
     details.push({
       label: "Redeemed part",
-      value: q.alsoOut ? amountText(q.alsoOut.amount, q.alsoOut.token) : code,
+      value: q.alsoOut ? amountText(q.alsoOut.amount, q.alsoOut.token) : UNAVAILABLE,
       hint: q.alsoOut
         ? `The redeemed part, ${amountText(q.alsoOut.amount, q.alsoOut.token)}, is paid in ${unitOf(q.alsoOut.token)} even when you receive SY: after maturity your PT is redeemed, not sold.`
-        : `The redeemed part is paid in ${code} even when you receive SY: after maturity your PT is redeemed, not sold.`,
+        : `${UNAVAILABLE}: the redeemed part could not be read from the quote. It is paid in ${code} even when you receive SY: after maturity your PT is redeemed, not sold.`,
     })
   }
   if (q) details.push({ label: "LP earns", value: "PT convergence", hint: LP_NOTE })
@@ -204,7 +204,11 @@ export function LpTab({ marketId, side }: { marketId: string; side: LpSide }) {
                   <PreviewList lines={details} />
                 </>
               ) : (
-                <p className="text-sm text-ink-muted">Enter an amount to see the details.</p>
+                <>
+                  <p className="text-sm text-ink-muted">Enter an amount to see the details.</p>
+                  {/* A static explanation, so it needs no quote. */}
+                  <PreviewList lines={[{ label: "LP earns", value: "PT convergence", hint: LP_NOTE }]} />
+                </>
               )}
               {!q && note ? <PreviewList lines={[signaturesLine(note)]} /> : null}
             </section>
