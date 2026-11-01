@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
-import { render, screen, within } from "@testing-library/react"
+import { fireEvent, render, screen, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import { useState } from "react"
 import { CardTabs, CardTabsContent, type CardTab } from "../card-tabs"
 
@@ -19,9 +19,9 @@ function Harness({ tabs }: { tabs: CardTab[] }) {
 }
 
 const TABS: CardTab[] = [
-  { value: "a", title: "Alpha", subtitle: "First one" },
-  { value: "b", title: "Beta", subtitle: "Second one", count: 2 },
-  { value: "c", title: "Gamma", subtitle: "Third one", count: 0 },
+  { value: "a", title: "Alpha" },
+  { value: "b", title: "Beta", count: 2 },
+  { value: "c", title: "Gamma", count: 0 },
 ]
 
 describe("CardTabs", () => {
@@ -42,7 +42,7 @@ describe("CardTabs", () => {
     expect(screen.getByRole("tab", { name: /^Beta/ }).getAttribute("aria-selected")).toBe("true")
     expect(screen.getByText("body b")).toBeTruthy()
   })
-  it("styles the active tab with the accent underline and the others on the darker band", () => {
+  it("centres the titles, styles the active tab with the accent underline and the others on the darker band", () => {
     render(<Harness tabs={TABS} />)
     const [a, b] = screen.getAllByRole("tab")
     expect(a.className).toContain("data-[state=active]:bg-surface")
@@ -51,17 +51,27 @@ describe("CardTabs", () => {
     expect(b.className).toContain("bg-surface-sunk")
     expect(b.className).toContain("text-ink-muted")
     expect(a.className).toContain("border-b-2")
+    expect(a.className).toContain("justify-center")
+    expect(a.className).toContain("text-center")
   })
-  it("shows the subtitle, hidden on phones, as the tab's description rather than its name", () => {
+  it("holds the title (and count) only: no subtitle, no description", () => {
     render(<Harness tabs={TABS} />)
     const a = screen.getByRole("tab", { name: "Alpha" })
-    const sub = screen.getByText("First one")
-    expect(sub.className).toContain("max-sm:hidden")
-    expect(sub.className).toContain("text-ink-muted")
-    expect(a.getAttribute("aria-describedby")).toBe(sub.id)
+    expect(a.textContent).toBe("Alpha")
+    expect(a.getAttribute("aria-describedby")).toBeNull()
+  })
+  it("focuses a clicked tab without the keyboard focus ring", () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus")
+    render(<Harness tabs={TABS} />)
+    const beta = screen.getByRole("tab", { name: /^Beta/ })
+    fireEvent.mouseDown(beta, { button: 0 })
+    expect(beta.getAttribute("aria-selected")).toBe("true")
+    expect(focus.mock.calls[0]).toEqual([{ focusVisible: false }])
+    expect(focus.mock.contexts[0]).toBe(beta)
+    focus.mockRestore()
   })
   it("shows a count badge for a number, neutral for 0 and negative above 0, none when undefined", () => {
-    render(<Harness tabs={[...TABS, { value: "d", title: "Delta", subtitle: "x" }]} />)
+    render(<Harness tabs={[...TABS, { value: "d", title: "Delta" }]} />)
     const beta = screen.getByRole("tab", { name: "Beta, 2 problems" })
     const bad = within(beta).getByText("2")
     expect(bad.className).toContain("bg-negative/15")
@@ -75,7 +85,7 @@ describe("CardTabs", () => {
     expect(within(delta).queryByText(/problem/)).toBeNull()
   })
   it("says '1 problem' in the singular, with visually hidden text and no role=img", () => {
-    render(<Harness tabs={[{ value: "a", title: "Safety", subtitle: "s", count: 1 }]} />)
+    render(<Harness tabs={[{ value: "a", title: "Safety", count: 1 }]} />)
     const tab = screen.getByRole("tab", { name: "Safety, 1 problem" })
     expect(within(tab).getByText(", 1 problem").className).toContain("sr-only")
     expect(within(tab).queryByRole("img")).toBeNull()

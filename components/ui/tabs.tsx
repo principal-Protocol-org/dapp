@@ -54,8 +54,22 @@ function TabsList({
   )
 }
 
+/** `focusVisible` is in browsers (Chromium, Firefox) but not yet in TypeScript's DOM types. */
+const NO_RING: FocusOptions & { focusVisible?: boolean } = { focusVisible: false }
+
+/**
+ * Radix Tabs focuses a trigger from script on mousedown. Chromium then treats the tab as
+ * keyboard-focused, so the focus ring stays after a click. Focusing it first without the ring makes
+ * Radix's call a no-op; arrow keys and Tab still show the ring. A trigger's `onMouseDown`.
+ */
+export function focusWithoutRing(event: React.MouseEvent<HTMLElement>) {
+  if (event.defaultPrevented || event.button !== 0 || event.ctrlKey) return
+  event.currentTarget.focus(NO_RING)
+}
+
 function TabsTrigger({
   className,
+  onMouseDown,
   ...props
 }: React.ComponentProps<typeof TabsPrimitive.Trigger>) {
   return (
@@ -69,6 +83,10 @@ function TabsTrigger({
         className
       )}
       {...props}
+      onMouseDown={(event) => {
+        onMouseDown?.(event)
+        focusWithoutRing(event)
+      }}
     />
   )
 }

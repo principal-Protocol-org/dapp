@@ -11,8 +11,8 @@ import { UNAVAILABLE } from "@/components/app/live"
 import { LineChart } from "@/components/app/charts/line-chart"
 
 const TABS: CardTab[] = [
-  { value: "apy", title: "APY", subtitle: "Fixed vs underlying, over time" },
-  { value: "liquidity", title: "Liquidity", subtitle: "Pool liquidity over time" },
+  { value: "apy", title: "APY" },
+  { value: "liquidity", title: "Liquidity" },
 ]
 const SPREAD = { fixed: "fixed", variable: "underlying" } as const
 
