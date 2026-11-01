@@ -42,9 +42,9 @@ function InfoCardView({ marketId, onGetTestTokens }: { marketId: string; onGetTe
     if (isTab(param)) setTab(param)
   }
   const tabs: CardTab[] = [
-    { value: "details", title: "Details", subtitle: "Oracle, supply, reserves, fees" },
-    { value: "compliance", title: "Compliance", subtitle: "Your access to this market", count: useComplianceIssues(marketId) },
-    { value: "safety", title: "Safety", subtitle: "Pauses, oracle, limits", count: useSafetyIssues(marketId) },
+    { value: "details", title: "Details" },
+    { value: "compliance", title: "Compliance", count: useComplianceIssues(marketId) },
+    { value: "safety", title: "Safety", count: useSafetyIssues(marketId) },
   ]
 
   return (

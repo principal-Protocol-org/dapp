@@ -244,13 +244,13 @@ describe("MarketStats", () => {
 })
 
 describe("MarketChartBox", () => {
-  it("has header tabs APY and Liquidity with subtitles (details moved to the info card) and ranges 7 d, 30 d, 90 d, All", () => {
+  it("has header tabs APY and Liquidity, without subtitles (details moved to the info card), and ranges 7 d, 30 d, 90 d, All", () => {
     wrap(<MarketChartBox marketId="m1" />)
     expect(screen.getAllByRole("tab")).toHaveLength(2)
     expect(screen.getByRole("tab", { name: "APY" })).toBeTruthy()
     expect(screen.getByRole("tab", { name: "Liquidity" })).toBeTruthy()
-    expect(screen.getByText("Fixed vs underlying, over time")).toBeTruthy()
-    expect(screen.getByText("Pool liquidity over time")).toBeTruthy()
+    expect(screen.queryByText("Fixed vs underlying, over time")).toBeNull()
+    expect(screen.queryByText("Pool liquidity over time")).toBeNull()
     const group = screen.getByRole("group", { name: "Range" })
     expect(within(group).getAllByRole("button").map((b) => b.textContent)).toEqual(["7 d", "30 d", "90 d", "All"])
   })
@@ -490,11 +490,11 @@ describe("MarketInfoCard", () => {
     wrap(<MarketInfoCard marketId="m1" onGetTestTokens={() => {}} />)
     expect(screen.getByRole("tab", { name: "Details" }).getAttribute("aria-selected")).toBe("true")
   })
-  it("shows each tab's subtitle", () => {
+  it("has no tab subtitles", () => {
     wrap(<MarketInfoCard marketId="m1" onGetTestTokens={() => {}} />)
-    expect(screen.getByText("Oracle, supply, reserves, fees")).toBeTruthy()
-    expect(screen.getByText("Your access to this market")).toBeTruthy()
-    expect(screen.getByText("Pauses, oracle, limits")).toBeTruthy()
+    expect(screen.queryByText("Oracle, supply, reserves, fees")).toBeNull()
+    expect(screen.queryByText("Your access to this market")).toBeNull()
+    expect(screen.queryByText("Pauses, oracle, limits")).toBeNull()
   })
   it("counts the Compliance items that are not OK for a connected account", () => {
     connect()
