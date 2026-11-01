@@ -366,6 +366,51 @@ describe("MarketGroups", () => {
     expect(chevron.className).not.toContain("hidden")
   })
 
+  it("puts the expand control in a last grid column, as a circled chevron; the old triangle is gone (R2-70)", () => {
+    renderList()
+    const row = assetRow()
+    expect(row.className).toContain("2.75rem]")
+    const chevron = within(row).getByTestId("chevron")
+    expect(row.lastElementChild).toBe(chevron)
+    expect(chevron.getAttribute("aria-hidden")).toBe("true")
+    expect(chevron.className).toContain("rounded-full")
+    expect(chevron.className).toContain("border-line")
+    expect(chevron.className).toContain("group-hover:bg-surface")
+    expect(chevron.querySelector("svg")).toBeTruthy()
+    expect(row.textContent).not.toMatch(/[▴▾]/)
+    // One control: no nested button, the row itself is it.
+    expect(within(row).queryByRole("button")).toBeNull()
+  })
+
+  it("the row button toggles aria-expanded and aria-controls the market list; the icon rotates when open (R2-70)", async () => {
+    renderList()
+    const row = assetRow()
+    const icon = () => within(row).getByTestId("chevron").querySelector("svg")!
+    const wasOpen = row.getAttribute("aria-expanded") === "true"
+    expect(icon().getAttribute("class")).toContain("transition-transform")
+    expect(icon().getAttribute("class")).toContain("motion-reduce:transition-none")
+    expect(icon().getAttribute("class")?.includes("rotate-180")).toBe(wasOpen)
+    await userEvent.click(row)
+    expect(row.getAttribute("aria-expanded")).toBe(String(!wasOpen))
+    expect(icon().getAttribute("class")?.includes("rotate-180")).toBe(!wasOpen)
+    const list = document.getElementById(row.getAttribute("aria-controls")!)
+    expect(row.getAttribute("aria-controls")).toBeTruthy()
+    if (!wasOpen) expect(list).toBeTruthy()
+  })
+
+  it("the column header is set apart: own background, a strong divider, tighter padding, an Expand label (R2-71)", () => {
+    renderList()
+    const header = screen.getByText("Asset / market").parentElement!
+    expect(header.className).toContain("bg-surface ")
+    expect(header.className).not.toContain("bg-surface-sunk")
+    expect(header.className).toContain("border-b")
+    expect(header.className).toContain("border-line-strong")
+    expect(header.className).toContain("py-3")
+    expect(header.className).toContain("hidden")
+    expect(header.className).toContain("2.75rem]")
+    expect(within(header).getByText("Expand").className).toContain("sr-only")
+  })
+
   it("spark says since <date> when its history is younger than 30 days, and not for a full window", () => {
     renderList()
     const since = SHORT.format(new Date((NOW - 2 * DAY) * 1000))

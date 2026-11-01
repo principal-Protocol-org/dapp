@@ -1,7 +1,8 @@
 "use client"
 
-import { useState, type ReactNode } from "react"
+import { useId, useState, type ReactNode } from "react"
 import Link from "next/link"
+import { ChevronDownIcon } from "lucide-react"
 import { useLedgerClock } from "@/hooks/use-ledger-clock"
 import { useMarketHistory, useSparks, type Spark } from "@/hooks/use-market-history"
 import { useMarketStates } from "@/hooks/use-market-state"
@@ -25,7 +26,7 @@ const SPARK_WINDOW_SECONDS = 30 * 86_400
 const TEST_NOTE = "Test token issued by Principal for Stellar Testnet, not Ondo's USDY"
 /** One grid for the asset row and the maturity rows, so their columns line up from `md` up. */
 const COLUMNS =
-  "md:grid md:grid-cols-[minmax(0,2fr)_minmax(0,1.3fr)_minmax(0,1.2fr)_minmax(0,1.4fr)_minmax(0,1fr)_minmax(0,1fr)] md:items-center md:gap-4"
+  "md:grid md:grid-cols-[minmax(0,2fr)_minmax(0,1.3fr)_minmax(0,1.2fr)_minmax(0,1.4fr)_minmax(0,1fr)_minmax(0,1fr)_2.75rem] md:items-center md:gap-4"
 
 type Slot = { data: MarketState | undefined; isPending: boolean; stale: boolean }
 
@@ -344,6 +345,7 @@ function AssetGroup({
   sparks: { map: Record<string, Spark> | undefined; isPending: boolean; failed: boolean }
 }) {
   const [open, setOpen] = useState(defaultOpen)
+  const listId = useId()
   const states = slots.map((s) => (s.stale ? undefined : s.data))
   const loading = slots.some((s) => s.isPending && s.data === undefined)
   const liquidity = total(states.map((ms) => (ms ? liquidityOf(ms) : undefined)))
@@ -357,10 +359,11 @@ function AssetGroup({
       <button
         type="button"
         aria-expanded={open}
+        aria-controls={listId}
         onClick={() => setOpen((o) => !o)}
-        className={`flex w-full flex-col gap-3 bg-surface-sunk px-4 py-4 text-left focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-focus ${COLUMNS}`}
+        className={`group relative flex w-full flex-col gap-3 bg-surface-sunk px-4 py-4 text-left focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-focus ${COLUMNS}`}
       >
-        <span className="flex min-w-0 items-center gap-3">
+        <span className="flex min-w-0 items-center gap-3 max-md:pr-12">
           <span aria-hidden className="grid size-8 shrink-0 place-items-center rounded-full bg-coupon-wash font-sans text-xs font-bold text-coupon-ink">
             {group.code.slice(0, 2)}
           </span>
@@ -371,10 +374,9 @@ function AssetGroup({
             </span>
             {group.note && <span className="mt-1 block text-xs text-ink-muted">{group.note}</span>}
           </span>
-          <span aria-hidden data-testid="chevron" className="ml-auto text-ink-muted">{open ? "▴" : "▾"}</span>
         </span>
         {loading ? (
-          <span className="md:col-span-4">
+          <span className="md:col-span-5">
             <Skeleton className="h-10 w-full" />
           </span>
         ) : (
@@ -395,9 +397,16 @@ function AssetGroup({
             </span>
           </>
         )}
+        <span
+          aria-hidden="true"
+          data-testid="chevron"
+          className="grid size-9 place-items-center rounded-full border border-line text-ink-muted transition-colors group-hover:bg-surface group-hover:text-ink max-md:absolute max-md:top-3 max-md:right-4 md:justify-self-end"
+        >
+          <ChevronDownIcon className={`size-5 transition-transform motion-reduce:transition-none ${open ? "rotate-180" : ""}`} />
+        </span>
       </button>
       {open && (
-        <ul>
+        <ul id={listId}>
           {group.markets.map((market, i) => (
             <MaturityRow
               key={market.marketId}
@@ -422,13 +431,14 @@ export function MarketGroups() {
   const slotOf = new Map(manifest.markets.map((m, i) => [m.marketId, slots[i]]))
   return (
     <div className="min-w-0 overflow-hidden rounded-lg border border-line bg-surface">
-      <div className={`hidden bg-surface-sunk px-4 py-2 text-xs font-semibold uppercase tracking-wide text-ink-muted ${COLUMNS}`}>
+      <div className={`hidden border-b border-line-strong bg-surface px-4 py-3 text-xs font-semibold uppercase tracking-wide text-ink-muted ${COLUMNS}`}>
         <span>Asset / market</span>
         <span className="text-right">Liquidity / TVL</span>
         <span className="text-right">Underlying APY (7 d)</span>
         <span>Fixed APY, 30 d</span>
         <span className="text-right">YT leverage</span>
         <span className="text-right">PT fixed APY</span>
+        <span className="sr-only">Expand</span>
       </div>
       <ul>
         {groups.map((g) => (
