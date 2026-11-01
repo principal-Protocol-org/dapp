@@ -14,11 +14,14 @@
  * Exactness (R2-55): the curve port is contract-exact on the state it is given, but the state moves,
  * so a curve figure is "indicative". A figure becomes "simulated" only when the step that produces it
  * was simulated as the user (0001's pipeline, passed in as `firstStep`). The tabs simulate a route's
- * first step before it starts, so:
- * - an SY-paid buy and every sale (the swap is step 1) can show a simulated swap output;
- * - a USDY-paid buy deposits first: the user holds no SY yet, so the swap stays indicative until
- *   the route prepares step 2 with its own simulation (RouteFlow shows that step's exact floor);
- * - a USDY received after a withdraw stays indicative: it is worked out at today's SY rate.
+ * first step before it starts, and the quote reads what that step is from the route itself (`plans`),
+ * never from an assumed route shape:
+ * - a one-step route: the step's simulated output is what the user receives;
+ * - a route whose first step is the swap (a sale today): its output is simulated, and what later steps
+ *   make of it (a withdraw to USDY) is worked out at today's rates, so it stays indicative;
+ * - a route whose first step is a deposit (a USDY-paid buy today): the user holds no SY yet, so the
+ *   swap stays indicative until the route prepares it with its own simulation (RouteFlow shows that
+ *   step's exact floor); the simulated deposit only fixes the SY the curve prices.
  */
 import type { ActionId } from "./actions"
 import { buyPt, curveStateFrom, impliedRate, sellPt, spotPrice, type CurveQuote, type CurveState } from "./curve"
@@ -50,6 +53,8 @@ export type TradeState = {
   ms: MarketState
   /** The user's slippage tolerance, for the minimum received. */
   slippageBps: bigint
+  /** The route this quote is for, as `plan` returned it: which step a simulation belongs to. */
+  plans: StepPlan[]
   /**
    * The route's first step, simulated as the user for this exact request (0001's `useSimulation`).
    * Used only when its action is the route's first step; it is never taken for another step.
@@ -64,11 +69,12 @@ export type TradeQuote = {
   outToken: TradeToken
   /** Whether `out` comes from a simulation of the step producing it, or from the curve port. */
   exactness: Exactness
-  /** The swap step's own output, when the route converts it after (a sale to USDY: its SY). */
-  swapOut?: { amount: bigint; token: TradeToken; exactness: Exactness }
+  /** The swap step's own output, when later steps convert it (a sale to USDY: its SY); `step` is 1-based. */
+  swapOut?: { amount: bigint; token: TradeToken; exactness: Exactness; step: number }
   /**
-   * The swap step's output at the slippage tolerance: the floor that step is signed with, in
-   * `minOutToken`. A later step's floor does not exist before that step is prepared, so none is shown.
+   * The swap's output at the slippage tolerance: the floor that step is signed with, in `minOutToken`
+   * (`swapOut`'s token when later steps convert it). A later step's floor does not exist before that
+   * step is prepared, so none is shown.
    */
   minOut: bigint
   minOutToken: TradeToken
@@ -89,11 +95,6 @@ export type TradeQuote = {
    * and that gain in the underlying at today's oracle rate (indicative: it falls as the price rises).
    */
   payoff?: { gainUsd: bigint; pct: number; gainUnderlying: bigint }
-  /** Buy YT (Task 17): the YT received, and the SY the route moves (more than it spends). */
-  ytOut?: bigint
-  moved?: bigint
-  /** LP (Task 18): the LP tokens received. */
-  lpOut?: bigint
 }
 
 /** What a route needs beyond the trade: who signs, where, and what the manifest lets it call. */
@@ -123,13 +124,30 @@ export function toRouteRequest(req: TradeRequest, ctx: PlanContext): RouteReques
 const unavailable = (error: string): Live<never> => ({ status: "unavailable", error })
 const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error))
 
-/** Reads the swap's simulated `amount` output, when `firstStep` is that action's. */
-function simulatedAmount(state: TradeState, action: ActionId): bigint | undefined {
+/** The pool swap each PT trade makes, in today's contracts. */
+const SWAP_ACTION: Partial<Record<TradeKind, ActionId>> = { buy_pt: "buy_pt", sell_pt: "sell_pt" }
+
+/**
+ * What the route's simulated first step tells the quote, read from the route (`plans`):
+ * - `final`: the route is that one step, so its output is what the user receives;
+ * - `swap`: the step is the pool swap and later steps convert its output;
+ * - `deposit`: the step deposits the underlying, so its output is the SY the swap is priced with.
+ * Undefined when there is no simulation, or it is not of the route's first step.
+ */
+function firstStepOf(req: TradeRequest, state: TradeState): { role: "final" | "swap" | "deposit"; amount: bigint } | undefined {
   const step = state.firstStep
-  if (!step || step.action !== action || step.output.kind !== "amount") return undefined
+  const first = state.plans[0]
+  if (!step || !first || step.action !== first.action || step.output.kind !== "amount") return undefined
   if (step.output.value <= 0n) throw new Error("The simulation returned nothing for this trade, so it is not offered.")
-  return step.output.value
+  const amount = step.output.value
+  if (state.plans.length === 1) return { role: "final", amount }
+  if (first.action === SWAP_ACTION[req.kind]) return { role: "swap", amount }
+  if (first.action === "deposit") return { role: "deposit", amount }
+  return undefined
 }
+
+/** `a / b` rounded away from zero: a loss in another unit is never understated. */
+const awayFromZero = (a: bigint, b: bigint) => (a < 0n ? -ceilDiv(-a, b) : a / b)
 
 /** The floor of `out` at the user's slippage; a floor that rounds to zero is not offered (0001). */
 function floor(out: bigint, slippageBps: bigint): bigint {
@@ -140,7 +158,8 @@ function floor(out: bigint, slippageBps: bigint): bigint {
 
 function payoffOf(ptOut: bigint, paidUnderlying: bigint, oracleRate: bigint): NonNullable<TradeQuote["payoff"]> {
   const { gainUsd, pct } = fixedPayoffUsd(ptOut, paidUnderlying, oracleRate)
-  return { gainUsd, pct, gainUnderlying: (gainUsd * SCALE) / oracleRate }
+  // A gain is floored, a loss's magnitude rounded up: the USDY figure never flatters the trade.
+  return { gainUsd, pct, gainUnderlying: awayFromZero(gainUsd * SCALE, oracleRate) }
 }
 
 type Reads = { s: CurveState; oracleRate: bigint; exchangeRate: bigint; slippageBps: bigint }
@@ -151,14 +170,15 @@ const apyOf = (s: CurveState) => aprToApy(impliedRate(s), s.secondsToMaturity)
 function quoteBuyPt(req: TradeRequest, r: Reads, state: TradeState): TradeQuote {
   const { s, oracleRate, exchangeRate } = r
   const payUnderlying = req.pay === "underlying"
-  // A USDY payer's SY is what step 1's deposit gives: simulated when it ran, else the wrapper's math.
-  const deposited = payUnderlying ? simulatedAmount(state, "deposit") : undefined
-  const syIn = payUnderlying ? (deposited ?? previewDeposit(req.amount, exchangeRate)) : req.amount
+  const first = firstStepOf(req, state)
+  // A USDY payer's SY: what a simulated deposit step gave, else the wrapper's math.
+  const syIn = first?.role === "deposit" ? first.amount : payUnderlying ? previewDeposit(req.amount, exchangeRate) : req.amount
   // What the user hands over, in the underlying: an SY payer's SY at the SY rate.
   const paidUnderlying = payUnderlying ? req.amount : previewWithdraw(req.amount, exchangeRate)
 
   const curve = buyPt(s, syIn)
-  const simulated = payUnderlying ? undefined : simulatedAmount(state, "buy_pt")
+  // Nothing follows a PT buy's swap: a simulated swap, or a one-step route, gives the PT out.
+  const simulated = first && first.role !== "deposit" ? first.amount : undefined
   // The pool once the simulated trade lands: pt − pt_out, sy + (sy_in − fee), as the swap writes it.
   // The fee depends on `sy_in` alone, so the curve's is the contract's.
   const q: CurveQuote =
@@ -190,8 +210,15 @@ function quoteBuyPt(req: TradeRequest, r: Reads, state: TradeState): TradeQuote 
 function quoteSellPt(req: TradeRequest, r: Reads, state: TradeState): TradeQuote {
   const { s, exchangeRate } = r
   const ptIn = req.amount
+  const toUnderlying = req.receive === "underlying"
+  const first = firstStepOf(req, state)
+  // Later steps turn the swap's SY into USDY (a withdraw today), unless the route is one step.
+  const converted = toUnderlying && state.plans.length > 1
   const curve = sellPt(s, ptIn)
-  const simulated = simulatedAmount(state, "sell_pt")
+  // The swap's simulated SY: the swap step's own output, or, for a one-step route paying USDY, the
+  // smallest SY that withdraws to the simulated USDY.
+  const simulated =
+    first?.role === "swap" ? first.amount : first?.role === "final" ? (toUnderlying ? ceilDiv(first.amount * SCALE, exchangeRate) : first.amount) : undefined
   let q: CurveQuote = curve
   if (simulated !== undefined) {
     // The SY out is `gross − ceil(gross · fee_rate / 1e12)`; the reserves lose `gross`. The smallest
@@ -202,16 +229,19 @@ function quoteSellPt(req: TradeRequest, r: Reads, state: TradeState): TradeQuote
   }
   const syOut = q.amountOut
   const swapExactness: Exactness = simulated === undefined ? "indicative" : "simulated"
-  const toUnderlying = req.receive === "underlying"
+  // What the user ends with: the one step's simulated output, else the swap's SY (withdrawn at
+  // today's SY rate for a USDY receiver: worked out, not simulated).
+  const out = first?.role === "final" ? first.amount : toUnderlying ? previewWithdraw(syOut, exchangeRate) : syOut
+  const outExact: Exactness = first?.role === "final" || (!toUnderlying && simulated !== undefined) ? "simulated" : "indicative"
+  const swapStep = state.plans.findIndex((p) => p.action === SWAP_ACTION[req.kind]) + 1
   return {
     kind: "sell_pt",
-    // A USDY receiver's step 2 withdraws the SY at today's SY rate: worked out, not simulated.
-    out: toUnderlying ? previewWithdraw(syOut, exchangeRate) : syOut,
+    out,
     outToken: toUnderlying ? "underlying" : "sy",
-    exactness: toUnderlying ? "indicative" : swapExactness,
-    ...(toUnderlying ? { swapOut: { amount: syOut, token: "sy" as const, exactness: swapExactness } } : {}),
-    minOut: floor(syOut, r.slippageBps),
-    minOutToken: "sy",
+    exactness: outExact,
+    ...(converted ? { swapOut: { amount: syOut, token: "sy" as const, exactness: swapExactness, step: Math.max(swapStep, 1) } } : {}),
+    minOut: converted ? floor(syOut, r.slippageBps) : floor(out, r.slippageBps),
+    minOutToken: converted ? "sy" : toUnderlying ? "underlying" : "sy",
     fee: toUnderlying ? previewWithdraw(q.feeShares, exchangeRate) : q.feeShares,
     feeToken: toUnderlying ? "underlying" : "sy",
     priceImpactPpm: priceImpactPpm("sell", syOut, ptIn, ptSpot(spotPrice(s), s.rate)),
