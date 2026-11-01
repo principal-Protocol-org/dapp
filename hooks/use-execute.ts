@@ -6,11 +6,15 @@ import { useWallet } from "@/hooks/use-wallet"
 import { appendLog } from "@/lib/app/local-log"
 import type { ActionInput } from "@/lib/protocol/actions"
 import { useManifest } from "@/components/app/manifest-provider"
+import type { ManagerCall } from "@/lib/protocol/manager-calls"
 import {
   executeRestore as executeRestoreTx,
   executeReview,
+  prepareManagerReview,
   prepareRestore as prepareRestoreTx,
   prepareReview,
+  type AnyReview,
+  type ManagerReview,
   type RestoreReview,
   type Review,
   type SignTransaction,
@@ -21,8 +25,10 @@ import type { ContractInvocation } from "@/lib/protocol/stellar"
 export type Execute = {
   /** Builds and RPC-prepares the exact transaction for `input` (R29 checks inside). */
   prepare(input: ActionInput): Promise<Review>
-  /** Signs, checks, submits and polls the exact `review` object `prepare` returned (R31). */
-  execute(review: Review): Promise<TxResult>
+  /** Builds and RPC-prepares a manager call (0002 §5) under the same R29 checks; it has no floor. */
+  prepareManager(call: ManagerCall): Promise<ManagerReview>
+  /** Signs, checks, submits and polls the exact `review` object `prepare` or `prepareManager` returned (R31). */
+  execute(review: AnyReview): Promise<TxResult>
   prepareRestore(p: { source: string; invocation: ContractInvocation }): Promise<RestoreReview>
   executeRestore(restore: RestoreReview): Promise<TxResult>
   /** A signature or submission is in flight. */
@@ -30,9 +36,11 @@ export type Execute = {
 }
 
 /**
- * The transaction pipeline for the panels. Every submitted transaction is appended to the local
- * log (any status: a pending one should show at once) and refreshes the market and account reads.
- * A refusal before submission throws and is not logged: nothing reached the network.
+ * The transaction pipeline for the panels and the manager view. Every submitted action is appended
+ * to the local log (any status: a pending one should show at once); every submitted transaction
+ * refreshes the market and account reads. A manager call is not logged: the log lists the user's
+ * actions, and the manager view reads the call's effect back from the chain. A refusal before
+ * submission throws and is not logged: nothing reached the network.
  */
 export function useExecute(): Execute {
   const manifest = useManifest()
@@ -63,20 +71,24 @@ export function useExecute(): Execute {
 
   const prepare = useCallback((input: ActionInput) => prepareReview({ manifest, input }), [manifest])
 
+  const prepareManager = useCallback((call: ManagerCall) => prepareManagerReview({ manifest, call }), [manifest])
+
   const execute = useCallback(
-    (review: Review) =>
+    (review: AnyReview) =>
       track(async () => {
         const result = await executeReview({ review, manifest, sign })
-        const { action, marketId, source } = review.input
-        appendLog({
-          hash: result.hash,
-          action,
-          marketId,
-          account: source,
-          at: Date.now(),
-          status: result.status,
-          ...(result.reason ? { reason: result.reason } : {}),
-        })
+        if (review.origin.type === "action") {
+          const { action, marketId, source } = review.origin.input
+          appendLog({
+            hash: result.hash,
+            action,
+            marketId,
+            account: source,
+            at: Date.now(),
+            status: result.status,
+            ...(result.reason ? { reason: result.reason } : {}),
+          })
+        }
         refresh()
         return result
       }),
@@ -98,5 +110,5 @@ export function useExecute(): Execute {
     [track, sign, refresh, manifest],
   )
 
-  return { prepare, execute, prepareRestore, executeRestore, pending: inFlight > 0 }
+  return { prepare, prepareManager, execute, prepareRestore, executeRestore, pending: inFlight > 0 }
 }

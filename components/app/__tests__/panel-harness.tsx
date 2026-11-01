@@ -92,6 +92,7 @@ export const valueIn = (heading: string, label: string | RegExp) => within(secti
 function fakeReview(input: ActionInput): Review {
   const now = Date.now()
   return {
+    origin: { type: "action", input },
     input,
     invocation: { contractId: "CROUTER", functionName: "x", args: [] },
     unsignedXdr: "AAAA-unsigned",

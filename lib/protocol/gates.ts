@@ -122,8 +122,11 @@ const ITEM_LABEL: Record<ComplianceItem["id"], string> = {
 const fmt = (raw: bigint) => formatAmount(raw, DECIMALS, DECIMALS)
 const max0 = (value: bigint) => (value > 0n ? value : 0n)
 
-/** Collects blockers; `need` turns an unavailable read into one deduplicated `unavailable` blocker. */
-class Gates {
+/**
+ * Collects blockers; `need` turns an unavailable read into one deduplicated `unavailable` blocker.
+ * Shared with the manager gates (`manager-gates.ts`).
+ */
+export class Gates {
   private readonly out: Blocker[] = []
   private readonly missing = new Set<string>()
 
@@ -207,12 +210,15 @@ function disabledGate(input: ActionInput, g: Gates): void {
   if (disabled) g.block("disabled", disabled.reason)
 }
 
-/** Returns true when a wallet is connected, i.e. there is an account to check. */
-function walletGate(input: ActionInput, ctx: GateContext, g: Gates): boolean {
-  const w = ctx.wallet
+/**
+ * Whether `wallet` can sign as `source`, the account the transaction was prepared for. Returns true
+ * when a wallet is connected, i.e. there is an account to check. Shared with the manager gates.
+ */
+export function walletGate(source: string, wallet: WalletState, g: Gates): boolean {
+  const w = wallet
   switch (w.status) {
     case "connected":
-      if (w.publicKey !== input.source) {
+      if (w.publicKey !== source) {
         g.block(
           "wallet",
           "This action was prepared for a different account than the one connected in your wallet. Enter it again so it is prepared for the connected account.",
@@ -584,7 +590,7 @@ export function evaluateGates(input: ActionInput, ctx: GateContext): Blocker[] {
   manifestGate(ctx, g)
   topologyGate(ctx, g)
   disabledGate(input, g)
-  const connected = walletGate(input, ctx, g)
+  const connected = walletGate(input.source, ctx.wallet, g)
   amountGate(input, g)
   maturityGate(input, ctx, g)
   oracleGate(input, ctx, g)
