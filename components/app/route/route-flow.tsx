@@ -24,6 +24,8 @@ export type RouteFlowProps = {
   kinds: UseRouteOptions["kinds"]
   /** The run History's Continue names (`?route=<id>`), if any. */
   routeId?: string | null
+  /** That run was opened: the host drops `?route=` from the URL. */
+  onRouteOpened?: UseRouteOptions["onRouteOpened"]
   /**
    * The panel's 0001 gates for one step. It MUST pass the simulation through:
    * `(input, simulation) => evaluateGates(input, { ...base, simulation })`.
@@ -86,6 +88,7 @@ export function RouteFlow(props: RouteFlowProps) {
     marketId: props.marketId,
     kinds: props.kinds,
     routeId: props.routeId,
+    onRouteOpened: props.onRouteOpened,
     gate: props.gate,
     onReachedNetwork: props.onReachedNetwork,
   })

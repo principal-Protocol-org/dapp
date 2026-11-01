@@ -79,7 +79,17 @@ function figuresFor(ms: MarketState, amount: bigint, receive: PayToken, simulate
  * the PT tab's Redeem; without one the pointer is a link to it. `routeId` is the run History's
  * Continue names.
  */
-export function RecombineAction({ marketId, onRedeem, routeId }: { marketId: string; onRedeem?: () => void; routeId?: string | null }) {
+export function RecombineAction({
+  marketId,
+  onRedeem,
+  routeId,
+  onRouteOpened,
+}: {
+  marketId: string
+  onRedeem?: () => void
+  routeId?: string | null
+  onRouteOpened?: (id: string) => void
+}) {
   const baseId = useId()
   const manifest = useManifest()
   const market = getMarket(manifest, marketId)
@@ -198,6 +208,7 @@ export function RecombineAction({ marketId, onRedeem, routeId }: { marketId: str
         marketId={marketId}
         kinds={ROUTE_HOSTS.recombine}
         routeId={routeId}
+        onRouteOpened={onRouteOpened}
         gate={route.gate}
         request={route.request}
         kind="recombine"

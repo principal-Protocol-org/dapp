@@ -26,6 +26,8 @@ const mocks = vi.hoisted(() => ({
     pending: false,
   },
   ledgerTime: 1_700_000_000 as number | null,
+  /** The manifest market's maturity (unix s); undefined: not known, so never matured. */
+  maturity: undefined as number | undefined,
   simulateInvocation: vi.fn(),
   getTransaction: vi.fn(),
 }))
@@ -46,6 +48,9 @@ vi.mock("@/components/app/manifest-provider", () => {
         displayName: "x",
         underlying: { code: "USDY", decimals: 7 },
         contracts: { router: "CROUTER", sy: "CSY", pool: "CPOOL", manager: "CMANAGER" },
+        get maturity() {
+          return mocks.maturity
+        },
       },
     ],
   }
@@ -146,6 +151,7 @@ beforeEach(() => {
   localStorage.clear()
   client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   mocks.ledgerTime = LEDGER
+  mocks.maturity = undefined
   mocks.exec.prepare.mockReset().mockImplementation(async (input: ActionInput) => fakeReview(input))
   mocks.exec.execute.mockReset()
   mocks.getTransaction.mockReset()
@@ -987,5 +993,92 @@ describe("useRoute", () => {
     rerender({ account: A })
     await waitFor(() => expect(result.current.state.phase).toBe("interrupted"))
     expect(result.current.state).toMatchObject({ step: 2, holdings: "You hold 998 SY" })
+  })
+
+  describe("follow-up (re-review)", () => {
+    it("tells its host once it opens the run History's Continue named, and keeps it when the host drops the name", async () => {
+      writeRoute(fundedRun({ id: "older", startedAt: 1 }))
+      writeRoute(fundedRun({ id: "newer", startedAt: 2 }))
+      const opened = vi.fn()
+      const { result, rerender } = renderHook(
+        ({ routeId }: { routeId: string | null }) => useRoute({ account: A, marketId: "m1", kinds: PT_KINDS, routeId, gate: () => [], onRouteOpened: opened }),
+        { wrapper, initialProps: { routeId: "older" as string | null } },
+      )
+      await waitFor(() => expect(result.current.state.run?.id).toBe("older"))
+      expect(opened).toHaveBeenCalledTimes(1)
+      expect(opened).toHaveBeenCalledWith("older")
+      // The host removes ?route= from the URL: the run on screen stays, it is not swapped for the newest.
+      rerender({ routeId: null })
+      await new Promise((r) => setTimeout(r, 20))
+      expect(result.current.state.run?.id).toBe("older")
+      expect(opened).toHaveBeenCalledTimes(1)
+    })
+
+    it("does not report a named run it did not open (another host's, or nothing to continue)", async () => {
+      writeRoute(fundedRun({ id: "mine" }))
+      const opened = vi.fn()
+      renderHook(() => useRoute({ account: A, marketId: "m1", kinds: ["recombine"], routeId: "mine", gate: () => [], onRouteOpened: opened }), { wrapper })
+      await new Promise((r) => setTimeout(r, 20))
+      expect(opened).not.toHaveBeenCalled()
+    })
+
+    it("a run adopted from another window that closed it never keeps 'closed' once a step holds funds (I1 shape)", async () => {
+      mocks.exec.execute.mockImplementation(async (review: Review): Promise<TxResult> => ({ hash: hashOf(review), status: "NOT_FOUND" }))
+      const { result } = setup()
+      act(() => result.current.start(buyPt, plansFor(buyPt)))
+      await untilReview(result, 1)
+      act(() => result.current.sign())
+      await waitFor(() => expect(result.current.state.phase).toBe("waiting"))
+      // Window B decided step 1 never landed, so nothing moved, and closed the run for good.
+      const other = loggedRun()!
+      writeRoute({ ...other, steps: [{ ...other.steps[0], status: "failed" }, other.steps[1]], closed: true })
+      mocks.getTransaction.mockResolvedValue({ status: "NOT_FOUND", latestLedgerCloseTime: LEDGER + 400, oldestLedgerCloseTime: LEDGER - 3600 })
+      act(() => result.current.continue())
+      await waitFor(() => expect(result.current.state.error).toBe("This route moved on in another window."))
+      expect(result.current.state).toMatchObject({ phase: "interrupted", step: 1 })
+      // Window A continues the adopted run, and step 1 lands this time.
+      mocks.exec.execute.mockImplementation(async (review: Review) =>
+        review.input.action === "buy_pt" ? Promise.reject(new Error("The wallet declined the request.")) : success(review, amountOut(998n * S)),
+      )
+      act(() => result.current.continue())
+      await untilReview(result, 1)
+      act(() => result.current.sign())
+      await untilReview(result, 2)
+      expect(loggedRun()?.steps[0].status).toBe("confirmed")
+      expect(loggedRun()?.closed).toBeUndefined()
+      expect(loggedRun()?.dismissed).toBeUndefined()
+      // So the run holds funds the usual way: History offers Continue, and a reload resumes it.
+      act(() => result.current.sign())
+      await waitFor(() => expect(result.current.state.phase).toBe("interrupted"))
+      const id = loggedRun()!.id
+      const reload = setup()
+      await waitFor(() => expect(reload.result.current.state.run?.id).toBe(id))
+      expect(reload.result.current.state).toMatchObject({ phase: "interrupted", holdings: "You hold 998 SY" })
+    })
+
+    it("after maturity the way back says Redeem in the PT tab, not a sale that has closed", async () => {
+      mocks.maturity = LEDGER - 60
+      const lp: RouteRequest = { ...buyPt, kind: "lp_withdraw", amount: 3n * S }
+      writeRoute({
+        id: "run-lp",
+        account: A,
+        marketId: "m1",
+        kind: "lp_withdraw",
+        request: lp,
+        plans: plansFor(lp),
+        outputs: [{ kind: "remove_liquidity", pt: 10n * S, sy: 5n * S }],
+        steps: plansFor(lp).map((p, i) => (i === 0 ? { action: p.action, status: "confirmed", hash: "d".repeat(64) } : { action: p.action, status: "pending" })),
+        startedAt: 1,
+      })
+      const { result } = setup(() => [], { kinds: ["lp_keep_yt", "lp_only", "lp_withdraw"] })
+      await waitFor(() => expect(result.current.state.phase).toBe("interrupted"))
+      expect(result.current.state.holdings).toBe("You hold 10 PT and 5 SY")
+      const u = result.current.state.unwind
+      expect(u?.available).toBe(false)
+      if (u && !u.available) {
+        expect(u.reason).toMatch(/redeem the PT with Redeem in the PT tab/)
+        expect(u.reason).not.toMatch(/Trade tab/)
+      }
+    })
   })
 })

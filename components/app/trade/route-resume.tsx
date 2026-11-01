@@ -15,7 +15,17 @@ import type { TxNotice } from "@/lib/app/tx-notice"
  * own simulation, so a step the market no longer takes (a buy after maturity) is refused with its
  * reason, while a withdraw back to USDY stays open. Renders nothing while no such run is waiting.
  */
-export function RouteResume({ marketId, kinds, routeId }: { marketId: string; kinds: RouteFlowProps["kinds"]; routeId?: string | null }) {
+export function RouteResume({
+  marketId,
+  kinds,
+  routeId,
+  onRouteOpened,
+}: {
+  marketId: string
+  kinds: RouteFlowProps["kinds"]
+  routeId?: string | null
+  onRouteOpened?: RouteFlowProps["onRouteOpened"]
+}) {
   const gate = useGateContext(marketId)
   const [last, setLast] = useState<{ owner: string; notice: TxNotice } | null>(null)
   const owner = JSON.stringify(gate.wallet)
@@ -27,6 +37,7 @@ export function RouteResume({ marketId, kinds, routeId }: { marketId: string; ki
         marketId={marketId}
         kinds={kinds}
         routeId={routeId}
+        onRouteOpened={onRouteOpened}
         gate={stepGate(gate)}
         request={null}
         plans={[]}

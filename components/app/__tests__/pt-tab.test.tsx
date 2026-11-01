@@ -1,9 +1,9 @@
-import { screen, within } from "@testing-library/react"
+import { cleanup, screen, within } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { impliedRate, type CurveState } from "@/lib/protocol/curve"
 import { formatPercent } from "@/lib/protocol/format"
 import { aprToApy } from "@/lib/protocol/math"
-import { writeRoute, type RouteRun } from "@/lib/app/route-log"
+import { readRoutes, writeRoute, type RouteRun } from "@/lib/app/route-log"
 import { planRoute, type RouteRequest, type StepPlan } from "@/lib/protocol/routes"
 import { accountState, live, marketState, MATURITY } from "./fixtures"
 
@@ -389,6 +389,31 @@ describe("PT tab — a Buy PT interrupted between its steps (R2-77)", () => {
     nav.search = "tab=pt&side=buy&route=older"
     await renderUi(<TradePanel marketId="m1" />)
     expect(within(screen.getByRole("region", { name: "Route progress" })).getByText("You hold 95 SY")).toBeTruthy()
+  })
+})
+
+describe("PT tab — History's Continue leaves no ?route= behind (follow-up)", () => {
+  afterEach(() => window.history.replaceState(null, "", "/"))
+
+  it("drops ?route= once the run is open, keeping the rest; a run closed again stays closed on reload", async () => {
+    writeRoute({ ...buyPtRun("only", 1, 95n * 10_000_000n), dismissed: true })
+    window.history.replaceState(null, "", "/app/markets/m1?tab=pt&side=buy&route=only")
+    nav.search = "tab=pt&side=buy&route=only"
+    await renderUi(<TradePanel marketId="m1" />)
+    const progress = screen.getByRole("region", { name: "Route progress" })
+    expect(within(progress).getByText("You hold 95 SY")).toBeTruthy()
+    expect(window.location.pathname).toBe("/app/markets/m1")
+    expect(window.location.search).toBe("?tab=pt&side=buy")
+    // Closed again with its funds: dismissed, continuable from History only.
+    await user().click(within(progress).getByRole("button", { name: "Dismiss" }))
+    await user().click(screen.getByRole("button", { name: "Close anyway" }))
+    await settle()
+    expect(readRoutes(A)[0]).toMatchObject({ id: "only", dismissed: true })
+    // A reload of the page as it now is does not bring it back.
+    cleanup()
+    nav.search = window.location.search.slice(1)
+    await renderUi(<TradePanel marketId="m1" />)
+    expect(screen.queryByRole("region", { name: "Route progress" })).toBeNull()
   })
 })
 

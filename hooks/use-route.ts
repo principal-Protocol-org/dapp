@@ -4,6 +4,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import { useQueryClient } from "@tanstack/react-query"
 import { useExecute, type Execute } from "@/hooks/use-execute"
 import { useLedgerClock } from "@/hooks/use-ledger-clock"
+import { useMatured } from "@/hooks/use-matured"
 import { useSettings } from "@/hooks/use-settings"
 import { derive, simulate } from "@/hooks/use-simulation"
 import {
@@ -97,9 +98,15 @@ export type UseRouteOptions = {
   kinds: readonly RouteKind[]
   /**
    * The run History's Continue names (`?route=<id>`): shown in place of the newest one when it is
-   * this host's and still holds funds, even dismissed (R2-76), which the opening clears.
+   * this host's and still holds funds, even dismissed (R2-76), which the opening clears. Read when
+   * the route loads (mount, account or market change), never a reload trigger of its own.
    */
   routeId?: string | null
+  /**
+   * The named run was opened: the host drops `?route=` from the URL, so a run closed again later is
+   * not re-opened by a tab switch, the dialog reopening or a reload.
+   */
+  onRouteOpened?: (id: string) => void
   gate: RouteGate
   /**
    * A step reached the network: confirmed, or sent with its result not known yet (as 96c2ded, not
@@ -206,6 +213,19 @@ function reopened(run: RouteRun): RouteRun {
   return open
 }
 
+/**
+ * A run a panel acts on: once a step is confirmed or unknown it holds funds, so it is never
+ * `closed` (closed is for nothing held) nor `dismissed` (the panel shows it). Another window's
+ * flags are dropped when this one adopts or writes the run, so History keeps its Continue (R2-76).
+ */
+function acting(run: RouteRun): RouteRun {
+  if (!run.steps.some((s) => s.status === "confirmed" || s.status === "unknown") || (!run.closed && !run.dismissed)) return run
+  const open = { ...run }
+  delete open.closed
+  delete open.dismissed
+  return open
+}
+
 function withStep(run: RouteRun, i: number, step: RouteStep, output?: ActionOutput | null): RouteRun {
   const steps = run.steps.map((s, j) => (j === i ? step : s))
   if (output === undefined) return { ...run, steps }
@@ -232,12 +252,15 @@ function waitingHoldings(run: RouteRun, n: number, underlying: { code: string; d
   return held ? `${held} before step ${n}. ${unknown}` : `${NOTHING_LEFT} ${unknown}`
 }
 
-/** What the confirmed steps left with the user, in words, and the single call back to USDY from it. */
-function interruption(run: RouteRun, underlying: { code: string; decimals: number }): { holdings: string; unwind: Unwind } {
+/**
+ * What the confirmed steps left with the user, in words, and the single call back to USDY from it;
+ * after maturity its reason names Redeem rather than a sale that has closed.
+ */
+function interruption(run: RouteRun, underlying: { code: string; decimals: number }, matured: boolean): { holdings: string; unwind: Unwind } {
   if (firstOpen(run) === 0) return { holdings: NOTHING_MOVED, unwind: unwindFrom({}) }
   const h = holdingsOf(run)
   if (!h) return { holdings: UNREADABLE_HOLDINGS, unwind: unwindFrom(undefined) }
-  return { holdings: describeHoldings(h, underlying) ?? NOTHING_LEFT, unwind: unwindFrom(h) }
+  return { holdings: describeHoldings(h, underlying) ?? NOTHING_LEFT, unwind: unwindFrom(h, { matured }) }
 }
 
 /**
@@ -296,8 +319,8 @@ async function lookup(manifest: Manifest, action: ActionId, step: RouteStep): Pr
  */
 export function useRoute(opts: UseRouteOptions): RouteControls {
   const { account, marketId } = opts
-  const routeId = opts.routeId ?? null
   const manifest = useManifest()
+  const matured = useMatured(marketId) === true
   const exec = useExecute()
   const queryClient = useQueryClient()
   const { ledgerTime } = useLedgerClock()
@@ -327,19 +350,24 @@ export function useRoute(opts: UseRouteOptions): RouteControls {
     }
     const interrupt = (g: number, index: number, error: string, extra: Pick<View, "blockers" | "restore"> = {}) =>
       show(g, { phase: "interrupted", index, error, ...extra })
-    /** Logs the run whatever happens; shows it only while `g` is the live route. */
+    /** Logs the run whatever happens; shows it only while `g` is the live route. A funded run loses any flag. */
     const save = (g: number, next: RouteRun) => {
-      writeRoute(next)
+      const run = acting(next)
+      writeRoute(run)
       if (!live(g)) return
-      runRef.current = next
-      setRun(next)
+      runRef.current = run
+      setRun(run)
     }
     const release = (g: number) => {
       if (live(g)) busy.current = false
     }
-    /** Shows the log's copy of a run another window moved on, and stops: nothing runs from the old copy. */
-    const movedOn = (g: number, r: RouteRun) => {
+    /**
+     * Shows the log's copy of a run another window moved on, and stops: nothing runs from the old
+     * copy. A funded copy is adopted without the other window's `closed` or `dismissed`.
+     */
+    const movedOn = (g: number, stored: RouteRun) => {
       if (!live(g)) return
+      const r = acting(stored)
       prepared.current = null
       runRef.current = r
       setRun(r)
@@ -652,6 +680,13 @@ export function useRoute(opts: UseRouteOptions): RouteControls {
       runRef.current = found ?? null
       setRun(found ?? null)
       if (!found) return show(g, IDLE)
+      if (routeId && found.id === routeId) {
+        try {
+          latest.current.opts.onRouteOpened?.(routeId)
+        } catch {
+          // the host's URL clean-up failed; the run is open all the same
+        }
+      }
       const i = firstOpen(found)
       if (found.steps[i]?.status === "unknown") return void recheck(g, found, i, false)
       interrupt(g, i, notSignedYet(i + 1, found.steps.length))
@@ -665,15 +700,16 @@ export function useRoute(opts: UseRouteOptions): RouteControls {
     return { prepareStep, sign, start, resume, unwind, dismiss, load, stop, expire }
   }, [queryClient])
 
-  // Resume from the log; a change of account, market or named run stops the route on screen (it
-  // stays logged). `kinds` is read at load time, never a dependency: hosts pass it inline.
+  // Resume from the log; a change of account or market stops the route on screen (it stays
+  // logged). `kinds` and `routeId` are read at load time, never dependencies: hosts pass `kinds`
+  // inline, and dropping `?route=` from the URL once the run is open must not swap it for another.
   useEffect(() => {
     const g = ++gen.current
     busy.current = false
     prepared.current = null
     void Promise.resolve().then(() => engine.load(g, account, marketId))
     return () => engine.stop()
-  }, [account, marketId, routeId, engine])
+  }, [account, marketId, engine])
 
   // A prepared step left unsigned for 60 s expires and stops the route (spec §4), with its holdings
   // shown. Signing with under 20 s left prepares it again instead (`sign`).
@@ -693,7 +729,7 @@ export function useRoute(opts: UseRouteOptions): RouteControls {
   const underlying = market ? { code: market.underlying.code, decimals: market.underlying.decimals } : { code: "USDY", decimals: 7 }
   const n = run?.steps.length ?? 0
   const idle = view.phase === "idle" || run === null
-  const stop = view.phase === "interrupted" && run ? interruption(run, underlying) : undefined
+  const stop = view.phase === "interrupted" && run ? interruption(run, underlying, matured) : undefined
   const pending = view.phase === "waiting" && run ? waitingHoldings(run, view.index + 1, underlying) : undefined
   const shown = view.phase === "reviewing" || view.phase === "signing" ? view.review : undefined
   const state: RouteState = {

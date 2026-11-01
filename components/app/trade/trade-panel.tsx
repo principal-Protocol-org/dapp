@@ -43,6 +43,20 @@ const SIDE_SELL = "border-negative bg-negative/10 text-negative"
 const SIDE_OFF = "border-transparent bg-transparent text-ink-muted hover:text-ink"
 
 const isTab = (v: string | null | undefined): v is TabId => TABS.some((t) => t.id === v)
+
+/**
+ * History's Continue named a run (`?route=<id>`); once its host has opened it the name has done its
+ * job, so it leaves the URL (the other params stay). Otherwise a run closed again later would come
+ * back on a tab switch, on reopening the Recombine dialog, or on a reload. `replaceState` updates
+ * `useSearchParams` without a server round trip or a remount (Next's native History API support).
+ */
+function dropRouteParam() {
+  const params = new URLSearchParams(window.location.search)
+  if (!params.has("route")) return
+  params.delete("route")
+  const query = params.toString()
+  window.history.replaceState(null, "", `${window.location.pathname}${query ? `?${query}` : ""}${window.location.hash}`)
+}
 /**
  * The side `v` names on `tab`, else the tab's first. After maturity LP opens on Withdraw: Deposit has
  * closed (History's Continue still asks for Deposit, where a Keep YT route resumes).
@@ -127,7 +141,7 @@ function TradePanelView({ marketId }: { marketId: string }) {
         <h2 id={headingId} className="font-serif text-2xl text-ink">
           Trade
         </h2>
-        <QuickActions marketId={marketId} tool={tool} onToolChange={setChosenTool} onRedeem={toRedeem} routeId={routeId} />
+        <QuickActions marketId={marketId} tool={tool} onToolChange={setChosenTool} onRedeem={toRedeem} routeId={routeId} onRouteOpened={dropRouteParam} />
       </div>
       <Tabs
         value={tab}
@@ -172,15 +186,15 @@ function TradePanelView({ marketId }: { marketId: string }) {
         </div>
         <TabsContent value={tab}>
           {ptTrade ? (
-            <PtTab marketId={marketId} side={side === "sell" ? "sell" : "buy"} routeId={routeId} />
+            <PtTab marketId={marketId} side={side === "sell" ? "sell" : "buy"} routeId={routeId} onRouteOpened={dropRouteParam} />
           ) : tab === "yt" ? (
-            <YtTab marketId={marketId} side={side === "sell" ? "sell" : "buy"} onRedeem={toRedeem} routeId={routeId} />
+            <YtTab marketId={marketId} side={side === "sell" ? "sell" : "buy"} onRedeem={toRedeem} routeId={routeId} onRouteOpened={dropRouteParam} />
           ) : tab === "lp" ? (
-            <LpTab marketId={marketId} side={side === "withdraw" ? "withdraw" : "deposit"} routeId={routeId} />
+            <LpTab marketId={marketId} side={side === "withdraw" ? "withdraw" : "deposit"} routeId={routeId} onRouteOpened={dropRouteParam} />
           ) : body ? (
             <div className="grid gap-3">
               <ActionPanel key={body.id} config={body.config} marketId={marketId} />
-              <RouteResume marketId={marketId} kinds={ROUTE_HOSTS.pt} routeId={routeId} />
+              <RouteResume marketId={marketId} kinds={ROUTE_HOSTS.pt} routeId={routeId} onRouteOpened={dropRouteParam} />
             </div>
           ) : null}
         </TabsContent>

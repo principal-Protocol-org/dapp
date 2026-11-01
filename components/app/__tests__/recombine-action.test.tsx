@@ -335,6 +335,20 @@ describe("Recombine quick action — a run stopped between its steps", () => {
   })
 })
 
+describe("Recombine quick action — ?route= (follow-up)", () => {
+  afterEach(() => window.history.replaceState(null, "", "/"))
+
+  it("the dialog opens the run History's Continue names, then drops ?route= and keeps ?quick=", async () => {
+    writeRoute(interruptedRun())
+    window.history.replaceState(null, "", "/app/markets/m1?quick=recombine&route=run-recombine")
+    nav.search = "quick=recombine&route=run-recombine"
+    await renderUi(<TradePanel marketId="m1" />)
+    const dialog = await screen.findByRole("dialog", { name: "Recombine PT + YT" })
+    expect(within(dialog).getByRole("region", { name: "Route progress" })).toBeTruthy()
+    expect(window.location.search).toBe("?quick=recombine")
+  })
+})
+
 describe("Recombine quick action — after maturity", () => {
   const AFTER = async () => ({ sequence: 1, closeTime: Number(MATURITY) + 100, readAtMs: Date.now() })
 
