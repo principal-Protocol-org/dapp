@@ -7,10 +7,10 @@ import { ActionPanel } from "@/components/app/actions/action-panel"
 import { addLiquidityPanel, addLiquiditySyPanel, removeLiquidityPanel } from "@/components/app/actions/liquidity-tab"
 import { redeemPanel } from "@/components/app/actions/redeem-tab"
 import { usePanels, type PanelEntry } from "@/components/app/actions/panel-group"
-import { buyYtPanel, sellYtPanel } from "@/components/app/actions/trade-tab"
 import { PtTab } from "@/components/app/trade/pt-tab"
 import { TokenPicker, type PayToken } from "@/components/app/trade/token-picker"
 import { ToolsMenu, type ToolId } from "@/components/app/trade/tools-menu"
+import { YtTab } from "@/components/app/trade/yt-tab"
 import { useManifest } from "@/components/app/manifest-provider"
 import { useHydrated } from "@/hooks/use-hydrated"
 import { useMatured } from "@/hooks/use-matured"
@@ -37,15 +37,13 @@ const sideOr = (tab: TabId, v: string | null | undefined): SideId => SIDES[tab].
 
 /**
  * The 0001 panels this panel still hosts, built once per market: configs must stay stable
- * (panel-config rule 1). PT trades are the PT tab's (Task 16); after maturity the PT tab hosts
- * 0001's Redeem. YT and LP are interim bodies (R2-48) until Tasks 17 and 18 replace them.
+ * (panel-config rule 1). PT and YT trades are the PT and YT tabs' (Tasks 16, 17); after maturity the
+ * PT tab hosts 0001's Redeem. LP is an interim body (R2-48) until Task 18 replaces it.
  */
 const bodies = (market: Market, manifest: Manifest): PanelEntry[] => {
   const reader = () => createRpcReader(manifest)
   return [
     { id: "pt:redeem", label: "Redeem", config: redeemPanel(market) },
-    { id: "yt:buy", label: "Buy YT", config: buyYtPanel(market, reader) },
-    { id: "yt:sell", label: "Sell YT", config: sellYtPanel(market, reader) },
     { id: "lp:deposit", label: "Add PT + SY", config: addLiquidityPanel() },
     { id: "lp:deposit-sy", label: "Add SY only", config: addLiquiditySyPanel(market, reader) },
     { id: "lp:withdraw", label: "Remove", config: removeLiquidityPanel() },
@@ -90,7 +88,7 @@ function TradePanelView({ marketId }: { marketId: string }) {
   const panels = usePanels(marketId, bodies)
   const [chosenTab, setChosenTab] = useState<TabId | null>(null)
   const [chosenSide, setChosenSide] = useState<SideId | null>(null)
-  // The interim YT and LP bodies pay in SY (R2-50); the PT tab has a picker on its own fields.
+  // The interim LP bodies pay in SY (R2-50); the PT and YT tabs have a picker on their own fields.
   const [pay, setPay] = useState<PayToken>("sy")
   const [tool, setTool] = useState<ToolId | null>(null)
   if (!hydrated) return <PanelFallback />
@@ -99,10 +97,15 @@ function TradePanelView({ marketId }: { marketId: string }) {
   // A tab the user picked starts on its first side; the URL's side applies to the URL's tab.
   const side = sideOr(tab, chosenSide ?? (chosenTab ? null : urlSide))
   const code = market?.underlying.code ?? "USDY"
-  // After maturity the PT tab offers Redeem only (spec §3), through 0001's panel.
+  // After maturity the PT tab offers Redeem only (spec §3), through 0001's panel, and the YT tab
+  // says its trading has closed (R2-60).
   const ptTrade = tab === "pt" && !matured
   const bodyId = tab === "pt" ? "pt:redeem" : `${tab}:${side}`
   const body = panels.find((p) => p.id === bodyId)
+  const toRedeem = () => {
+    setChosenTab("pt")
+    setChosenSide(null)
+  }
 
   return (
     <section aria-labelledby={headingId} className="grid min-w-0 gap-3">
@@ -132,6 +135,8 @@ function TradePanelView({ marketId }: { marketId: string }) {
         <div className="flex flex-wrap items-center justify-between gap-2">
           {tab === "pt" && matured ? (
             <p className="text-sm text-ink-muted">This market has matured: redeem your PT.</p>
+          ) : tab === "yt" && matured ? (
+            <p className="text-sm text-ink-muted">This market has matured: YT trading has closed.</p>
           ) : (
             <div role="group" aria-label="Side" className="inline-flex gap-1">
               {SIDES[tab].map((s) => (
@@ -150,9 +155,9 @@ function TradePanelView({ marketId }: { marketId: string }) {
               ))}
             </div>
           )}
-          {tab !== "pt" ? <TokenPicker value={pay} onChange={setPay} options={["underlying", "sy"]} code={code} /> : null}
+          {tab === "lp" ? <TokenPicker value={pay} onChange={setPay} options={["underlying", "sy"]} code={code} /> : null}
         </div>
-        {tab !== "pt" && pay === "underlying" ? (
+        {tab === "lp" && pay === "underlying" ? (
           <p className="text-xs text-ink-muted">
             Paying with {code} directly is coming. These panels pay in SY: deposit {code} to SY first.
           </p>
@@ -160,14 +165,16 @@ function TradePanelView({ marketId }: { marketId: string }) {
         <TabsContent value={tab}>
           {ptTrade ? (
             <PtTab marketId={marketId} side={side === "sell" ? "sell" : "buy"} />
+          ) : tab === "yt" ? (
+            <YtTab marketId={marketId} side={side === "sell" ? "sell" : "buy"} onRedeem={toRedeem} />
           ) : body ? (
             <ActionPanel key={body.id} config={body.config} marketId={marketId} />
           ) : null}
         </TabsContent>
       </Tabs>
       <p className="flex flex-wrap gap-x-4 gap-y-1 text-sm text-ink-muted">
-        {/* Only the interim YT and LP bodies still need SY; the PT tab pays the underlying directly. */}
-        {tab !== "pt" ? (
+        {/* Only the interim LP bodies still need SY; the PT and YT tabs pay the underlying directly. */}
+        {tab === "lp" ? (
           <button type="button" onClick={() => setTool("deposit")} className="underline underline-offset-2 hover:text-ink">
             Need SY? Deposit {code}
           </button>
