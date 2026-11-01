@@ -25,6 +25,7 @@ const mocks = vi.hoisted(() => ({
   history: "ok" as "ok" | "pending" | "error" | "short" | "empty",
   historyRanges: [] as string[],
   clock: { ledgerTime: null as number | null, isError: false },
+  search: new URLSearchParams(),
   notFound: vi.fn(() => {
     throw new Error("NEXT_NOT_FOUND")
   }),
@@ -46,7 +47,7 @@ vi.mock("@/lib/protocol/manifest-source", () => ({ activeManifest: () => ({ netw
 vi.mock("@/lib/server/manifest", () => ({
   resolvedManifest: async () => ({ network: mocks.network, markets: [MARKET, { ...MARKET, marketId: "testnet-sta-registry" }] }),
 }))
-vi.mock("next/navigation", () => ({ notFound: mocks.notFound }))
+vi.mock("next/navigation", () => ({ notFound: mocks.notFound, useSearchParams: () => mocks.search }))
 vi.mock("@/hooks/use-market-state", () => ({
   useMarketState: () => ({ data: mocks.ms, isPending: mocks.pending, stale: mocks.stale }),
 }))
@@ -104,13 +105,14 @@ vi.mock("@/components/app/onboarding/onboarding-dialog", () => ({
 import { isValidElement, Suspense } from "react"
 import MarketPage, { generateStaticParams } from "../../../app/app/markets/[marketId]/page"
 import { MarketRoute } from "../../../app/app/markets/[marketId]/market-route"
-import { ComplianceCard } from "../market/compliance-card"
+import { ComplianceContent } from "../market/compliance-card"
+import { MarketInfoCard } from "../market/market-info-card"
 import { MarketChartBox } from "../market/market-chart-box"
 import { MarketDetails } from "../market/market-details"
 import { MarketHeader } from "../market/market-header"
 import { MarketStats } from "../market/market-stats"
 import { MarketView } from "../market/market-view"
-import { SafetyCard } from "../market/safety-card"
+import { SafetyContent } from "../market/safety-card"
 
 const wrap = (ui: React.ReactElement) => render(<TooltipProvider>{ui}</TooltipProvider>)
 const sac = live({
@@ -130,6 +132,7 @@ beforeEach(() => {
   mocks.wallet = { status: "disconnected" }
   mocks.findings = []
   mocks.network = "testnet"
+  mocks.search = new URLSearchParams()
   mocks.notFound.mockClear()
   mocks.pending = false
   mocks.history = "ok"
@@ -230,9 +233,9 @@ describe("MarketStats", () => {
 })
 
 describe("MarketChartBox", () => {
-  it("has tabs APY, Liquidity, Market details and ranges 7 d, 30 d, 90 d, All", () => {
+  it("has tabs APY and Liquidity only (details moved to the info card) and ranges 7 d, 30 d, 90 d, All", () => {
     wrap(<MarketChartBox marketId="m1" />)
-    expect(screen.getAllByRole("tab").map((t) => t.textContent)).toEqual(["APY", "Liquidity", "Market details"])
+    expect(screen.getAllByRole("tab").map((t) => t.textContent)).toEqual(["APY", "Liquidity"])
     const group = screen.getByRole("group", { name: "Range" })
     expect(within(group).getAllByRole("button").map((b) => b.textContent)).toEqual(["7 d", "30 d", "90 d", "All"])
   })
@@ -260,11 +263,6 @@ describe("MarketChartBox", () => {
     mocks.history = "error"
     wrap(<MarketChartBox marketId="m1" />)
     expect(screen.getByText(/History could not be read right now/)).toBeTruthy()
-  })
-  it("Market details tab shows the details", async () => {
-    wrap(<MarketChartBox marketId="m1" />)
-    await userEvent.click(screen.getByRole("tab", { name: "Market details" }))
-    expect(screen.getByText("Oracle rate")).toBeTruthy()
   })
 })
 
@@ -317,9 +315,9 @@ describe("MarketDetails", () => {
   })
 })
 
-describe("ComplianceCard", () => {
+describe("ComplianceContent", () => {
   it("lists the market model", () => {
-    wrap(<ComplianceCard marketId="m1" onGetTestTokens={() => {}} />)
+    wrap(<ComplianceContent marketId="m1" onGetTestTokens={() => {}} />)
     expect(screen.getByText("Authorization required").nextSibling?.textContent).toBe("Yes")
     expect(screen.getByText("Authorization revocable").nextSibling?.textContent).toBe("Yes")
     expect(screen.getByText("Clawback enabled").nextSibling?.textContent).toBe("No")
@@ -328,19 +326,19 @@ describe("ComplianceCard", () => {
   })
   it("says a SEP-57 token has no flags", () => {
     mocks.compliance = live({ kind: "sep57" as const, administrator: null })
-    wrap(<ComplianceCard marketId="m1" onGetTestTokens={() => {}} />)
+    wrap(<ComplianceContent marketId="m1" onGetTestTokens={() => {}} />)
     expect(screen.getByText(/SEP-57 token. It has no issuer flags/)).toBeTruthy()
   })
   it("says Unavailable when the model cannot be read", () => {
     mocks.compliance = down("horizon 503")
-    wrap(<ComplianceCard marketId="m1" onGetTestTokens={() => {}} />)
+    wrap(<ComplianceContent marketId="m1" onGetTestTokens={() => {}} />)
     expect(screen.getByText(/compliance model could not be read \(horizon 503\)/)).toBeTruthy()
   })
   it("hides old account items after a failed refresh", () => {
     mocks.wallet = { status: "connected", publicKey: "GABC", networkPassphrase: "x" }
     mocks.account = accountState()
     mocks.accountStale = true
-    wrap(<ComplianceCard marketId="m1" onGetTestTokens={() => {}} />)
+    wrap(<ComplianceContent marketId="m1" onGetTestTokens={() => {}} />)
     expect(screen.getByText(/Unavailable — last update failed/)).toBeTruthy()
     expect(screen.queryByText(/Your account exists/)).toBeNull()
   })
@@ -348,7 +346,7 @@ describe("ComplianceCard", () => {
     mocks.wallet = { status: "connected", publicKey: "GABC", networkPassphrase: "x" }
     mocks.account = accountState({ permPt: live(false), trustline: live("none"), sacAuthorized: live(false) })
     const open = vi.fn()
-    wrap(<ComplianceCard marketId="m1" onGetTestTokens={open} />)
+    wrap(<ComplianceContent marketId="m1" onGetTestTokens={open} />)
     expect(screen.getByText(/You have no trustline/)).toBeTruthy()
     expect(screen.getAllByText(/Fix: Add a trustline/).length).toBeGreaterThan(0)
     await userEvent.click(screen.getAllByRole("button", { name: "Get test tokens" })[0])
@@ -358,16 +356,16 @@ describe("ComplianceCard", () => {
     mocks.wallet = { status: "connected", publicKey: "GABC", networkPassphrase: "x" }
     mocks.account = accountState({ permPt: live(false) })
     mocks.network = "mainnet"
-    wrap(<ComplianceCard marketId="m1" onGetTestTokens={() => {}} />)
+    wrap(<ComplianceContent marketId="m1" onGetTestTokens={() => {}} />)
     expect(screen.queryByRole("button", { name: "Get test tokens" })).toBeNull()
     expect(screen.getAllByText(/Fix: Ask the market's administrator/).length).toBeGreaterThan(0)
   })
 })
 
-describe("SafetyCard", () => {
+describe("SafetyContent", () => {
   it("lists pauses, oracle freshness and circuit-breaker room", () => {
     mocks.ms = marketState({ riskPaused: live(true) })
-    wrap(<SafetyCard marketId="m1" />)
+    wrap(<SafetyContent marketId="m1" />)
     expect(screen.getByText("SY wrapper").nextSibling?.textContent).toBe("Not paused")
     expect(screen.getByText("Risk control").nextSibling?.textContent).toMatch(/^Paused/)
     expect(screen.getByText("Oracle").nextSibling?.textContent).toBe("Fresh (updated within the last hour), updated 10m 0s ago")
@@ -378,26 +376,96 @@ describe("SafetyCard", () => {
   it("shows deposit cap left for a connected account", () => {
     mocks.wallet = { status: "connected", publicKey: "GABC", networkPassphrase: "x" }
     mocks.account = accountState()
-    wrap(<SafetyCard marketId="m1" />)
+    wrap(<SafetyContent marketId="m1" />)
     expect(screen.getByText("Your deposit cap").nextSibling?.textContent).toBe("6000 left of 10000")
   })
   it("says a stale oracle is stale", () => {
     mocks.ms = marketState({ oracleFresh: live(false) })
-    wrap(<SafetyCard marketId="m1" />)
+    wrap(<SafetyContent marketId="m1" />)
     expect(screen.getByText("Oracle").nextSibling?.textContent).toBe("Stale (not updated within the last hour), updated 10m 0s ago")
   })
   it("hides old values after a failed refresh", () => {
     mocks.stale = true
-    wrap(<SafetyCard marketId="m1" />)
+    wrap(<SafetyContent marketId="m1" />)
     expect(screen.getByText(/Unavailable — last update failed/)).toBeTruthy()
     expect(screen.queryByText("Not paused")).toBeNull()
   })
   it("never reads an unavailable value as zero", () => {
     mocks.ms = marketState({ syPaused: down(), oracleFresh: down(), cb: { limit: down(), volume: live(0n), assetLimit: live(0n), assetVolume: live(0n) } })
-    wrap(<SafetyCard marketId="m1" />)
+    wrap(<SafetyContent marketId="m1" />)
     expect(screen.getByText("SY wrapper").nextSibling?.textContent).toBe("Unavailable")
     expect(screen.getByText("Oracle").nextSibling?.textContent).toBe("Unavailable")
     expect(screen.getByText("Circuit breaker, protocol-wide").nextSibling?.textContent).toBe("Unavailable")
+  })
+})
+
+describe("MarketInfoCard", () => {
+  const tabNames = () => screen.getAllByRole("tab").map((t) => t.textContent)
+  const connect = () => {
+    mocks.wallet = { status: "connected", publicKey: "GABC", networkPassphrase: "x" }
+  }
+  it("has Details, Compliance and Safety tabs, opening on Details", () => {
+    wrap(<MarketInfoCard marketId="m1" onGetTestTokens={() => {}} />)
+    expect(tabNames()).toEqual(["Details", "Compliance", "Safety"])
+    expect(screen.getByRole("tab", { name: "Details" }).getAttribute("aria-selected")).toBe("true")
+    expect(screen.getByText("Oracle rate")).toBeTruthy()
+    expect(screen.queryByText("Authorization required")).toBeNull()
+  })
+  it("Compliance shows the model rows and Get test tokens on testnet", async () => {
+    connect()
+    mocks.account = accountState({ permYt: live(false) })
+    const open = vi.fn()
+    wrap(<MarketInfoCard marketId="m1" onGetTestTokens={open} />)
+    await userEvent.click(screen.getByRole("tab", { name: /^Compliance/ }))
+    expect(screen.getByText("Authorization required").nextSibling?.textContent).toBe("Yes")
+    await userEvent.click(screen.getByRole("button", { name: "Get test tokens" }))
+    expect(open).toHaveBeenCalledTimes(1)
+  })
+  it("Safety shows the safety rows", async () => {
+    wrap(<MarketInfoCard marketId="m1" onGetTestTokens={() => {}} />)
+    await userEvent.click(screen.getByRole("tab", { name: /^Safety/ }))
+    expect(screen.getByText("SY wrapper").nextSibling?.textContent).toBe("Not paused")
+  })
+  it("?info=safety and ?info=compliance open that tab; anything else opens Details", () => {
+    mocks.search = new URLSearchParams("info=safety")
+    const { unmount } = wrap(<MarketInfoCard marketId="m1" onGetTestTokens={() => {}} />)
+    expect(screen.getByRole("tab", { name: /^Safety/ }).getAttribute("aria-selected")).toBe("true")
+    unmount()
+    mocks.search = new URLSearchParams("info=compliance")
+    wrap(<MarketInfoCard marketId="m1" onGetTestTokens={() => {}} />)
+    expect(screen.getByRole("tab", { name: /^Compliance/ }).getAttribute("aria-selected")).toBe("true")
+  })
+  it("an unknown ?info= value opens Details", () => {
+    mocks.search = new URLSearchParams("info=nope")
+    wrap(<MarketInfoCard marketId="m1" onGetTestTokens={() => {}} />)
+    expect(screen.getByRole("tab", { name: "Details" }).getAttribute("aria-selected")).toBe("true")
+  })
+  it("marks Compliance when a connected account has an item that is not OK", () => {
+    connect()
+    mocks.account = accountState({ permPt: live(false), trustline: live("none"), sacAuthorized: live(false) })
+    wrap(<MarketInfoCard marketId="m1" onGetTestTokens={() => {}} />)
+    expect(within(screen.getByRole("tab", { name: /^Compliance/ })).getByRole("img", { name: "needs attention" })).toBeTruthy()
+    expect(within(screen.getByRole("tab", { name: "Safety" })).queryByRole("img")).toBeNull()
+  })
+  it("shows no dot for Compliance when disconnected, or when every item is OK", () => {
+    wrap(<MarketInfoCard marketId="m1" onGetTestTokens={() => {}} />)
+    expect(screen.queryByRole("img", { name: "needs attention" })).toBeNull()
+  })
+  it("marks Safety for a paused contract, a stale oracle or an exhausted breaker", () => {
+    for (const ms of [
+      marketState({ poolPaused: live(true) }),
+      marketState({ oracleFresh: live(false) }),
+      marketState({ cb: { limit: live(100n), volume: live(100n), assetLimit: live(0n), assetVolume: live(0n) } }),
+    ]) {
+      mocks.ms = ms
+      const { unmount } = wrap(<MarketInfoCard marketId="m1" onGetTestTokens={() => {}} />)
+      expect(within(screen.getByRole("tab", { name: /^Safety/ })).getByRole("img", { name: "needs attention" })).toBeTruthy()
+      unmount()
+    }
+  })
+  it("shows no Safety dot when all is well, and none while the data is unavailable", () => {
+    wrap(<MarketInfoCard marketId="m1" onGetTestTokens={() => {}} />)
+    expect(within(screen.getByRole("tab", { name: "Safety" })).queryByRole("img")).toBeNull()
   })
 })
 
@@ -420,23 +488,38 @@ describe("MarketView", () => {
     wrap(<MarketView marketId="m1" />)
     expect(screen.getByRole("region", { name: "Actions for m1" })).toBeTruthy()
   })
-  it("compliance and safety cards stay under the panel, in the right column (R2-7)", () => {
+  it("the right column holds only the trade panel; it is sticky from 900 px (R2-67)", () => {
     wrap(<MarketView marketId="m1" />)
     const right = screen.getByTestId("market-right")
     expect(within(right).getByRole("region", { name: "Actions for m1" })).toBeTruthy()
-    expect(within(right).getByText("Authorization required")).toBeTruthy()
-    expect(within(right).getByText("SY wrapper")).toBeTruthy()
+    expect(within(right).queryByText("Authorization required")).toBeNull()
+    expect(within(right).queryByText("SY wrapper")).toBeNull()
+    expect(right.className).toContain("min-[900px]:sticky")
+    expect(right.className).toContain("min-[900px]:top-20")
+    expect(right.className).toContain("min-[900px]:self-start")
+  })
+  it("the info card sits in the left column under the chart; the trade panel comes before it in one column", () => {
+    wrap(<MarketView marketId="m1" />)
     const left = screen.getByTestId("market-left")
     expect(within(left).getByRole("heading", { name: "STA · test" })).toBeTruthy()
     expect(within(left).getByText("TVL")).toBeTruthy()
     expect(within(left).getByRole("tab", { name: "APY" })).toBeTruthy()
-    expect(within(left).queryByText("Authorization required")).toBeNull()
+    expect(within(screen.getByTestId("market-info")).getByRole("region", { name: "Market information" })).toBeTruthy()
+    expect(within(screen.getByTestId("market-info")).getByRole("tab", { name: "Details" })).toBeTruthy()
+    expect(within(screen.getByTestId("market-right")).queryByRole("region", { name: "Market information" })).toBeNull()
+    const order = (el: Element) => [...el.closest("[data-testid=market-grid]")!.children].findIndex((c) => c.contains(el))
+    const chart = screen.getByRole("region", { name: "Market chart" })
+    const trade = screen.getByRole("region", { name: "Actions for m1" })
+    const info = screen.getByRole("region", { name: "Market information" })
+    expect(order(chart)).toBeLessThan(order(trade))
+    expect(order(trade)).toBeLessThan(order(info))
   })
   it("opens the Get test tokens dialog for this market from the compliance card", async () => {
     mocks.wallet = { status: "connected", publicKey: "GABC", networkPassphrase: "x" }
     mocks.account = accountState({ permYt: live(false) })
     wrap(<MarketView marketId="m1" />)
     expect(screen.queryByRole("dialog")).toBeNull()
+    await userEvent.click(screen.getByRole("tab", { name: /^Compliance/ }))
     await userEvent.click(screen.getByRole("button", { name: "Get test tokens" }))
     expect(screen.getByRole("dialog", { name: "Get test tokens for m1" })).toBeTruthy()
   })

@@ -9,7 +9,6 @@ import { useManifest } from "@/components/app/manifest-provider"
 import { onboardingAvailable } from "@/lib/protocol/onboarding"
 import type { Live } from "@/lib/protocol/types"
 import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Skeleton } from "@/components/ui/skeleton"
 import { UNAVAILABLE } from "@/components/app/live"
 
@@ -71,67 +70,75 @@ function MarketModel({ compliance }: { compliance: Live<MarketCompliance> | unde
   )
 }
 
-/** Where the compliance fix for an item is done; "onboarding" opens the Get test tokens dialog. */
-export function ComplianceCard({
+/** The compliance items for the connected account on this market; null until they can be read fresh. */
+export function useComplianceItems(marketId: string) {
+  const { state } = useWallet()
+  const compliance = useMarketCompliance(marketId)
+  const account = useAccountState(marketId)
+  const marketCompliance = compliance.data
+  const kind = marketCompliance?.status === "live" ? marketCompliance.value.kind : null
+  const kindError = marketCompliance?.status === "unavailable" ? marketCompliance.error : undefined
+  const items = account.data && !account.stale ? evaluateAccountCompliance(account.data, kind, kindError) : null
+  return { connected: state.status === "connected", marketCompliance, account, items }
+}
+
+/** True when a connected account has a compliance item that is not OK on this market. */
+export function useComplianceAttention(marketId: string): boolean {
+  const { connected, items } = useComplianceItems(marketId)
+  return connected && !!items && items.some((i) => i.status !== "ok")
+}
+
+/**
+ * The compliance body: the underlying asset's model and the account's items, with the fix for each
+ * ("onboarding" opens the Get test tokens dialog). It sits in the market info card's tab.
+ */
+export function ComplianceContent({
   marketId,
   onGetTestTokens,
 }: {
   marketId: string
   onGetTestTokens: () => void
 }) {
-  const { state } = useWallet()
-  const compliance = useMarketCompliance(marketId)
-  const account = useAccountState(marketId)
-  const connected = state.status === "connected"
+  const { connected, marketCompliance, account, items } = useComplianceItems(marketId)
   const testTokens = onboardingAvailable(useManifest())
-  const marketCompliance = compliance.data
-  const kind = marketCompliance?.status === "live" ? marketCompliance.value.kind : null
-  const kindError = marketCompliance?.status === "unavailable" ? marketCompliance.error : undefined
-
-  const items = account.data && !account.stale ? evaluateAccountCompliance(account.data, kind, kindError) : null
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Compliance</CardTitle>
-      </CardHeader>
-      <CardContent className="grid gap-5 text-sm text-ink">
-        <section aria-label="Market model" className="grid gap-2">
-          <h3 className="label">Underlying asset</h3>
-          <MarketModel compliance={marketCompliance} />
-        </section>
-        <section aria-label="Your account" className="grid gap-2">
-          <h3 className="label">Your account</h3>
-          {!connected ? (
-            <p>Connect a wallet to check whether your account can use this market.</p>
-          ) : account.isPending ? (
-            <Skeleton className="h-24 w-full" />
-          ) : items ? (
-            <ul className="grid gap-3">
-              {items.map((item) => (
-                <li key={item.id} className="grid gap-1 border-t border-line pt-3 first:border-t-0 first:pt-0">
-                  <p className="wrap-anywhere">
-                    <span className="font-semibold">{STATUS_TEXT[item.status]}.</span> {item.message}
-                  </p>
-                  {item.fix ? (
-                    item.fix === "onboarding" && testTokens ? (
-                      <Button type="button" variant="secondary" className="w-fit" onClick={onGetTestTokens}>
-                        Get test tokens
-                      </Button>
-                    ) : (
-                      <p className="text-ink-muted">
-                        Fix: {item.fix === "onboarding" ? NO_ONBOARDING_FIX : FIX_TEXT[item.fix]}
-                      </p>
-                    )
-                  ) : null}
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <p>{account.stale ? "Unavailable — last update failed." : `${UNAVAILABLE}: your account could not be read right now.`}</p>
-          )}
-        </section>
-      </CardContent>
-    </Card>
+    <div className="grid gap-5 text-sm text-ink">
+      <section aria-label="Market model" className="grid gap-2">
+        <h3 className="label">Underlying asset</h3>
+        <MarketModel compliance={marketCompliance} />
+      </section>
+      <section aria-label="Your account" className="grid gap-2">
+        <h3 className="label">Your account</h3>
+        {!connected ? (
+          <p>Connect a wallet to check whether your account can use this market.</p>
+        ) : account.isPending ? (
+          <Skeleton className="h-24 w-full" />
+        ) : items ? (
+          <ul className="grid gap-3">
+            {items.map((item) => (
+              <li key={item.id} className="grid gap-1 border-t border-line pt-3 first:border-t-0 first:pt-0">
+                <p className="wrap-anywhere">
+                  <span className="font-semibold">{STATUS_TEXT[item.status]}.</span> {item.message}
+                </p>
+                {item.fix ? (
+                  item.fix === "onboarding" && testTokens ? (
+                    <Button type="button" variant="secondary" className="w-fit" onClick={onGetTestTokens}>
+                      Get test tokens
+                    </Button>
+                  ) : (
+                    <p className="text-ink-muted">
+                      Fix: {item.fix === "onboarding" ? NO_ONBOARDING_FIX : FIX_TEXT[item.fix]}
+                    </p>
+                  )
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p>{account.stale ? "Unavailable — last update failed." : `${UNAVAILABLE}: your account could not be read right now.`}</p>
+        )}
+      </section>
+    </div>
   )
 }

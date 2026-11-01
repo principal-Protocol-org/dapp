@@ -8,8 +8,8 @@ import { formatAmount } from "@/lib/protocol/format"
 import { getMarket } from "@/lib/protocol/manifest"
 import { useManifest } from "@/components/app/manifest-provider"
 import type { Live } from "@/lib/protocol/types"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Skeleton } from "@/components/ui/skeleton"
+import { safetyNeedsAttention } from "@/components/app/market/attention"
 import { formatDuration, showLive, UNAVAILABLE } from "@/components/app/live"
 
 function Row({ label, children }: { label: string; children: React.ReactNode }) {
@@ -31,7 +31,8 @@ function roomLeft(limit: Live<bigint>, volume: Live<bigint>, amount: (v: bigint)
   return `${amount(left)} left of ${amount(limit.value)}`
 }
 
-export function SafetyCard({ marketId }: { marketId: string }) {
+/** The safety body: pauses, oracle freshness, circuit-breaker room and the account's deposit cap. It sits in the market info card's tab. */
+export function SafetyContent({ marketId }: { marketId: string }) {
   const market = getMarket(useManifest(), marketId)
   const { data, isPending, stale } = useMarketState(marketId)
   const ms = stale ? undefined : data
@@ -59,30 +60,30 @@ export function SafetyCard({ marketId }: { marketId: string }) {
     return `${amount(left)} left of ${amount(acc.depositCap.value)}`
   }
 
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Safety</CardTitle>
-      </CardHeader>
-      <CardContent>
-        {ms ? (
-          <dl className="grid gap-3 text-ink">
-            <Row label="SY wrapper">{showLive(ms.syPaused, pause)}</Row>
-            <Row label="Market pool">{showLive(ms.poolPaused, pause)}</Row>
-            <Row label="Risk control">{showLive(ms.riskPaused, pause)}</Row>
-            <Row label="Oracle">{oracle()}</Row>
-            <Row label="Circuit breaker, protocol-wide">{roomLeft(ms.cb.limit, ms.cb.volume, amount)}</Row>
-            <Row label={`Circuit breaker, ${market.underlying.code}`}>
-              {roomLeft(ms.cb.assetLimit, ms.cb.assetVolume, amount)}
-            </Row>
-            <Row label="Your deposit cap">{depositCap()}</Row>
-          </dl>
-        ) : isPending ? (
-          <Skeleton className="h-48 w-full" />
-        ) : (
-          <p className="text-sm text-ink">{stale ? "Unavailable — last update failed." : `${UNAVAILABLE}: safety data could not be read right now.`}</p>
-        )}
-      </CardContent>
-    </Card>
+  return ms ? (
+    <dl className="grid gap-3 text-ink">
+      <Row label="SY wrapper">{showLive(ms.syPaused, pause)}</Row>
+      <Row label="Market pool">{showLive(ms.poolPaused, pause)}</Row>
+      <Row label="Risk control">{showLive(ms.riskPaused, pause)}</Row>
+      <Row label="Oracle">{oracle()}</Row>
+      <Row label="Circuit breaker, protocol-wide">{roomLeft(ms.cb.limit, ms.cb.volume, amount)}</Row>
+      <Row label={`Circuit breaker, ${market.underlying.code}`}>
+        {roomLeft(ms.cb.assetLimit, ms.cb.assetVolume, amount)}
+      </Row>
+      <Row label="Your deposit cap">{depositCap()}</Row>
+    </dl>
+  ) : isPending ? (
+    <Skeleton className="h-48 w-full" />
+  ) : (
+    <p className="text-sm text-ink">{stale ? "Unavailable — last update failed." : `${UNAVAILABLE}: safety data could not be read right now.`}</p>
   )
+}
+
+/** True when a contract is paused, the oracle is stale, or a breaker window or the account's deposit cap is used up. */
+export function useSafetyAttention(marketId: string): boolean {
+  const { data, stale } = useMarketState(marketId)
+  const { state } = useWallet()
+  const account = useAccountState(marketId)
+  const acc = state.status === "connected" && !account.stale ? account.data : undefined
+  return safetyNeedsAttention(stale ? undefined : data, acc)
 }
