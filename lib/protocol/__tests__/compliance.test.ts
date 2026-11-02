@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest"
-import testnetJson from "@/config/manifests/testnet.json"
+import testnetJson from "@/lib/protocol/__tests__/fixtures/testnet-interim.json"
 import type { AccountState } from "../account-state"
 import { evaluateAccountCompliance, fetchMarketCompliance } from "../compliance"
 import type { Horizon } from "../horizon"

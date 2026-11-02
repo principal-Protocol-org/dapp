@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest"
-import testnetJson from "@/config/manifests/testnet.json"
+import testnetJson from "@/lib/protocol/__tests__/fixtures/testnet-interim.json"
 import { parseManifest } from "../manifest"
 import { ACTION_META, invocationFor, type ActionId } from "../actions"
 import type { ActionOutput } from "../guards"

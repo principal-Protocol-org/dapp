@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { Keypair, Transaction, TransactionBuilder } from "@stellar/stellar-sdk"
 import { describe, expect, it, vi } from "vitest"
-import testnetJson from "@/config/manifests/testnet.json"
+import testnetJson from "@/lib/protocol/__tests__/fixtures/testnet-interim.json"
 import type { AccountState } from "../account-state"
 import { bytesToHex } from "../bytes"
 import { parseManifest } from "../manifest"

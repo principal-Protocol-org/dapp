@@ -41,6 +41,28 @@ Outputs (both git-ignored; never commit them):
 - `.env.local`: `NEXT_PUBLIC_PRINCIPAL_NETWORK=local`, `FAUCET_ISSUER_SECRET` (the
   `principal-localdev-admin` secret, valid on this throwaway network only) and `DATABASE_URL` for `principal-pg`.
 
+## Testnet
+
+`PRINCIPAL_NETWORK=testnet scripts/dev-stack/deploy.sh` runs the same deployment on Stellar
+Testnet, as an interim market until the contract team's Deliverable 1 manifest replaces it. There
+is no `up.sh` step: the script creates and funds (friendbot) four keys in the Stellar CLI keystore,
+and the roles are split so the server never holds the protocol admin:
+
+| Key | Role | Where it lives |
+|---|---|---|
+| `principal-testnet-admin` | Admin of every market contract, the Router and the factory; SAC admin of the test asset (every Principal contract requires its admin to be the SAC admin) | This machine only |
+| `principal-testnet-treasury` | Receives the fee shares | This machine only |
+| `principal-testnet-issuer` | Classic issuer of the test asset and Permissioning admin: the faucet's key | Server: `FAUCET_ISSUER_SECRET` |
+| `principal-testnet-oracle` | OracleAdapter admin: can only push the value | Server: `ORACLE_ADMIN_SECRET` |
+
+- `MATURITY_SECONDS` defaults to 90 days on testnet. The market id is `testnet-usdy-<maturity>`.
+- It writes `config/manifests/testnet.json` (committed: public addresses and hashes only), no env
+  file and no database migration. It never prints a secret: copy them yourself with
+  `stellar keys secret <name>` into the testnet environment of the hosting.
+- The oracle is kept fresh by the app's `/api/cron/oracle` schedule (see the main README);
+  `PRINCIPAL_NETWORK=testnet scripts/dev-stack/oracle-tick.sh` does it by hand.
+- Every run deploys a new market and overwrites `testnet.json`.
+
 ## Keep the oracle fresh
 
 The oracle goes stale after about 1 h. A stale oracle refuses most writes and the app shows

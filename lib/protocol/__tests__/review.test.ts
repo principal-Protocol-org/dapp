@@ -16,7 +16,7 @@ import {
   xdr,
 } from "@stellar/stellar-sdk"
 import { afterEach, describe, expect, it, vi } from "vitest"
-import testnetJson from "@/config/manifests/testnet.json"
+import testnetJson from "@/lib/protocol/__tests__/fixtures/testnet-interim.json"
 import { ACTION_META, invocationFor, type ActionId, type ActionInput, type GuardValues } from "../actions"
 import { hashLike } from "../hash"
 import {

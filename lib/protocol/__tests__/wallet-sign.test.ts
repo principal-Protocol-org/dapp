@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { Account, BASE_FEE, Contract, Keypair, Transaction, TransactionBuilder } from "@stellar/stellar-sdk";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import testnetJson from "@/config/manifests/testnet.json";
+import testnetJson from "@/lib/protocol/__tests__/fixtures/testnet-interim.json";
 import { parseManifest } from "../manifest";
 
 const { signTransactionMock } = vi.hoisted(() => ({ signTransactionMock: vi.fn() }));
