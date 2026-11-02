@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# Build the Principal contracts and deploy one market on the local network.
-# Follows principal docs/DEPLOYMENT.md steps 1-11, then seeds the pool and writes
-# config/manifests/local.json and .env.local.
+# Build the Principal contracts and deploy one market on the local network, or on testnet with
+# PRINCIPAL_NETWORK=testnet. Follows principal docs/DEPLOYMENT.md steps 1-11, then seeds the pool and
+# writes config/manifests/<network>.json. Locally it also writes .env.local and migrates the local
+# database; on testnet it writes no env file and prints which keys to give the server.
 #
-# Usage: [PRINCIPAL_REPO=../principal] [PRINCIPAL_REF=origin/feat/tranche-1-mvp] \
-#        [MATURITY_SECONDS=3600] [ASSET_CODE=USDY] scripts/dev-stack/deploy.sh
+# Usage: [PRINCIPAL_NETWORK=local|testnet] [PRINCIPAL_REPO=../principal] \
+#        [PRINCIPAL_REF=origin/feat/tranche-1-mvp] [MATURITY_SECONDS=3600 locally, 7776000 on testnet] \
+#        [ASSET_CODE=USDY] scripts/dev-stack/deploy.sh
 set -euo pipefail
 # shellcheck source=common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
@@ -18,7 +20,7 @@ need shasum ""
 
 PRINCIPAL_REPO="${PRINCIPAL_REPO:-../principal}"
 PRINCIPAL_REF="${PRINCIPAL_REF:-origin/feat/tranche-1-mvp}"
-MATURITY_SECONDS="${MATURITY_SECONDS:-3600}"
+if [ "$NETWORK" = local ]; then MATURITY_SECONDS="${MATURITY_SECONDS:-3600}"; else MATURITY_SECONDS="${MATURITY_SECONDS:-7776000}"; fi
 ASSET_CODE="${ASSET_CODE:-USDY}"
 [[ "$ASSET_CODE" =~ ^[A-Za-z0-9]{1,12}$ ]] || die "ASSET_CODE must be 1-12 letters or digits"
 ASSET_DISPLAY="$ASSET_CODE (test)"
@@ -27,11 +29,18 @@ case "$MATURITY_SECONDS" in '' | *[!0-9]*) die "MATURITY_SECONDS must be a posit
 case "$PRINCIPAL_REPO" in /*) ;; *) PRINCIPAL_REPO="$DAPP_DIR/$PRINCIPAL_REPO" ;; esac
 [ -d "$PRINCIPAL_REPO" ] || die "PRINCIPAL_REPO '$PRINCIPAL_REPO' does not exist"
 
-rpc_healthy || die "the local network is not answering on $RPC_URL. Run scripts/dev-stack/up.sh first."
-stellar keys address "$ADMIN_KEY" >/dev/null 2>&1 || die "key $ADMIN_KEY is missing. Run scripts/dev-stack/up.sh first."
-stellar keys address "$TREASURY_KEY" >/dev/null 2>&1 || die "key $TREASURY_KEY is missing. Run scripts/dev-stack/up.sh first."
+if [ "$NETWORK" = local ]; then
+  rpc_healthy || die "the local network is not answering on $RPC_URL. Run scripts/dev-stack/up.sh first."
+  stellar keys address "$ADMIN_KEY" >/dev/null 2>&1 || die "key $ADMIN_KEY is missing. Run scripts/dev-stack/up.sh first."
+  stellar keys address "$TREASURY_KEY" >/dev/null 2>&1 || die "key $TREASURY_KEY is missing. Run scripts/dev-stack/up.sh first."
+else
+  rpc_healthy || die "the $NETWORK RPC is not answering on $RPC_URL."
+  for key in "$ADMIN_KEY" "$TREASURY_KEY" "$ISSUER_KEY" "$ORACLE_KEY"; do ensure_funded_key "$key"; done
+fi
 ADMIN="$(stellar keys address "$ADMIN_KEY")"
 TREASURY="$(stellar keys address "$TREASURY_KEY")"
+ISSUER="$(stellar keys address "$ISSUER_KEY")"
+ORACLE_ADMIN="$(stellar keys address "$ORACLE_KEY")"
 
 log() { echo "==> $*"; }
 
@@ -73,29 +82,39 @@ deploy_contract() {
 }
 
 adm() { invoke "$ADMIN_KEY" "$@" >/dev/null; } # adm <contract id> <fn> [args...]
+iss() { invoke "$ISSUER_KEY" "$@" >/dev/null; } # iss <contract id> <fn> [args...]: as the issuer (SAC and Permissioning admin)
 
 # Unwrap a JSON scalar printed by `stellar contract invoke`.
 scalar() { tr -d '"[:space:]'; }
 
 # ---------------------------------------------------------------------------------------------
-# Underlying: classic asset $ASSET_CODE (USDY) issued by the dev admin key (AUTH_REQUIRED | AUTH_REVOCABLE | AUTH_CLAWBACK_ENABLED)
-# and its Stellar Asset Contract. The dev admin key is the issuer, the SAC admin and the Permissioning admin.
+# Underlying: classic asset $ASSET_CODE (USDY) issued by the issuer key (AUTH_REQUIRED | AUTH_REVOCABLE | AUTH_CLAWBACK_ENABLED)
+# and its Stellar Asset Contract. The issuer is the SAC admin and the Permissioning admin (locally the dev admin key).
 # ---------------------------------------------------------------------------------------------
-ASSET="$ASSET_CODE:$ADMIN"
+ASSET="$ASSET_CODE:$ISSUER"
 log "Issuing $ASSET_CODE with AUTH_REQUIRED, AUTH_REVOCABLE, AUTH_CLAWBACK_ENABLED"
-stellar tx new set-options --source "$ADMIN_KEY" --network "$NETWORK" \
+stellar tx new set-options --source "$ISSUER_KEY" --network "$NETWORK" \
   --set-required --set-revocable --set-clawback-enabled >/dev/null 2>&1 ||
-  die "could not set the issuer flags on $ADMIN_KEY"
+  die "could not set the issuer flags on $ISSUER_KEY"
 SAC="$(stellar contract id asset --asset "$ASSET" --network "$NETWORK")"
-if ! stellar contract asset deploy --asset "$ASSET" --source "$ADMIN_KEY" --network "$NETWORK" >/dev/null 2>&1; then
+if ! stellar contract asset deploy --asset "$ASSET" --source "$ISSUER_KEY" --network "$NETWORK" >/dev/null 2>&1; then
   # Already deployed by an earlier run: fine as long as the contract answers.
-  invoke "$ADMIN_KEY" "$SAC" admin >/dev/null 2>&1 || die "could not deploy the $ASSET_CODE Stellar Asset Contract"
+  invoke "$ISSUER_KEY" "$SAC" admin >/dev/null 2>&1 || die "could not deploy the $ASSET_CODE Stellar Asset Contract"
 fi
 log "$ASSET_CODE SAC ${SAC:0:6}..."
 
 # The treasury receives fee shares, so it holds the underlying: open a trustline (issuer authorizes below).
 stellar tx new change-trust --source "$TREASURY_KEY" --line "$ASSET" --network "$NETWORK" >/dev/null 2>&1 ||
   die "could not open the $ASSET_CODE trustline for $TREASURY_KEY"
+# The admin seeds the pool below. When it is not the issuer it needs a trustline, the issuer's
+# authorization and the seeding amount, minted by the issuer through the SAC.
+DEPOSIT=2000000000000 # 200_000 $ASSET_CODE at 7 decimals
+if [ "$ADMIN" != "$ISSUER" ]; then
+  stellar tx new change-trust --source "$ADMIN_KEY" --line "$ASSET" --network "$NETWORK" >/dev/null 2>&1 ||
+    die "could not open the $ASSET_CODE trustline for $ADMIN_KEY"
+  iss "$SAC" set_authorized --id "$ADMIN" --authorize true
+  iss "$SAC" mint --to "$ADMIN" --amount "$DEPOSIT"
+fi
 
 # Maturity is fixed at initialization for PT, YT, MarketConfig and PrincipalManager.
 NOW="$(ledger_close_time)"
@@ -108,14 +127,15 @@ log "Maturity $MATURITY (ledger time $NOW + ${MATURITY_SECONDS}s)"
 log "1. OracleAdapter"
 deploy_contract oracle principal_oracle_adapter.wasm
 ORACLE="$LAST_ID"
-adm "$ORACLE" initialize --admin "$ADMIN"
+# The oracle admin is its own key on testnet: it can only push a value (the keeper's job).
+adm "$ORACLE" initialize --admin "$ORACLE_ADMIN"
 # Genesis value 1.0 (1e7). YTToken.initialize needs a fresh value; the timestamp is ledger time.
-adm "$ORACLE" set_reference_value --caller "$ADMIN" --value 10000000 --timestamp "$(ledger_close_time)"
+invoke "$ORACLE_KEY" "$ORACLE" set_reference_value --caller "$ORACLE_ADMIN" --value 10000000 --timestamp "$(ledger_close_time)" >/dev/null
 
 log "2. Permissioning"
 deploy_contract permissioning principal_permissioning.wasm
 PERMISSIONING="$LAST_ID"
-adm "$PERMISSIONING" initialize --admin "$ADMIN"
+adm "$PERMISSIONING" initialize --admin "$ISSUER"
 
 log "3. RiskControl (circuit breaker disabled)"
 deploy_contract riskControl principal_risk_control.wasm
@@ -193,20 +213,20 @@ ROUTER_FUNCTIONS="$(stellar contract info interface --wasm "$WASM_DIR/principal_
 
 # ---------------------------------------------------------------------------------------------
 # Step 11: compliance standing. Both layers: SAC authorization and Permissioning grants.
-# The Router holds nothing and gets none. The dev admin key trades too (seeding), so it gets grants as well;
-# as issuer it needs no SAC authorization.
+# The Router holds nothing and gets none. The admin key trades too (seeding), so it gets grants as well;
+# its SAC authorization was set above (an issuer needs none). The issuer signs both layers.
 # ---------------------------------------------------------------------------------------------
 log "11. Compliance standing"
 for holder in "$SY" "$MANAGER" "$POOL" "$ESCROW" "$TREASURY"; do
-  adm "$SAC" set_authorized --id "$holder" --authorize true
-  adm "$PERMISSIONING" grant_account --caller "$ADMIN" --account "$holder"
+  iss "$SAC" set_authorized --id "$holder" --authorize true
+  iss "$PERMISSIONING" grant_account --caller "$ISSUER" --account "$holder"
 done
 for holder in "$POOL" "$ESCROW" "$ADMIN"; do
   for asset in "$PT" "$YT"; do
-    adm "$PERMISSIONING" grant_asset --caller "$ADMIN" --account "$holder" --asset "$asset"
+    iss "$PERMISSIONING" grant_asset --caller "$ISSUER" --account "$holder" --asset "$asset"
   done
 done
-adm "$PERMISSIONING" grant_account --caller "$ADMIN" --account "$ADMIN"
+iss "$PERMISSIONING" grant_account --caller "$ISSUER" --account "$ADMIN"
 
 # ---------------------------------------------------------------------------------------------
 # Seed the pool from the dev admin key.
@@ -219,7 +239,6 @@ adm "$PERMISSIONING" grant_account --caller "$ADMIN" --account "$ADMIN"
 # and isqrt(~0.97e12) is far above 1000. 100_000 SY are left over for the sy side (needs ~95_000).
 # ---------------------------------------------------------------------------------------------
 log "Seeding the pool"
-DEPOSIT=2000000000000 # 200_000 $ASSET_CODE at 7 decimals
 MINT_SY=1000000000000 # 100_000 SY
 adm "$SY" deposit --from "$ADMIN" --amount "$DEPOSIT" --min_shares_out 0
 MINT_OUT="$(invoke "$ADMIN_KEY" "$MANAGER" mint --from "$ADMIN" --sy_shares "$MINT_SY")"
@@ -232,21 +251,20 @@ adm "$POOL" add_liquidity --from "$ADMIN" --pt_desired "$PT_MINTED" --sy_desired
 # ---------------------------------------------------------------------------------------------
 # Outputs
 # ---------------------------------------------------------------------------------------------
-MARKET_ID="local-$(tr "[:upper:]" "[:lower:]" <<<"$ASSET_CODE")-$MATURITY"
-MANIFEST="$DAPP_DIR/config/manifests/local.json"
-ENV_FILE="$DAPP_DIR/.env.local"
+MARKET_ID="$NETWORK-$(tr "[:upper:]" "[:lower:]" <<<"$ASSET_CODE")-$MATURITY"
+MANIFEST="$DAPP_DIR/config/manifests/$NETWORK.json"
 mkdir -p "$(dirname "$MANIFEST")"
 
 jq -n \
   --arg passphrase "$NETWORK_PASSPHRASE" --arg rpc "$RPC_URL" --arg horizon "$HORIZON_URL" \
   --arg friendbot "$FRIENDBOT_URL" --arg generatedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --arg commit "$COMMIT" --arg risk "$RISK_CONTROL" --arg perm "$PERMISSIONING" --arg factory "$FACTORY" \
-  --arg id "$MARKET_ID" --arg issuer "$ADMIN" --arg sac "$SAC" --argjson maturity "$MATURITY" \
+  --arg id "$MARKET_ID" --arg issuer "$ISSUER" --arg sac "$SAC" --argjson maturity "$MATURITY" --arg network "$NETWORK" \
   --arg code "$ASSET_CODE" --arg display "$ASSET_DISPLAY" --argjson fns "$ROUTER_FUNCTIONS" \
   --arg router "$ROUTER" --arg oracle "$ORACLE" --arg sy "$SY" --arg pt "$PT" --arg yt "$YT" \
   --arg config "$CONFIG" --arg manager "$MANAGER" --arg pool "$POOL" --arg escrow "$ESCROW" \
   --argjson hashes "$HASHES_JSON" '{
-    schemaVersion: 2, network: "local", networkPassphrase: $passphrase,
+    schemaVersion: 2, network: $network, networkPassphrase: $passphrase,
     rpcUrl: $rpc, horizonUrl: $horizon, friendbotUrl: $friendbot,
     generatedAt: $generatedAt, sourceCommit: $commit,
     shared: { router: $router, oracle: $oracle, permissioning: $perm, riskControl: $risk, factory: $factory },
@@ -262,7 +280,22 @@ jq -n \
     }]
   }' >"$MANIFEST"
 
+if [ "$NETWORK" != local ]; then
+  # No env file and no database migration off the local network: the server's keys are set in the
+  # hosting environment by hand, and the network's database is migrated with `pnpm db:migrate`.
+  # The secrets are never printed: copy each one from the keystore yourself.
+  log "Wrote $MANIFEST"
+  log "Market $MARKET_ID matures at $MATURITY."
+  log "Set in the $NETWORK environment of the app (secrets: copy them yourself, they are not printed):"
+  log "  NEXT_PUBLIC_PRINCIPAL_NETWORK=$NETWORK"
+  log "  FAUCET_ISSUER_SECRET        <- stellar keys secret $ISSUER_KEY"
+  log "  ORACLE_ADMIN_SECRET         <- stellar keys secret $ORACLE_KEY"
+  log "Schedule POST /api/cron/oracle every 30 minutes: the oracle value is fresh for 3600 s."
+  exit 0
+fi
+
 # .env.local: set (or replace) the three keys, keep anything else already in the file. Local only; git-ignored.
+ENV_FILE="$DAPP_DIR/.env.local"
 touch "$ENV_FILE"
 chmod 600 "$ENV_FILE"
 tmp="$(mktemp)"
@@ -270,7 +303,7 @@ grep -v -e '^FAUCET_ISSUER_SECRET=' -e '^NEXT_PUBLIC_PRINCIPAL_NETWORK=' -e '^DA
 {
   cat "$tmp"
   echo "NEXT_PUBLIC_PRINCIPAL_NETWORK=local"
-  echo "FAUCET_ISSUER_SECRET=$(stellar keys secret "$ADMIN_KEY")"
+  echo "FAUCET_ISSUER_SECRET=$(stellar keys secret "$ISSUER_KEY")"
   echo "DATABASE_URL=postgres://principal:principal@localhost:5432/principal"
 } >"$ENV_FILE"
 rm -f "$tmp"

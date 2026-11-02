@@ -4,6 +4,7 @@
 set -euo pipefail
 # shellcheck source=common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
+[ "$NETWORK" = local ] || die "up.sh starts the local network only. For testnet run PRINCIPAL_NETWORK=testnet scripts/dev-stack/deploy.sh."
 
 need stellar "Install the Stellar CLI: https://developers.stellar.org/docs/tools/cli"
 need curl ""
