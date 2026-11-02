@@ -20,7 +20,7 @@ vi.mock("@upstash/qstash", () => ({
 }))
 vi.mock("@/lib/protocol/manifest-source", async () => {
   const { parseManifest } = await import("@/lib/protocol/manifest")
-  const json = (await import("@/config/manifests/testnet.json")).default
+  const json = (await import("@/lib/protocol/__tests__/fixtures/testnet-interim.json")).default
   const m = parseManifest(json)
   return { activeManifest: () => m }
 })

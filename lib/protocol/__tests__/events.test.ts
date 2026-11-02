@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { Address, Keypair, nativeToScVal, xdr } from "@stellar/stellar-sdk"
 import { describe, expect, it, vi } from "vitest"
-import testnetJson from "@/config/manifests/testnet.json"
+import testnetJson from "@/lib/protocol/__tests__/fixtures/testnet-interim.json"
 import { decodeEvent, fetchAccountHistory, type Role } from "../events"
 import { parseManifest } from "../manifest"
 

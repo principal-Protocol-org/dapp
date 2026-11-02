@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { Keypair, StrKey } from "@stellar/stellar-sdk"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import testnetJson from "@/config/manifests/testnet.json"
+import testnetJson from "@/lib/protocol/__tests__/fixtures/testnet-interim.json"
 import { parseManifest } from "@/lib/protocol/manifest"
 
 vi.mock("server-only", () => ({}))
@@ -20,7 +20,7 @@ vi.mock("@/lib/server/faucet", async (importOriginal) => ({
 }))
 vi.mock("@/lib/protocol/manifest-source", async () => {
   const { parseManifest: parse } = await import("@/lib/protocol/manifest")
-  const json = (await import("@/config/manifests/testnet.json")).default
+  const json = (await import("@/lib/protocol/__tests__/fixtures/testnet-interim.json")).default
   const m = parse(json)
   return { activeManifest: () => m }
 })

@@ -1,6 +1,8 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest"
-import testnetJson from "@/config/manifests/testnet.json"
+// The interim 3 Oct 2026 Testnet file (v1), frozen as a fixture: the committed testnet.json changes with each deployment.
+import testnetJson from "@/lib/protocol/__tests__/fixtures/testnet-interim.json"
+import committedTestnetJson from "@/config/manifests/testnet.json"
 import localExample from "@/config/manifests/local.example.json"
 import { getMarket, parseManifest, validateManifest } from "../manifest"
 import type { Manifest } from "../types"
@@ -10,6 +12,12 @@ type Raw = typeof testnetJson
 const errors = (m: Manifest) => validateManifest(m).filter((f) => f.severity === "error")
 
 describe("manifest v1", () => {
+  it("accepts the committed testnet manifest, whatever deployment it holds", () => {
+    const m = parseManifest(committedTestnetJson)
+    expect(m.network).toBe("testnet")
+    expect(errors(m)).toEqual([])
+  })
+
   it("accepts the interim testnet manifest", () => {
     const m = parseManifest(testnetJson)
     expect(validateManifest(m)).toEqual([])
@@ -116,7 +124,7 @@ const ROUTER_FUNCTIONS = [
 describe("manifest v2", () => {
   const v2Raw = () => structuredClone(parseManifest(localExample)) as Manifest
 
-  it("upgrades the committed v1 testnet file", () => {
+  it("upgrades the interim v1 testnet file", () => {
     const m = parseManifest(testnetJson)
     expect(m.schemaVersion).toBe(2)
     expect(m.shared.router).toBe(m.markets[0].contracts.router)

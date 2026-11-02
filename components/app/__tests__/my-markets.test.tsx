@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import userEvent from "@testing-library/user-event"
 import { Keypair, StrKey } from "@stellar/stellar-sdk"
 import { beforeEach, describe, expect, it, vi } from "vitest"
-import testnetJson from "@/config/manifests/testnet.json"
+import testnetJson from "@/lib/protocol/__tests__/fixtures/testnet-interim.json"
 import { parseManifest } from "@/lib/protocol/manifest"
 import type { AccruedFees, AccountRoles, MarketRoles, SharedRoles } from "@/lib/protocol/roles"
 import type { ManagerReview } from "@/lib/protocol/review"

@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { Keypair, StrKey, type Transaction } from "@stellar/stellar-sdk"
 import { describe, expect, it } from "vitest"
-import testnetJson from "@/config/manifests/testnet.json"
+import testnetJson from "@/lib/protocol/__tests__/fixtures/testnet-interim.json"
 import { parseManifest } from "../manifest"
 import {
   MANAGER_CALL_AUTH,
