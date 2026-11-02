@@ -738,7 +738,7 @@ export type InvalidMarket = { pool: string; name: string | null; reason: string 
 
 /**
  * The rows the registry holds as `valid = false` (a hidden seed too), for the manager view
- * (R2-38). Their reasons were written by this module's checks (Task 11: no RPC text). When the
+ * (R2-38), except rows from another deployment (another Router or oracle). Their reasons were written by this module's checks (Task 11: no RPC text). When the
  * registry cannot be read, or is slower than `timeoutMs`, the answer is `unavailable`, never an
  * empty list that would read as "nothing is invalid".
  */
@@ -757,20 +757,24 @@ export async function invalidMarkets(deps: {
     return { status: "unavailable" }
   }
   const seedNames = new Map(deps.manifest.markets.map((m) => [m.contracts.pool, m.displayName]))
-  const invalid = rows.filter((r) => r.valid === false)
+  const stored = (r: RegistryRow): Market | null => {
+    if (!r.market) return null
+    try {
+      return parseMarket(r.market)
+    } catch {
+      return null
+    }
+  }
+  // A row whose stored market names another Router or oracle is from another deployment (an earlier
+  // manifest): it is not this app's to list, valid or not.
+  const invalid = rows.filter((r) => r.valid === false && !isForeign(deps.manifest, stored(r)))
   return {
     status: "ok",
-    rows: invalid.map((r) => {
-      let name: string | null = seedNames.get(r.pool) ?? null
-      if (name === null && r.market) {
-        try {
-          name = parseMarket(r.market).displayName
-        } catch {
-          name = null
-        }
-      }
-      return { pool: r.pool, name, reason: r.reason ?? "it did not pass the registry's checks" }
-    }),
+    rows: invalid.map((r) => ({
+      pool: r.pool,
+      name: seedNames.get(r.pool) ?? stored(r)?.displayName ?? null,
+      reason: r.reason ?? "it did not pass the registry's checks",
+    })),
   }
 }
 
