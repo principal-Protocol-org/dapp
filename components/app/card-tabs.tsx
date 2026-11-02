@@ -49,7 +49,7 @@ export function CardTabs({
             value={t.value}
             onMouseDown={focusWithoutRing}
             className={cn(
-              "flex min-w-0 items-center justify-center border-b-2 border-transparent bg-surface-sunk px-3 py-3 text-center text-ink-muted transition-colors sm:px-5 sm:py-4",
+              "flex min-w-0 cursor-pointer items-center justify-center border-b-2 border-transparent bg-surface-sunk px-3 py-3 text-center text-ink-muted transition-colors sm:px-5 sm:py-4",
               "hover:text-ink focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring",
               "data-[state=active]:border-coupon data-[state=active]:bg-surface data-[state=active]:text-ink",
             )}

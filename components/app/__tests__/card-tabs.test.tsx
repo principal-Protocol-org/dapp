@@ -52,6 +52,7 @@ describe("CardTabs", () => {
     expect(b.className).toContain("text-ink-muted")
     expect(a.className).toContain("border-b-2")
     expect(a.className).toContain("justify-center")
+    expect(a.className).toContain("cursor-pointer")
     expect(a.className).toContain("text-center")
   })
   it("holds the title (and count) only: no subtitle, no description", () => {

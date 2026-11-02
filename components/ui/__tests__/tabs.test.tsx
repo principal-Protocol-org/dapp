@@ -25,6 +25,7 @@ describe("TabsTrigger", () => {
     const yt = screen.getByRole("tab", { name: "YT" })
     fireEvent.mouseDown(yt, { button: 0 })
     expect(yt.getAttribute("aria-selected")).toBe("true")
+    expect(yt.className).toContain("cursor-pointer")
     expect(focus.mock.calls[0]).toEqual([{ focusVisible: false }])
     expect(focus.mock.contexts[0]).toBe(yt)
     focus.mockRestore()
