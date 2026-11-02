@@ -737,10 +737,11 @@ describe("server secrets", () => {
   it("appear only in files that start with import \"server-only\"", () => {
     const files = ["app", "components", "hooks", "lib"].flatMap((d) => sourceFiles(join(ROOT, d)))
     const offenders = files
-      .filter((f) => readFileSync(f, "utf8").includes("FAUCET_"))
+      .filter((f) => /FAUCET_|DATABASE_URL|CRON_SECRET|QSTASH_|ORACLE_ADMIN_/.test(readFileSync(f, "utf8")))
       .filter((f) => !readFileSync(f, "utf8").startsWith('import "server-only"'))
       .map((f) => relative(ROOT, f))
     expect(offenders).toEqual([])
     expect(files.some((f) => f.endsWith(join("lib", "server", "faucet.ts")))).toBe(true)
+    expect(files.some((f) => f.endsWith(join("lib", "server", "oracle-keeper.ts")))).toBe(true)
   })
 })
