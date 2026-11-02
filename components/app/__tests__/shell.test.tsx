@@ -346,4 +346,16 @@ describe("app header", () => {
     expect(screen.getByRole("link", { name: "History" }).getAttribute("href")).toBe("/app/history")
     expect(screen.getByRole("link", { name: "Markets" }).getAttribute("aria-current")).toBe("page")
   })
+  it("never pushes its right side off screen: the row may wrap, and the nav joins it only from 900 px", () => {
+    render(<Providers><AppHeader /></Providers>)
+    const nav = screen.getByRole("navigation", { name: "App" })
+    const row = nav.parentElement as HTMLElement
+    expect(row.className).toContain("flex-wrap")
+    expect(row.className).not.toMatch(/flex-nowrap/)
+    expect(row.className).not.toMatch(/(^|\s)(min-\[\d+px\]:)?h-16(\s|$)/)
+    expect(row.className).toContain("min-[900px]:min-h-16")
+    expect(nav.className).toContain("order-last")
+    expect(nav.className).toContain("min-[900px]:order-none")
+    expect(nav.className).not.toContain("min-[700px]:order-none")
+  })
 })
