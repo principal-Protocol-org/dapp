@@ -62,19 +62,25 @@ export function MarketStats({ marketId }: { marketId: string }) {
   const amount = (v: bigint) => `≈ ${formatAmount(v, decimals, 2, { group: true })} ${code}`
   const l = liquidityOf(ms)
   const tvl = marketTvl(ms)
+  // Developer's request: each value on one line, in a smaller type than the titles. From 900 px the
+  // five stats share the row by content (the amounts need more room than "317x"); values sit at the
+  // bottom so they line up when a title wraps.
+  const stat = { className: "content-between", valueClassName: "text-[13px]/6 min-[900px]:whitespace-nowrap" }
   return (
-    <dl className="grid grid-cols-2 gap-x-6 gap-y-5 rounded-lg border border-line bg-surface p-5 min-[900px]:grid-cols-5">
-      <Metric label="Liquidity">
+    <dl className="grid grid-cols-2 gap-x-6 gap-y-5 rounded-lg border border-line bg-surface p-5 min-[900px]:flex min-[900px]:justify-between">
+      <Metric label="Liquidity" {...stat}>
         {l.kind === "value" ? amount(l.value) : l.kind === "none" ? "No liquidity yet" : <Unavailable label="Liquidity" reason="The pool's value could not be read." />}
       </Metric>
-      <Metric label="TVL">{tvl.status === "live" ? amount(tvl.value) : <Unavailable label="TVL" reason="The TVL could not be read." />}</Metric>
-      <Metric label="Underlying APY (7 d)">
+      <Metric label="TVL" {...stat}>{tvl.status === "live" ? amount(tvl.value) : <Unavailable label="TVL" reason="The TVL could not be read." />}</Metric>
+      <Metric label="Underlying APY (7 d)" {...stat}>
         <UnderlyingApyStat pool={market.contracts.pool} />
       </Metric>
-      <Metric label="PT fixed APY">
+      <Metric label="PT fixed APY" {...stat}>
         <FixedApy impliedRate={ms.impliedRate} maturity={ms.maturity} ledgerTime={ledgerTime} poolSeeded={ms.poolSeeded} />
       </Metric>
-      <Metric label="YT leverage">{yt(ms)}</Metric>
+      <Metric label="YT leverage" {...stat}>
+        {yt(ms)}
+      </Metric>
     </dl>
   )
 }
