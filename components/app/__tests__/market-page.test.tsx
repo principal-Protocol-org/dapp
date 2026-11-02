@@ -206,6 +206,18 @@ describe("MarketStats", () => {
     expect(stat("PT fixed APY")?.textContent).toMatch(/^\d+\.\d\d%$/)
     expect(stat("YT leverage")?.textContent).toBe("50x")
   })
+  it("keeps each value on one line in a smaller type, the titles unchanged, values aligned at the bottom", () => {
+    const { container } = wrap(<MarketStats marketId="m1" />)
+    const dl = container.querySelector("dl") as HTMLElement
+    expect(dl.className).toContain("min-[900px]:flex")
+    expect(dl.className).toContain("min-[900px]:justify-between")
+    const liquidity = stat("Liquidity") as HTMLElement
+    expect(liquidity.className).toContain("text-[13px]/6")
+    expect(liquidity.className).toContain("min-[900px]:whitespace-nowrap")
+    expect(liquidity.className).not.toContain("text-[15px]")
+    expect((liquidity.parentElement as HTMLElement).className).toContain("content-between")
+    expect(screen.getByText("Liquidity").className).toBe("label")
+  })
   it("labels a short underlying window 'since <date>' and never extrapolates (R2-44)", () => {
     mocks.history = "short"
     wrap(<MarketStats marketId="m1" />)
