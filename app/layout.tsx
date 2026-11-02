@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Hanken_Grotesk, IBM_Plex_Mono, Newsreader } from "next/font/google";
 import { ThemeProvider } from "@/components/theme-provider";
+import { siteOrigin, socialImage } from "@/lib/app/site";
 import "./globals.css";
 
 const newsreader = Newsreader({
@@ -24,10 +25,17 @@ const plexMono = IBM_Plex_Mono({
   fallback: ["ui-monospace", "Menlo", "monospace"],
 });
 
+const TITLE = "Principal Protocol";
+const DESCRIPTION = "Yield tokenization for Stellar real-world assets.";
+const ORIGIN = siteOrigin();
+const IMAGE = socialImage(ORIGIN);
+
 export const metadata: Metadata = {
-  metadataBase: new URL("https://principalmarket.fi"),
-  title: "Principal Protocol",
-  description: "Yield tokenization for Stellar real-world assets.",
+  metadataBase: new URL(ORIGIN),
+  title: TITLE,
+  description: DESCRIPTION,
+  openGraph: { title: TITLE, description: DESCRIPTION, images: [IMAGE] },
+  twitter: { card: "summary_large_image", title: TITLE, description: DESCRIPTION, images: [IMAGE] },
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
