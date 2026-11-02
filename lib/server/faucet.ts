@@ -4,7 +4,9 @@ import "server-only"
  * The Testnet faucet behind `POST /api/faucet` (spec §9): the app's only server code, and the only
  * code holding keys. For one account it performs only the missing steps, in order:
  *
- * 1. `authorize` — SAC `set_authorized(account, true)`, signed by the issuer (the SAC admin);
+ * 1. `authorize` — a classic `SetTrustLineFlags` (authorized) from the issuer. The issuer keeps that
+ *    power when the SAC admin is another key: every Principal contract requires its admin to be the
+ *    SAC admin, so on testnet the SAC admin is the protocol admin, which stays off this server;
  * 2. `grant_account` — Permissioning `grant_account(admin, account)`;
  * 3. `grant_pt` / `grant_yt` — Permissioning `grant_asset(admin, account, pt|yt)`, for every market;
  * 4. `pay` — a classic payment of `FAUCET_AMOUNT` test tokens from the issuer, only below
@@ -74,7 +76,7 @@ export interface FaucetChain {
   readAccount(account: string, asset: TestAsset): Promise<FaucetAccount>
   isAllowed(account: string): Promise<boolean>
   isAllowedForAsset(account: string, asset: string): Promise<boolean>
-  /** SAC `set_authorized(account, true)`, signed by the issuer. */
+  /** Authorizes the account's trustline: a classic `SetTrustLineFlags` from the issuer. */
   setAuthorized(account: string, asset: TestAsset): Promise<void>
   /** Permissioning `grant_account(admin, account)`, signed by the Permissioning admin. */
   grantAccount(account: string): Promise<void>
@@ -491,11 +493,14 @@ export function createStellarFaucetChain(
     isAllowedForAsset: (account, contract) =>
       read({ contractId: permissioning, functionName: "is_allowed_for_asset", args: [address(account), address(contract)] }),
     setAuthorized: (account, testAssetArg) =>
-      invoke(issuer, {
-        contractId: testAssetArg.sac,
-        functionName: "set_authorized",
-        args: [address(account), { type: "bool", value: true }],
-      }),
+      classic(
+        issuer,
+        Operation.setTrustLineFlags({
+          trustor: account,
+          asset: new Asset(testAssetArg.code, testAssetArg.issuer),
+          flags: { authorized: true },
+        }),
+      ),
     grantAccount: (account) =>
       invoke(admin, {
         contractId: permissioning,

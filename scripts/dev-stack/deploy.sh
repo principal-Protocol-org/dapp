@@ -89,7 +89,10 @@ scalar() { tr -d '"[:space:]'; }
 
 # ---------------------------------------------------------------------------------------------
 # Underlying: classic asset $ASSET_CODE (USDY) issued by the issuer key (AUTH_REQUIRED | AUTH_REVOCABLE | AUTH_CLAWBACK_ENABLED)
-# and its Stellar Asset Contract. The issuer is the SAC admin and the Permissioning admin (locally the dev admin key).
+# and its Stellar Asset Contract. Every Principal contract requires its admin to be the SAC admin
+# (compliance::is_authority), so the SAC admin is the protocol admin. The issuer keeps its classic
+# powers (trustline flags, payments) and is the Permissioning admin: that is all the faucet needs.
+# Locally one dev key is all of these.
 # ---------------------------------------------------------------------------------------------
 ASSET="$ASSET_CODE:$ISSUER"
 log "Issuing $ASSET_CODE with AUTH_REQUIRED, AUTH_REVOCABLE, AUTH_CLAWBACK_ENABLED"
@@ -101,19 +104,25 @@ if ! stellar contract asset deploy --asset "$ASSET" --source "$ISSUER_KEY" --net
   # Already deployed by an earlier run: fine as long as the contract answers.
   invoke "$ISSUER_KEY" "$SAC" admin >/dev/null 2>&1 || die "could not deploy the $ASSET_CODE Stellar Asset Contract"
 fi
+SAC_ADMIN="$(invoke "$ISSUER_KEY" "$SAC" admin | scalar)"
+if [ "$SAC_ADMIN" != "$ADMIN" ]; then
+  [ "$SAC_ADMIN" = "$ISSUER" ] || die "the $ASSET_CODE SAC admin is $SAC_ADMIN, neither the issuer nor the admin key"
+  log "Handing the SAC admin to the protocol admin"
+  iss "$SAC" set_admin --new_admin "$ADMIN"
+fi
 log "$ASSET_CODE SAC ${SAC:0:6}..."
 
 # The treasury receives fee shares, so it holds the underlying: open a trustline (issuer authorizes below).
 stellar tx new change-trust --source "$TREASURY_KEY" --line "$ASSET" --network "$NETWORK" >/dev/null 2>&1 ||
   die "could not open the $ASSET_CODE trustline for $TREASURY_KEY"
-# The admin seeds the pool below. When it is not the issuer it needs a trustline, the issuer's
-# authorization and the seeding amount, minted by the issuer through the SAC.
+# The admin seeds the pool below. When it is not the issuer it needs a trustline, its authorization
+# and the seeding amount, both from the SAC, whose admin it now is.
 DEPOSIT=2000000000000 # 200_000 $ASSET_CODE at 7 decimals
 if [ "$ADMIN" != "$ISSUER" ]; then
   stellar tx new change-trust --source "$ADMIN_KEY" --line "$ASSET" --network "$NETWORK" >/dev/null 2>&1 ||
     die "could not open the $ASSET_CODE trustline for $ADMIN_KEY"
-  iss "$SAC" set_authorized --id "$ADMIN" --authorize true
-  iss "$SAC" mint --to "$ADMIN" --amount "$DEPOSIT"
+  adm "$SAC" set_authorized --id "$ADMIN" --authorize true
+  adm "$SAC" mint --to "$ADMIN" --amount "$DEPOSIT"
 fi
 
 # Maturity is fixed at initialization for PT, YT, MarketConfig and PrincipalManager.
@@ -214,11 +223,12 @@ ROUTER_FUNCTIONS="$(stellar contract info interface --wasm "$WASM_DIR/principal_
 # ---------------------------------------------------------------------------------------------
 # Step 11: compliance standing. Both layers: SAC authorization and Permissioning grants.
 # The Router holds nothing and gets none. The admin key trades too (seeding), so it gets grants as well;
-# its SAC authorization was set above (an issuer needs none). The issuer signs both layers.
+# its SAC authorization was set above (an issuer needs none). The SAC admin authorizes, the
+# Permissioning admin (the issuer) grants.
 # ---------------------------------------------------------------------------------------------
 log "11. Compliance standing"
 for holder in "$SY" "$MANAGER" "$POOL" "$ESCROW" "$TREASURY"; do
-  iss "$SAC" set_authorized --id "$holder" --authorize true
+  adm "$SAC" set_authorized --id "$holder" --authorize true
   iss "$PERMISSIONING" grant_account --caller "$ISSUER" --account "$holder"
 done
 for holder in "$POOL" "$ESCROW" "$ADMIN"; do

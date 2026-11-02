@@ -3,7 +3,7 @@ import { readdirSync, readFileSync, statSync } from "node:fs"
 import { join, relative } from "node:path"
 import { Keypair, StrKey, Transaction, nativeToScVal, xdr } from "@stellar/stellar-sdk"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import testnetJson from "@/config/manifests/testnet.json"
+import testnetJson from "@/lib/protocol/__tests__/fixtures/testnet-interim.json"
 import { bytesToHex } from "@/lib/protocol/bytes"
 import { parseManifest } from "@/lib/protocol/manifest"
 import { buildInvocationEnvelope, type ContractInvocation } from "@/lib/protocol/stellar"
@@ -574,7 +574,7 @@ describe("the Stellar faucet chain", () => {
     }
   })
 
-  it("authorizes with SAC set_authorized(account, true), signed by the issuer", async () => {
+  it("authorizes with one classic SetTrustLineFlags from the issuer, which holds even when the SAC admin is another key", async () => {
     const { server, sent } = fakeRpc()
     const chain = createStellarFaucetChain(onIssuer, { env, server })
     const a = user()
@@ -583,11 +583,15 @@ describe("the Stellar faucet chain", () => {
     const [tx] = sent
     expect(tx.source).toBe(issuer.publicKey())
     expect(tx.sequence).toBe("71")
-    expect(callXdr(tx)).toBe(
-      expectedCall({ contractId: asset.sac, functionName: "set_authorized", args: [{ type: "address", value: a }, { type: "bool", value: true }] }),
-    )
+    expect(tx.operations).toHaveLength(1)
+    expect(tx.operations[0]).toMatchObject({
+      type: "setTrustLineFlags",
+      trustor: a,
+      asset: { code: asset.code, issuer: asset.issuer },
+      flags: { authorized: true },
+    })
+    expect(server.prepareTransaction).not.toHaveBeenCalled()
     expect(signedBy(tx, issuer)).toBe(true)
-    expect(server.prepareTransaction).toHaveBeenCalledTimes(1)
     expect(server.getTransaction).toHaveBeenCalledWith(bytesToHex(tx.hash()))
   })
 
