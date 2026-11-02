@@ -174,7 +174,7 @@ function TradePanelView({ marketId }: { marketId: string }) {
                   aria-pressed={s.id === side}
                   onClick={() => setChosenSide(s.id)}
                   className={cn(
-                    "min-h-10 w-full rounded-sm border px-3 text-sm font-medium focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ring",
+                    "min-h-10 w-full cursor-pointer rounded-sm border px-3 text-sm font-medium focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ring",
                     s.id !== side ? SIDE_OFF : SIDE_TONE[s.id] === "buy" ? SIDE_BUY : SIDE_SELL,
                   )}
                 >

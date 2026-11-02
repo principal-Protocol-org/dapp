@@ -209,7 +209,7 @@ describe("Side toggle", () => {
 
     for (const [tab, green, red] of [["PT", "Buy", "Sell"], ["YT", "Buy", "Sell"], ["LP", "Deposit", "Withdraw"]] as const) {
       await userEvent.click(screen.getByRole("tab", { name: tab }))
-      for (const name of [green, red]) expect(classes(side(name))).toEqual(expect.arrayContaining(["w-full", "min-h-10", "font-medium"]))
+      for (const name of [green, red]) expect(classes(side(name))).toEqual(expect.arrayContaining(["w-full", "min-h-10", "font-medium", "cursor-pointer"]))
       expect(side(green).getAttribute("aria-pressed")).toBe("true")
       expect(classes(side(green))).toEqual(expect.arrayContaining(GREEN))
       expect(classes(side(red))).toEqual(expect.arrayContaining(OFF))
