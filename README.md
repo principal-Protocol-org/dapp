@@ -94,7 +94,7 @@ QStash account, because Vercel Cron runs only on Production deployments.
 
 | Branch | Vercel environment | Domain | QStash | Network |
 |---|---|---|---|---|
-| `testnet` | Custom environment `testnet` | `testnet.principalmarket.fi` (public) | `principalmarket-testnet` | Testnet |
+| `testnet` | Preview, branch `testnet` | `testnet.principalmarket.fi`, public through a Deployment Protection exception | `principalmarket-testnet` | Testnet |
 | `main` | Production | `principalmarket.fi` | `principalmarket-mainnet` | Mainnet, once supported (Tranche 3) |
 
 For each environment:
@@ -107,8 +107,9 @@ For each environment:
   came in on, so no URL variable is needed in any environment. That URL is trusted only where
   Vercel sets the host, so QStash calls are accepted only on Vercel (`VERCEL=1`, set when the
   project exposes system environment variables, the default); elsewhere use `CRON_SECRET`.
-- Keep the environment's secrets (faucet key, `DATABASE_URL`, QStash keys) in that environment only.
-  Preview deployments of other branches get none of them.
+- Keep the environment's secrets (faucet key, `DATABASE_URL`, QStash keys) in that environment only:
+  scope the testnet ones to the `testnet` branch, so Preview deployments of other branches get none
+  of them. Those other previews stay behind Vercel Authentication.
 - No `vercel.json` and no `CRON_SECRET` are needed.
 
 Do not create the mainnet schedule before the dApp supports Mainnet. `NEXT_PUBLIC_PRINCIPAL_NETWORK`
