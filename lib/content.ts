@@ -1,7 +1,8 @@
 export const links = {
   /** The app is served by this Next.js project under /app. */
   app: "/app",
-  docs: "https://github.com/principal-Protocol-org/principal/tree/main/docs",
+  /** The VitePress docs, proxied under /docs by next.config.ts. */
+  docs: "/docs",
   github: "https://github.com/principal-Protocol-org/principal",
   // TODO: set the community URLs; footer links without a URL are not rendered.
   discord: null as string | null,
