@@ -852,6 +852,16 @@ describe("invalidMarkets (R2-38: the manager view lists them with their reason)"
     ])
   })
 
+  it("leaves out a row from another deployment (its stored market has another Router or oracle)", async () => {
+    const seed = seedMarket(chain.deploy(50))
+    const manifest = manifestWith([seed])
+    const old = seedMarket(chain.deploy(60))
+    const otherRouter = { ...old, contracts: { ...old.contracts, router: seedMarket(chain.deploy(70)).contracts.pool } }
+    await store.record({ pool: old.contracts.pool, source: "seed", valid: false, reason: "matured and unpinned", market: otherRouter })
+    const result = await invalidMarkets({ store, manifest })
+    expect(result).toEqual({ status: "ok", rows: [] })
+  })
+
   it("says it is unavailable when the registry cannot be read, instead of an empty list", async () => {
     store.fail = new Error("connection refused at 10.0.0.1")
     vi.spyOn(console, "error").mockImplementation(() => {})
