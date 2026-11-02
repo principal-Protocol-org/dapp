@@ -12,12 +12,6 @@ type Raw = typeof testnetJson
 const errors = (m: Manifest) => validateManifest(m).filter((f) => f.severity === "error")
 
 describe("manifest v1", () => {
-  it("accepts the committed testnet manifest, whatever deployment it holds", () => {
-    const m = parseManifest(committedTestnetJson)
-    expect(m.network).toBe("testnet")
-    expect(errors(m)).toEqual([])
-  })
-
   it("accepts the interim testnet manifest", () => {
     const m = parseManifest(testnetJson)
     expect(validateManifest(m)).toEqual([])
@@ -122,6 +116,12 @@ const ROUTER_FUNCTIONS = [
 ]
 
 describe("manifest v2", () => {
+  it("accepts the committed testnet manifest, whatever deployment it holds", () => {
+    const m = parseManifest(committedTestnetJson)
+    expect(m.network).toBe("testnet")
+    expect(errors(m)).toEqual([])
+  })
+
   const v2Raw = () => structuredClone(parseManifest(localExample)) as Manifest
 
   it("upgrades the interim v1 testnet file", () => {

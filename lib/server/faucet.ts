@@ -392,7 +392,7 @@ function rejection(sent: { errorResult?: xdr.TransactionResult; errorResultXdr?:
 
 /**
  * The faucet chain on the manifest's RPC, with the keys from the environment: `FAUCET_ISSUER_SECRET`
- * (required: the test asset issuer, which is also its SAC admin) and
+ * (required: the test asset's classic issuer; the SAC admin may be another key) and
  * `FAUCET_PERMISSIONING_ADMIN_SECRET` (optional; defaults to the issuer). Throws
  * `FaucetConfigError` when a key is missing, malformed, or not the manifest's issuer.
  */
