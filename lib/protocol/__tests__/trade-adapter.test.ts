@@ -992,6 +992,72 @@ describe("trade adapter #1 — one-step Router functions (R4-3, R4-4, R4-5)", ()
       }
     })
 
+    it("Final review 1: the split leaves no SY behind and no less LP, so Keep YT never makes the next sale multi-step (R4-3)", () => {
+      // The sizing before this fix: bisection, then the most LP in lo−1..lo+2, then the least left behind.
+      const windowSizing = (shares: bigint, s: CurveState, oracleRate: bigint) => {
+        const at = (m: bigint) => {
+          const pt = previewMint(m, oracleRate, FEE_BPS).pt
+          return { pt, sy: shares - m, fromPt: (pt * s.totalLp) / s.ptReserve, fromSy: ((shares - m) * s.totalLp) / s.syReserve }
+        }
+        let lo = 0n
+        let hi = shares
+        while (lo < hi) {
+          const mid = (lo + hi + 1n) / 2n
+          if (at(mid).fromPt <= at(mid).fromSy) lo = mid
+          else hi = mid - 1n
+        }
+        let best: { lp: bigint; left: bigint; syLeft: bigint } | undefined
+        for (let m = lo - 1n; m <= lo + 2n; m++) {
+          if (m < 1n || m >= shares) continue
+          const x = at(m)
+          const add = previewAddLiquidity(x.pt, x.sy, { pt: s.ptReserve, sy: s.syReserve }, s.totalLp)
+          const syLeft = x.sy - add.syUsed
+          const left = x.pt - add.ptUsed + syLeft
+          if (!best || add.lp > best.lp || (add.lp === best.lp && left < best.left)) best = { lp: add.lp, left, syLeft }
+        }
+        if (!best) throw new Error("no split")
+        return best
+      }
+      const pools: CurveState[] = [
+        A,
+        { ...A, ptReserve: 3_210_987_654_321n, syReserve: 1_234_567_890_123n, totalLp: 987_654_321_098n },
+        { ...A, ptReserve: 1_456_789_012_345n, syReserve: 856_789_012_345n, totalLp: 98_765_432_101n },
+        { ...A, ptReserve: 777_777_777_777n, syReserve: 333_333_333_333n, totalLp: 5_555_555_555_555n },
+      ]
+      const amounts = [1_000_003n, 12_345_678n, 987_654_321n, USDY_100_LP, 31_415_926_535n, 2_718_281_828_459n]
+      let cases = 0
+      let dustBefore = 0
+      for (const [p, s] of pools.entries()) {
+        for (const xr of [SCALE, XR, 10_000_001n, 10_734_567n]) {
+          for (const oracle of [ORACLE, 10_000_000n, 10_987_654n]) {
+            const ms = market({ poolState: live(s), exchangeRate: live(xr), oracleRate: live(oracle) })
+            for (const amount of amounts) {
+              const at = `pool ${p}, xr ${xr}, oracle ${oracle}, ${amount} USDY`
+              const plans = currentContractsAdapter.plan(keepYt("underlying", amount), { ...LISTED, ms })
+              if (!Array.isArray(plans)) throw new Error(`${at}: ${plans.disabled}`)
+              const shares = sharesOf(amount, xr)
+              const mint = mintOf(plans)
+              expect(mint >= 1n && mint < shares, at).toBe(true)
+              const minted = previewMint(mint, oracle, FEE_BPS)
+              const add = previewAddLiquidity(minted.pt, shares - mint, { pt: s.ptReserve, sy: s.syReserve }, s.totalLp)
+              expect(shares - mint - add.syUsed, `${at}: SY left`).toBe(0n)
+              const before = windowSizing(shares, s, oracle)
+              expect(add.lp >= before.lp, `${at}: LP ${add.lp} < ${before.lp}`).toBe(true)
+              if (before.syLeft > 0n) dustBefore++
+              // The quote prices the same split: nothing it says stays behind is SY.
+              const q = quoted(quote(keepYt("underlying", amount), { ms, plans }))
+              expect(q.out, at).toBe(add.lp)
+              expect(q.leftover?.filter((l) => l.token === "sy"), at).toEqual([])
+              cases++
+            }
+          }
+        }
+      }
+      expect(cases).toBe(pools.length * 4 * 3 * amounts.length)
+      // The grid holds states where the old sizing left SY behind.
+      expect(dustBefore).toBeGreaterThan(cases / 10)
+    })
+
     it("indicative: LP and YT from the sized split, the tokenization fee on the shares minted, and the rounding left behind", () => {
       const ms = market({ exchangeRate: live(XR) })
       const plans = planned(keepYt(), ms)

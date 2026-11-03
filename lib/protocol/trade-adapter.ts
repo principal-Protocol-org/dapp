@@ -586,6 +586,12 @@ function sizeKeepYt(req: TradeRequest, r: MarketReads, ms: MarketState): KeepYtS
  * shares instead of USDY, never `zap_swap_amount`, which solves a different split. Review Focus 5:
  * the answer is at least 1 and always below `shares`, since the Router adds `shares − mint` SY and a
  * mint of all of them would revert. Throws the plain-words reason when no split adds any LP.
+ *
+ * Then the split that leaves no SY behind (final review 1): the pool takes `ceil(lp · S / L)` SY for
+ * `lp`, so minting `shares − ceil(best.lp · S / L)` keeps exactly that SY, and its PT, from at least
+ * as many shares, still gives `best.lp` or more. It wins on more LP, or the same LP with less SY left.
+ * The PT left grows by a raw unit or so instead, which is harmless: SY left in the wallet would send
+ * every later one-signature sale and Buy YT to the multi-step route (`withdraw_all`, R4-3).
  */
 export function sizeKeepYtShares(shares: bigint, reads: { s: CurveState; oracleRate: bigint }, feeBps: bigint): bigint {
   const { s, oracleRate } = reads
@@ -604,16 +610,27 @@ export function sizeKeepYtShares(shares: bigint, reads: { s: CurveState; oracleR
     if (x.fromPt <= x.fromSy) lo = mid
     else hi = mid - 1n
   }
-  let best: { m: bigint; lp: bigint; left: bigint } | undefined
+  const split = (m: bigint) => {
+    const x = at(m)
+    const add = previewAddLiquidity(x.pt, x.sy, reservesOf(s), s.totalLp)
+    const syLeft = x.sy - add.syUsed
+    return { m, lp: add.lp, syLeft, left: x.pt - add.ptUsed + syLeft }
+  }
+  let best: ReturnType<typeof split> | undefined
   for (let m = lo - 1n; m <= lo + 2n; m++) {
     // 1 ≤ mint < shares: the Router must keep some SY to add (Review Focus 5).
     if (m < 1n || m >= shares) continue
-    const x = at(m)
-    const add = previewAddLiquidity(x.pt, x.sy, reservesOf(s), s.totalLp)
-    const left = x.pt - add.ptUsed + (x.sy - add.syUsed)
-    if (!best || add.lp > best.lp || (add.lp === best.lp && left < best.left)) best = { m, lp: add.lp, left }
+    const x = split(m)
+    if (!best || x.lp > best.lp || (x.lp === best.lp && x.left < best.left)) best = x
   }
   if (!best || best.lp <= 0n) throw new Error(KEEP_YT_TOO_SMALL)
+  if (best.syLeft > 0n) {
+    const m2 = shares - ceilDiv(best.lp * s.syReserve, s.totalLp)
+    if (m2 >= 1n && m2 < shares) {
+      const x = split(m2)
+      if (x.lp > best.lp || (x.lp === best.lp && x.syLeft < best.syLeft)) best = x
+    }
+  }
   return best.m
 }
 
