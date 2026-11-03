@@ -494,8 +494,10 @@ export type Unwind = { available: true; amount: bigint; plan: StepPlan } | { ava
 
 /**
  * The single call back to USDY from what an interrupted route left, where one exists: SY is
- * unwrapped by `withdraw` (Router.unwrap). PT, YT or LP need more than one call (a sale, then a
- * withdraw), so there is no single call back from them, and the reason names the way out. After
+ * unwrapped by `withdraw` (Router.unwrap). Only SY gets this plan. PT or YT go back from the Trade
+ * tab, which the reason names: in one Router call (`swap_pt_for_underlying`, `swap_yt_for_underlying`)
+ * when the manifest lists it and the wallet holds no SY, else a sale then a withdraw (R4-3), as when
+ * the route also left SY. LP needs more than one call (remove, sell the PT, withdraw). After
  * maturity (`matured`) PT and YT can no longer be sold: it names Redeem in the PT tab instead, the
  * LP's withdraw (open at maturity), and the SY's withdraw.
  */
