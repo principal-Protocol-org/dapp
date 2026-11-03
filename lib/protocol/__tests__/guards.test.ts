@@ -133,7 +133,7 @@ describe("guardsFrom", () => {
   it("buy_yt refuses when YT price is not positive", () => {
     for (const back of [100n, 150n]) {
       const r = guardsFrom("buy_yt", input("buy_yt", 100n), { kind: "buy_yt", yt_out: 10n, sy_back: back }, 50n)
-      expect(r).toEqual({ ok: false, reason: "YT price is not positive — buying YT is not offered" })
+      expect(r).toEqual({ ok: false, reason: "The YT price is not positive, so buying YT is not offered." })
     }
   })
   it("remove_liquidity sets two floors", () => {
@@ -210,7 +210,7 @@ describe("guardsFrom", () => {
       for (const back of [100_0000000n, 150_0000000n]) {
         const out: ActionOutput = { kind: "buy_yt_underlying", yt_out: 10_0000000n, underlying_back: back }
         const r = guardsFrom("buy_yt_underlying", buy(100_0000000n), out, 50n, { exchangeRate: SCALE })
-        expect(r).toEqual({ ok: false, reason: "YT price is not positive — buying YT is not offered" })
+        expect(r).toEqual({ ok: false, reason: "The YT price is not positive, so buying YT is not offered." })
       }
     })
     it("is refused when the YT floor rounds to zero", () => {

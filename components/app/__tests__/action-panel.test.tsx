@@ -768,7 +768,7 @@ describe("ActionPanel — review lifecycle", () => {
     mocks.simulateInvocation.mockResolvedValue({ ok: true, retval: [500_000_000n, 100_000_000n], latestLedger: 1, minResourceFee: "1" })
     await renderPanel(buyYt)
     await enter("SY to spend", "10")
-    expect(screen.getByText("YT price is not positive — buying YT is not offered")).toBeTruthy()
+    expect(screen.getByText("The YT price is not positive, so buying YT is not offered.")).toBeTruthy()
     expect(reviewButton("Buy YT").disabled).toBe(true)
     expect(mocks.prepareReview).not.toHaveBeenCalled()
   })

@@ -19,7 +19,7 @@ export type GuardResult = { ok: true; guards: GuardValues } | { ok: false; reaso
 /** What the floors may need besides the simulation: the SY exchange rate (R4-6), when it is live. */
 export type GuardRates = { exchangeRate: bigint }
 
-const YT_PRICE_REASON = "YT price is not positive — buying YT is not offered"
+const YT_PRICE_REASON = "The YT price is not positive, so buying YT is not offered."
 /** R4-6: without the exchange rate, one-step Buy YT's bound in SY cannot be worked out. */
 const NO_EXCHANGE_RATE_REASON =
   "The SY exchange rate is not available, so the most this Buy YT may spend cannot be worked out in SY. It is not offered until the market data loads."
