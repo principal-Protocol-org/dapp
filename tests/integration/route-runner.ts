@@ -55,6 +55,57 @@ export type StepRecord = {
 
 const abs = (v: bigint) => (v < 0n ? -v : v)
 
+/**
+ * The floors an action is signed with, and a result against them (0001): every slippage-sensitive
+ * call has a floor above zero; Buy YT's `max_net_cost` sits above zero and below what the buy
+ * spends (in SY for the one step, R4-6); the result honours each floor. The route runner checks a
+ * step's simulated output before it is signed and its decoded output once it lands; the lifecycle
+ * suite checks every decoded output. One-step Buy YT's net cost in SY needs the exchange rate: the
+ * routes suite checks it.
+ */
+export function expectFloors(input: ActionInput, out: ActionOutput, g: GuardValues, label: string = input.action): void {
+  const positive = (floor: bigint | undefined, what: string): bigint => {
+    expect(floor !== undefined && floor > 0n, `${label}: ${what} ${String(floor)} must be a floor above zero`).toBe(true)
+    return floor as bigint
+  }
+  const atLeast = (got: bigint, floor: bigint, what: string) => expect(got >= floor, `${label}: ${what} ${got} below its floor ${floor}`).toBe(true)
+  switch (out.kind) {
+    case "amount":
+      // claim_yield returns an amount and takes no floor.
+      if (!ACTION_META[input.action].slippageSensitive) return
+      atLeast(out.value, positive(g.minOut, "minOut"), "output")
+      return
+    case "mint":
+      atLeast(out.pt_minted, positive(g.minOut, "minOut"), "pt_minted")
+      return
+    case "add_liquidity":
+    case "keep_yt":
+      // Keep YT signs min_lp_out only: the YT it mints has no floor.
+      atLeast(out.lp, positive(g.minOut, "min_lp_out"), "lp")
+      return
+    case "remove_liquidity":
+      atLeast(out.pt, positive(g.minOut, "min_pt_out"), "pt")
+      atLeast(out.sy, positive(g.minOut2, "min_sy_out"), "sy")
+      return
+    case "buy_yt": {
+      atLeast(out.yt_out, positive(g.minOut, "min_yt_out"), "yt_out")
+      const max = positive(g.maxNetCost, "max_net_cost")
+      expect(max < input.amount, `${label}: max_net_cost ${max} vs sy_in ${input.amount}`).toBe(true)
+      expect(input.amount - out.sy_back <= max, `${label}: net cost ${input.amount - out.sy_back} vs max_net_cost ${max}`).toBe(true)
+      return
+    }
+    case "buy_yt_underlying": {
+      atLeast(out.yt_out, positive(g.minOut, "min_yt_out"), "yt_out")
+      const max = positive(g.maxNetCost, "max_net_cost")
+      expect(g.syIn !== undefined && max < g.syIn, `${label}: max_net_cost ${max} vs the deposit's SY ${String(g.syIn)}`).toBe(true)
+      return
+    }
+    case "redeem":
+      // redeem_at_maturity takes no floor: the settlement rate is frozen.
+      return
+  }
+}
+
 export const showOutput = (out: ActionOutput) =>
   Object.entries(out)
     .filter(([k]) => k !== "kind")
@@ -157,16 +208,11 @@ export function createRunner(p: {
     expect(blockers, `${label}: gates`).toEqual([])
     const { output: simulated, guards } = derive(draft, outcome, SLIPPAGE_BPS, rates(s))
     if (!simulated || !guards?.ok) throw new Error(`${label}: no exact quote: ${json({ outcome, guards })}`)
-    // A nonzero floor on every slippage-sensitive call, from this step's own simulation.
+    // A floor above zero on every slippage-sensitive call, from this step's own simulation, checked
+    // before the step is signed.
     const g = guards.guards
     expect(ACTION_META[plan.action].slippageSensitive, `${label} is slippage-sensitive`).toBe(true)
-    expect(g.minOut !== undefined && g.minOut > 0n, `${label}: minOut ${String(g.minOut)}`).toBe(true)
-    if (plan.action === "remove_liquidity") expect(g.minOut2 !== undefined && g.minOut2 > 0n, `${label}: minOut2`).toBe(true)
-    if (plan.action === "buy_yt") expect(g.maxNetCost !== undefined && g.maxNetCost > 0n && g.maxNetCost < draft.amount, `${label}: maxNetCost`).toBe(true)
-    // R4-6: one-step Buy YT's bound is in SY, below the SY its deposit produces.
-    if (plan.action === "buy_yt_underlying") {
-      expect(g.syIn !== undefined && g.maxNetCost !== undefined && g.maxNetCost > 0n && g.maxNetCost < g.syIn, `${label}: maxNetCost ${String(g.maxNetCost)} vs syIn ${String(g.syIn)}`).toBe(true)
-    }
+    expectFloors({ ...draft, guards: g }, simulated, g, `${label} (simulated)`)
 
     const review: Review = await prepareReview({ manifest, input: { ...draft, guards: g } })
     expect(review.input.guards).toEqual(g)
@@ -176,6 +222,8 @@ export function createRunner(p: {
     const decoded = result.output
     if (!decoded) throw new Error(`${label}: no decoded output`)
     expect(decoded.kind).toBe(simulated.kind)
+    // The landed result honours the floors it was signed with (the contract enforces them; checked here too).
+    expectFloors({ ...draft, guards: g }, decoded, g, label)
     // The landed result is within the slippage setting of this step's simulation, field by field.
     for (const [field, sim] of Object.entries(simulated)) {
       if (typeof sim !== "bigint") continue

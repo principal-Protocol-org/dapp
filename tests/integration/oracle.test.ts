@@ -1,7 +1,8 @@
 // @vitest-environment node
 /**
  * The OracleAdapter v2 on the local stack (plan 0004: R4-2, R4-8, R4-9, Task 7):
- * - market state reads the oracle's policy through the real RPC reader: `get_primary_source()` (a
+ * - market state reads the oracle's policy through the real RPC reader (the oracle is ticked first
+ *   when it was last set more than half its freshness window ago): `get_primary_source()` (a
  *   `BytesN<32>`) decodes to the hex the Stellar CLI prints, which is R4-9's source id
  *   `sha256("principal-oracle-source:local:<ASSET_CODE>:app-team:keeper")`; no fallback source, no
  *   rejection ever (`last_rejection()` is `None`), `is_available()`, 3,600 s and 1,000 bps;
@@ -22,12 +23,16 @@ vi.mock("server-only", () => ({}))
 import { fetchMarketState } from "@/lib/protocol/market-state"
 import { createRpcReader } from "@/lib/protocol/reader"
 import { tickOracle } from "@/lib/server/oracle-keeper"
-import { createLog, ledgerClock, readManifest, redact, run, skipReason, sleep } from "./local-stack"
+import { createLog, eventually, ledgerClock, oracleTick, readManifest, redact, run, skipReason } from "./local-stack"
 
 const skip = await skipReason()
 if (skip) console.info(`[oracle] skipped: ${skip}. Start it with scripts/dev-stack/up.sh.`)
 
 const ADMIN_KEY = "principal-localdev-admin"
+/** The oracle is stale after 3,600 s; older than this, it is ticked before its freshness is asserted (as the routes suite does). */
+const TICK_AFTER_SECONDS = 1_800
+/** How long the keeper test waits for a ledger after the oracle's last reference timestamp. */
+const NEXT_LEDGER_TIMEOUT_MS = 30_000
 const out = createLog("oracle")
 
 /** A read-only call of the oracle through the Stellar CLI, as the developer would type it. */
@@ -41,6 +46,10 @@ describe.skipIf(skip !== null)("the OracleAdapter v2 on the local stack", () => 
     const manifest = readManifest()
     const market = manifest.markets[0]
     const oracle = manifest.shared.oracle
+    // A stack left idle past the freshness window has a stale oracle: tick it first, as the routes suite does.
+    const lastSet = Number(JSON.parse(await cli(oracle, "get_reference_timestamp")))
+    const age = (await ledgerClock(manifest)).closeTime - lastSet
+    out.log(`oracle last set ${age} s ago: ${age > TICK_AFTER_SECONDS ? await oracleTick() : "not ticked"}`)
     const ms = await fetchMarketState(createRpcReader(manifest), manifest, market.marketId)
 
     // `Option<BytesN<32>>`: the CLI prints the bytes as a JSON hex string.
@@ -66,7 +75,12 @@ describe.skipIf(skip !== null)("the OracleAdapter v2 on the local stack", () => 
     const secret = (await run("stellar", ["keys", "secret", ADMIN_KEY])).stdout.trim()
     // The oracle refuses a timestamp that does not move forward: wait for a ledger past the last value.
     const last = Number(JSON.parse(await cli(oracle, "get_reference_timestamp")))
-    for (let i = 0; i < 30 && (await ledgerClock(manifest)).closeTime <= last; i++) await sleep(1_000)
+    await eventually(
+      () => ledgerClock(manifest),
+      (clock) => clock.closeTime > last,
+      `a ledger closed after the oracle's last reference timestamp ${last} (is the local network closing ledgers?)`,
+      NEXT_LEDGER_TIMEOUT_MS,
+    )
     const before = BigInt(JSON.parse(await cli(oracle, "get_reference_value")) as string)
 
     const tick = await tickOracle({ manifest, secret })

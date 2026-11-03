@@ -22,7 +22,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
 vi.mock("server-only", () => ({}))
 
 import { fetchAccountState, type AccountState, type ComplianceKind } from "@/lib/protocol/account-state"
-import { invocationFor, type ActionId, type ActionInput, type GuardValues } from "@/lib/protocol/actions"
+import { invocationFor, type ActionId, type ActionInput } from "@/lib/protocol/actions"
 import { evaluateAccountCompliance, fetchMarketCompliance, type ComplianceItem } from "@/lib/protocol/compliance"
 import { fetchAccountHistory } from "@/lib/protocol/events"
 import { evaluateGates, type GateContext } from "@/lib/protocol/gates"
@@ -48,6 +48,7 @@ import type { Finding, Manifest, Market } from "@/lib/protocol/types"
 import { pendingYield } from "@/lib/protocol/yield"
 import { createStellarFaucetChain, resetFaucetStateForTests, runFaucet } from "@/lib/server/faucet"
 import { fundedKeypairSigner, type KeypairSigner } from "./keypair-signer"
+import { expectFloors } from "./route-runner"
 import {
   DAPP,
   DEV_STACK,
@@ -155,41 +156,6 @@ function expectRawShape(action: ActionId, retval: unknown): void {
       return struct(retval, ["pt_used", "sy_used", "lp_minted", "yt_minted"])
     default:
       expect(typeof retval, `${action} returns an integer`).toBe("bigint")
-  }
-}
-
-/** The decoded result honours the signed floors (the contract enforces them; checked here too). */
-function expectFloors(input: ActionInput, out: ActionOutput, g: GuardValues): void {
-  switch (out.kind) {
-    case "amount":
-      if (g.minOut !== undefined) expect(out.value >= g.minOut).toBe(true)
-      return
-    case "mint":
-      expect(out.pt_minted >= g.minOut!).toBe(true)
-      return
-    case "add_liquidity":
-      expect(out.lp >= g.minOut!).toBe(true)
-      return
-    case "remove_liquidity":
-      expect(out.pt >= g.minOut!).toBe(true)
-      expect(out.sy >= g.minOut2!).toBe(true)
-      return
-    case "buy_yt":
-      expect(out.yt_out >= g.minOut!).toBe(true)
-      expect(input.amount - out.sy_back <= g.maxNetCost!).toBe(true)
-      return
-    case "buy_yt_underlying":
-      // R4-6: the bound is in SY, below the SY the deposit produced; the net cost in SY needs the
-      // exchange rate and is checked in the routes suite.
-      expect(out.yt_out >= g.minOut!).toBe(true)
-      expect(g.syIn !== undefined && g.maxNetCost! < g.syIn).toBe(true)
-      return
-    case "keep_yt":
-      // Keep YT signs min_lp_out only: the YT it mints has no floor.
-      expect(out.lp >= g.minOut!).toBe(true)
-      return
-    case "redeem":
-      return
   }
 }
 
