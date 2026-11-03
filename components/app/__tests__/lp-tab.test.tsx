@@ -8,7 +8,7 @@ import { minAfterSlippage } from "@/lib/protocol/guards"
 import { aprToApy, SCALE } from "@/lib/protocol/math"
 import { previewAddLiquidity, previewDeposit, previewMint, previewRedeemPt, previewRemoveLiquidity, previewWithdraw } from "@/lib/protocol/previews"
 import { planRoute, type RouteRequest, type StepPlan } from "@/lib/protocol/routes"
-import type { TradeAdapter } from "@/lib/protocol/trade-adapter"
+import { sizeKeepYtShares, type TradeAdapter } from "@/lib/protocol/trade-adapter"
 import { accountState, live, marketState, MATURITY } from "./fixtures"
 
 const mocks = await vi.hoisted(async () => (await import("./panel-mocks")).createPanelMocks())
@@ -339,6 +339,41 @@ describe("LP tab — Deposit, Keep YT on", () => {
     await settle()
     expect(mocks.executeReview).toHaveBeenCalledTimes(1)
     expect((screen.getByLabelText("You pay") as HTMLInputElement).value).toBe("")
+  })
+})
+
+describe("LP tab — Deposit, Keep YT on, one signature (0004 Task 5, R4-4)", () => {
+  it("with add_liquidity_keep_yt listed, Keep YT deposits it all and mints the sized SY shares in one call", async () => {
+    mocks.manifest = { ...usdyManifest, routerFunctions: ["add_liquidity_keep_yt"] } as typeof mocks.manifest
+    const shares = previewDeposit(100n * UNIT, SCALE)
+    const mint = sizeKeepYtShares(shares, { s: POOL, oracleRate: ORACLE }, FEE_BPS)
+    expect(mint >= 1n && mint < shares).toBe(true)
+    const keep = { pt_used: 652_000_000n, sy_used: 378_000_000n, lp_minted: 495_000_000n, yt_minted: 652_000_002n }
+    simulateReturns(mocks, keep)
+    await renderUi(<LpTab marketId="m1" side="deposit" />)
+    await enter("You pay", "100")
+    expect(detail("Signatures")).toBe("1")
+    expect(await tipOf("Signatures")).toMatch(/This is one step, one signature: Add liquidity, keep YT \(you give USDY, you get LP \+ YT\)\./)
+    expect(screen.getByText("Exact (simulated)")).toBeTruthy()
+    expect(received()).toBe(`${amount(keep.lp_minted)} LP + ${amount(keep.yt_minted)} YT`)
+    expect(detail("YT you keep")).toBe(`${amount(keep.yt_minted)} YT`)
+    expect(detail("Minimum received")).toBe(`${amount(minAfterSlippage(keep.lp_minted, 50n))} LP`)
+    expect(await tipOf("Minimum received")).toMatch(/^Signed into the transaction/)
+    // The copy follows the one step: no "each step", and the whole payment is deposited first.
+    expect(await tipOf("Price impact")).toMatch(/Nothing is swapped.*The transaction is still signed with a slippage minimum from its simulation\./)
+    expect(detail("Split into PT + YT")).toBe(`${amount(previewWithdraw(mint, SCALE))} USDY`)
+    expect(await tipOf("Split into PT + YT")).toMatch(/^All 100\.0000 USDY is deposited as SY in this one transaction; the SY worth .* is minted into PT \+ YT/)
+    // What the pool did not take: yt_minted − pt_used PT, and shares − mint − sy_used SY.
+    expect(detail("Left in your wallet")).toBe(`${amount(keep.yt_minted - keep.pt_used)} PT + ${amount(shares - mint - keep.sy_used)} SY`)
+
+    await user().click(reviewButton("Add liquidity (keep YT)"))
+    await settle()
+    const dialog = await screen.findByRole("dialog", { name: "Review route: Add liquidity (keep YT)" })
+    expect(stepsIn(dialog)).toHaveLength(1)
+    const input = mocks.prepareReview.mock.calls[0][0].input
+    expect(input).toMatchObject({ action: "add_liquidity_keep_yt", amount: 100n * UNIT, secondaryAmount: mint, source: A })
+    expect(input.guards).toEqual({ minOut: minAfterSlippage(keep.lp_minted, 50n) })
+    expect(mocks.executeReview).not.toHaveBeenCalled()
   })
 })
 

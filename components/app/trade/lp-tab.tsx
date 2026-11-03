@@ -329,13 +329,20 @@ function depositLines(q: TradeQuote, c: LineContext): PreviewLine[] {
   lines.push({
     label: "Price impact",
     value: q.priceImpactPpm === undefined ? UNAVAILABLE : q.priceImpactPpm === 0n ? "None" : formatImpact(q.priceImpactPpm),
-    hint: `Nothing is swapped: your ${code} is split into PT + YT and SY, and the PT and SY go in at the pool's ratio. Each step is still signed with a slippage minimum from its own simulation.`,
+    hint: `Nothing is swapped: your ${code} is split into PT + YT and SY, and the PT and SY go in at the pool's ratio. ${
+      c.steps > 1 ? "Each step is still signed with a slippage minimum from its own simulation." : "The transaction is still signed with a slippage minimum from its simulation."
+    }`,
   })
   if (q.splitPart !== undefined) {
     lines.push({
       label: "Split into PT + YT",
       value: amountText(q.splitPart, "underlying"),
-      hint: `Minted into PT + YT; the other ${amountText(c.paid - q.splitPart, "underlying")} is deposited as SY. Sized so the PT and SY match the pool's ratio.`,
+      // R4-4: the one Router call deposits all of it, then mints part of its SY; the route deposits
+      // only the rest. Read from the plan, never assumed.
+      hint:
+        c.steps > 1
+          ? `Minted into PT + YT; the other ${amountText(c.paid - q.splitPart, "underlying")} is deposited as SY. Sized so the PT and SY match the pool's ratio.`
+          : `All ${amountText(c.paid, "underlying")} is deposited as SY in this one transaction; the SY worth ${amountText(q.splitPart, "underlying")} is minted into PT + YT and the rest goes into the pool with the PT. Sized so the PT and SY match the pool's ratio.`,
     })
   }
   lines.push({

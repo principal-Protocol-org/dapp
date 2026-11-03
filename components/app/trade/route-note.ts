@@ -12,6 +12,12 @@ export type RouteNote = {
   route: string
   /** Which figures are exact and which are indicative, or null when there is no quote yet: the tip on the exactness badge. */
   exactness: string | null
+  /**
+   * R4-3: why the route takes more than the one signature the manifest's Router function would, and
+   * how to get it back (the wallet holds SY that function would sweep). The tab shows it in plain
+   * sight, beside the details, as it shows any reason a faster option is off.
+   */
+  fallback?: string
 }
 
 /**
@@ -26,7 +32,8 @@ export function routeNote(p: { plans: StepPlan[]; q: TradeQuote | undefined; con
     plans.length === 1
       ? `This is one step, one signature: ${stepText(plans[0])}.`
       : `This takes ${plans.length} signatures, one per step: ${plans.map((plan, i) => `step ${i + 1}, ${stepText(plan)}`).join("; ")}.`
-  const note = (exactness: string | null): RouteNote => ({ signatures: plans.length, route, exactness })
+  const fallback = plans[0]?.fallback
+  const note = (exactness: string | null): RouteNote => ({ signatures: plans.length, route, exactness, ...(fallback ? { fallback } : {}) })
   if (!q) return note(null)
   if (q.exactness === "simulated") return note("The amount you receive is exact: it was simulated as your account.")
   if (q.swapOut?.exactness === "simulated") {

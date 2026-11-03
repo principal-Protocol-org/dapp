@@ -28,26 +28,6 @@ vi.mock("@/lib/protocol/stellar", async (orig) => ({
   // The fake reviews carry no real XDR; the route logs this hash before "signing".
   transactionEnvelopeHash: (xdr: string) => `hash-of-${xdr}`,
 }))
-// A one-step route, as `planRoute` builds one once a single-step Router function ships and the
-// manifest lists it (`SINGLE_STEP` is empty today): on for the tests that set `stub.oneStep`.
-const stub = vi.hoisted(() => ({ oneStep: false }))
-vi.mock("@/lib/protocol/trade-adapter", async (orig) => {
-  const mod = await orig<typeof import("@/lib/protocol/trade-adapter")>()
-  const { planRoute } = await import("@/lib/protocol/routes")
-  return {
-    ...mod,
-    currentContractsAdapter: {
-      quote: mod.currentContractsAdapter.quote,
-      plan: (req: Parameters<typeof mod.currentContractsAdapter.plan>[0], ctx: Parameters<typeof mod.currentContractsAdapter.plan>[1]) =>
-        stub.oneStep
-          ? planRoute(mod.toRouteRequest(req, ctx), {
-              routerFunctions: ["swap_one_step"],
-              singleStep: { [req.kind]: { fn: "swap_one_step", action: req.kind === "buy_pt" ? "buy_pt" : "sell_pt" } },
-            })
-          : mod.currentContractsAdapter.plan(req, ctx),
-    },
-  }
-})
 vi.mock("@/lib/protocol/review", async (orig) => ({
   ...(await orig<object>()),
   prepareReview: mocks.prepareReview,
@@ -98,7 +78,6 @@ beforeEach(() => {
   installDefaults(mocks)
   mocks.manifest = usdyManifest as typeof mocks.manifest
   nav.search = ""
-  stub.oneStep = false
   mocks.accounts[A] = accountState({ underlying: live(BALANCE), sy: live(BALANCE), pt: live(BALANCE), permYt: live(true) })
   mocks.fetchMarketState.mockResolvedValue(poolMarket())
 })
@@ -303,7 +282,7 @@ describe("PT tab — Sell", () => {
 
 describe("PT tab — whatever the route's shape", () => {
   it("a one-step USDY buy reads as one step, and its simulation makes the output exact", async () => {
-    stub.oneStep = true
+    mocks.manifest = { ...usdyManifest, routerFunctions: ["swap_underlying_for_pt"] } as typeof mocks.manifest
     let answer: (value: unknown) => void = () => {}
     mocks.simulateInvocation.mockImplementation(() => new Promise((resolve) => (answer = resolve)))
     await renderUi(<PtTab marketId="m1" side="buy" />)
@@ -321,7 +300,41 @@ describe("PT tab — whatever the route's shape", () => {
     expect(received()).toBe("106.0000 PT")
     expect(await tipOf("Exact (simulated)")).toMatch(/The amount you receive is exact: it was simulated as your account\./)
     // The one step was simulated with the USDY typed.
-    expect(mocks.simulateInvocation.mock.calls.at(-1)?.[0].invocation.functionName).toBe("swap_sy_for_pt")
+    expect(mocks.simulateInvocation.mock.calls.at(-1)?.[0].invocation.functionName).toBe("swap_underlying_for_pt")
+  })
+
+  it("Sell PT to USDY is one signature with swap_pt_for_underlying listed and no SY held", async () => {
+    mocks.manifest = { ...usdyManifest, routerFunctions: ["swap_underlying_for_pt", "swap_pt_for_underlying"] } as typeof mocks.manifest
+    mocks.accounts[A] = accountState({ underlying: live(BALANCE), sy: live(0n), pt: live(BALANCE), permYt: live(true) })
+    simulateReturns(mocks, 930_000_000n)
+    await renderUi(<PtTab marketId="m1" side="sell" />)
+    await enter("You pay", "100")
+    expect(detail("Signatures")).toBe("1")
+    expect(await tipOf("Signatures")).toMatch(/This is one step, one signature: Sell PT \(you give PT, you get USDY\)\./)
+    expect(screen.getByText("Exact (simulated)")).toBeTruthy()
+    expect(received()).toBe("93.0000 USDY")
+    expect(detail("Minimum received")).toBe("92.5350 USDY")
+    expect(screen.queryByText(/so this takes \d signatures/)).toBeNull()
+    await user().click(screen.getByRole("button", { name: "Review Sell PT" }))
+    await settle()
+    expect(mocks.prepareReview.mock.calls[0][0].input).toMatchObject({ action: "sell_pt_underlying", amount: 1_000_000_000n })
+  })
+
+  it("holding SY, Sell PT to USDY keeps its two steps and says why in plain sight; Buy PT never sweeps SY (R4-3)", async () => {
+    mocks.manifest = { ...usdyManifest, routerFunctions: ["swap_underlying_for_pt", "swap_pt_for_underlying"] } as typeof mocks.manifest
+    await renderUi(<PtTab marketId="m1" side="sell" />)
+    await enter("You pay", "100")
+    expect(detail("Signatures")).toBe("2")
+    expect(
+      screen.getByText(
+        "You hold 1000 SY, so this takes 2 signatures: the one-signature trade would withdraw all your SY. Withdraw it first to trade in one signature.",
+      ),
+    ).toBeTruthy()
+    cleanup()
+    await renderUi(<PtTab marketId="m1" side="buy" />)
+    await enter("You pay", "100")
+    expect(detail("Signatures")).toBe("1")
+    expect(screen.queryByText(/so this takes \d signatures/)).toBeNull()
   })
 })
 

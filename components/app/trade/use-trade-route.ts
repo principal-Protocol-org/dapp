@@ -10,7 +10,7 @@ import type { ActionInput } from "@/lib/protocol/actions"
 import { evaluateGates, type Blocker } from "@/lib/protocol/gates"
 import { isOffered, preStartDraft, routePreStartBlockers } from "@/lib/protocol/route-gates"
 import type { RouteRequest, StepPlan } from "@/lib/protocol/routes"
-import { currentContractsAdapter, toRouteRequest, type TradeAdapter, type TradeQuote, type TradeRequest, type TradeState } from "@/lib/protocol/trade-adapter"
+import { currentContractsAdapter, toRouteRequest, type PlanContext, type TradeAdapter, type TradeQuote, type TradeRequest, type TradeState } from "@/lib/protocol/trade-adapter"
 import type { Live } from "@/lib/protocol/types"
 import { useManifest } from "@/components/app/manifest-provider"
 
@@ -24,7 +24,10 @@ export type TradeRoute = {
   source: string | null
   /** What `RouteFlow` starts; null while the amount is not valid or no wallet is connected. */
   request: RouteRequest | null
-  /** The route's steps; empty when the route is not offered (its reason is among `blockers`). */
+  /**
+   * The route's steps; empty when the route is not offered (its reason is among `blockers`). A route
+   * planned instead of a listed one-step function carries why on its first step (R4-3, `routeNote`).
+   */
   plans: StepPlan[]
   /** The adapter's figures for this trade; null while there is no amount or no market data. */
   quote: Live<TradeQuote> | null
@@ -69,7 +72,17 @@ export function useTradeRoute({
   const { wallet, ms } = gate
   const source = wallet.status === "connected" ? wallet.publicKey : null
 
-  const ctx = { marketId, source: source ?? "", matured, routerFunctions: manifest.routerFunctions ?? [], ...(ms ? { ms } : {}) }
+  // R4-3: the connected account's SY, when it is read, decides whether a one-step trade that would
+  // sweep it is planned; unknown, the one step is planned and its `sy_balance` gate checks.
+  const sy = gate.account?.sy
+  const ctx: PlanContext = {
+    marketId,
+    source: source ?? "",
+    matured,
+    routerFunctions: manifest.routerFunctions ?? [],
+    ...(ms ? { ms } : {}),
+    ...(sy?.status === "live" ? { syBalance: sy.value } : {}),
+  }
   const planned = adapter.plan(trade, ctx)
   const plans = Array.isArray(planned) ? planned : []
   const disabled = Array.isArray(planned) ? undefined : planned.disabled
