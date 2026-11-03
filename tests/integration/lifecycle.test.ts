@@ -15,16 +15,16 @@
  * deploys a fresh one instead (`scripts/dev-stack/deploy.sh`, which rewrites local.json).
  */
 import { join } from "node:path"
-import { Keypair, Transaction, rpc, scValToNative } from "@stellar/stellar-sdk"
+import { Keypair, Transaction, scValToNative } from "@stellar/stellar-sdk"
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
 
 // `server-only` throws outside a react-server bundle; the faucet is imported here as the route does.
 vi.mock("server-only", () => ({}))
 
 import { fetchAccountState, type AccountState, type ComplianceKind } from "@/lib/protocol/account-state"
-import { ACTION_META, invocationFor, type ActionId, type ActionInput, type GuardValues } from "@/lib/protocol/actions"
+import { invocationFor, type ActionId, type ActionInput, type GuardValues } from "@/lib/protocol/actions"
 import { evaluateAccountCompliance, fetchMarketCompliance, type ComplianceItem } from "@/lib/protocol/compliance"
-import { fetchAccountHistory, type HistoryKind } from "@/lib/protocol/events"
+import { fetchAccountHistory } from "@/lib/protocol/events"
 import { evaluateGates, type GateContext } from "@/lib/protocol/gates"
 import { guardsFrom, openGuards, parseOutput, type ActionOutput } from "@/lib/protocol/guards"
 import { createHorizon } from "@/lib/protocol/horizon"
@@ -35,10 +35,8 @@ import { addTrustline, fetchMarketPermissions, onboardingSteps } from "@/lib/pro
 import { createRpcReader, isContractError } from "@/lib/protocol/reader"
 import { assertPreparedMatches, executeReview, prepareReview } from "@/lib/protocol/review"
 import {
-  AMOUNTS_MOVED_REASON,
   buildInvocationEnvelope,
   createRpcServer,
-  failedTransactionReason,
   getLedgerClock,
   pollTransactionStatus,
   simulateInvocation,
@@ -55,6 +53,7 @@ import {
   DEV_STACK,
   eventually,
   faucetIssuerSecret,
+  HISTORY_KIND,
   json,
   oracleTick as tickOracle,
   readManifest,
@@ -72,8 +71,8 @@ const U = 10_000_000n
 
 /**
  * Seconds from the start of the run to maturity the pre-maturity steps need (onboarding, 11
- * transactions and the pinned zap, two oracle ticks, a pause and an unpause: about 1.5 minutes
- * measured), and the most this run waits for maturity.
+ * transactions, two oracle ticks, a pause and an unpause: about 1.5 minutes measured before the
+ * single-sided add joined them), and the most this run waits for maturity.
  * Outside that window the suite skips (`runwayReason`); with `LIFECYCLE_REDEPLOY=1` a fresh market is
  * deployed instead, maturing `DEPLOY_MATURITY_SECONDS` after the deploy reads the ledger time (the
  * deploy itself takes about two minutes of that).
@@ -86,7 +85,7 @@ const MINUTE = 60_000
 
 /**
  * Why this suite does not run on the market deployed now, or null. It needs a market that matures
- * within the run and changes it for good (oracle 1.05, a pause, the R47 canary, redemption), so it
+ * within the run and changes it for good (oracle 1.05, a pause, a single-sided add, redemption), so it
  * never runs on a market with a longer life: that is the developer's (R2-68). `LIFECYCLE_REDEPLOY=1`
  * lets it deploy a fresh market instead.
  */
@@ -146,11 +145,14 @@ function expectRawShape(action: ActionId, retval: unknown): void {
     case "redeem":
       return struct(retval, ["underlying_from_pt", "underlying_from_yt"])
     case "buy_yt":
+    case "buy_yt_underlying":
     case "remove_liquidity":
       return bigints(retval, 2)
     case "add_liquidity":
     case "add_liquidity_sy":
       return bigints(retval, 3)
+    case "add_liquidity_keep_yt":
+      return struct(retval, ["pt_used", "sy_used", "lp_minted", "yt_minted"])
     default:
       expect(typeof retval, `${action} returns an integer`).toBe("bigint")
   }
@@ -176,32 +178,19 @@ function expectFloors(input: ActionInput, out: ActionOutput, g: GuardValues): vo
       expect(out.yt_out >= g.minOut!).toBe(true)
       expect(input.amount - out.sy_back <= g.maxNetCost!).toBe(true)
       return
+    case "buy_yt_underlying":
+      // R4-6: the bound is in SY, below the SY the deposit produced; the net cost in SY needs the
+      // exchange rate and is checked in the routes suite.
+      expect(out.yt_out >= g.minOut!).toBe(true)
+      expect(g.syIn !== undefined && g.maxNetCost! < g.syIn).toBe(true)
+      return
+    case "keep_yt":
+      // Keep YT signs min_lp_out only: the YT it mints has no floor.
+      expect(out.lp >= g.minOut!).toBe(true)
+      return
     case "redeem":
       return
   }
-}
-
-/** History kind each action's transaction is listed as (T19). */
-const HISTORY_KIND: Record<ActionId, HistoryKind> = {
-  deposit: "deposit",
-  withdraw: "withdraw",
-  mint: "mint",
-  buy_pt: "buy_pt",
-  sell_pt: "sell_pt",
-  buy_yt: "buy_yt",
-  sell_yt: "sell_yt",
-  add_liquidity: "add_liquidity",
-  add_liquidity_sy: "add_liquidity",
-  remove_liquidity: "remove_liquidity",
-  recombine: "recombine",
-  claim_yield: "claim",
-  redeem: "redeem",
-  // 0004 Task 3, forced by the Record: R4-10's classification. Task 4 teaches history these sets.
-  buy_pt_underlying: "buy_pt",
-  sell_pt_underlying: "sell_pt",
-  buy_yt_underlying: "buy_yt",
-  sell_yt_underlying: "sell_yt",
-  add_liquidity_keep_yt: "add_liquidity",
 }
 
 /** A user's approval time in Freighter, between preparation and submission (well inside the 60 s review window). */
@@ -209,7 +198,8 @@ const SIGNING_DELAY_MS = 5_000
 
 /**
  * The account's nested `SY.transfer(from, pool, amount)` in the signed authorization of an
- * `add_liquidity_single_sy` (Router → MarketPool → SY), as simulation recorded it.
+ * `add_liquidity_single_sy` (Router → MarketPool → SY), as simulation recorded it: since 3cb1942
+ * the pool pulls `sy_in` itself, a fixed amount (R4-7).
  */
 function signedNestedTransfer(unsignedXdr: string, networkPassphrase: string): { from: string; amount: bigint } {
   const tx = new Transaction(unsignedXdr, networkPassphrase)
@@ -222,32 +212,6 @@ function signedNestedTransfer(unsignedXdr: string, networkPassphrase: string): {
   const [from, , amount] = transfer.contractFn.args.map((a) => scValToNative(a) as unknown)
   if (typeof from !== "string" || typeof amount !== "bigint") throw new Error("unexpected transfer arguments")
   return { from, amount }
-}
-
-type ScErrorLike = { type: string; code?: { name?: string } }
-
-/** Why a transaction failed on-chain: its result code, the auth refusal, the transfer amount it ran with. */
-async function failureOf(rpcUrl: string, hash: string) {
-  const tx = await createRpcServer(rpcUrl).getTransaction(hash)
-  if (tx.status !== rpc.Api.GetTransactionStatus.FAILED) throw new Error(`transaction ${hash} is ${tx.status}, not FAILED`)
-  const outcome = tx.resultXdr.result
-  const op = outcome.type === "txFailed" ? outcome.results[0] : undefined
-  const result = op?.type === "opInner" && op.tr.type === "invokeHostFunction" ? op.tr.invokeHostFunctionResult.type : outcome.type
-  let authInvalidAction = false
-  let executedTransfer: bigint | undefined
-  for (const { event } of tx.diagnosticEventsXdr ?? []) {
-    const [topic, detail, fn] = event.body.value.topics
-    if (topic?.type !== "scvSymbol") continue
-    if (topic.value === "error" && detail?.type === "scvError") {
-      const error = detail.error as unknown as ScErrorLike
-      if (error.type === "sceAuth" && error.code?.name === "scecInvalidAction") authInvalidAction = true
-    }
-    if (topic.value === "fn_call" && fn?.type === "scvSymbol" && fn.value === "transfer") {
-      const args = scValToNative(event.body.value.data) as unknown
-      if (Array.isArray(args) && typeof args[2] === "bigint") executedTransfer = args[2]
-    }
-  }
-  return { result, authInvalidAction, executedTransfer }
 }
 
 type Snapshot = { ms: MarketState; acc: AccountState; compliance: ComplianceItem[]; ledgerTime: number }
@@ -265,8 +229,6 @@ describe.skipIf(skip !== null)("protocol layer on the local network", () => {
   /** Ledger before the first protocol transaction: the start of the history check's window. */
   let firstLedger = 0
   const sent: Sent[] = []
-  /** Hashes of transactions that failed on-chain (the pinned pool limitation). */
-  const failed: string[] = []
 
   const reader = () => createRpcReader(manifest)
   const horizon = () => createHorizon(manifest.horizonUrl)
@@ -565,8 +527,33 @@ describe.skipIf(skip !== null)("protocol layer on the local network", () => {
     await runStep("remove_liquidity", lp.value / 2n)
   }, 3 * MINUTE)
 
-  // Task 8 (0004): R47 is lifted; this live suite is rewritten there for the fixed pool (3cb1942).
-  it.skip("add_liquidity_sy (rewritten in Task 8)", () => {})
+  /**
+   * The former R47 canary (plan 0004, R4-7). `MarketPool.add_liquidity_single_sy` used to compute the
+   * SY it pulls when the transaction ran, from a curve that moves with the ledger time, so the signed
+   * `SY.transfer` authorization (pinned at the simulation's amount) no longer matched at inclusion
+   * and the host refused it. Since 3cb1942 the pool takes the whole `sy_in` up front and refunds
+   * what it does not use: the authorization pins `sy_in`, and the transaction succeeds even signed
+   * after a user's approval time, through the same gates, floors and review as every action.
+   */
+  it("add_liquidity_sy succeeds (R4-7): the authorization pins sy_in, even signed after a user's approval time", async () => {
+    const amount = 100n * U
+    const { input, simulated, guards, review } = await reviewStep("add_liquidity_sy", amount)
+    const signed = signedNestedTransfer(review.unsignedXdr, manifest.networkPassphrase)
+    expect(signed).toEqual({ from: account, amount })
+    // A user takes a few seconds to approve in Freighter; the pool's curve moves every ledger meanwhile.
+    await sleep(SIGNING_DELAY_MS)
+    const result = await executeReview({ review, manifest, sign: signer.sign })
+    expect(result.status, `add_liquidity_sy: ${json(result)}`).toBe("SUCCESS")
+    const decoded = result.output
+    if (decoded?.kind !== "add_liquidity" || simulated.kind !== "add_liquidity") throw new Error(`add_liquidity_sy: unexpected output ${json(decoded)}`)
+    expectFloors(input, decoded, guards)
+    // `sy_used` is what the pool kept of `sy_in` (split + sy_used); the rest was refunded.
+    expect(decoded.sy_used <= amount).toBe(true)
+    const tolerance = ceilDiv(simulated.lp * SLIPPAGE_BPS, BPS)
+    expect(abs(decoded.lp - simulated.lp) <= tolerance, `lp: decoded ${decoded.lp} vs simulated ${simulated.lp}`).toBe(true)
+    sent.push({ action: "add_liquidity_sy", hash: result.hash, simulated, decoded })
+    log(`add_liquidity_sy: signed SY.transfer ${signed.amount}, tx ${result.hash.slice(0, 12)} SUCCESS ${SIGNING_DELAY_MS / 1000} s after its review; simulated ${show(simulated)} | decoded ${show(decoded)}`)
+  }, 2 * MINUTE)
 
   it("oracle tick to 1.05, then claim_yield pays exactly the pending yield", async () => {
     await oracleTick(10_500_000n)
@@ -641,16 +628,13 @@ describe.skipIf(skip !== null)("protocol layer on the local network", () => {
 
   it("history lists every transaction the test sent, once, with its kind (T19)", async () => {
     const expected = sent.map((s) => [s.hash, HISTORY_KIND[s.action]])
-    expect(expected).toHaveLength(11)
-    expect(failed).toHaveLength(1)
+    expect(expected).toHaveLength(12)
 
     const full = await fetchAccountHistory({ manifest, marketId: market.marketId, account })
     expect(full.truncated).toBe(false)
     // Entries are newest first; `sent` is in the order the transactions were sent.
     expect([...full.entries].reverse().map((e) => [e.hash, e.kind])).toEqual(expected)
     expect(full.oracleUpdates.some((u) => u.value === 10_500_000n)).toBe(true)
-    // A trapped transaction emits no contract events: the failed zap is not listed.
-    expect(full.entries.some((e) => failed.includes(e.hash))).toBe(false)
 
     // Many small windows: the endLedger walk must find the same entries, none twice, none missing.
     const health = await server().getHealth()

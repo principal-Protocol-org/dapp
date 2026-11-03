@@ -11,7 +11,9 @@ import { existsSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { promisify } from "node:util"
 import { fetchAccountState, type AccountState, type ComplianceKind } from "@/lib/protocol/account-state"
+import type { ActionId } from "@/lib/protocol/actions"
 import { fetchMarketCompliance } from "@/lib/protocol/compliance"
+import type { HistoryKind } from "@/lib/protocol/events"
 import { createHorizon } from "@/lib/protocol/horizon"
 import { parseManifest } from "@/lib/protocol/manifest"
 import { addTrustline } from "@/lib/protocol/onboarding"
@@ -115,6 +117,30 @@ export function createLog(prefix = "integration") {
       console.info(`[${prefix}] summary\n${lines.join("\n")}`)
     },
   }
+}
+
+/** History kind each action's transaction is listed as (T19; R4-10 for the one-transaction Router actions). */
+export const HISTORY_KIND: Record<ActionId, HistoryKind> = {
+  deposit: "deposit",
+  withdraw: "withdraw",
+  mint: "mint",
+  buy_pt: "buy_pt",
+  sell_pt: "sell_pt",
+  buy_yt: "buy_yt",
+  sell_yt: "sell_yt",
+  add_liquidity: "add_liquidity",
+  add_liquidity_sy: "add_liquidity",
+  remove_liquidity: "remove_liquidity",
+  recombine: "recombine",
+  claim_yield: "claim",
+  redeem: "redeem",
+  // R4-10: deposit + buy_pt, sell_pt + withdraw, deposit + mint + sell_pt + withdraw, sell_yt +
+  // withdraw, deposit + mint + add_liq, each in one transaction.
+  buy_pt_underlying: "buy_pt",
+  sell_pt_underlying: "sell_pt",
+  buy_yt_underlying: "buy_yt",
+  sell_yt_underlying: "sell_yt",
+  add_liquidity_keep_yt: "add_liquidity",
 }
 
 /** `scripts/dev-stack/oracle-tick.sh` (admin key): default growth from the last reference time, or `rate`. */
