@@ -910,7 +910,13 @@ function quote(req: TradeRequest, state: TradeState): Live<TradeQuote> {
  */
 function plan(req: TradeRequest, ctx: PlanContext): StepPlan[] | RouteDisabled {
   const route = toRouteRequest(req, ctx)
-  const base: RouteContext = { routerFunctions: ctx.routerFunctions, ...(ctx.syBalance !== undefined ? { syBalance: ctx.syBalance } : {}) }
+  const xr = ctx.ms?.exchangeRate
+  const base: RouteContext = {
+    routerFunctions: ctx.routerFunctions,
+    ...(ctx.syBalance !== undefined ? { syBalance: ctx.syBalance } : {}),
+    // The fallback reason tells SY too small to withdraw (final review 2).
+    ...(xr?.status === "live" ? { exchangeRate: xr.value } : {}),
+  }
   // Keep YT's split is sized from the market's reads; paid in SY, the planner gives R2-22's reason.
   if (req.kind === "lp_keep_yt" && req.pay === "underlying") return planKeepYt(req, ctx, route, base)
   if (req.kind !== "buy_yt") return planRoute(route, base)

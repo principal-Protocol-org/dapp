@@ -833,7 +833,7 @@ describe("trade adapter #1 — one-step Router functions (R4-3, R4-4, R4-5)", ()
     return plans
   }
   const FALLBACK = (sy: string, k: number) =>
-    `You hold ${sy} SY, so this takes ${k} signatures: the one-signature trade would withdraw all your SY. Withdraw it first to trade in one signature.`
+    `You hold ${sy} SY, so this takes ${k} signatures: the one-signature trade would withdraw all your SY. Withdraw it first (Quick actions → Withdraw) to trade in one signature.`
 
   it("each kind paid or received in USDY plans its one step; paid or received in SY, the old route", () => {
     expect(planned(buy("underlying")).map((p) => [p.action, p.amount])).toEqual([["buy_pt_underlying", { from: "input" }]])
@@ -877,6 +877,19 @@ describe("trade adapter #1 — one-step Router functions (R4-3, R4-4, R4-5)", ()
     for (const extra of [{ syBalance: 0n }, {}]) {
       for (const req of [sell("underlying"), sellYt("underlying"), buyYt("underlying")]) expect(planned(req, market(), extra)).toHaveLength(1)
     }
+  })
+
+  it("final review 2: the fallback reason reads the market's SY rate, so dust too small to withdraw says so", () => {
+    const dust = (k: number) =>
+      `You hold 0.0000001 SY, so this takes ${k} signatures: the one-signature trade would withdraw all your SY. An amount this small cannot be withdrawn, so this trade keeps its multi-step route.`
+    const held = { syBalance: 1n }
+    expect(planned(sell("underlying"), market(), held)[0].fallback).toBe(dust(2))
+    expect(planned(sellYt("underlying"), market(), held)[0].fallback).toBe(dust(2))
+    expect(planned(buyYt("underlying"), market(), held)[0].fallback).toBe(dust(3))
+    // The SY rate not read: the withdraw text stays.
+    expect(planned(sell("underlying"), market({ exchangeRate: down }), held)[0].fallback).toBe(FALLBACK("0.0000001", 2))
+    // A balance that withdraws to 2 raw USDY or more keeps the withdraw text.
+    expect(planned(sell("underlying"), market(), { syBalance: 2n })[0].fallback).toBe(FALLBACK("0.0000002", 2))
   })
 
   it("Buy PT, Sell PT and Sell YT: the one step's simulation is what the user receives, exact", () => {

@@ -666,7 +666,7 @@ describe.skipIf(skip !== null)("every route on the local USDY market (Task 24; 0
       expect(req.amount > 0n).toBe(true)
       const t = await trade(req, multi, (plans) => {
         expect(plans[0].fallback).toBe(
-          `You hold 0.0000001 SY, so this takes ${multi.length} signatures: the one-signature trade would withdraw all your SY. Withdraw it first to trade in one signature.`,
+          `You hold 0.0000001 SY, so this takes ${multi.length} signatures: the one-signature trade would withdraw all your SY. An amount this small cannot be withdrawn, so this trade keeps its multi-step route.`,
         )
         expect(plans.slice(1).every((p) => p.fallback === undefined)).toBe(true)
       })

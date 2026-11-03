@@ -1,6 +1,7 @@
 import type { ActionId } from "./actions"
 import { formatAmount } from "./format"
 import type { ActionOutput } from "./guards"
+import { previewWithdraw } from "./previews"
 
 /**
  * Route planner (spec 0002 §4). Each panel action is a route: an ordered list of contract actions,
@@ -103,6 +104,8 @@ export type RouteContext = {
    * one-step function sweeps SY are planned the old way, with the reason (R4-3).
    */
   syBalance?: bigint
+  /** The SY exchange rate (USDY per SY share), when read: the reason tells a balance too small to withdraw. */
+  exchangeRate?: bigint
   /** Overrides `SINGLE_STEP` (used by tests; keys are route kinds). */
   singleStep?: Partial<Record<RouteKind, SingleStep>>
 }
@@ -166,9 +169,22 @@ export function singleStepFor(
   return single && inUnderlying && ctx.routerFunctions.includes(single.fn) ? single : undefined
 }
 
+/**
+ * Whether `sy` SY is too small to withdraw: it gives under 2 raw USDY at the SY rate, so any slippage
+ * floor rounds to 0, which the withdraw refuses (guards.ts). False when the rate is not known, so the
+ * text that points at Withdraw stays.
+ */
+export function syTooSmallToWithdraw(sy: bigint, exchangeRate: bigint | undefined): boolean {
+  return exchangeRate !== undefined && exchangeRate > 0n && previewWithdraw(sy, exchangeRate) < 2n
+}
+
 /** R4-3's reason, on the first step of a route planned instead of a one-step function that sweeps SY. */
-const sweepFallback = (sy: bigint, signatures: number) =>
-  `You hold ${formatAmount(sy, PRINCIPAL_DECIMALS, PRINCIPAL_DECIMALS)} SY, so this takes ${signatures} signatures: the one-signature trade would withdraw all your SY. Withdraw it first to trade in one signature.`
+function sweepFallback(sy: bigint, signatures: number, exchangeRate: bigint | undefined): string {
+  const head = `You hold ${formatAmount(sy, PRINCIPAL_DECIMALS, PRINCIPAL_DECIMALS, { group: true })} SY, so this takes ${signatures} signatures: the one-signature trade would withdraw all your SY.`
+  return syTooSmallToWithdraw(sy, exchangeRate)
+    ? `${head} An amount this small cannot be withdrawn, so this trade keeps its multi-step route.`
+    : `${head} Withdraw it first (Quick actions → Withdraw) to trade in one signature.`
+}
 
 /**
  * The one step, with the amounts it signs: the input, except Buy YT, which tokenizes the solver's
@@ -201,7 +217,7 @@ export function planRoute(req: RouteRequest, ctx: RouteContext): StepPlan[] | Ro
   const planned = multiStep(req, ctx)
   if (!Array.isArray(planned) || planned.length === 0) return planned
   const [first, ...rest] = planned
-  return [{ ...first, fallback: sweepFallback(sy, planned.length) }, ...rest]
+  return [{ ...first, fallback: sweepFallback(sy, planned.length, ctx.exchangeRate) }, ...rest]
 }
 
 /** The route as the existing contract actions, one signature each (spec §4). */

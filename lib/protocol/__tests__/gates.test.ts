@@ -1402,6 +1402,29 @@ describe("sy_balance — the sweeping Router actions refuse any SY in the wallet
     expect(codes(gates(action, withSy(1n)))).toEqual(["sy_balance"])
   })
 
+  const DUST = (sy: string) =>
+    `You hold ${sy} SY. This one-signature trade withdraws all the SY in your wallet, so it is not available while you hold it. An amount this small cannot be withdrawn: the trade keeps its multi-step route.`
+  const syReason = (blockers: Blocker[]) => blockers.find((b) => b.code === "sy_balance")?.message
+
+  it.each(SWEEPS)("%s with SY too small to withdraw (under 2 raw USDY at the SY rate) says so instead of pointing at Withdraw", (action) => {
+    expect(gates(action, withSy(1n))).toEqual([{ code: "sy_balance", message: DUST("0.0000001") }])
+    // 2 raw SY at 0.9999999 USDY each withdraw to 1 raw USDY; at 1.0, to 2, which can be withdrawn.
+    const at = (sy: bigint, rate: bigint): Mutate => (c) => {
+      c.account!.sy = live(sy)
+      c.market.exchangeRate = live(rate)
+    }
+    expect(syReason(gates(action, at(2n, 9_999_999n)))).toBe(DUST("0.0000002"))
+    expect(syReason(gates(action, at(2n, SCALE)))).toMatch(/^You hold 0\.0000002 SY\. .*withdraw it first with Quick actions → Withdraw, then try again\.$/)
+  })
+
+  it.each(SWEEPS)("%s with the SY rate unreadable keeps the withdraw text, and the rate is not a read it needs", (action) => {
+    const blockers = gates(action, (c) => {
+      c.account!.sy = live(1n)
+      c.market.exchangeRate = down()
+    })
+    expect(blockers).toEqual([{ code: "sy_balance", message: expect.stringMatching(/^You hold 0\.0000001 SY\. .*Quick actions → Withdraw/) }])
+  })
+
   it.each(SWEEPS)("%s with a zero SY balance passes", (action) => {
     expect(gates(action, withSy(0n))).toEqual([])
   })

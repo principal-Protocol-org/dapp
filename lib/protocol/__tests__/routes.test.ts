@@ -87,7 +87,9 @@ describe("one-step Router functions (0004 Task 5, R4-3)", () => {
     return p
   }
   const FALLBACK = (sy: string, k: number) =>
-    `You hold ${sy} SY, so this takes ${k} signatures: the one-signature trade would withdraw all your SY. Withdraw it first to trade in one signature.`
+    `You hold ${sy} SY, so this takes ${k} signatures: the one-signature trade would withdraw all your SY. Withdraw it first (Quick actions → Withdraw) to trade in one signature.`
+  const DUST = (sy: string, k: number) =>
+    `You hold ${sy} SY, so this takes ${k} signatures: the one-signature trade would withdraw all your SY. An amount this small cannot be withdrawn, so this trade keeps its multi-step route.`
 
   it("the table names the five functions, and the three that end with withdraw_all sweep SY", () => {
     expect(SINGLE_STEP).toEqual({
@@ -143,10 +145,29 @@ describe("one-step Router functions (0004 Task 5, R4-3)", () => {
     expect(buyYt[0].fallback).toBe(FALLBACK("0.0000087", 3))
     const sellYt = plan({ ...base, kind: "sell_yt" }, { ...listed, syBalance: 1_000n * 10_000_000n })
     expect(sellYt.map((p) => p.action)).toEqual(["sell_yt", "withdraw"])
-    expect(sellYt[0].fallback).toBe(FALLBACK("1000", 2))
+    expect(sellYt[0].fallback).toBe(FALLBACK("1,000", 2))
     // Buy PT and Keep YT do not sweep SY: they stay one step whatever the wallet holds.
     expect(plan({ ...base, kind: "buy_pt" }, held)).toEqual([{ action: "buy_pt_underlying", amount: { from: "input" }, gives: "USDY", takes: "PT" }])
     expect(plan({ ...base, kind: "lp_keep_yt" }, held).map((p) => [p.action, p.fallback])).toEqual([["add_liquidity_keep_yt", undefined]])
+  })
+
+  it("final review 2: SY that withdraws to under 2 raw USDY cannot be withdrawn (its floor is 0), and the reason says so", () => {
+    const SCALE = 10_000_000n
+    const reason = (syBalance: bigint, exchangeRate?: bigint) =>
+      plan({ ...base, kind: "sell_pt" }, { ...listed, syBalance, ...(exchangeRate !== undefined ? { exchangeRate } : {}) })[0].fallback
+    expect(reason(1n, SCALE)).toBe(DUST("0.0000001", 2))
+    expect(plan({ ...base, kind: "buy_yt" }, { ...listed, syBalance: 1n, exchangeRate: SCALE })[0].fallback).toBe(DUST("0.0000001", 3))
+    // 2 raw SY at 0.9999999 USDY each withdraw to 1 raw USDY; at 1.0, to 2.
+    expect(reason(2n, 9_999_999n)).toBe(DUST("0.0000002", 2))
+    expect(reason(2n, SCALE)).toBe(FALLBACK("0.0000002", 2))
+    // 1 raw SY at 2.0 USDY each withdraws to 2 raw USDY: it can be withdrawn.
+    expect(reason(1n, 2n * SCALE)).toBe(FALLBACK("0.0000001", 2))
+    // No SY rate read: the reason cannot tell, so it keeps the withdraw text.
+    expect(reason(1n)).toBe(FALLBACK("0.0000001", 2))
+  })
+
+  it("the SY held is grouped like the other amounts", () => {
+    expect(plan({ ...base, kind: "sell_yt" }, { ...listed, syBalance: 12_345_678_901_234n })[0].fallback).toBe(FALLBACK("1,234,567.8901234", 2))
   })
 
   it("R4-3: a zero or unknown SY balance plans the one step (the sy_balance gate checks the live balance)", () => {

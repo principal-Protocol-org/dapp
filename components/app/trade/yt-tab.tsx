@@ -365,7 +365,8 @@ function detailLines(
   if (side === "buy" && q.maxCost !== undefined) {
     // M15: the figure is this preview's, in the token paid; what is signed is the step's own SY bound
     // (max_net_cost), from that step's own simulation.
-    const signer = buyStep > 0 ? `Step ${buyStep}` : "The Buy YT step"
+    // A one-step route has no "Step 1": its one transaction carries the bound.
+    const signer = steps === 1 ? "The transaction" : buyStep > 0 ? `Step ${buyStep}` : "The Buy YT step"
     lines.push({
       label: "Spends at most",
       // A buy's fee token is the token paid.

@@ -327,7 +327,7 @@ describe("PT tab — whatever the route's shape", () => {
     expect(detail("Signatures")).toBe("2")
     expect(
       screen.getByText(
-        "You hold 1000 SY, so this takes 2 signatures: the one-signature trade would withdraw all your SY. Withdraw it first to trade in one signature.",
+        "You hold 1,000 SY, so this takes 2 signatures: the one-signature trade would withdraw all your SY. Withdraw it first (Quick actions → Withdraw) to trade in one signature.",
       ),
     ).toBeTruthy()
     cleanup()

@@ -343,11 +343,13 @@ describe("YT tab — Buy", () => {
     )
   })
 
-  it("paying in SY, the bound is step 1's own (M15)", async () => {
+  it("paying in SY, one step: the bound is the transaction's own, never \"Step 1\" (M15)", async () => {
     await renderUi(<YtTab marketId="m1" side="buy" />)
     await pick("Pay with", /SY/)
     await enter("You pay", "100")
-    expect(await tipOf("Spends at most")).toMatch(/^At your 0\.50% slippage tolerance, on this preview\. Step 1 is signed with its own bound, from its own simulation/)
+    expect(await tipOf("Spends at most")).toBe(
+      "At your 0.50% slippage tolerance, on this preview. The transaction is signed with its own bound, from its own simulation, and fails rather than cost more.",
+    )
   })
 
   it("paying in SY is one step, its refund stays SY, and its simulation makes the figures exact", async () => {
@@ -533,7 +535,9 @@ describe("YT tab — one-step Router functions (0004 Task 5)", () => {
     expect(detail("Moves")).toBe(`${amount(dep)} USDY`)
     expect(detail("Spends")).toBe(`${amount(dep - out.back)} USDY`)
     expect(detail("Comes back (step 1)")).toBe(`${amount(out.back)} USDY`)
-    expect(await tipOf("Spends at most")).toMatch(/Step 1 is signed with its own bound, from its own simulation/)
+    expect(await tipOf("Spends at most")).toBe(
+      "At your 0.50% slippage tolerance, on this preview. The transaction is signed with its own bound, from its own simulation, and fails rather than cost more.",
+    )
     expect(screen.queryByText(/so this takes \d signatures/)).toBeNull()
 
     await user().click(reviewButton("Buy YT"))
@@ -558,7 +562,7 @@ describe("YT tab — one-step Router functions (0004 Task 5)", () => {
     expect(detail("Signatures")).toBe("3")
     expect(
       screen.getByText(
-        "You hold 100000 SY, so this takes 3 signatures: the one-signature trade would withdraw all your SY. Withdraw it first to trade in one signature.",
+        "You hold 100,000 SY, so this takes 3 signatures: the one-signature trade would withdraw all your SY. Withdraw it first (Quick actions → Withdraw) to trade in one signature.",
       ),
     ).toBeTruthy()
     expect(detail("Comes back (step 3)")).toBe(`${amount(previewWithdraw(r.syBack, SCALE))} USDY`)

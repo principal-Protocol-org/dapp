@@ -17,6 +17,7 @@ import type { ComplianceItem } from "./compliance"
 import { formatAmount, formatWindow } from "./format"
 import type { MarketState } from "./market-state"
 import { SCALE } from "./math"
+import { syTooSmallToWithdraw } from "./routes"
 import type { SimulationOutcome } from "./stellar"
 import type { Finding, Live, WalletState } from "./types"
 import { pendingYield } from "./yield"
@@ -371,14 +372,20 @@ function balanceGate(input: ActionInput, acc: AccountState, g: Gates): void {
  * R4-3 / Review Focus 1: the three actions that end with `SYWrapper.withdraw_all` revert
  * `PreexistingSyBalance` (Router error 9) when the wallet holds any SY. Reads the live balance, never
  * a route's recorded holdings (Keep YT's omit its SY dust). An unreadable balance is `unavailable`.
+ * SY too small to withdraw (final review 2) is not sent to Withdraw, which would refuse it; the SY
+ * rate that tells it is read only when live, since this gate does not need it otherwise.
  */
-function syBalanceGate(input: ActionInput, acc: AccountState, g: Gates): void {
+function syBalanceGate(input: ActionInput, ctx: GateContext, acc: AccountState, g: Gates): void {
   if (!SWEEPS_SY.has(input.action)) return
   const have = g.need(acc.sy, "your SY balance")
   if (have === undefined || have <= 0n) return
+  const xr = ctx.market.exchangeRate
+  const head = `You hold ${fmt(have)} SY. This one-signature trade withdraws all the SY in your wallet, so`
   g.block(
     "sy_balance",
-    `You hold ${fmt(have)} SY. This one-signature trade withdraws all the SY in your wallet, so withdraw it first with Quick actions → Withdraw, then try again.`,
+    syTooSmallToWithdraw(have, xr.status === "live" ? xr.value : undefined)
+      ? `${head} it is not available while you hold it. An amount this small cannot be withdrawn: the trade keeps its multi-step route.`
+      : `${head} withdraw it first with Quick actions → Withdraw, then try again.`,
   )
 }
 
@@ -752,7 +759,7 @@ export function evaluateGates(input: ActionInput, ctx: GateContext): Blocker[] {
       g.unverified("account", "Your account (balances and deposit cap) has not been read yet, so this cannot be checked. Wait for it to load.")
     } else {
       balanceGate(input, acc, g)
-      syBalanceGate(input, acc, g)
+      syBalanceGate(input, ctx, acc, g)
       capGate(input, acc, g)
       claimGate(input, ctx, acc, g)
     }
