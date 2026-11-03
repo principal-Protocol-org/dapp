@@ -334,13 +334,55 @@ function authInvalidAction(events: readonly xdr.DiagnosticEvent[] | undefined): 
   }
 }
 
+/** What a FAILED transaction says when it touched ledger data its footprint did not list (final review 3). */
+export const FOOTPRINT_MOVED_REASON =
+  "The pool's refund rounding moved between the quote and inclusion, so the transaction touched data it had not planned for. Nothing was taken except the network fee; prepare it again.";
+
+/** The text of a diagnostic event's data: the host's message alone, or the strings of `[message, ...args]`. */
+function eventText(data: xdr.ScVal): string {
+  if (data.type === "scvString") return String(data.value);
+  if (data.type !== "scvVec") return "";
+  return (data.value ?? []).flatMap((v) => (v.type === "scvString" ? [String(v.value)] : [])).join(" ");
+}
+
+/**
+ * The host refused to touch an entry outside the transaction's footprint (`Error(Storage,
+ * ExceededLimit)`, "trying to access … outside of the footprint", soroban-env-host storage.rs). Seen
+ * on LP only: `add_liquidity_single_sy` refunds PT only when the refund is above zero, so a refund of
+ * 0 at simulation leaves the PT contract out of the footprint, and a refund of 1 at inclusion traps.
+ * Both the structured error, raised in a call that failed, and the text are needed: the same error
+ * covers other storage limits.
+ */
+function footprintExceeded(events: readonly xdr.DiagnosticEvent[] | undefined): boolean {
+  try {
+    return (events ?? []).some(({ inSuccessfulContractCall, event }) => {
+      if (inSuccessfulContractCall !== false) return false;
+      const { topics, data } = event.body.value;
+      const [topic, error] = topics;
+      return (
+        topic?.type === "scvSymbol" &&
+        topic.value === "error" &&
+        error?.type === "scvError" &&
+        error.error.type === "sceStorage" &&
+        error.error.code.name === "scecExceededLimit" &&
+        /outside of the footprint/.test(eventText(data))
+      );
+    });
+  } catch {
+    // An event of unexpected shape: no special cause is claimed.
+    return false;
+  }
+}
+
 /**
  * Why a transaction included in a ledger FAILED, in plain words (R49): an authorization refused
- * because an amount moved (from the diagnostic events, when RPC returns them), else the result code.
- * A failed transaction changes nothing on-chain but its fee and sequence number.
+ * because an amount moved, or a footprint the pool's refund rounding outgrew (from the diagnostic
+ * events, when RPC returns them), else the result code. A failed transaction changes nothing
+ * on-chain but its fee and sequence number.
  */
 export function failedTransactionReason(failure: PolledTransactionResult["failure"]): string {
   if (authInvalidAction(failure?.diagnosticEvents)) return AMOUNTS_MOVED_REASON;
+  if (footprintExceeded(failure?.diagnosticEvents)) return FOOTPRINT_MOVED_REASON;
   let cause: string | undefined;
   try {
     if (failure?.result) cause = describeTransactionResult(failure.result);

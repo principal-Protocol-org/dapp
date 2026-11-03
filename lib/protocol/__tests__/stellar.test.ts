@@ -9,6 +9,7 @@ import {
   buildInvokeTransaction,
   describeTransactionResult,
   failedTransactionReason,
+  FOOTPRINT_MOVED_REASON,
   getLedgerClock,
   SubmissionRejectedError,
   pollTransactionStatus,
@@ -454,8 +455,11 @@ const txResult = (outcome: xdr.TransactionResultResult) =>
 const trapped = xdr.TransactionResultResult.txFailed([
   xdr.OperationResult.opInner(xdr.OperationResultTr.invokeHostFunction(xdr.InvokeHostFunctionResult.invokeHostFunctionTrapped())),
 ]);
-/** A diagnostic `error` event, decoded from base64 as the SDK's getTransaction does. */
-function diagnosticError(error: xdr.ScError, text: string, inSuccessfulContractCall = false): xdr.DiagnosticEvent {
+/**
+ * A diagnostic `error` event, decoded from base64 as the SDK's getTransaction does. The host's data is
+ * the message alone, or `[message, ...args]` when the error carries arguments (`record_err_diagnostics`).
+ */
+function diagnosticError(error: xdr.ScError, text: string | xdr.ScVal, inSuccessfulContractCall = false): xdr.DiagnosticEvent {
   const event = new xdr.DiagnosticEvent({
     inSuccessfulContractCall,
     event: new xdr.ContractEvent({
@@ -463,7 +467,10 @@ function diagnosticError(error: xdr.ScError, text: string, inSuccessfulContractC
       contractId: null,
       type: xdr.ContractEventType.diagnostic,
       body: xdr.ContractEventBody.v0(
-        new xdr.ContractEventV0({ topics: [xdr.ScVal.scvSymbol("error"), xdr.ScVal.scvError(error)], data: xdr.ScVal.scvString(text) }),
+        new xdr.ContractEventV0({
+          topics: [xdr.ScVal.scvSymbol("error"), xdr.ScVal.scvError(error)],
+          data: typeof text === "string" ? xdr.ScVal.scvString(text) : text,
+        }),
       ),
     }),
   });
@@ -490,6 +497,42 @@ describe("failedTransactionReason (R49)", () => {
     expect(failedTransactionReason({ result: txResult(trapped), diagnosticEvents: [inSuccessfulCall] })).toBe(
       "Cause: the contract call failed. Nothing was taken except the network fee.",
     );
+  });
+
+  describe("the LP only footprint trap: a PT refund of 0 at simulation and 1 at inclusion (final review 3)", () => {
+    const outside = xdr.ScError.sceStorage(xdr.ScErrorCode.scecExceededLimit);
+    // As the host raised it in tx 4e86dce2…: the message, then the PT contract the access was in.
+    const pt = xdr.ScVal.scvAddress(xdr.ScAddress.scAddressTypeContract(new xdr.ContractId(StrKey.decodeContract(testnetMarket.contracts.pt))));
+    const raised = (inSuccessfulCall = false) =>
+      diagnosticError(outside, xdr.ScVal.scvVec([xdr.ScVal.scvString("trying to access contract instance outside of the footprint"), pt]), inSuccessfulCall);
+    // Then echoed, with the same error, by every frame it unwinds through.
+    const echo = () => diagnosticError(outside, "contract call failed");
+
+    it("says the pool's refund rounding moved, and to prepare it again", () => {
+      expect(failedTransactionReason({ result: txResult(trapped), diagnosticEvents: [raised(), echo(), echo()] })).toBe(FOOTPRINT_MOVED_REASON);
+      expect(FOOTPRINT_MOVED_REASON).toBe(
+        "The pool's refund rounding moved between the quote and inclusion, so the transaction touched data it had not planned for. Nothing was taken except the network fee; prepare it again.",
+      );
+      // The message alone, with no arguments, is the same failure.
+      const bare = diagnosticError(outside, "trying to access contract data key outside of the footprint");
+      expect(failedTransactionReason({ result: txResult(trapped), diagnosticEvents: [bare] })).toBe(FOOTPRINT_MOVED_REASON);
+    });
+
+    it("needs both the structured error, in a call that failed, and the footprint text", () => {
+      const generic = "Cause: the contract call failed. Nothing was taken except the network fee.";
+      // Logged in a call that went on to succeed.
+      expect(failedTransactionReason({ result: txResult(trapped), diagnosticEvents: [raised(true)] })).toBe(generic);
+      // Storage limits that are not the footprint, and the text under another error.
+      expect(failedTransactionReason({ result: txResult(trapped), diagnosticEvents: [echo()] })).toBe(generic);
+      const budget = diagnosticError(xdr.ScError.sceBudget(xdr.ScErrorCode.scecExceededLimit), "trying to access contract instance outside of the footprint");
+      expect(failedTransactionReason({ result: txResult(trapped), diagnosticEvents: [budget] })).toBe(generic);
+      const missing = diagnosticError(xdr.ScError.sceStorage(xdr.ScErrorCode.scecMissingValue), "trying to access contract instance outside of the footprint");
+      expect(failedTransactionReason({ result: txResult(trapped), diagnosticEvents: [missing] })).toBe(generic);
+    });
+
+    it("an authorization refused because an amount moved still reads as that", () => {
+      expect(failedTransactionReason({ result: txResult(trapped), diagnosticEvents: [authRefused(), raised()] })).toBe(AMOUNTS_MOVED_REASON);
+    });
   });
 
   it("names the result code otherwise, and that only the fee was taken", () => {
