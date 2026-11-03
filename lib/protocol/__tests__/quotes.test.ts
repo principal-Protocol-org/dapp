@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it, vi } from "vitest"
-import { quoteBuyExactPt, quotePtForSy, quoteSyForPt, zapSwapAmount } from "../quotes"
+import { quoteBuyExactPt, quotePtForSy, quoteSyForPt, quoteSyForYt, quoteYtForSy, zapSwapAmount } from "../quotes"
 import type { ContractReader } from "../reader"
 
 const POOL = "CPOOL"
@@ -58,5 +58,34 @@ describe("zap_swap_amount (T17)", () => {
     await expect(zapSwapAmount(read, POOL, 0n)).rejects.toThrow("A quote needs an amount greater than zero.")
     expect(read).not.toHaveBeenCalled()
     await expect(zapSwapAmount(reader("5"), POOL, 1n)).rejects.toThrow(/expected an integer/)
+  })
+})
+
+describe("YT quote views (0004 Task 8)", () => {
+  it("quote_yt_for_sy: the SY a YT sale pays, read as a pool quote", async () => {
+    const read = reader({ amount_out: 61_508n, amount_in: 0n, fee_shares: 5_311n })
+    await expect(quoteYtForSy(read, POOL, 1_000_000_000n)).resolves.toEqual({ amountOut: 61_508n, amountIn: 0n, feeShares: 5_311n, ledger: 777 })
+    expect(read).toHaveBeenCalledWith({ contractId: POOL, functionName: "quote_yt_for_sy", args: [{ type: "i128", value: 1_000_000_000n }] })
+  })
+
+  it("quote_sy_for_yt: the flash-mint's two legs, read as a FlashMintQuote", async () => {
+    const read = reader({ yt_out: 999_507_096n, sy_back: 999_425_179n, mint_fee_shares: 500_000n, swap_fee_shares: 5_308n })
+    await expect(quoteSyForYt(read, POOL, 1_000_000_000n)).resolves.toEqual({
+      ytOut: 999_507_096n,
+      syBack: 999_425_179n,
+      mintFeeShares: 500_000n,
+      swapFeeShares: 5_308n,
+      ledger: 777,
+    })
+    expect(read).toHaveBeenCalledWith({ contractId: POOL, functionName: "quote_sy_for_yt", args: [{ type: "i128", value: 1_000_000_000n }] })
+  })
+
+  it("rejects a non-positive amount before reading, and a malformed answer", async () => {
+    const read = reader({ amount_out: 1n, amount_in: 0n, fee_shares: 0n })
+    await expect(quoteYtForSy(read, POOL, 0n)).rejects.toThrow("A quote needs an amount greater than zero.")
+    await expect(quoteSyForYt(read, POOL, -1n)).rejects.toThrow("A quote needs an amount greater than zero.")
+    expect(read).not.toHaveBeenCalled()
+    await expect(quoteSyForYt(reader(null), POOL, 1n)).rejects.toThrow("quote_sy_for_yt did not return a quote.")
+    await expect(quoteSyForYt(reader({ yt_out: 1n, sy_back: "2", mint_fee_shares: 0n, swap_fee_shares: 0n }), POOL, 1n)).rejects.toThrow(/expected an integer/)
   })
 })
