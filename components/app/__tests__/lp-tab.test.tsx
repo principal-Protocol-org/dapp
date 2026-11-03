@@ -1,12 +1,11 @@
 import { render, screen, within } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { readRoutes, writeRoute, type RouteRun } from "@/lib/app/route-log"
-import { ACTION_META } from "@/lib/protocol/actions"
-import { impliedRate, sellPt, type CurveState } from "@/lib/protocol/curve"
+import { buyPt, impliedRate, sellPt, zapSplit, type CurveState } from "@/lib/protocol/curve"
 import { formatPercent, formatTokenAmount } from "@/lib/protocol/format"
 import { minAfterSlippage } from "@/lib/protocol/guards"
 import { aprToApy, SCALE } from "@/lib/protocol/math"
-import { previewAddLiquidity, previewDeposit, previewMint, previewRedeemPt, previewRemoveLiquidity, previewWithdraw } from "@/lib/protocol/previews"
+import { previewAddLiquidity, previewAddLiquiditySingleSy, previewDeposit, previewMint, previewRedeemPt, previewRemoveLiquidity, previewWithdraw } from "@/lib/protocol/previews"
 import { planRoute, type RouteRequest, type StepPlan } from "@/lib/protocol/routes"
 import { sizeKeepYtShares, type TradeAdapter } from "@/lib/protocol/trade-adapter"
 import { accountState, live, marketState, MATURITY } from "./fixtures"
@@ -280,13 +279,10 @@ describe("LP tab — Deposit, Keep YT on", () => {
     expect((keepYt() as HTMLButtonElement).disabled).toBe(true)
     expect(screen.getByText(/Keep YT needs USDY/)).toBeTruthy()
     expect(screen.getByText("Balance: 100000 SY")).toBeTruthy()
-    // The LP-only refusal names the fix an SY payer can take: their Keep YT switch is off.
+    // R2-22 stays: the switch stays off, and the SY payer's LP-only route is not refused (R4-7).
     await enter("You pay", "100")
-    const reason = within(gateList()).getAllByRole("listitem")[0].textContent ?? ""
-    expect(reason).toMatch(/^Adding liquidity without keeping YT is unavailable on this release/)
-    expect(reason).toMatch(/Pay in USDY and turn on Keep YT/)
-    expect(reason).not.toMatch(/^.*\. Turn on Keep YT/)
-    expect(screen.queryByText(/Turn on Keep YT to add liquidity from USDY now/)).toBeNull()
+    expect(within(gateList()).queryByText(/unavailable on this release/)).toBeNull()
+    expect(screen.queryByText(/not offered on this release/)).toBeNull()
   })
 
   it("keeps 0001's amount refusals, on Deposit and on Withdraw", async () => {
@@ -377,26 +373,49 @@ describe("LP tab — Deposit, Keep YT on, one signature (0004 Task 5, R4-4)", ()
   })
 })
 
-describe("LP tab — Deposit, Keep YT off", () => {
-  it("Keep YT off shows the R47 reason and signing stays off", async () => {
+describe("LP tab — Deposit, Keep YT off (R4-7)", () => {
+  const SYX = previewDeposit(100n * UNIT, SCALE)
+  const split = zapSplit(POOL, SYX)
+  const buy = buyPt(POOL, split)
+  const zapped = previewAddLiquiditySingleSy(SYX, split, { ptOut: buy.amountOut, feeShares: buy.feeShares }, RESERVES, POOL.totalLp)
+
+  it("shows the zap's figures: LP, fixed APY before and after, price impact, fee, pool share, minimum and refunds", async () => {
     await renderUi(<LpTab marketId="m1" side="deposit" />)
     await user().click(keepYt())
     await settle()
     expect(keepYt().getAttribute("aria-checked")).toBe("false")
     await enter("You pay", "100")
-    const reason = ACTION_META.add_liquidity_sy.disabled!.reason
-    // The reason comes first among the refusals, and is the whole of the details: no figure for a
-    // trade this release does not offer (0001 R51 M1).
-    expect(within(gateList()).getAllByRole("listitem")[0].textContent).toBe(reason)
-    expect(within(screen.getByRole("region", { name: "Liquidity details" })).getByText(`Unavailable: ${reason}`)).toBeTruthy()
-    expect(received()).toBe("Unavailable")
-    expect(screen.queryByText("Pool share")).toBeNull()
-    expect(screen.queryByText("Fixed APY")).toBeNull()
-    // Never simulated nor quoted from the pool, and signing is off.
-    expect(mocks.simulateInvocation).not.toHaveBeenCalled()
-    expect(mocks.read).not.toHaveBeenCalled()
-    expect(screen.queryByText(/exact quote/)).toBeNull()
-    expect(reviewButton("Add liquidity").disabled).toBe(true)
+    expect(received()).toBe(`${amount(zapped.lp)} LP`)
+    expect(within(gateList()).queryByText(/unavailable on this release/)).toBeNull()
+    const apyText = detail("Fixed APY") ?? ""
+    expect(apyText.startsWith(`${apy(501023n)} → `)).toBe(true)
+    expect(detail("Price impact")).not.toBe("None")
+    expect(detail("Price impact")).not.toBe("Unavailable")
+    expect(detail("Fees")).toBe(`${amount(previewWithdraw(buy.feeShares, SCALE))} USDY`)
+    expect(detail("Minimum received")).toBe(`${amount(minAfterSlippage(zapped.lp, 50n))} LP`)
+    expect(detail("Pool share")).toMatch(/→/)
+    expect(detail("Signatures")).toBe("2")
+    const refunds = [
+      ...(buy.amountOut > zapped.ptUsed ? [`${amount(buy.amountOut - zapped.ptUsed)} PT`] : []),
+      ...(SYX > zapped.syUsed ? [`${amount(SYX - zapped.syUsed)} SY`] : []),
+    ]
+    if (refunds.length > 0) expect(detail("Refunded to your wallet")).toBe(refunds.join(" + "))
+    expect(screen.queryByText(/split into PT/)).toBeNull()
+  })
+
+  it("starts with the deposit, then the add: 2 steps, the first signed with its own floor", async () => {
+    simulateReturns(mocks, SYX)
+    await renderUi(<LpTab marketId="m1" side="deposit" />)
+    await user().click(keepYt())
+    await settle()
+    await enter("You pay", "100")
+    await user().click(reviewButton("Add liquidity"))
+    await settle()
+    const dialog = await screen.findByRole("dialog", { name: "Review route: Add liquidity" })
+    expect(stepsIn(dialog)).toHaveLength(2)
+    expect(mocks.prepareReview.mock.calls[0][0].input).toMatchObject({ action: "deposit", amount: 100n * UNIT, source: A })
+    expect(readRoutes(A)[0].plans.map((p) => p.action)).toEqual(["deposit", "add_liquidity_sy"])
+    expect(mocks.executeReview).not.toHaveBeenCalled()
   })
 })
 

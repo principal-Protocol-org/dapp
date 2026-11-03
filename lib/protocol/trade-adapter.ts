@@ -35,17 +35,17 @@
  * The LP tab (Task 18) is sized here too. Keep YT splits the USDY paid between `wrap_and_mint` (PT +
  * YT) and a deposit (SY) so that the PT and SY match the pool's ratio, and adds them (`sizeKeepYt`);
  * the one-step `add_liquidity_keep_yt` deposits it all and mints the SY shares this app sizes the same
- * way (`sizeKeepYtShares`, R4-4). Keep YT off is not offered (R47), so it is not quoted. A withdraw
+ * way (`sizeKeepYtShares`, R4-4). Keep YT off (LP only, R4-7) is a zap: the pool swaps part of the SY into PT, adds both and refunds what it does not use. A withdraw
  * removes, then sells the PT, or redeems it after maturity (R2-20), and the quote reads which from
  * the route.
  */
-import { ACTION_META, ADD_LIQUIDITY_SY_DISABLED_PAYING_SY, type ActionId } from "./actions"
-import { buyExactPt, buyPt, curveStateFrom, impliedRate, sellPt, spotPrice, type CurveQuote, type CurveState } from "./curve"
+import type { ActionId } from "./actions"
+import { buyExactPt, buyPt, curveStateFrom, impliedRate, sellPt, spotPrice, zapSplit, type CurveQuote, type CurveState } from "./curve"
 import { minAfterSlippage, type ActionOutput } from "./guards"
 import type { MarketState } from "./market-state"
 import { aprToApy, BPS, ceilDiv, FEE_RATE_SCALE, SCALE } from "./math"
 import { settlementOf } from "./position"
-import { previewAddLiquidity, previewDeposit, previewMint, previewRecombine, previewRedeemPt, previewRemoveLiquidity, previewSellYt, previewWithdraw } from "./previews"
+import { previewAddLiquidity, previewAddLiquiditySingleSy, previewDeposit, previewMint, previewRecombine, previewRedeemPt, previewRemoveLiquidity, previewSellYt, previewWithdraw } from "./previews"
 import { priceImpactPpm, ptSpot, ytSpot, type Spot } from "./prices"
 import { apyAfterTrade, effectiveFixedApy, effectiveImpliedApy, fixedPayoffUsd, leverage } from "./rates"
 import { planRoute, singleStepFor, type RouteContext, type RouteDisabled, type RouteKind, type RouteRequest, type StepPlan, type Token } from "./routes"
@@ -720,6 +720,61 @@ function quoteKeepYtOneStep(req: TradeRequest, r: Reads, state: TradeState): Tra
 }
 
 /**
+ * Keep YT off, LP only (R4-7): `add_liquidity_single_sy` takes the whole `sy_in`, swaps `zapSplit` of it
+ * into PT (paying the swap fee), adds the PT and the rest of the SY at the post-swap ratio and refunds
+ * what it did not use: the PT bought beyond the LP minted and the SY left over. A USDY payer deposits
+ * first, so the SY is the wrapper's math on the amount (R4-7 deposit then add), or the simulated
+ * deposit's output, which only fixes the SY priced; the add stays indicative until it is simulated.
+ * An SY payer's one step, simulated, makes the LP, `pt_used` and `split + sy_used` exact.
+ */
+function quoteLpOnly(req: TradeRequest, r: Reads, state: TradeState): TradeQuote {
+  const { s, exchangeRate, slippageBps } = r
+  if (!seeded(s)) throw new Error(NOT_SEEDED)
+  const payUnderlying = req.pay === "underlying"
+  const first = firstStepOf(req, state)
+  const syIn = first?.role === "deposit" ? first.amount : payUnderlying ? previewDeposit(req.amount, exchangeRate) : req.amount
+  if (syIn <= 0n) throw new Error(KEEP_YT_TOO_SMALL)
+  const split = zapSplit(s, syIn)
+  const buy = buyPt(s, split)
+  const add = previewAddLiquiditySingleSy(syIn, split, { ptOut: buy.amountOut, feeShares: buy.feeShares }, reservesOf(s), s.totalLp)
+  const sim = simulated(state, "add_liquidity_sy", "add_liquidity")
+  const lp = sim ? sim.lp : add.lp
+  if (lp <= 0n) throw new Error(KEEP_YT_TOO_SMALL)
+  const ptUsed = sim ? sim.pt_used : add.ptUsed
+  // The contract returns `split + sy_used`: what it kept of `sy_in`.
+  const syUsed = sim ? sim.sy_used : add.syUsed
+  // The pool once the add lands: pt − pt_bought + pt_used, sy + (split − fee) + (syUsed − split), total + lp.
+  const after: CurveState = {
+    ...s,
+    ptReserve: s.ptReserve - buy.amountOut + ptUsed,
+    syReserve: s.syReserve - buy.feeShares + syUsed,
+    totalLp: s.totalLp + lp,
+  }
+  const ptRefund = buy.amountOut - ptUsed
+  const syRefund = syIn - syUsed
+  const leftover: NonNullable<TradeQuote["leftover"]> = [
+    ...(ptRefund > 0n ? [{ amount: ptRefund, token: "pt" as const }] : []),
+    ...(syRefund > 0n ? [{ amount: syRefund, token: "sy" as const }] : []),
+  ]
+  return {
+    kind: "lp_only",
+    out: lp,
+    outToken: "lp",
+    exactness: sim ? "simulated" : "indicative",
+    // The one step is signed with this floor when it is the route's only step (guards.ts: min_lp_out).
+    minOut: floor(lp, slippageBps),
+    minOutToken: "lp",
+    fee: payUnderlying ? previewWithdraw(buy.feeShares, exchangeRate) : buy.feeShares,
+    feeToken: payUnderlying ? "underlying" : "sy",
+    priceImpactPpm: priceImpactPpm("buy", split, buy.amountOut, ptSpot(spotPrice(s), s.rate)),
+    apyBefore: apyOf(s),
+    apyAfter: apyOf(after),
+    leftover,
+    ...poolShareOf(state, s.totalLp, lp),
+  }
+}
+
+/**
  * A withdraw (spec §3): `remove_liquidity` (market_pool:1089-1090), then, before maturity, the PT
  * sold (`swap_pt_for_sy`) on the pool as the removal left it, which raises the fixed APY (R2-15); a
  * USDY receiver then withdraws the SY removed and the sale's SY together. After maturity the PT is
@@ -808,22 +863,16 @@ const QUOTES: Partial<Record<TradeKind, (req: TradeRequest, r: Reads, state: Tra
   buy_yt: quoteBuyYt,
   sell_yt: quoteSellYt,
   lp_keep_yt: quoteKeepYt,
+  lp_only: quoteLpOnly,
   lp_withdraw: quoteLpWithdraw,
 }
 
 function quote(req: TradeRequest, state: TradeState): Live<TradeQuote> {
-  // Keep YT off (LP only) is not offered on this release (R47): its reason alone, never a figure for
-  // a trade it never allows (0001 R51 M1).
-  if (req.kind === "lp_only") {
-    const reason = ACTION_META.add_liquidity_sy.disabled?.reason
-    if (!reason) return unavailable("Adding liquidity without keeping YT is not quoted by this app yet.")
-    return unavailable(req.pay === "underlying" ? reason : ADD_LIQUIDITY_SY_DISABLED_PAYING_SY)
-  }
   const { ms } = state
   const m = readsOf(ms)
   if (typeof m === "string") return unavailable(m)
   // A withdraw stays open at maturity: it redeems its PT instead of selling it.
-  if (m.s.secondsToMaturity <= 0n && req.kind !== "lp_withdraw") return unavailable(req.kind === "lp_keep_yt" ? DEPOSITS_CLOSED : MATURED)
+  if (m.s.secondsToMaturity <= 0n && req.kind !== "lp_withdraw") return unavailable(req.kind === "lp_keep_yt" || req.kind === "lp_only" ? DEPOSITS_CLOSED : MATURED)
   if (req.amount <= 0n) return unavailable("Enter an amount greater than zero.")
   const run = QUOTES[req.kind]
   if (!run) return unavailable("This trade is not quoted by this app yet.")

@@ -53,28 +53,7 @@ export type ActionMeta = {
   slippageSensitive: boolean
   hasDeadline: boolean
   tab: "mint" | "trade" | "liquidity" | "redeem"
-  /**
-   * Not offered on this release (R47): every gate refuses it with `reason`, and it is never prepared
-   * or signed. Remove the field to offer the action again.
-   */
-  disabled?: { reason: string }
 }
-
-/**
- * R47: `MarketPool.add_liquidity_single_sy` works out the SY it pulls (`split + sy_used`) when the
- * transaction runs, from a curve that moves with the ledger time, and pulls it with
- * `SY.transfer(from, pool, amount)`. The signed authorization pins the amount of the simulation, and
- * inclusion is always at a later ledger, so the host refuses the transfer (`Error(Auth,
- * InvalidAction)`, reproduced live in Task 23). It returns once the pool takes a fixed amount.
- */
-const ADD_LIQUIDITY_SY_WHY =
-  "Adding liquidity without keeping YT is unavailable on this release: the pool works out the SY it takes only when the transaction runs, so the amount you sign can never match it and the transaction would fail. It will return once the pool contract is fixed."
-const ADD_LIQUIDITY_SY_DISABLED = `${ADD_LIQUIDITY_SY_WHY} Turn on Keep YT to add liquidity from USDY now.`
-/**
- * R47's reason for a payer in SY, whose Keep YT switch is off and disabled (R2-22): the fix they can
- * take is to pay in USDY first.
- */
-export const ADD_LIQUIDITY_SY_DISABLED_PAYING_SY = `${ADD_LIQUIDITY_SY_WHY} Pay in USDY and turn on Keep YT to add liquidity now.`
 
 export const ACTION_META: Record<ActionId, ActionMeta> = {
   deposit: { label: "Deposit", slippageSensitive: true, hasDeadline: false, tab: "mint" },
@@ -90,7 +69,6 @@ export const ACTION_META: Record<ActionId, ActionMeta> = {
     slippageSensitive: true,
     hasDeadline: true,
     tab: "liquidity",
-    disabled: { reason: ADD_LIQUIDITY_SY_DISABLED },
   },
   remove_liquidity: { label: "Remove liquidity", slippageSensitive: true, hasDeadline: true, tab: "liquidity" },
   recombine: { label: "Recombine PT + YT", slippageSensitive: true, hasDeadline: true, tab: "redeem" },

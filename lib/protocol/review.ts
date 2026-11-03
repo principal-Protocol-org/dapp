@@ -216,15 +216,6 @@ function assertNoZeroFloor(input: ActionInput): void {
   }
 }
 
-/**
- * R47: an action this release does not offer is never prepared or signed, whatever the caller
- * passed; the gates refuse it too (`disabled`).
- */
-function assertOffered(input: ActionInput): void {
-  const disabled = ACTION_META[input.action].disabled
-  if (disabled) throw new Error(`${ACTION_META[input.action].label} is not offered, so it is not prepared. ${disabled.reason}`)
-}
-
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
@@ -386,8 +377,7 @@ function currentTime(nowMs: number | undefined): number {
 type ReviewedCall = { source: string; invocation: ContractInvocation; auth: AuthRule; action?: ActionId }
 
 /**
- * R31: the call `review` was prepared for, derived again from its origin. An action: still offered
- * (R47), no zero floor (R5), the call `input` maps to. A manager call: the call its builder makes
+ * R31: the call `review` was prepared for, derived again from its origin. An action: no zero floor (R5), the call `input` maps to. A manager call: the call its builder makes
  * again for this manifest (`rebuildManagerCall`), which refuses any other contract, function,
  * argument, signer or label.
  */
@@ -396,7 +386,6 @@ function reviewedCall(review: AnyReview, manifest: Manifest): ReviewedCall {
   if (origin.type === "action") {
     if (!("input" in review) || review.input !== origin.input) throw changedSince("review", "the action it describes")
     const input = origin.input
-    assertOffered(input)
     assertNoZeroFloor(input)
     return { source: input.source, invocation: invocationFor(manifest, input), auth: "rooted", action: input.action }
   }
@@ -531,7 +520,8 @@ function summarize(market: Market, input: ActionInput, fee: string, validUntil: 
       getAtLeast = [floor(g.minOut, "LP")]
       break
     case "add_liquidity_sy":
-      give = [amount(a, "SY")]
+      // R4-7: the pool takes the whole amount, then sends back the SY and PT it does not use.
+      give = [`up to ${amount(a, "SY")} (the part the pool does not use is sent back to you, with any PT it bought and did not need)`]
       getAtLeast = [floor(g.minOut, "LP")]
       protocolFees = [swapFee]
       break
@@ -626,13 +616,12 @@ function maxTimeOf(transaction: Transaction): number {
 
 /**
  * Builds the exact transaction for `input`, has RPC prepare it and describes it for review.
- * Refuses an action that is not offered (R47) and a zero floor (R5) before any RPC call.
+ * Refuses a zero floor (R5) before any RPC call.
  */
 export async function prepareReview(p: { manifest: Manifest; input: ActionInput; rpc?: ReviewRpcServer }): Promise<Review> {
   const { manifest, input } = p
   const market = getMarket(manifest, input.marketId)
   if (!market) throw new Error(`Unknown market "${input.marketId}".`)
-  assertOffered(input)
   assertNoZeroFloor(input)
   const invocation = invocationFor(manifest, input)
 

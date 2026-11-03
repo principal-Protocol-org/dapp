@@ -1,12 +1,11 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest"
 import type { AccountState } from "../account-state"
-import { ACTION_META } from "../actions"
 import type { ComplianceItem } from "../compliance"
 import type { Blocker, GateContext } from "../gates"
 import type { MarketState } from "../market-state"
 import { SCALE } from "../math"
-import { isOffered, preStartDraft, routePreStartBlockers, type PreStartInput } from "../route-gates"
+import { preStartDraft, routePreStartBlockers, type PreStartInput } from "../route-gates"
 import type { RouteRequest, StepPlan } from "../routes"
 import type { SimulationOutcome } from "../stellar"
 import type { Live } from "../types"
@@ -147,12 +146,6 @@ describe("preStartDraft", () => {
     expect(buy.input.amount).toBe(60n * U)
     expect(withdraw).toMatchObject({ input: { action: "withdraw", amount: 5n * U }, known: false })
   })
-
-  it("isOffered: false for an action this release does not offer (R47) and for no step", () => {
-    expect(isOffered(null)).toBe(false)
-    expect(isOffered(preStartDraft({ action: "add_liquidity_sy", amount: value(U), gives: "SY", takes: "LP" }, request("lp_only", U)).input)).toBe(false)
-    expect(isOffered(preStartDraft({ action: "deposit", amount: value(U), gives: "USDY", takes: "SY" }, request("buy_pt", U)).input)).toBe(true)
-  })
 })
 
 describe("routePreStartBlockers", () => {
@@ -209,12 +202,11 @@ describe("routePreStartBlockers", () => {
     expect(run({ plans, request: req })).toEqual([])
   })
 
-  it("lists the planner's refusal, and the R47 refusal of a step that is not offered, without a quote refusal", () => {
+  it("lists the planner's refusal without a quote refusal", () => {
     const reason = "Keeping YT while adding liquidity needs USDY: pay in USDY."
     expect(run({ plans: [], disabled: reason, request: request("lp_keep_yt", U) })).toEqual([{ code: "disabled", message: reason }])
-    const zap: StepPlan[] = [{ action: "add_liquidity_sy", amount: { from: "input" }, gives: "SY", takes: "LP" }]
-    const list = run({ plans: zap, request: request("lp_only", U), simGuards: { ok: false, reason: "no quote" } })
-    expect(list).toEqual([{ code: "disabled", message: ACTION_META.add_liquidity_sy.disabled!.reason }])
+    // No step to simulate: a quote refusal is not a reason of its own.
+    expect(run({ plans: [], disabled: reason, request: request("lp_keep_yt", U), simGuards: { ok: false, reason: "no quote" } })).toEqual([{ code: "disabled", message: reason }])
   })
 
   it("says a refusal shared by several steps once (dedupe), in 0001's order", () => {

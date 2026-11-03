@@ -96,9 +96,6 @@ export function preStartDraft(plan: StepPlan, request: RouteRequest): PreStartDr
   return { input, known }
 }
 
-/** A step this release offers (R47): one that is not is never simulated. */
-export const isOffered = (input: ActionInput | null): input is ActionInput => input !== null && !ACTION_META[input.action].disabled
-
 /** The amount field's check (`checkAmount`): its refusal replaces the amount and balance gates. */
 export type AmountFieldCheck = { ok: true } | { ok: false; code: "amount" | "balance"; message: string }
 
@@ -131,7 +128,6 @@ export function routePreStartBlockers(p: PreStartInput): Blocker[] {
   const complete = check.ok && request.amount > 0n
   const drafts = plans.map((plan) => preStartDraft(plan, request))
   const firstDraft = drafts[0]
-  const offered = isOffered(firstDraft?.input ?? null)
 
   let list: Blocker[] = p.disabled ? [{ code: "disabled", message: p.disabled }] : []
   if (firstDraft) {
@@ -180,8 +176,8 @@ export function routePreStartBlockers(p: PreStartInput): Blocker[] {
       }
     })
   }
-  // Nothing is simulated until the amount is complete, nor for a step that is not offered.
-  if (!complete || !offered) list = list.filter((b) => b.code !== "quote")
+  // Nothing is simulated until the amount is complete, nor when there is no step.
+  if (!complete || !firstDraft) list = list.filter((b) => b.code !== "quote")
   if (!check.ok) {
     // The gates saw 0 for an amount that does not parse; the field's own refusal replaces theirs.
     list = [{ code: check.code, message: check.message }, ...list.filter((b) => b.code !== "amount" && b.code !== "balance")]

@@ -565,70 +565,8 @@ describe.skipIf(skip !== null)("protocol layer on the local network", () => {
     await runStep("remove_liquidity", lp.value / 2n)
   }, 3 * MINUTE)
 
-  /**
-   * R47 and its canary. `MarketPool.add_liquidity_single_sy` computes the SY it pulls
-   * (`split + sy_used`) when the transaction runs, from a curve whose exponent and swap fee depend on
-   * the ledger time (`state()`), then calls `SY.transfer(from, pool, amount)`, which needs `from`'s
-   * authorization for exactly that amount. The signed authorization pins the amount of the
-   * simulation; inclusion is always at a later ledger, so the amounts differ and the host refuses the
-   * transfer (`Error(Auth, InvalidAction)`). The dApp therefore does not offer it: the gates and
-   * `prepareReview` refuse it. The canary then sends the same transaction past them, on purpose, so
-   * this test fails loudly the day the pool takes a fixed amount.
-   */
-  it("add_liquidity_sy is refused (R47); sent past the gates, the pool's nested SY transfer still outruns the signed authorization", async () => {
-    const before = await snapshot()
-    const simInput = simInputFor("add_liquidity_sy", 1_000n * U, undefined, before)
-    const simulation = await simulate(simInput)
-    // Every other gate passes: the only refusal is that the action is not offered.
-    const blockers = evaluateGates({ ...simInput, guards: {}, deadline: 0n }, gateContext(before, simulation))
-    expect(blockers).toEqual([{ code: "disabled", message: ACTION_META.add_liquidity_sy.disabled!.reason }])
-    if (!simulation.ok) throw new Error(`add_liquidity_sy: simulation failed: ${json(simulation)}`)
-    expectRawShape("add_liquidity_sy", simulation.retval)
-    const guards = guardsFrom("add_liquidity_sy", simInput, parseOutput("add_liquidity_sy", simulation.retval), SLIPPAGE_BPS)
-    if (!guards.ok) throw new Error(guards.reason)
-    const input: ActionInput = { ...simInput, guards: guards.guards, deadline: BigInt(Math.floor((await ledgerClock()).now()) + DEADLINE_SECONDS) }
-    await expect(prepareReview({ manifest, input })).rejects.toThrow("Add liquidity (SY only) is not offered")
-
-    // The canary bypasses the gate and prepareReview on purpose: built, RPC-prepared and checked
-    // (R29) like a review, then signed and sent, to show the pool limitation still holds.
-    const node = server()
-    const built = buildInvocationEnvelope({
-      source: account,
-      sequence: (await node.getAccount(account)).sequenceNumber(),
-      networkPassphrase: manifest.networkPassphrase,
-      invocation: invocationFor(manifest, input),
-      timeoutSeconds: DEADLINE_SECONDS,
-    })
-    const prepared = await node.prepareTransaction(built)
-    assertPreparedMatches(built, prepared)
-    const unsignedXdr = prepared.toXdr()
-    const signed = signedNestedTransfer(unsignedXdr, manifest.networkPassphrase)
-    expect(signed.from).toBe(account)
-    // A user takes a few seconds to approve in Freighter; the pool's curve moves every ledger meanwhile.
-    await sleep(SIGNING_DELAY_MS)
-    const signedXdr = await signer.sign(unsignedXdr, manifest.networkPassphrase, account)
-    const { hash } = await submitSignedTransaction({ rpcUrl: manifest.rpcUrl, networkPassphrase: manifest.networkPassphrase, signedXdr })
-    const polled = await pollTransactionStatus({ rpcUrl: manifest.rpcUrl, hash, attempts: 30, intervalMs: 1_000 })
-    if (polled.status === "SUCCESS") {
-      throw new Error(
-        "add_liquidity_sy succeeded: the pool limitation no longer reproduces. If the contract was fixed, promote add_liquidity_sy into the main flow and remove `disabled` from its ACTION_META.",
-      )
-    }
-    // NOT_FOUND (a poll timeout) is a flake, not a fix: only SUCCESS above means the limitation is gone.
-    expect(polled.status).toBe("FAILED")
-    // R49, live: the cause the app shows for this failure, read from the real result and diagnostics.
-    expect(failedTransactionReason(polled.failure)).toBe(AMOUNTS_MOVED_REASON)
-    const failure = await failureOf(manifest.rpcUrl, hash)
-    expect(failure.result).toBe("invokeHostFunctionTrapped")
-    expect(failure.authInvalidAction).toBe(true)
-    expect(failure.executedTransfer).toBeDefined()
-    expect(failure.executedTransfer).not.toBe(signed.amount)
-    failed.push(hash)
-    log(
-      `add_liquidity_sy: gates [disabled], prepareReview refused; canary tx ${hash.slice(0, 12)} FAILED (${failure.result}, ` +
-        `Error(Auth, InvalidAction)): signed SY.transfer amount ${signed.amount}, executed ${failure.executedTransfer}; reason "${failedTransactionReason(polled.failure)}"`,
-    )
-  }, 2 * MINUTE)
+  // Task 8 (0004): R47 is lifted; this live suite is rewritten there for the fixed pool (3cb1942).
+  it.skip("add_liquidity_sy (rewritten in Task 8)", () => {})
 
   it("oracle tick to 1.05, then claim_yield pays exactly the pending yield", async () => {
     await oracleTick(10_500_000n)

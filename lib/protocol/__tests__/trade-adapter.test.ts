@@ -7,12 +7,12 @@
  * 93.1966515 SY for a 0.1150419 SY fee (gross 93.3116934) and moves it to 503687.
  */
 import { describe, expect, it } from "vitest"
-import { ACTION_META } from "../actions"
-import { buyExactPt, buyPt, impliedRate, sellPt, spotPrice, type CurveState } from "../curve"
+import { buyExactPt, buyPt, impliedRate, sellPt, spotPrice, zapSplit, type CurveState } from "../curve"
 import { guardsFrom, minAfterSlippage, type ActionOutput } from "../guards"
 import type { MarketState } from "../market-state"
 import { aprToApy, BPS, ceilDiv, FEE_RATE_SCALE, SCALE } from "../math"
-import { previewAddLiquidity, previewDeposit, previewMint, previewRedeemPt, previewRemoveLiquidity, previewSellYt, previewWithdraw } from "../previews"
+import { previewAddLiquidity, previewAddLiquiditySingleSy, previewDeposit, previewMint, previewRedeemPt, previewRemoveLiquidity, previewSellYt, previewWithdraw } from "../previews"
+import { priceImpactPpm, ptSpot } from "../prices"
 import { effectiveFixedApy, effectiveImpliedApy, fixedPayoffUsd, leverage } from "../rates"
 import { planRoute, type StepPlan } from "../routes"
 import { currentContractsAdapter, maxSpend, sizeKeepYtShares, toRouteRequest, type PlanContext, type TradeQuote, type TradeRequest } from "../trade-adapter"
@@ -263,11 +263,6 @@ describe("trade adapter #1 — unavailable, never a guess", () => {
   it("a matured pool is not quoted", () => {
     const r = quote(buy("sy"), { ms: market({ poolState: live({ ...A, secondsToMaturity: 0n }) }) })
     expect(r.status === "unavailable" && r.error).toMatch(/matured/)
-  })
-
-  it("a trade this release does not offer (LP only, R47) is not quoted: its reason, never a figure", () => {
-    const r = quote({ kind: "lp_only", amount: SY_100, pay: "underlying", receive: "underlying" }, { plans: [] })
-    expect(r).toEqual({ status: "unavailable", error: ACTION_META.add_liquidity_sy.disabled!.reason })
   })
 })
 
@@ -527,8 +522,8 @@ describe("maxSpend — Max is the balance divided by the moved ratio (spec §4)"
 })
 
 // ---------------------------------------------------------------------------------------------
-// LP (Task 18): Keep YT splits USDY into PT + YT and SY at the pool's ratio; Keep YT off is not
-// offered (R47); a withdraw removes, then sells the PT (or redeems it after maturity, R2-20).
+// LP (Task 18): Keep YT splits USDY into PT + YT and SY at the pool's ratio; Keep YT off zaps the SY (R4-7);
+// a withdraw removes, then sells the PT (or redeems it after maturity, R2-20).
 // ---------------------------------------------------------------------------------------------
 
 const USDY_100_LP = 1_000_000_000n
@@ -658,28 +653,87 @@ describe("trade adapter #1 — LP Keep YT: the split at the pool's ratio", () =>
   })
 })
 
-describe("trade adapter #1 — LP only (Keep YT off)", () => {
-  it("is not offered (R47): the route is disabled and the quote gives the reason alone, no figure", () => {
-    const reason = ACTION_META.add_liquidity_sy.disabled!.reason
-    expect(currentContractsAdapter.plan(lpOnly(), { ...CTX, ms: market() })).toEqual({ disabled: reason })
-    expect(quote(lpOnly(), { plans: [] })).toEqual({ status: "unavailable", error: reason })
+describe("trade adapter #1 — LP only (Keep YT off, R4-7)", () => {
+  const lpSy = (amount = USDY_100_LP): TradeRequest => ({ kind: "lp_only", amount, pay: "sy", receive: "sy" })
+  const reserves = { pt: A.ptReserve, sy: A.syReserve }
+
+  /** The curve's figures for `syIn` SY, as the contract works them out. */
+  function zap(syIn: bigint) {
+    const split = zapSplit(A, syIn)
+    const buy = buyPt(A, split)
+    return { split, buy, add: previewAddLiquiditySingleSy(syIn, split, { ptOut: buy.amountOut, feeShares: buy.feeShares }, reserves, A.totalLp) }
+  }
+
+  it("plans the one add for an SY payer and deposit then add for a USDY payer", () => {
+    expect(plansFor(lpSy()).map((p) => p.action)).toEqual(["add_liquidity_sy"])
+    expect(plansFor(lpOnly()).map((p) => p.action)).toEqual(["deposit", "add_liquidity_sy"])
   })
 
-  it("the reason no longer offers a two-sided add (R2-63): it points to Keep YT", () => {
-    const reason = ACTION_META.add_liquidity_sy.disabled!.reason
-    expect(reason).not.toMatch(/PT and SY together/)
-    expect(reason).toMatch(/Keep YT/)
+  it("an SY payer: the LP, the swap fee, the price impact and the pool after the add, from the zap", () => {
+    const { split, buy, add } = zap(USDY_100_LP)
+    const q = quoted(quote(lpSy(), { heldLp: 1_000_000_000n }))
+    expect(q).toMatchObject({ kind: "lp_only", out: add.lp, outToken: "lp", exactness: "indicative", fee: buy.feeShares, feeToken: "sy" })
+    expect(add.lp).toBeGreaterThan(0n)
+    expect(q.minOut).toBe(minAfterSlippage(add.lp, 50n))
+    expect(q.minOutToken).toBe("lp")
+    expect(q.priceImpactPpm).toBe(priceImpactPpm("buy", split, buy.amountOut, ptSpot(spotPrice(A), A.rate)))
+    expect(q.priceImpactPpm!).toBeGreaterThan(0n)
+    // The pool once the add lands: pt − bought + pt_used, sy − fee + (split + sy_used) − split... = sy − fee + syUsed.
+    const after: CurveState = { ...A, ptReserve: A.ptReserve - buy.amountOut + add.ptUsed, syReserve: A.syReserve - buy.feeShares + add.syUsed, totalLp: A.totalLp + add.lp }
+    expect(q.apyBefore).toBe(apy(impliedRate(A)))
+    expect(q.apyAfter).toBe(apy(impliedRate(after)))
+    expect(q.poolShare).toEqual({ before: Number(1_000_000_000n) / Number(A.totalLp), after: Number(1_000_000_000n + add.lp) / Number(A.totalLp + add.lp) })
   })
 
-  it("an SY payer, whose Keep YT is off (R2-22), is told to pay in USDY and turn Keep YT on", () => {
-    const sy: TradeRequest = { kind: "lp_only", amount: USDY_100_LP, pay: "sy", receive: "sy" }
-    const plan = currentContractsAdapter.plan(sy, { ...CTX, ms: market() })
-    const q = quote(sy, { plans: [] })
-    for (const reason of [!Array.isArray(plan) ? plan.disabled : "", q.status === "unavailable" ? q.error : ""]) {
-      expect(reason).toMatch(/^Adding liquidity without keeping YT is unavailable on this release/)
-      expect(reason).toMatch(/Pay in USDY and turn on Keep YT/)
-      expect(reason).not.toMatch(/\. Turn on Keep YT/)
+  it("leftover lists the PT and SY the pool refunds", () => {
+    const { buy, add } = zap(USDY_100_LP)
+    const q = quoted(quote(lpSy()))
+    const ptRefund = buy.amountOut - add.ptUsed
+    const syRefund = USDY_100_LP - add.syUsed
+    expect(q.leftover).toEqual([...(ptRefund > 0n ? [{ amount: ptRefund, token: "pt" }] : []), ...(syRefund > 0n ? [{ amount: syRefund, token: "sy" }] : [])])
+    expect(ptRefund + syRefund).toBeGreaterThanOrEqual(0n)
+  })
+
+  it("a USDY payer is priced on the SY its deposit gives, the fee shown in USDY", () => {
+    const rate = 10_200_000n
+    const syIn = previewDeposit(USDY_100_LP, rate)
+    const { buy, add } = zap(syIn)
+    const q = quoted(quote(lpOnly(), { ms: market({ exchangeRate: live(rate) }) }))
+    expect(q).toMatchObject({ out: add.lp, exactness: "indicative", feeToken: "underlying", fee: previewWithdraw(buy.feeShares, rate) })
+  })
+
+  it("a simulated deposit only fixes the SY priced; the LP stays indicative", () => {
+    const syIn = 990_000_000n
+    const { add } = zap(syIn)
+    const q = quoted(quote(lpOnly(), { firstStep: { action: "deposit", output: { kind: "amount", value: syIn } } }))
+    expect(q).toMatchObject({ out: add.lp, exactness: "indicative" })
+  })
+
+  it("a simulated add makes the LP, the PT used and the SY kept exact", () => {
+    const { buy, add } = zap(USDY_100_LP)
+    const sim: ActionOutput = { kind: "add_liquidity", pt_used: add.ptUsed - 1n, sy_used: add.syUsed - 2n, lp: add.lp - 3n }
+    const q = quoted(quote(lpSy(), { firstStep: { action: "add_liquidity_sy", output: sim } }))
+    expect(q).toMatchObject({ out: add.lp - 3n, exactness: "simulated" })
+    expect(q.minOut).toBe(minAfterSlippage(add.lp - 3n, 50n))
+    expect(q.leftover).toContainEqual({ amount: USDY_100_LP - (add.syUsed - 2n), token: "sy" })
+    expect(q.leftover).toContainEqual({ amount: buy.amountOut - (add.ptUsed - 1n), token: "pt" })
+  })
+
+  it("an amount too small to add any liquidity is unavailable with the plain reason, never a throw", () => {
+    for (const amount of [1n, 2n, 3n]) {
+      let r: Live<TradeQuote> | undefined
+      expect(() => (r = quote(lpOnly(amount), { plans: [] }))).not.toThrow()
+      expect(r?.status).toBe("unavailable")
     }
+    const tiny = market({ poolState: live({ ...A, totalLp: 1n }) })
+    expect(quote(lpOnly(), { ms: tiny, plans: [] })).toEqual({ status: "unavailable", error: expect.stringMatching(/too small to add any liquidity/) })
+  })
+
+  it("an unseeded pool and a matured market are unavailable with the existing reasons", () => {
+    const unseeded = market({ poolState: live({ ...A, totalLp: 0n, ptReserve: 0n, syReserve: 0n }) })
+    expect(quote(lpOnly(), { ms: unseeded, plans: [] })).toEqual({ status: "unavailable", error: expect.stringMatching(/Pool not seeded yet/) })
+    const matured = market({ poolState: live({ ...A, secondsToMaturity: 0n }) })
+    expect(quote(lpOnly(), { ms: matured, plans: [] })).toEqual({ status: "unavailable", error: expect.stringMatching(/Adding liquidity closed at maturity/) })
   })
 })
 

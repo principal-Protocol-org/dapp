@@ -32,7 +32,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
 vi.mock("server-only", () => ({}))
 
 import { fetchAccountState, type ComplianceKind } from "@/lib/protocol/account-state"
-import { ACTION_META, ADD_LIQUIDITY_SY_DISABLED_PAYING_SY, type ActionInput } from "@/lib/protocol/actions"
+import { ACTION_META, type ActionInput } from "@/lib/protocol/actions"
 import { impliedRate, curveStateFrom, type CurveState } from "@/lib/protocol/curve"
 import { evaluateGates } from "@/lib/protocol/gates"
 import { openGuards, type ActionOutput } from "@/lib/protocol/guards"
@@ -274,29 +274,8 @@ describe.skipIf(skip !== null)("every route on the local USDY market (Task 24)",
     out.summary()
   }, 2 * MINUTE)
 
-  it("LP only (Keep YT off) stays refused (R47): no route, no quote, no review", async () => {
-    const s = await r.snapshot()
-    const ctx = planCtx(s.ms)
-    const reason = ACTION_META.add_liquidity_sy.disabled?.reason
-    expect(reason).toBeDefined()
-    const usdy: TradeRequest = { kind: "lp_only", amount: 100n * U, pay: "underlying", receive: "underlying" }
-    const sy: TradeRequest = { ...usdy, pay: "sy" }
-    expect(currentContractsAdapter.plan(usdy, ctx)).toEqual({ disabled: reason })
-    expect(currentContractsAdapter.plan(sy, ctx)).toEqual({ disabled: ADD_LIQUIDITY_SY_DISABLED_PAYING_SY })
-    expect(currentContractsAdapter.quote(usdy, { ms: s.ms, slippageBps: SLIPPAGE_BPS, plans: [] })).toEqual({ status: "unavailable", error: reason })
-    // Sent past the planner, the gates and the review refuse the pool's zap as well.
-    const input: ActionInput = {
-      action: "add_liquidity_sy",
-      marketId: market.marketId,
-      source: r.account,
-      amount: 100n * U,
-      guards: { minOut: 1n },
-      deadline: BigInt(Math.floor(s.ledgerTime) + 300),
-    }
-    expect(evaluateGates({ ...input, guards: openGuards("add_liquidity_sy", input.amount) }, r.base(s)).map((b) => b.code)).toContain("disabled")
-    await expect(prepareReview({ manifest, input })).rejects.toThrow("Add liquidity (SY only) is not offered")
-    log("lp_only: plan disabled (R47 reason, USDY and SY payers), quote unavailable, gates [disabled], prepareReview refused; nothing signed")
-  }, MINUTE)
+  // Task 8 (0004): R47 is lifted; this live suite is rewritten there for the fixed pool (3cb1942).
+  it.skip("LP only (Keep YT off) (rewritten in Task 8)", () => {})
 
   it("Buy PT with USDY: deposit, then buy; the implied rate falls", async () => {
     const t = await trade({ kind: "buy_pt", amount: 300n * U, pay: "underlying", receive: "underlying" }, ["deposit", "buy_pt"])

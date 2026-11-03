@@ -1,4 +1,4 @@
-import { ACTION_META, ADD_LIQUIDITY_SY_DISABLED_PAYING_SY, type ActionId } from "./actions"
+import type { ActionId } from "./actions"
 import { formatAmount } from "./format"
 import type { ActionOutput } from "./guards"
 
@@ -265,10 +265,8 @@ function multiStep(req: RouteRequest, ctx: RouteContext): StepPlan[] | RouteDisa
       ]
     }
     case "lp_only": {
-      const reason = ACTION_META.add_liquidity_sy.disabled?.reason
-      // An SY payer's Keep YT is off (R2-22): their fix is to pay in USDY, then turn it on.
-      if (reason) return disabledIf(payUnderlying ? reason : ADD_LIQUIDITY_SY_DISABLED_PAYING_SY)
-      // Once R47 is lifted: [deposit?] -> add_liquidity_sy.
+      // R4-7: [deposit?] -> add_liquidity_sy. The pool takes the whole `sy_in` and refunds what it
+      // does not use, so the signed amount always matches.
       const add: StepPlan = {
         action: "add_liquidity_sy",
         amount: payUnderlying ? step(0, "value") : input,
@@ -385,7 +383,10 @@ function moved(action: ActionId, a: { amount: bigint; secondaryAmount?: bigint }
       // The pool takes only what it uses; the rest stays with the user.
       return out.kind !== "add_liquidity" ? undefined : [["pt", -out.pt_used], ["sy", -out.sy_used], ["lp", out.lp]]
     case "add_liquidity_sy":
-      return out.kind !== "add_liquidity" ? undefined : [["sy", -a.amount], ["lp", out.lp]]
+      // R4-7: the pool takes the whole `sy_in` and refunds the rest, so `sy_used` in the return value
+      // is `split + sy_used`, what it kept. The PT it bought and did not use is refunded too, but it is
+      // not in the return value, so it is not counted here.
+      return out.kind !== "add_liquidity" ? undefined : [["sy", -out.sy_used], ["lp", out.lp]]
     case "remove_liquidity":
       return out.kind !== "remove_liquidity" ? undefined : [["lp", -a.amount], ["pt", out.pt], ["sy", out.sy]]
     case "redeem":

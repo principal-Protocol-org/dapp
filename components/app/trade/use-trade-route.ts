@@ -8,7 +8,7 @@ import { useSimulation, type Simulation } from "@/hooks/use-simulation"
 import type { AmountCheck } from "@/lib/app/amounts"
 import type { ActionInput } from "@/lib/protocol/actions"
 import { evaluateGates, type Blocker } from "@/lib/protocol/gates"
-import { isOffered, preStartDraft, routePreStartBlockers } from "@/lib/protocol/route-gates"
+import { preStartDraft, routePreStartBlockers } from "@/lib/protocol/route-gates"
 import type { RouteRequest, StepPlan } from "@/lib/protocol/routes"
 import { currentContractsAdapter, toRouteRequest, type PlanContext, type TradeAdapter, type TradeQuote, type TradeRequest, type TradeState } from "@/lib/protocol/trade-adapter"
 import type { Live } from "@/lib/protocol/types"
@@ -167,9 +167,8 @@ export function useRouteStart({
   const complete = check.ok && request.amount > 0n
 
   const first = plans[0] ? preStartDraft(plans[0], request).input : null
-  const offered = isOffered(first)
   const simInput: ActionInput | null =
-    source !== null && complete && ledgerTime !== null && first && offered ? { ...first, deadline: BigInt(Math.floor(ledgerTime) + deadlineSeconds) } : null
+    source !== null && complete && ledgerTime !== null && first ? { ...first, deadline: BigInt(Math.floor(ledgerTime) + deadlineSeconds) } : null
   const sim = useSimulation(simInput)
 
   const blockers: Blocker[] = gate.base

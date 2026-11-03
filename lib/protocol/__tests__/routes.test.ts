@@ -59,11 +59,10 @@ describe("routes match spec §4", () => {
   })
 })
 
-describe("lp_only", () => {
-  it("is disabled with the R47 reason", () => {
-    expect(planRoute({ ...base, kind: "lp_only" }, ctx)).toEqual({
-      disabled: ACTION_META.add_liquidity_sy.disabled!.reason,
-    })
+describe("lp_only (R4-7)", () => {
+  it("an SY payer's route is the one add; a USDY payer deposits first", () => {
+    expect(actions({ ...base, kind: "lp_only", pay: "sy" })).toEqual(["add_liquidity_sy"])
+    expect(actions({ ...base, kind: "lp_only", pay: "underlying" })).toEqual(["deposit", "add_liquidity_sy"])
   })
 })
 
@@ -392,6 +391,13 @@ describe("route holdings (spec §4 interruption)", () => {
       expect(afterUsdy("add_liquidity_keep_yt", out)).toEqual({ pt: 2n * S, yt: 40n * S, lp: 50n * S, underlying: 200n * S })
       expect(held("lp_keep_yt", { kind: "add_liquidity", pt_used: 1n, sy_used: 1n, lp: 1n })).toBeUndefined()
     })
+  })
+
+  it("holdings after the add: the SY it did not keep (sy_used is split + sy_used) and the LP", () => {
+    const r = { ...base, kind: "lp_only" as const, pay: "underlying" as const, amount: 100n * S }
+    const plans = planRoute(r, scaled) as StepPlan[]
+    const outs: ActionOutput[] = [{ kind: "amount", value: 100n * S }, { kind: "add_liquidity", pt_used: 40n * S, sy_used: 98n * S, lp: 50n * S }]
+    expect(routeHoldings(r, plans, outs, 2)).toEqual({ sy: 2n * S, lp: 50n * S })
   })
 
   it("nothing confirmed: no holdings, and no unwind", () => {

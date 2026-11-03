@@ -41,8 +41,9 @@ const shareText = (share: number) => (share > 0 && share < 0.0001 ? "<0.01%" : f
  * runner.
  * - Deposit pays the underlying (or its SY) with a Keep YT switch. On, part of the payment is split
  *   into PT + YT and the PT and the rest go into the pool at its ratio: LP and YT out, the fixed APY
- *   unchanged, no price impact, the tokenization fee on the split part. Off ("LP only") is not
- *   offered on this release (R47): the reason, and nothing else. Paying SY turns Keep YT off (R2-22).
+ *   unchanged, no price impact, the tokenization fee on the split part. Off ("LP only", R4-7) swaps
+ *   part of the payment into PT and adds both: LP out, the swap fee, the price impact, the fixed APY
+ *   before and after, and the PT and SY the pool refunds. Paying SY turns Keep YT off (R2-22).
  * - Withdraw takes LP and pays the underlying or SY: the PT removed is sold, which raises the fixed
  *   APY (R2-15), or redeemed after maturity (R2-20).
  *
@@ -108,7 +109,7 @@ export function LpTab({ marketId, side, routeId, onRouteOpened }: { marketId: st
   const redeems = route.plans.some((p) => p.action === "redeem")
   const ctx: LineContext = { code, slippage: formatBps(slippageBps), steps, paid: trade.amount, connected: route.source !== null, amountText }
   const note = routeNote({ plans: route.plans, q, connected: route.source !== null, pending: route.sim.pending })
-  const details: PreviewLine[] = q ? (side === "deposit" ? depositLines(q, ctx) : withdrawLines(q, ctx, redeems)) : []
+  const details: PreviewLine[] = q ? (side === "deposit" ? (keep ? depositLines(q, ctx) : lpOnlyLines(q, ctx)) : withdrawLines(q, ctx, redeems)) : []
   if (q && side === "withdraw" && redeems && token === "sy") {
     details.push({
       label: "Redeemed part",
@@ -166,7 +167,7 @@ export function LpTab({ marketId, side, routeId, onRouteOpened }: { marketId: st
                     ? `Keep YT needs ${code}: it splits ${code} into PT + YT with the Router, which takes ${code}. Pay in ${code} to keep the YT.`
                     : keep
                       ? undefined
-                      : `LP only: all your ${code} would go into the pool and no YT kept. It is not offered on this release.`
+                      : `LP only: all your ${code} goes into the pool and you keep no YT.`
                 }
                 hint={keep ? `Part of your ${code} is split into PT + YT; the PT and the rest go into the pool at its ratio, and you keep the YT.` : undefined}
               />
@@ -239,7 +240,7 @@ export function LpTab({ marketId, side, routeId, onRouteOpened }: { marketId: st
 }
 
 /**
- * The Keep YT switch (spec §3). Why it is off (a payment in SY, or the R47 refusal) stays visible
+ * The Keep YT switch (spec §3). Why it is off (a payment in SY) stays visible
  * under it; what it does while on goes behind an info tip (R2-65).
  */
 function KeepYtSwitch({ id, checked, disabled, onChange, hint, reason }: { id: string; checked: boolean; disabled: boolean; onChange: () => void; hint?: string; reason?: string }) {
@@ -366,6 +367,33 @@ function depositLines(q: TradeQuote, c: LineContext): PreviewLine[] {
       label: "Left in your wallet",
       value: q.leftover.map((l) => amountText(l.amount, l.token)).join(" + "),
       hint: "The pool takes PT and SY only in its exact ratio: this rounding remainder stays with you.",
+    })
+  }
+  return lines
+}
+
+/** Keep YT off (R4-7): the zap swaps part of the payment into PT, so it pays the swap fee and moves the price. */
+function lpOnlyLines(q: TradeQuote, c: LineContext): PreviewLine[] {
+  const lines: PreviewLine[] = [
+    {
+      label: "Fixed APY",
+      value: apyValue(q),
+      hint: "The pool's fixed APY now, and once your deposit lands: the pool buys PT with part of it, so the fixed APY falls a little.",
+    },
+    {
+      label: "Price impact",
+      value: q.priceImpactPpm === undefined ? UNAVAILABLE : formatImpact(q.priceImpactPpm),
+      hint: "The PT the pool buys with part of your payment, against the pool's spot price, swap fee included.",
+    },
+    { label: "Fees", value: feeValue(q, c), hint: "The pool's swap fee on the part swapped into PT. There is no tokenization fee: no YT is minted." },
+    poolShareLine(q, c.connected),
+    minimumLine(q, c),
+  ]
+  if (q.leftover && q.leftover.length > 0) {
+    lines.push({
+      label: "Refunded to your wallet",
+      value: q.leftover.map((l) => c.amountText(l.amount, l.token)).join(" + "),
+      hint: "The pool takes PT and SY only in its exact ratio and sends back what it did not use.",
     })
   }
   return lines

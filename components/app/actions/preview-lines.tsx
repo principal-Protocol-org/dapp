@@ -3,7 +3,6 @@
 import { useEffect, useRef, useState } from "react"
 import { SIMULATION_DEBOUNCE_MS } from "@/hooks/use-simulation"
 import type { AccountState } from "@/lib/protocol/account-state"
-import { ACTION_META } from "@/lib/protocol/actions"
 import type { MarketState } from "@/lib/protocol/market-state"
 import { LabelWithTip } from "@/components/app/info-tip"
 import type { IndicativeContext, PanelConfig, PanelInputs, PreviewLine } from "@/components/app/actions/panel-config"
@@ -39,8 +38,7 @@ const inputsKey = (inputs: PanelInputs) => `${inputs.amount ?? ""}|${inputs.seco
 /**
  * The config's async `quote` lines for the current inputs: read 400 ms after the inputs stop
  * changing (spec §11: on demand, debounced, like the exact simulation), re-read when the market data
- * or the account changes, and shown only for the inputs they were read for. An action this release
- * does not offer (R47) is never quoted: it would preview a result it can never give.
+ * or the account changes, and shown only for the inputs they were read for.
  */
 export function useQuoteLines(
   config: PanelConfig,
@@ -50,7 +48,7 @@ export function useQuoteLines(
 ): PreviewLine[] | null {
   const key = inputsKey(inputs)
   const [result, setResult] = useState<{ key: string; lines: PreviewLine[] } | null>(null)
-  const quote = ACTION_META[config.action].disabled ? undefined : config.quote
+  const quote = config.quote
   const account: AccountState | undefined = ctx.account
   const accountStatus = ctx.accountStatus
   const { amount, secondaryAmount } = inputs
