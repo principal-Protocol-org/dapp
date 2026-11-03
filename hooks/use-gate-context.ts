@@ -48,7 +48,9 @@ export function useGateContext(marketId: string): GateInputs {
   const market = useMarketState(marketId)
   const accountQuery = useAccountState(marketId)
   const compliance = useMarketCompliance(marketId)
-  const managerId = getMarket(manifest, marketId)?.contracts.manager
+  const contracts = getMarket(manifest, marketId)?.contracts
+  const managerId = contracts?.manager
+  const routerId = contracts?.router
 
   const ms = market.stale ? undefined : market.data
   const connected = wallet.status === "connected"
@@ -81,12 +83,12 @@ export function useGateContext(marketId: string): GateInputs {
       message: `${STALE}: your account data could not be refreshed, so your balances and checks cannot be trusted. Signing stays off until it loads again.`,
     })
   }
-  if (managerId === undefined) {
+  if (managerId === undefined || routerId === undefined) {
     unavailable.push({ code: "manifest", message: `Market "${marketId}" is not in the deployment manifest.` })
   }
 
   let base: GateInputs["base"] = null
-  if (unavailable.length === 0 && ms && ledgerTime !== null && managerId !== undefined) {
+  if (unavailable.length === 0 && ms && ledgerTime !== null && managerId !== undefined && routerId !== undefined) {
     const model = compliance.data
     const kind = !compliance.isError && model?.status === "live" ? model.value.kind : null
     const kindError =
@@ -99,6 +101,7 @@ export function useGateContext(marketId: string): GateInputs {
       compliance: account ? evaluateAccountCompliance(account, kind, kindError) : [],
       ledgerTime,
       managerId,
+      routerId,
     }
   }
 

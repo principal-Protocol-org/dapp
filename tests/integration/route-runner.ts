@@ -162,6 +162,7 @@ export function createRunner(p: {
       compliance: s.compliance,
       ledgerTime: s.ledgerTime,
       managerId: market.contracts.manager,
+      routerId: market.contracts.router,
     }
   }
 

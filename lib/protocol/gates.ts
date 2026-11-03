@@ -69,6 +69,8 @@ export type GateContext = {
   simulation?: SimulationOutcome
   /** The market's PrincipalManager: its `Error(Contract, #9)` is `Paused`. */
   managerId: string
+  /** The Router: its `Error(Contract, #9)` is `PreexistingSyBalance` (router:182). */
+  routerId: string
 }
 
 /** Token decimals: every Principal token, and the release's underlying, use 7. */
@@ -76,6 +78,8 @@ const DECIMALS = 7
 
 /** `PrincipalManager` `Error::Paused` (`principal_manager/src/lib.rs:203`). */
 const MANAGER_PAUSED_CODE = 9
+/** `Router` `Error::PreexistingSyBalance` (`router/src/lib.rs:182`), raised by the three that sweep SY. */
+const ROUTER_PREEXISTING_SY_CODE = 9
 
 /**
  * 0004 Task 4 (R4-3): each one-transaction Router action is in every gate set any of its components
@@ -167,6 +171,11 @@ export class Gates {
     this.out.push(fix ? { code, message, fix } : { code, message })
   }
 
+  /** Whether a blocker of `code` is already recorded. */
+  has(code: BlockerCode): boolean {
+    return this.out.some((b) => b.code === code)
+  }
+
   /** Refuses once per `key` because something needed could not be verified. */
   unverified(key: string, message: string): void {
     if (this.missing.has(key)) return
@@ -215,6 +224,19 @@ function isManagerPause(action: ActionId, ctx: GateContext): boolean {
     s.kind === "contract_error" &&
     s.code === MANAGER_PAUSED_CODE &&
     s.contractId === ctx.managerId
+  )
+}
+
+/** The Router refused a sweeping action because the wallet already holds SY (R4-3). */
+function isRouterPreexistingSy(action: ActionId, ctx: GateContext): boolean {
+  const s = ctx.simulation
+  return (
+    SWEEPS_SY.has(action) &&
+    s !== undefined &&
+    !s.ok &&
+    s.kind === "contract_error" &&
+    s.code === ROUTER_PREEXISTING_SY_CODE &&
+    s.contractId === ctx.routerId
   )
 }
 
@@ -380,13 +402,15 @@ function syBalanceGate(input: ActionInput, ctx: GateContext, acc: AccountState, 
   const have = g.need(acc.sy, "your SY balance")
   if (have === undefined || have <= 0n) return
   const xr = ctx.market.exchangeRate
-  const head = `You hold ${fmt(have)} SY. This one-signature trade withdraws all the SY in your wallet, so`
-  g.block(
-    "sy_balance",
-    syTooSmallToWithdraw(have, xr.status === "live" ? xr.value : undefined)
-      ? `${head} it is not available while you hold it. An amount this small cannot be withdrawn: the trade keeps its multi-step route.`
-      : `${head} withdraw it first with Quick actions → Withdraw, then try again.`,
-  )
+  g.block("sy_balance", sweepRefusal(`You hold ${fmt(have)} SY`, syTooSmallToWithdraw(have, xr.status === "live" ? xr.value : undefined)))
+}
+
+/** The `sy_balance` words, shared with the Router's own refusal (`simulationGate`). */
+function sweepRefusal(held: string, tooSmallToWithdraw: boolean): string {
+  const then = tooSmallToWithdraw
+    ? "it is not available while you hold it. An amount this small cannot be withdrawn: the trade keeps its multi-step route."
+    : "withdraw it first with Quick actions → Withdraw, then try again."
+  return `${held}. This one-signature trade withdraws all the SY in your wallet, so ${then}`
 }
 
 function maturityGate(input: ActionInput, ctx: GateContext, g: Gates): void {
@@ -717,6 +741,11 @@ function simulationGate(input: ActionInput, ctx: GateContext, g: Gates): void {
       return
     case "contract_error":
       if (isManagerPause(input.action, ctx)) return // reported by pauseGate
+      if (isRouterPreexistingSy(input.action, ctx)) {
+        // Reported by syBalanceGate when the live balance shows the SY; else the amount is not known.
+        if (!g.has("sy_balance")) g.block("quote", sweepRefusal("The simulation found SY in your wallet", false))
+        return
+      }
       g.block(
         "quote",
         `The simulation was refused with contract error #${s.code}, so there is no exact quote and this would fail on-chain. Check the amount and any reason listed above, then try again.`,

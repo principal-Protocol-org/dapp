@@ -24,6 +24,7 @@ import { indexFor } from "../yield"
 
 const MANAGER = "CMANAGERCONTRACTID"
 const ROUTER = "CROUTERCONTRACTID"
+const POOL = "CPOOLCONTRACTID"
 const USER = "GUSERACCOUNT"
 const OTHER = "GOTHERACCOUNT"
 const TESTNET = "Test SDF Network ; September 2015"
@@ -151,6 +152,7 @@ function healthyCtx(action: ActionId): GateContext {
     ledgerTime: action === "redeem" ? AFTER : BEFORE,
     simulation: okSimulation,
     managerId: MANAGER,
+    routerId: ROUTER,
   }
 }
 
@@ -493,11 +495,30 @@ const MATRIX: Row[] = [
     // manager's own #9 is a pause.
     rule: "a contract_error #9 from another contract is not a pause",
     mutate: (c) => {
-      c.simulation = { ...managerPaused, contractId: ROUTER }
+      c.simulation = { ...managerPaused, contractId: POOL }
     },
     code: "quote",
     message: /#9/,
     blocks: ALL,
+  },
+  {
+    rule: "the Router's #9 on an action that does not sweep SY is a failed quote",
+    mutate: (c) => {
+      c.simulation = { ...managerPaused, contractId: ROUTER }
+    },
+    code: "quote",
+    message: /#9/,
+    blocks: except(...SWEEPS),
+  },
+  {
+    // Final review 3: Router error 9 is PreexistingSyBalance, which only the three sweeping actions raise.
+    rule: "the Router's #9 on a sweeping action reads as SY in the wallet, in the sy_balance words",
+    mutate: (c) => {
+      c.simulation = { ...managerPaused, contractId: ROUTER }
+    },
+    code: "quote",
+    message: /^The simulation found SY in your wallet\. This one-signature trade withdraws all the SY in your wallet, so withdraw it first with Quick actions → Withdraw, then try again\.$/,
+    blocks: SWEEPS,
   },
 
   // §5 "Something to claim".
@@ -1438,6 +1459,14 @@ describe("sy_balance — the sweeping Router actions refuse any SY in the wallet
 
   it.each(except(...SWEEPS))("%s ignores the SY held", (action) => {
     expect(codes(gates(action, withSy(3n * UNIT)))).not.toContain("sy_balance")
+  })
+
+  it.each(SWEEPS)("%s: the Router's own refusal (#9) of SY the gate already names is not repeated", (action) => {
+    const blockers = gates(action, (c) => {
+      c.account!.sy = live(3n * UNIT)
+      c.simulation = { ok: false, kind: "contract_error", contractId: ROUTER, code: 9, message: "HostError: Error(Contract, #9)" }
+    })
+    expect(blockers).toEqual([{ code: "sy_balance", message: expect.stringMatching(/^You hold 3 SY\. .*Quick actions → Withdraw/) }])
   })
 
   it("buy_pt_underlying and Keep YT hold SY in between but are not refused for it", () => {

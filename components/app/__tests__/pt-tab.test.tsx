@@ -320,6 +320,23 @@ describe("PT tab — whatever the route's shape", () => {
     expect(mocks.prepareReview.mock.calls[0][0].input).toMatchObject({ action: "sell_pt_underlying", amount: 1_000_000_000n })
   })
 
+  it("the Router's own #9 (PreexistingSyBalance) on the one step reads as SY in the wallet, not as a contract error (final review 3)", async () => {
+    mocks.manifest = { ...usdyManifest, routerFunctions: ["swap_underlying_for_pt", "swap_pt_for_underlying"] } as typeof mocks.manifest
+    // The balance read shows no SY, but the chain has some by the time the step is simulated.
+    mocks.accounts[A] = accountState({ underlying: live(BALANCE), sy: live(0n), pt: live(BALANCE), permYt: live(true) })
+    mocks.simulateInvocation.mockResolvedValue({ ok: false, kind: "contract_error", contractId: "CROUTER", code: 9, message: "Error(Contract, #9)" })
+    await renderUi(<PtTab marketId="m1" side="sell" />)
+    await enter("You pay", "100")
+    await settle()
+    expect(
+      screen.getByText(
+        "The simulation found SY in your wallet. This one-signature trade withdraws all the SY in your wallet, so withdraw it first with Quick actions → Withdraw, then try again.",
+      ),
+    ).toBeTruthy()
+    expect(screen.queryByText(/contract error #9/)).toBeNull()
+    expect(screen.getByRole<HTMLButtonElement>("button", { name: "Review Sell PT" }).disabled).toBe(true)
+  })
+
   it("holding SY, Sell PT to USDY keeps its two steps and says why in plain sight; Buy PT never sweeps SY (R4-3)", async () => {
     mocks.manifest = { ...usdyManifest, routerFunctions: ["swap_underlying_for_pt", "swap_pt_for_underlying"] } as typeof mocks.manifest
     await renderUi(<PtTab marketId="m1" side="sell" />)
