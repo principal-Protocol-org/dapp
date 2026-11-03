@@ -249,6 +249,57 @@ describe("route holdings (spec §4 interruption)", () => {
     expect(describeHoldings(routeHoldings(r, plan(r), outs, 2)!, usdy)).toBe("You hold 40 PT, 40 YT and 59 SY")
   })
 
+  describe("one-transaction Router actions (0004 Task 3)", () => {
+    const ONE_STEP: RouteContext["singleStep"] = {
+      buy_pt: { fn: "swap_underlying_for_pt", action: "buy_pt_underlying" },
+      sell_pt: { fn: "swap_pt_for_underlying", action: "sell_pt_underlying" },
+      buy_yt: { fn: "swap_underlying_for_yt", action: "buy_yt_underlying" },
+      sell_yt: { fn: "swap_yt_for_underlying", action: "sell_yt_underlying" },
+      lp_keep_yt: { fn: "add_liquidity_keep_yt", action: "add_liquidity_keep_yt" },
+    }
+    const oneStep: RouteContext = { ...scaled, routerFunctions: Object.values(ONE_STEP).map((x) => x!.fn), singleStep: ONE_STEP }
+    const held = (kind: RouteRequest["kind"], out: ActionOutput, amount = 100n * S) => {
+      const r = { ...base, kind, amount }
+      const plans = planRoute(r, oneStep) as StepPlan[]
+      expect(plans).toHaveLength(1)
+      return routeHoldings(r, plans, [out], 1)
+    }
+    /** `action` after a step that left 300 USDY: shows the underlying the action takes or pays. */
+    const afterUsdy = (action: ActionId, out: ActionOutput) => {
+      const r = { ...base, amount: 100n * S }
+      const plans: StepPlan[] = [
+        { action: "withdraw", amount: { from: "value", value: 300n * S }, gives: "SY", takes: "USDY" },
+        { action, amount: { from: "input" }, gives: "x", takes: "y" },
+      ]
+      return routeHoldings(r, plans, [{ kind: "amount", value: 300n * S }, out], 2)
+    }
+
+    it("Buy PT and Sell PT / YT: the underlying in or out, PT out or in", () => {
+      expect(held("buy_pt", { kind: "amount", value: 98n * S })).toEqual({ pt: 98n * S })
+      expect(held("sell_pt", { kind: "amount", value: 9n * S }, 10n * S)).toEqual({ underlying: 9n * S })
+      expect(held("sell_yt", { kind: "amount", value: 3n * S }, 10n * S)).toEqual({ underlying: 3n * S })
+      expect(afterUsdy("buy_pt_underlying", { kind: "amount", value: 98n * S })).toEqual({ pt: 98n * S, underlying: 200n * S })
+      expect(afterUsdy("sell_pt_underlying", { kind: "amount", value: 9n * S })).toEqual({ underlying: 309n * S })
+      expect(afterUsdy("sell_yt_underlying", { kind: "amount", value: 3n * S })).toEqual({ underlying: 303n * S })
+    })
+
+    it("Buy YT: the whole amount goes in and underlying_back comes back with the YT (R4-5)", () => {
+      const out: ActionOutput = { kind: "buy_yt_underlying", yt_out: 40n * S, underlying_back: 85n * S }
+      expect(held("buy_yt", out)).toEqual({ yt: 40n * S })
+      expect(afterUsdy("buy_yt_underlying", out)).toEqual({ yt: 40n * S, underlying: 285n * S })
+      expect(held("buy_yt", { kind: "buy_yt", yt_out: 40n * S, sy_back: 85n * S })).toBeUndefined()
+    })
+
+    it("Keep YT: LP and YT, and the PT the pool did not take (PT is minted 1:1 with YT)", () => {
+      const out: ActionOutput = { kind: "keep_yt", pt_used: 38n * S, sy_used: 59n * S, lp: 50n * S, yt_minted: 40n * S }
+      const h = held("lp_keep_yt", out)
+      expect(h).toEqual({ pt: 2n * S, yt: 40n * S, lp: 50n * S })
+      expect(describeHoldings(h!, usdy)).toBe("You hold 2 PT, 40 YT and 50 LP")
+      expect(afterUsdy("add_liquidity_keep_yt", out)).toEqual({ pt: 2n * S, yt: 40n * S, lp: 50n * S, underlying: 200n * S })
+      expect(held("lp_keep_yt", { kind: "add_liquidity", pt_used: 1n, sy_used: 1n, lp: 1n })).toBeUndefined()
+    })
+  })
+
   it("nothing confirmed: no holdings, and no unwind", () => {
     const r = { ...base, kind: "buy_pt" as const }
     const h = routeHoldings(r, plan(r), [], 0)

@@ -28,10 +28,13 @@ export function useMarketStates(marketIds: string[]) {
   })
 }
 
-/** Every on-chain value of one market, each as a `Live`. Refetched every 6 s. */
-export function useMarketState(marketId: string) {
+/**
+ * Every on-chain value of one market, each as a `Live`. Refetched every 6 s. `null` reads nothing
+ * (a simulation with no input yet), under the same hook call.
+ */
+export function useMarketState(marketId: string | null) {
   const m = useManifest()
-  const query = useQuery(marketQuery(m, marketId))
+  const query = useQuery({ ...marketQuery(m, marketId ?? ""), enabled: marketId !== null })
   // A failed refetch keeps the old `data`; `stale` tells callers not to show it as current (R35).
   return { ...query, stale: query.isError }
 }

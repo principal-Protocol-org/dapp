@@ -309,6 +309,16 @@ function holdings(input: ActionInput, acc: AccountState): Holding[] {
       return [pt(amount), yt(second)]
     case "claim_yield":
       return []
+    // 0004 Task 3, forced by the exhaustive switch: each one-transaction action spends what its
+    // composition takes from the wallet (the SY in between is its own). Task 4 owns these gates.
+    case "buy_pt_underlying":
+    case "buy_yt_underlying":
+    case "add_liquidity_keep_yt":
+      return [underlying(amount)]
+    case "sell_pt_underlying":
+      return [pt(amount)]
+    case "sell_yt_underlying":
+      return [yt(amount)]
   }
 }
 

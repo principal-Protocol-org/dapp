@@ -2,11 +2,12 @@
 
 import { useEffect, useState } from "react"
 import { useQuery, useQueryClient } from "@tanstack/react-query"
-import { MARKET_REFETCH_MS } from "@/hooks/use-market-state"
+import { MARKET_REFETCH_MS, useMarketState } from "@/hooks/use-market-state"
 import { useSettings } from "@/hooks/use-settings"
 import { invocationFor, type ActionInput } from "@/lib/protocol/actions"
-import { guardsFrom, openGuards, parseOutput, type ActionOutput, type GuardResult } from "@/lib/protocol/guards"
+import { guardsFrom, openGuards, parseOutput, type ActionOutput, type GuardRates, type GuardResult } from "@/lib/protocol/guards"
 import { useManifest } from "@/components/app/manifest-provider"
+import type { MarketState } from "@/lib/protocol/market-state"
 import { simulateInvocation, type SimulationOutcome } from "@/lib/protocol/stellar"
 import type { Manifest } from "@/lib/protocol/types"
 
@@ -48,12 +49,29 @@ export async function simulate(m: Manifest, input: ActionInput): Promise<Simulat
   }
 }
 
-/** The validated output and the floors at `slippageBps`; an unreadable result is a refusal. Also used per route step. */
-export function derive(input: ActionInput, outcome: SimulationOutcome, slippageBps: bigint): { output?: ActionOutput; guards?: GuardResult } {
+/**
+ * The rates the floors may need (R4-6: the SY exchange rate), from market state that is neither
+ * stale nor unread (R35), and only while the exchange rate itself is live. Also used by the route runner.
+ */
+export function ratesFrom(market: { data?: MarketState; stale: boolean }): GuardRates | undefined {
+  const xr = market.stale ? undefined : market.data?.exchangeRate
+  return xr?.status === "live" ? { exchangeRate: xr.value } : undefined
+}
+
+/**
+ * The validated output and the floors at `slippageBps`; an unreadable result is a refusal. Also used
+ * per route step. `rates` is the live SY exchange rate, when there is one (R4-6).
+ */
+export function derive(
+  input: ActionInput,
+  outcome: SimulationOutcome,
+  slippageBps: bigint,
+  rates?: GuardRates,
+): { output?: ActionOutput; guards?: GuardResult } {
   if (!outcome.ok) return {}
   try {
     const output = parseOutput(input.action, outcome.retval)
-    return { output, guards: guardsFrom(input.action, input, output, slippageBps) }
+    return { output, guards: guardsFrom(input.action, input, output, slippageBps, rates) }
   } catch (error) {
     const why = error instanceof Error ? error.message : String(error)
     return { guards: { ok: false, reason: `The simulation returned a result this app cannot read (${why}), so there is no exact quote.` } }
@@ -72,6 +90,8 @@ export function useSimulation(input: ActionInput | null): Simulation {
   const manifest = useManifest()
   const network = manifest.network
   const key = input ? keyParts(input).join("|") : null
+  // The panel's own market query (same key): the exchange rate one-step Buy YT's bound needs (R4-6).
+  const rates = ratesFrom(useMarketState(input?.marketId ?? null))
 
   const [settled, setSettled] = useState<string | null>(null)
   useEffect(() => {
@@ -95,7 +115,7 @@ export function useSimulation(input: ActionInput | null): Simulation {
   const outcome = live ? query.data : undefined
   return {
     outcome,
-    ...(live && outcome ? derive(live, outcome, slippageBps) : {}),
+    ...(live && outcome ? derive(live, outcome, slippageBps, rates) : {}),
     simulated: live && outcome ? withOpenGuards(live) : undefined,
     pending: input !== null && outcome === undefined,
     // Reset, not refetch: the old outcome (e.g. "restore required") must not stand meanwhile.

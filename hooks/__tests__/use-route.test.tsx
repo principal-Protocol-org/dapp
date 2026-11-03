@@ -30,6 +30,7 @@ const mocks = vi.hoisted(() => ({
   maturity: undefined as number | undefined,
   simulateInvocation: vi.fn(),
   getTransaction: vi.fn(),
+  fetchMarketState: vi.fn(),
 }))
 
 vi.mock("@/hooks/use-execute", () => ({ useExecute: () => mocks.exec }))
@@ -63,6 +64,9 @@ vi.mock("@/lib/protocol/stellar", async (orig) => ({
   transactionEnvelopeHash: (xdr: string) => `hash-of-${xdr}`,
 }))
 
+vi.mock("@/lib/protocol/market-state", async (orig) => ({ ...(await orig<object>()), fetchMarketState: mocks.fetchMarketState }))
+
+import { down, live, marketState } from "@/components/app/__tests__/fixtures"
 import { useRoute, type RouteGate } from "@/hooks/use-route"
 import { readRoutes, writeRoute, type RouteRun } from "@/lib/app/route-log"
 import { planRoute, type RouteKind, type RouteRequest, type StepPlan } from "@/lib/protocol/routes"
@@ -77,6 +81,8 @@ const SIMULATED: Partial<Record<ActionInput["action"], unknown>> = {
   withdraw: 997n * S,
   sell_pt: 9n * S,
   remove_liquidity: [10n * S, 5n * S],
+  // swap_underlying_for_yt -> (yt_minted, underlying_back)
+  buy_yt_underlying: [40n * S, 85n * S],
 }
 
 let xdrSeq = 0
@@ -155,6 +161,7 @@ beforeEach(() => {
   mocks.exec.prepare.mockReset().mockImplementation(async (input: ActionInput) => fakeReview(input))
   mocks.exec.execute.mockReset()
   mocks.getTransaction.mockReset()
+  mocks.fetchMarketState.mockReset().mockResolvedValue(marketState())
   mocks.simulateInvocation.mockReset().mockImplementation(async (p: { invocation: { functionName: string } }): Promise<SimulationOutcome> => {
     const byFn: Record<string, ActionInput["action"]> = {
       deposit: "deposit",
@@ -162,6 +169,7 @@ beforeEach(() => {
       unwrap: "withdraw",
       swap_pt_for_sy: "sell_pt",
       remove_liquidity: "remove_liquidity",
+      swap_underlying_for_yt: "buy_yt_underlying",
     }
     const action = byFn[p.invocation.functionName]
     return { ok: true, retval: SIMULATED[action], latestLedger: 1, minResourceFee: "1" }
@@ -791,6 +799,45 @@ describe("useRoute", () => {
     ],
     startedAt: 1,
     ...over,
+  })
+
+  describe("a one-step Buy YT takes its SY cost bound from the market's exchange rate (R4-6)", () => {
+    const YT_KINDS: readonly RouteKind[] = ["buy_yt", "sell_yt"]
+    const req: RouteRequest = { ...buyPt, kind: "buy_yt", amount: 100n * S }
+    const oneStep = () => {
+      const p = planRoute(req, {
+        routerFunctions: ["swap_underlying_for_yt"],
+        singleStep: { buy_yt: { fn: "swap_underlying_for_yt", action: "buy_yt_underlying" } },
+      })
+      if ("disabled" in p) throw new Error(p.disabled)
+      return p
+    }
+    async function marketLoaded() {
+      await waitFor(() => expect(client.getQueryData(["market", "testnet", "m1"])).toBeDefined())
+      await act(async () => {})
+    }
+
+    it("prepares the step with max_net_cost and syIn worked out at the live exchange rate", async () => {
+      mocks.fetchMarketState.mockResolvedValue(marketState({ exchangeRate: live(S) }))
+      const { result } = setup(() => [], { kinds: YT_KINDS })
+      await marketLoaded()
+      act(() => result.current.start(req, oneStep()))
+      await untilReview(result, 1)
+      const step: ActionInput = mocks.exec.prepare.mock.calls[0][0]
+      expect(step.action).toBe("buy_yt_underlying")
+      // sy_in 100 SY, at least 85 SY back: net 15 SY · 1.005.
+      expect(step.guards).toEqual({ minOut: (40n * S * 9_950n) / 10_000n, maxNetCost: 150_750_000n, syIn: 100n * S })
+    })
+
+    it("does not prepare it without a live exchange rate, and says why", async () => {
+      mocks.fetchMarketState.mockResolvedValue(marketState({ exchangeRate: down() }))
+      const { result } = setup(() => [], { kinds: YT_KINDS })
+      await marketLoaded()
+      act(() => result.current.start(req, oneStep()))
+      await waitFor(() => expect(result.current.state.phase).toBe("interrupted"))
+      expect(result.current.state.error).toMatch(/exchange rate/)
+      expect(mocks.exec.prepare).not.toHaveBeenCalled()
+    })
   })
 
   describe("hosts are disjoint by kind (R2-77)", () => {

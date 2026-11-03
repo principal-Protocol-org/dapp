@@ -4,9 +4,10 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import { useQueryClient } from "@tanstack/react-query"
 import { useExecute, type Execute } from "@/hooks/use-execute"
 import { useLedgerClock } from "@/hooks/use-ledger-clock"
+import { useMarketState } from "@/hooks/use-market-state"
 import { useMatured } from "@/hooks/use-matured"
 import { useSettings } from "@/hooks/use-settings"
-import { derive, simulate } from "@/hooks/use-simulation"
+import { derive, ratesFrom, simulate } from "@/hooks/use-simulation"
 import {
   closedCopy,
   firstOpen,
@@ -325,15 +326,17 @@ export function useRoute(opts: UseRouteOptions): RouteControls {
   const queryClient = useQueryClient()
   const { ledgerTime } = useLedgerClock()
   const { slippageBps, deadlineSeconds } = useSettings()
+  // R4-6: one-step Buy YT's floors need the live SY exchange rate, refetched with the market reads.
+  const rates = ratesFrom(useMarketState(marketId))
 
   const [view, setView] = useState<View>(IDLE)
   const [run, setRun] = useState<RouteRun | null>(null)
   const [nowMs, setNowMs] = useState<number | null>(null)
 
-  const latest = useRef({ opts, exec, ledgerTime, slippageBps, deadlineSeconds, manifest })
+  const latest = useRef({ opts, exec, ledgerTime, slippageBps, deadlineSeconds, manifest, rates })
   // A layout effect: current right after the commit, before a step resumes after its refetch.
   useLayoutEffect(() => {
-    latest.current = { opts, exec, ledgerTime, slippageBps, deadlineSeconds, manifest }
+    latest.current = { opts, exec, ledgerTime, slippageBps, deadlineSeconds, manifest, rates }
   })
   const gen = useRef(0)
   const busy = useRef(false)
@@ -439,7 +442,7 @@ export function useRoute(opts: UseRouteOptions): RouteControls {
           !outcome.ok && outcome.kind === "restore_required" ? { source: r.account, invocation: invocationFor(latest.current.manifest, draft) } : undefined
         const blockers = latest.current.opts.gate(draft, outcome)
         if (blockers.length > 0) return interrupt(g, i, blockers[0].message, { blockers, ...(restore ? { restore } : {}) })
-        const { guards } = derive(draft, outcome, latest.current.slippageBps)
+        const { guards } = derive(draft, outcome, latest.current.slippageBps, latest.current.rates)
         if (!guards?.ok) return interrupt(g, i, guards?.reason ?? `Step ${i + 1} has no exact quote, so it was not prepared. Continue to try again.`)
         const review = await exe().prepare({ ...draft, guards: guards.guards })
         if (!live(g)) return

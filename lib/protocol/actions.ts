@@ -16,8 +16,27 @@ export type ActionId =
   | "recombine"
   | "claim_yield"
   | "redeem"
+  // One transaction each, paid or received in the underlying (0004 Task 3). Each is the composition of
+  // existing actions, and behaves as their union (gates, history):
+  //   buy_pt_underlying = deposit + buy_pt; sell_pt_underlying = sell_pt + withdraw;
+  //   buy_yt_underlying = deposit + buy_yt + withdraw; sell_yt_underlying = sell_yt + withdraw;
+  //   add_liquidity_keep_yt = deposit + mint (of SY) + add_liquidity.
+  | "buy_pt_underlying"
+  | "sell_pt_underlying"
+  | "buy_yt_underlying"
+  | "sell_yt_underlying"
+  | "add_liquidity_keep_yt"
 
-export type GuardValues = { minOut?: bigint; minOut2?: bigint; maxNetCost?: bigint }
+export type GuardValues = {
+  minOut?: bigint
+  minOut2?: bigint
+  maxNetCost?: bigint
+  /**
+   * R4-6, one-step Buy YT only: the SY its deposit produces (`previewDeposit(amount, xr)`), from
+   * which `maxNetCost` was worked out. Never signed: the review states the bound with it.
+   */
+  syIn?: bigint
+}
 
 export type ActionInput = {
   action: ActionId
@@ -77,9 +96,14 @@ export const ACTION_META: Record<ActionId, ActionMeta> = {
   recombine: { label: "Recombine PT + YT", slippageSensitive: true, hasDeadline: true, tab: "redeem" },
   claim_yield: { label: "Claim yield", slippageSensitive: false, hasDeadline: false, tab: "redeem" },
   redeem: { label: "Redeem at maturity", slippageSensitive: false, hasDeadline: false, tab: "redeem" },
+  buy_pt_underlying: { label: "Buy PT", slippageSensitive: true, hasDeadline: true, tab: "trade" },
+  sell_pt_underlying: { label: "Sell PT", slippageSensitive: true, hasDeadline: true, tab: "trade" },
+  buy_yt_underlying: { label: "Buy YT", slippageSensitive: true, hasDeadline: true, tab: "trade" },
+  sell_yt_underlying: { label: "Sell YT", slippageSensitive: true, hasDeadline: true, tab: "trade" },
+  add_liquidity_keep_yt: { label: "Add liquidity, keep YT", slippageSensitive: true, hasDeadline: true, tab: "liquidity" },
 }
 
-const MAX_I128 = (1n << 127n) - 1n
+export const MAX_I128 = (1n << 127n) - 1n
 const MIN_I128 = -(1n << 127n)
 
 const address = (value: string): ScArg => ({ type: "address", value })
@@ -146,5 +170,24 @@ export function invocationFor(m: Manifest, input: ActionInput): ContractInvocati
     case "redeem":
       // redeem_at_maturity(from, pool, pt_amount, yt_amount): settlement rate is frozen, no floor.
       return viaRouter("redeem_at_maturity", [from, pool, amount, i128(input.secondaryAmount ?? 0n)])
+    case "buy_pt_underlying":
+      // swap_underlying_for_pt(from, pool, underlying_amount, min_pt_out, deadline)
+      return viaRouter("swap_underlying_for_pt", [from, pool, amount, floor(g.minOut), deadline])
+    case "sell_pt_underlying":
+      // swap_pt_for_underlying(from, pool, pt_in, min_underlying_out, deadline)
+      return viaRouter("swap_pt_for_underlying", [from, pool, amount, floor(g.minOut), deadline])
+    case "buy_yt_underlying":
+      // swap_underlying_for_yt(from, pool, underlying_amount, min_yt_out, max_net_cost, deadline):
+      // max_net_cost is in SY (R4-6); the Router derives min_sy_back = sy_in - max_net_cost.
+      return viaRouter("swap_underlying_for_yt", [from, pool, amount, floor(g.minOut), floor(g.maxNetCost), deadline])
+    case "sell_yt_underlying":
+      // swap_yt_for_underlying(from, pool, yt_in, min_underlying_out, deadline)
+      return viaRouter("swap_yt_for_underlying", [from, pool, amount, floor(g.minOut), deadline])
+    case "add_liquidity_keep_yt": {
+      // add_liquidity_keep_yt(from, pool, underlying_amount, mint_amount, min_lp_out, deadline):
+      // mint_amount is SY shares of the deposit, sized by the dApp (R4-4).
+      if (input.secondaryAmount === undefined) throw new Error("add_liquidity_keep_yt requires secondaryAmount (SY to mint).")
+      return viaRouter("add_liquidity_keep_yt", [from, pool, amount, i128(input.secondaryAmount), floor(g.minOut), deadline])
+    }
   }
 }

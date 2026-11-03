@@ -62,6 +62,13 @@ describe("useMarketState", () => {
     await waitFor(() => expect(result.current.stale).toBe(true))
     expect(result.current.data).toBeDefined()
   })
+
+  it("reads nothing without a market (a simulation with no input yet)", async () => {
+    const { result } = renderHook(() => useMarketState(null), { wrapper })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(mocks.fetchMarketState).not.toHaveBeenCalled()
+    expect(result.current.data).toBeUndefined()
+  })
 })
 
 describe("useAccountState", () => {

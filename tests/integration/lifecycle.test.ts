@@ -196,6 +196,12 @@ const HISTORY_KIND: Record<ActionId, HistoryKind> = {
   recombine: "recombine",
   claim_yield: "claim",
   redeem: "redeem",
+  // 0004 Task 3, forced by the Record: R4-10's classification. Task 4 teaches history these sets.
+  buy_pt_underlying: "buy_pt",
+  sell_pt_underlying: "sell_pt",
+  buy_yt_underlying: "buy_yt",
+  sell_yt_underlying: "sell_yt",
+  add_liquidity_keep_yt: "add_liquidity",
 }
 
 /** A user's approval time in Freighter, between preparation and submission (well inside the 60 s review window). */

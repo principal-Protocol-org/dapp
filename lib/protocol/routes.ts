@@ -328,6 +328,23 @@ function moved(action: ActionId, a: { amount: bigint; secondaryAmount?: bigint }
       return out.kind !== "redeem"
         ? undefined
         : [["pt", -a.amount], ["yt", -(a.secondaryAmount ?? 0n)], ["underlying", out.underlying_from_pt + out.underlying_from_yt]]
+    // One transaction each: the SY in between never stays with the user, except Keep YT's.
+    case "buy_pt_underlying":
+      return value === undefined ? undefined : [["underlying", -a.amount], ["pt", value]]
+    case "sell_pt_underlying":
+      return value === undefined ? undefined : [["pt", -a.amount], ["underlying", value]]
+    case "sell_yt_underlying":
+      return value === undefined ? undefined : [["yt", -a.amount], ["underlying", value]]
+    case "buy_yt_underlying":
+      // R4-5: the whole amount is tokenized; underlying_back comes back in the same transaction.
+      return out.kind !== "buy_yt_underlying" ? undefined : [["underlying", out.underlying_back - a.amount], ["yt", out.yt_out]]
+    case "add_liquidity_keep_yt":
+      // PrincipalManager.mint mints PT 1:1 with YT, so the PT the pool did not take is
+      // yt_minted − pt_used. The SY left over (deposit shares − mint_amount − sy_used) needs the
+      // deposit's shares, which KeepYtResult does not return, so it is not counted here.
+      return out.kind !== "keep_yt"
+        ? undefined
+        : [["underlying", -a.amount], ["pt", out.yt_minted - out.pt_used], ["yt", out.yt_minted], ["lp", out.lp]]
   }
 }
 

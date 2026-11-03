@@ -276,6 +276,23 @@ describe("prepareReview", () => {
     }
   })
 
+  it("lists each one-transaction Router function, then its downstream calls in composition order", async () => {
+    const trees: [ActionId, string[]][] = [
+      ["buy_pt_underlying", ["Router.swap_underlying_for_pt", "SYWrapper.deposit", "MarketPool.swap_sy_for_pt"]],
+      ["sell_pt_underlying", ["Router.swap_pt_for_underlying", "MarketPool.swap_pt_for_sy", "SYWrapper.withdraw_all"]],
+      [
+        "buy_yt_underlying",
+        ["Router.swap_underlying_for_yt", "SYWrapper.deposit", "PrincipalManager.mint", "MarketPool.swap_pt_for_sy", "SYWrapper.withdraw_all"],
+      ],
+      ["sell_yt_underlying", ["Router.swap_yt_for_underlying", "MarketPool.swap_yt_for_sy", "SYWrapper.withdraw_all"]],
+      ["add_liquidity_keep_yt", ["Router.add_liquidity_keep_yt", "SYWrapper.deposit", "PrincipalManager.mint", "MarketPool.add_liquidity"]],
+    ]
+    for (const [action, tree] of trees) {
+      const r = await review(action, { guards: { minOut: 1n, maxNetCost: 1n, syIn: 2n }, secondaryAmount: 1n })
+      expect(r.callTree).toEqual(tree)
+    }
+  })
+
   describe("never prepares an action that is not offered (R47)", () => {
     it("refuses add_liquidity_sy before any RPC call, naming why", async () => {
       const reason = ACTION_META.add_liquidity_sy.disabled!.reason
@@ -318,6 +335,18 @@ describe("prepareReview", () => {
     })
     it("min_yt_out of buy_yt", async () => {
       await refuses("buy_yt", { minOut: 0n, maxNetCost: 5n })
+    })
+    it("max_net_cost and min_yt_out of one-step Buy YT (syIn is not a signed floor)", async () => {
+      await refuses("buy_yt_underlying", { minOut: 5n, maxNetCost: 0n, syIn: 9n })
+      await refuses("buy_yt_underlying", { minOut: 5n, syIn: 9n })
+      await refuses("buy_yt_underlying", { minOut: 0n, maxNetCost: 5n, syIn: 9n })
+      await expect(review("buy_yt_underlying", { guards: { minOut: 5n, maxNetCost: 5n, syIn: 9n } })).resolves.toMatchObject({ fee: PREPARED_FEE })
+    })
+    it("min_out of the other one-step Router actions", async () => {
+      await refuses("buy_pt_underlying", { minOut: 0n })
+      await refuses("sell_pt_underlying", {})
+      await refuses("sell_yt_underlying", { minOut: -1n })
+      await refuses("add_liquidity_keep_yt", { minOut: 0n })
     })
     it("claim and redeem carry no floor and are prepared", async () => {
       await expect(review("claim_yield", { guards: {}, amount: 0n })).resolves.toMatchObject({ fee: PREPARED_FEE })
@@ -461,6 +490,60 @@ describe("prepareReview", () => {
       expect(await whileOffered("add_liquidity_sy", () => lines("add_liquidity_sy"))).toEqual({ give: ["10 SY"], getAtLeast: ["1.2345678 LP"] })
       expect(await lines("remove_liquidity")).toEqual({ give: ["10 LP"], getAtLeast: ["1.2345678 PT", "2.0000001 SY"] })
       expect(await lines("recombine")).toEqual({ give: ["10 PT", "10 YT"], getAtLeast: ["1.2345678 SY"] })
+    })
+
+    it("one-step Router actions: what is given in the underlying or PT / YT, and the least received", async () => {
+      const g: GuardValues = { minOut: 1_2345678n, maxNetCost: 3_5000000n, syIn: 9_9000000n }
+      const lines = async (action: ActionId, extra: Partial<ActionInput> = {}) => {
+        const { give, getAtLeast } = (await review(action, { guards: g, ...extra })).summary
+        return { give, getAtLeast }
+      }
+      const sweep =
+        "All the SY in your wallet, which this call withdraws as STA: it is refused if you hold any SY before it runs, so only the SY this trade produces is withdrawn."
+      expect(await lines("buy_pt_underlying")).toEqual({ give: ["10 STA"], getAtLeast: ["1.2345678 PT"] })
+      expect(await lines("sell_pt_underlying")).toEqual({ give: ["10 PT", sweep], getAtLeast: ["1.2345678 STA"] })
+      expect(await lines("sell_yt_underlying")).toEqual({ give: ["10 YT", sweep], getAtLeast: ["1.2345678 STA"] })
+      // max_net_cost bounds what is spent: the PT sale must return at least sy_in − max_net_cost SY (R4-6).
+      expect(await lines("buy_yt_underlying")).toEqual({
+        give: [
+          "10 STA, deposited as 9.9 SY, of which at most 3.5 SY is spent: the PT sale must return at least 6.4 SY, paid back to you as STA in the same transaction",
+          sweep,
+        ],
+        getAtLeast: ["1.2345678 YT"],
+      })
+      // max_net_cost >= sy_in: the Router asks the PT sale for no SY back.
+      expect((await lines("buy_yt_underlying", { guards: { ...g, maxNetCost: 9_9000000n } })).give[0]).toBe(
+        "10 STA, deposited as 9.9 SY, all of which may be spent: no STA is guaranteed back",
+      )
+      // Without the deposit's SY the bound cannot be stated, so nothing is promised back.
+      expect((await lines("buy_yt_underlying", { guards: { minOut: 1n, maxNetCost: 1n } })).give[0]).toBe(
+        "10 STA, all of which may be spent: no STA is guaranteed back",
+      )
+      // Only min_lp_out is signed; the YT comes from minting `mint_amount` SY of the deposit.
+      expect(await lines("add_liquidity_keep_yt", { secondaryAmount: 4_0000000n })).toEqual({
+        give: ["10 STA"],
+        getAtLeast: [
+          "1.2345678 LP",
+          "The YT minted from 4 SY of your deposit, which you keep. This call sets no minimum on it.",
+          "Any PT or SY the pool does not take stays in your wallet.",
+        ],
+      })
+    })
+
+    it("one-step Router actions pay the fees of their components", async () => {
+      const fees = async (action: ActionId) =>
+        (await review(action, { guards: { minOut: 1n, maxNetCost: 1n, syIn: 2n }, secondaryAmount: 1n })).summary.fees.slice(1)
+      const swap = expect.stringMatching(/^Swap fee:/)
+      const tokenization = expect.stringMatching(/^Tokenization fee:/)
+      expect(await fees("buy_pt_underlying")).toEqual([swap])
+      expect(await fees("sell_pt_underlying")).toEqual([swap])
+      expect(await fees("sell_yt_underlying")).toEqual([swap])
+      expect(await fees("buy_yt_underlying")).toEqual([tokenization, swap])
+      // deposit + mint + proportional add_liquidity: no swap inside.
+      expect(await fees("add_liquidity_keep_yt")).toEqual([tokenization])
+      for (const action of ["buy_pt_underlying", "sell_pt_underlying", "buy_yt_underlying", "sell_yt_underlying", "add_liquidity_keep_yt"] as const) {
+        expect((await review(action, { guards: { minOut: 1n, maxNetCost: 1n, syIn: 2n }, secondaryAmount: 1n })).summary.deadline).toBe(Number(DEADLINE))
+      }
     })
 
     it("says plainly when no minimum is enforced", async () => {

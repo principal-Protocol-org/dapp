@@ -173,13 +173,29 @@ const CALL_TREES: Record<ActionId, string[]> = {
   recombine: ["Router.recombine", "PrincipalManager.recombine"],
   claim_yield: ["Router.claim_yield", "PrincipalManager.claim_yield"],
   redeem: ["Router.redeem_at_maturity", "PrincipalManager.redeem"],
+  // The one-transaction Router functions: the Router function, then each downstream call in the
+  // order it makes them (router/src/lib.rs). The three that sweep end with `SYWrapper.withdraw_all`.
+  buy_pt_underlying: ["Router.swap_underlying_for_pt", "SYWrapper.deposit", "MarketPool.swap_sy_for_pt"],
+  sell_pt_underlying: ["Router.swap_pt_for_underlying", "MarketPool.swap_pt_for_sy", "SYWrapper.withdraw_all"],
+  buy_yt_underlying: [
+    "Router.swap_underlying_for_yt",
+    "SYWrapper.deposit",
+    "PrincipalManager.mint",
+    "MarketPool.swap_pt_for_sy",
+    "SYWrapper.withdraw_all",
+  ],
+  sell_yt_underlying: ["Router.swap_yt_for_underlying", "MarketPool.swap_yt_for_sy", "SYWrapper.withdraw_all"],
+  add_liquidity_keep_yt: ["Router.add_liquidity_keep_yt", "SYWrapper.deposit", "PrincipalManager.mint", "MarketPool.add_liquidity"],
 }
 
-/** The guard fields each slippage-sensitive call signs (R4 mapping). */
+/**
+ * The guard fields each slippage-sensitive call signs (R4 mapping). One-step Buy YT's `syIn` is not
+ * one of them: it only states the bound in the review (R4-6).
+ */
 function signedFloors(action: ActionId): (keyof GuardValues)[] {
   if (!ACTION_META[action].slippageSensitive) return []
   if (action === "remove_liquidity") return ["minOut", "minOut2"]
-  if (action === "buy_yt") return ["minOut", "maxNetCost"]
+  if (action === "buy_yt" || action === "buy_yt_underlying") return ["minOut", "maxNetCost"]
   return ["minOut"]
 }
 
@@ -459,6 +475,9 @@ function summarize(market: Market, input: ActionInput, fee: string, validUntil: 
   const swapFee = "Swap fee: charged by the pool in SY, already counted in the amounts above."
   const tokenizationFee = "Tokenization fee: withheld from the SY before PT and YT are minted, already counted in the amounts above."
   const ytFee = "YT fee: deducted from the yield before it is paid."
+  // R4-3: Router.swap_pt_for_underlying, swap_yt_for_underlying and swap_underlying_for_yt end with
+  // SYWrapper.withdraw_all, and revert PreexistingSyBalance if the wallet holds SY when they start.
+  const sweep = `All the SY in your wallet, which this call withdraws as ${underlying}: it is refused if you hold any SY before it runs, so only the SY this trade produces is withdrawn.`
 
   let give: string[]
   let getAtLeast: string[]
@@ -528,6 +547,52 @@ function summarize(market: Market, input: ActionInput, fee: string, validUntil: 
       give = []
       getAtLeast = [`Your pending yield, paid in ${underlying}. This call sets no minimum.`]
       protocolFees = [ytFee]
+      break
+    case "buy_pt_underlying":
+      give = [amount(a, underlying)]
+      getAtLeast = [floor(g.minOut, "PT")]
+      protocolFees = [swapFee]
+      break
+    case "sell_pt_underlying":
+      give = [amount(a, "PT"), sweep]
+      getAtLeast = [floor(g.minOut, underlying)]
+      protocolFees = [swapFee]
+      break
+    case "buy_yt_underlying": {
+      // As buy_yt, but paid in the underlying: max_net_cost (SY) bounds what is spent of the SY
+      // the deposit produces (`syIn`, R4-6). The PT sale must return at least syIn − max_net_cost
+      // SY (Router.swap_underlying_for_yt), which is paid back as the underlying. Without `syIn`
+      // the bound cannot be stated, so nothing is promised back.
+      const maxNetCost = g.maxNetCost ?? 0n
+      const syIn = g.syIn
+      const allSpent = `all of which may be spent: no ${underlying} is guaranteed back`
+      give = [
+        syIn === undefined
+          ? `${amount(a, underlying)}, ${allSpent}`
+          : maxNetCost >= syIn
+            ? `${amount(a, underlying)}, deposited as ${amount(syIn, "SY")}, ${allSpent}`
+            : `${amount(a, underlying)}, deposited as ${amount(syIn, "SY")}, of which at most ${amount(maxNetCost, "SY")} is spent: the PT sale must return at least ${amount(syIn - maxNetCost, "SY")}, paid back to you as ${underlying} in the same transaction`,
+        sweep,
+      ]
+      getAtLeast = [floor(g.minOut, "YT")]
+      protocolFees = [tokenizationFee, swapFee]
+      break
+    }
+    case "sell_yt_underlying":
+      give = [amount(a, "YT"), sweep]
+      getAtLeast = [floor(g.minOut, underlying)]
+      protocolFees = [swapFee]
+      break
+    case "add_liquidity_keep_yt":
+      // Only min_lp_out is signed. `b` (mint_amount) is SY of the deposit minted into PT + YT; the
+      // proportional add takes only the PT and SY it uses (Router.add_liquidity_keep_yt): no swap.
+      give = [amount(a, underlying)]
+      getAtLeast = [
+        floor(g.minOut, "LP"),
+        `The YT minted from ${amount(b, "SY")} of your deposit, which you keep. This call sets no minimum on it.`,
+        "Any PT or SY the pool does not take stays in your wallet.",
+      ]
+      protocolFees = [tokenizationFee]
       break
     case "redeem":
       // Either side may be 0: only the legs redeemed are listed.

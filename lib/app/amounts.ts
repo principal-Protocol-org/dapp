@@ -60,7 +60,8 @@ function smaller(a: Live<bigint>, b: Live<bigint>): Live<bigint> {
 /**
  * The balance a field spends (R24), which MAX fills and the amount is checked against. Null when
  * the field spends nothing (claim) or the action has no such field. Recombine burns PT and YT one
- * for one, so its MAX is the smaller of the two.
+ * for one, so its MAX is the smaller of the two. Keep YT's second amount is SY of its own deposit
+ * (mint_amount, R4-4), not a balance of the wallet.
  */
 export function spendBalance(action: ActionId, field: FieldKey, acc: AccountState): Live<bigint> | null {
   if (field === "secondaryAmount") {
@@ -71,6 +72,9 @@ export function spendBalance(action: ActionId, field: FieldKey, acc: AccountStat
   switch (action) {
     case "deposit":
     case "mint":
+    case "buy_pt_underlying":
+    case "buy_yt_underlying":
+    case "add_liquidity_keep_yt":
       return acc.underlying
     case "withdraw":
     case "buy_pt":
@@ -78,10 +82,12 @@ export function spendBalance(action: ActionId, field: FieldKey, acc: AccountStat
     case "add_liquidity_sy":
       return acc.sy
     case "sell_pt":
+    case "sell_pt_underlying":
     case "add_liquidity":
     case "redeem":
       return acc.pt
     case "sell_yt":
+    case "sell_yt_underlying":
       return acc.yt
     case "remove_liquidity":
       return acc.lp
@@ -101,6 +107,7 @@ export function amountsComplete(action: ActionId, amount: bigint, secondaryAmoun
     case "redeem":
       return amount >= 0n && second >= 0n && amount + second > 0n
     case "add_liquidity":
+    case "add_liquidity_keep_yt":
       return amount > 0n && second > 0n
     default:
       return amount > 0n

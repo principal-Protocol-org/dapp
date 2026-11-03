@@ -114,6 +114,12 @@ describe("spendBalance (R24)", () => {
     ["redeem", "amount", 3n],
     ["redeem", "secondaryAmount", 4n],
     ["recombine", "amount", 3n],
+    // The one-transaction Router actions (0004 Task 3): the buys and Keep YT spend the underlying.
+    ["buy_pt_underlying", "amount", 1n],
+    ["buy_yt_underlying", "amount", 1n],
+    ["add_liquidity_keep_yt", "amount", 1n],
+    ["sell_pt_underlying", "amount", 3n],
+    ["sell_yt_underlying", "amount", 4n],
   ] as const)("%s %s spends the right balance", (action, field, expected) => {
     expect(spendBalance(action, field, acc)).toEqual(live(expected))
   })
@@ -126,6 +132,8 @@ describe("spendBalance (R24)", () => {
   it("claim spends nothing, and a field an action does not have has no balance", () => {
     expect(spendBalance("claim_yield", "amount", acc)).toBeNull()
     expect(spendBalance("buy_pt", "secondaryAmount", acc)).toBeNull()
+    // Keep YT's second amount is SY carved from its own deposit, not a balance of the wallet.
+    expect(spendBalance("add_liquidity_keep_yt", "secondaryAmount", acc)).toBeNull()
   })
 })
 
@@ -139,5 +147,14 @@ describe("amountsComplete", () => {
     expect(amountsComplete("redeem", 0n, 0n)).toBe(false)
     expect(amountsComplete("redeem", 0n, 1n)).toBe(true)
     expect(amountsComplete("redeem", 1n, undefined)).toBe(true)
+    // Keep YT needs the underlying and the SY to mint from it.
+    expect(amountsComplete("add_liquidity_keep_yt", 1n, 1n)).toBe(true)
+    expect(amountsComplete("add_liquidity_keep_yt", 1n, 0n)).toBe(false)
+    expect(amountsComplete("add_liquidity_keep_yt", 1n, undefined)).toBe(false)
+    expect(amountsComplete("add_liquidity_keep_yt", 0n, 1n)).toBe(false)
+    for (const action of ["buy_pt_underlying", "sell_pt_underlying", "buy_yt_underlying", "sell_yt_underlying"] as const) {
+      expect(amountsComplete(action, 1n, undefined)).toBe(true)
+      expect(amountsComplete(action, 0n, undefined)).toBe(false)
+    }
   })
 })
