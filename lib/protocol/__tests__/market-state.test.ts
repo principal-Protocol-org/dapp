@@ -41,7 +41,8 @@ function healthy(): Record<string, Handler> {
   return {
     [`${c.oracle}.get_reference_value`]: 10_500_000n,
     [`${c.oracle}.get_reference_timestamp`]: 1_790_000_000n,
-    [`${c.oracle}.is_fresh`]: true,
+    [`${c.oracle}.is_available`]: true,
+    [`${c.oracle}.max_stale_seconds`]: 3600n,
     [`${c.manager}.maturity`]: BigInt(market.maturity),
     [`${c.manager}.settled_rate`]: null,
     [`${c.yt}.is_frozen`]: false,
@@ -110,6 +111,15 @@ describe("fetchMarketState", () => {
     expect(calls.find((x) => x.key === `${c.sy}.balance_of`)?.args).toEqual([{ type: "address", value: c.manager }])
   })
 
+  it("a v1 oracle (no is_available) reads as unavailable, never a crash (R4-2)", async () => {
+    const table = healthy()
+    table[`${c.oracle}.is_available`] = new Error("HostError: no function is_available")
+    table[`${c.oracle}.max_stale_seconds`] = new Error("HostError: no function max_stale_seconds")
+    const s = await fetchMarketState(fakeReader(table), manifest, market.marketId)
+    expect(s.oracleFresh.status).toBe("unavailable")
+    expect(s.oracleMaxStaleSeconds.status).toBe("unavailable")
+  })
+
   it("an unreadable manager SY balance is unavailable, not zero", async () => {
     const table = healthy()
     table[`${c.sy}.balance_of`] = new Error("rpc 429")
@@ -117,10 +127,12 @@ describe("fetchMarketState", () => {
     expect(s.managerSy).toEqual({ status: "unavailable", error: "rpc 429" })
   })
 
-  it("passes is_fresh(3600) as u64 and the underlying SAC as the risk-control asset key", async () => {
+  it("calls is_available with no arguments, reads max_stale_seconds, and the underlying SAC is the risk-control asset key", async () => {
     const calls: Calls = []
-    await fetchMarketState(fakeReader(healthy(), calls), manifest, market.marketId)
-    expect(calls.find((x) => x.key.endsWith(".is_fresh"))?.args).toEqual([{ type: "u64", value: 3600 }])
+    const s = await fetchMarketState(fakeReader(healthy(), calls), manifest, market.marketId)
+    expect(calls.find((x) => x.key.endsWith(".is_available"))?.args ?? []).toEqual([])
+    expect(calls.some((x) => x.key.endsWith(".is_fresh"))).toBe(false)
+    expect(s.oracleMaxStaleSeconds).toMatchObject({ status: "live", value: 3600n })
     for (const fn of ["get_asset_limit", "get_asset_volume"]) {
       expect(calls.find((x) => x.key === `${manifest.shared.riskControl}.${fn}`)?.args).toEqual([
         { type: "address", value: sac },

@@ -2,9 +2,6 @@ import { allLive, readLive, toBigint, toBool, unavailable, type ContractReader }
 import { getMarket } from "./manifest"
 import type { Live, Manifest, Market } from "./types"
 
-/** The oracle freshness window the protocol hardcodes on-chain (seconds). */
-export const ORACLE_MAX_STALE_SECONDS = 3600
-
 export type PoolStateView = {
   ptReserve: bigint
   syReserve: bigint
@@ -20,7 +17,10 @@ export type Topology = { matches: boolean; mismatches: string[] }
 export type MarketState = {
   oracleRate: Live<bigint>
   oracleTimestamp: Live<bigint>
+  /** `is_available()` (R4-2): false or unreadable on a v1 oracle, which has no such function. */
   oracleFresh: Live<boolean>
+  /** `max_stale_seconds()`: the freshness window the oracle was initialized with (Task 7). */
+  oracleMaxStaleSeconds: Live<bigint>
   maturity: Live<bigint>
   /** `null` while the market is unsettled (`Option::None`). */
   settledRate: Live<bigint | null>
@@ -164,17 +164,15 @@ export async function fetchMarketState(reader: ContractReader, m: Manifest, mark
   )
 
   const [
-    oracleRate, oracleTimestamp, oracleFresh, settledRate, ytFrozen, ytAccruedIndex, totalPt, totalYt,
+    oracleRate, oracleTimestamp, oracleFresh, oracleMaxStaleSeconds, settledRate, ytFrozen, ytAccruedIndex, totalPt, totalYt,
     lpTotalSupply, tokenizationBps, ytBps, swapTierBps, protocolShareBps, exchangeRate, syPaused, poolPaused,
     riskPaused, cbLimit, cbVolume, assetLimit, assetVolume, poolState, seeded, swapFeeRate, info, matured, managerSy,
   ] = await Promise.all([
     big(c.oracle, "get_reference_value"),
     big(c.oracle, "get_reference_timestamp"),
-    readLive<unknown, boolean>(
-      reader,
-      { contractId: c.oracle, functionName: "is_fresh", args: [{ type: "u64", value: ORACLE_MAX_STALE_SECONDS }] },
-      toBool,
-    ),
+    // R4-2: a v1 oracle has no is_available, the read fails and the oracle counts as unavailable.
+    bool(c.oracle, "is_available"),
+    big(c.oracle, "max_stale_seconds"),
     readLive<unknown, bigint | null>(reader, { contractId: c.manager, functionName: "settled_rate" }, parseSettledRate),
     bool(c.yt, "is_frozen"),
     big(c.yt, "accrued_yield_index"),
@@ -205,6 +203,7 @@ export async function fetchMarketState(reader: ContractReader, m: Manifest, mark
     oracleRate,
     oracleTimestamp,
     oracleFresh,
+    oracleMaxStaleSeconds,
     maturity: matured,
     settledRate,
     ytFrozen,

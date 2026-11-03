@@ -13,6 +13,7 @@ export function marketState(over: Partial<MarketState> = {}): MarketState {
     oracleRate: live(10_500_000n),
     oracleTimestamp: live(BigInt(LEDGER_TIME - 600)),
     oracleFresh: live(true),
+    oracleMaxStaleSeconds: live(3600n),
     maturity: live(MATURITY),
     settledRate: live<bigint | null>(null),
     ytFrozen: live(false),

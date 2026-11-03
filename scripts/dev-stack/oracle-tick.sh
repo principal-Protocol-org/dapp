@@ -6,7 +6,7 @@
 #   --apy <percent>: yearly growth, default 5. New rate = current x (1 + apy/100)^(elapsed/31536000),
 #   elapsed = seconds since the oracle's last reference timestamp, rounded down, never below current.
 # The timestamp is the latest ledger close time (the oracle rejects future timestamps), so run it
-# at least every hour (the freshness window is 3600 s); every 30 minutes is comfortable.
+# at least every hour (the freshness window, max_stale_seconds, is 3600 s); every 30 minutes is comfortable.
 set -euo pipefail
 # shellcheck source=common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
@@ -54,6 +54,11 @@ else
 fi
 [ "$NEW" -ge "$CURRENT" ] || die "the oracle never decreases: new $NEW < current $CURRENT"
 
-invoke "$ORACLE_KEY" "$ORACLE" set_reference_value --caller "$ORACLE_ADMIN" --value "$NEW" --timestamp "$TS" >/dev/null ||
+# v2 (R4-8): the source id is the oracle's primary source; Option<BytesN<32>> prints as a JSON hex string.
+SOURCE="$(invoke "$ORACLE_KEY" "$ORACLE" get_primary_source | tr -d '"[:space:]')"
+[[ "$SOURCE" =~ ^[0-9a-f]{64}$ ]] || die "the oracle has no primary source (not initialized with set_sources, or a v1 oracle)"
+RESULT="$(invoke "$ORACLE_KEY" "$ORACLE" set_reference_value --caller "$ORACLE_ADMIN" --source "$SOURCE" --value "$NEW" --timestamp "$TS" | tr -d '"[:space:]')" ||
   die "set_reference_value failed (a second tick within the same ledger second is rejected as TimestampTooOld)"
+# A rejection is a successful transaction that returns false.
+[ "$RESULT" = "true" ] || die "the oracle rejected the value (returned '$RESULT'): $(invoke "$ORACLE_KEY" "$ORACLE" last_rejection)"
 echo "oracle rate $CURRENT -> $NEW at ledger time $TS"

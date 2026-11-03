@@ -22,7 +22,9 @@ export type ScArg =
   | { type: "u64"; value: string | number | bigint }
   | { type: "bool"; value: boolean }
   | { type: "symbol"; value: string }
-  | { type: "string"; value: string };
+  | { type: "string"; value: string }
+  /** `BytesN` / `Bytes` from hex (R4-9: the oracle source id). */
+  | { type: "bytes"; value: string };
 
 export type ContractInvocation = {
   contractId: string;
@@ -94,6 +96,7 @@ export function createRpcServer(rpcUrl: string) {
 
 export function scArgToVal(arg: ScArg): xdr.ScVal {
   if (arg.type === "string") return nativeToScVal(arg.value);
+  if (arg.type === "bytes") return xdr.ScVal.scvBytes(Buffer.from(arg.value, "hex"));
   return nativeToScVal(arg.value, { type: arg.type });
 }
 

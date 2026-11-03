@@ -80,7 +80,7 @@ const ADDS: readonly ActionId[] = ["add_liquidity", "add_liquidity_sy"]
 
 /** Closed at maturity: `assert_not_mature` (manager) and `assert_active` (pool, :1032-1037). */
 const BEFORE_MATURITY_ONLY = new Set<ActionId>(["mint", ...TRADES, ...ADDS, "recombine"])
-/** Need `is_fresh(3600)` always. Claim and redeem need it only until settlement (see `oracleGate`). */
+/** Need `is_available()` (a fresh, accepted price) always. Claim and redeem need it only until settlement (see `oracleGate`). */
 const NEEDS_FRESH_ORACLE = new Set<ActionId>(["mint", ...TRADES, "add_liquidity_sy", "recombine"])
 /** Go through the pool's reserves: `assert_seeded` panics on an empty pool (`market_pool:930-935`). */
 const USES_POOL = new Set<ActionId>([...TRADES, ...ADDS])

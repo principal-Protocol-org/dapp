@@ -137,9 +137,15 @@ log "1. OracleAdapter"
 deploy_contract oracle principal_oracle_adapter.wasm
 ORACLE="$LAST_ID"
 # The oracle admin is its own key on testnet: it can only push a value (the keeper's job).
-adm "$ORACLE" initialize --admin "$ORACLE_ADMIN"
-# Genesis value 1.0 (1e7). YTToken.initialize needs a fresh value; the timestamp is ledger time.
-invoke "$ORACLE_KEY" "$ORACLE" set_reference_value --caller "$ORACLE_ADMIN" --value 10000000 --timestamp "$(ledger_close_time)" >/dev/null
+# v2 (R4-9): 1 h freshness window, 10 % deviation bound, one primary source, no fallback.
+adm "$ORACLE" initialize --admin "$ORACLE_ADMIN" --max_stale_seconds 3600 --max_deviation_bps 1000
+ORACLE_SOURCE="$(printf '%s' "principal-oracle-source:${NETWORK}:${ASSET_CODE}:app-team:keeper" | shasum -a 256 | cut -d' ' -f1)"
+[[ "$ORACLE_SOURCE" =~ ^[0-9a-f]{64}$ ]] || die "could not derive the oracle source id"
+invoke "$ORACLE_KEY" "$ORACLE" set_sources --caller "$ORACLE_ADMIN" --primary_source "$ORACLE_SOURCE" >/dev/null ||
+  die "oracle set_sources failed"
+# Genesis value 1.0 (1e7). YTToken.initialize needs an available value; the timestamp is ledger time.
+GENESIS="$(invoke "$ORACLE_KEY" "$ORACLE" set_reference_value --caller "$ORACLE_ADMIN" --source "$ORACLE_SOURCE" --value 10000000 --timestamp "$(ledger_close_time)" | tr -d '"[:space:]')"
+[ "$GENESIS" = "true" ] || die "the oracle rejected the genesis value (returned '$GENESIS'): $(invoke "$ORACLE_KEY" "$ORACLE" last_rejection)"
 
 log "2. Permissioning"
 deploy_contract permissioning principal_permissioning.wasm

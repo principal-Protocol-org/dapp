@@ -2,7 +2,7 @@ import "server-only"
 
 /**
  * The oracle keeper behind `/api/cron/oracle`, for the app's own test deployments (testnet, local).
- * The OracleAdapter's value is fresh for 3600 s and only its admin may push one, so a schedule calls
+ * The OracleAdapter's value is fresh for `max_stale_seconds` (3600) and only its admin may push one, so a schedule calls
  * this every 30 minutes with `ORACLE_ADMIN_SECRET`, a key that is the oracle's admin and nothing else
  * (the protocol admin key never reaches the server). It pushes the value grown at
  * `ORACLE_APY_PERCENT` a year for the time elapsed, stamped with the ledger time, as
@@ -47,15 +47,15 @@ export function nextReferenceValue(params: {
   return grown > current ? grown : current
 }
 
-type OracleRead = "get_admin" | "get_reference_value" | "get_reference_timestamp"
+type OracleRead = "get_admin" | "get_reference_value" | "get_reference_timestamp" | "get_primary_source" | "last_rejection"
 
 /** What the keeper needs from the network: reads of the oracle, the ledger clock, and one signed call. */
 export type OracleChain = {
   read(fn: OracleRead): Promise<unknown>
   /** The latest ledger's close time, unix seconds. */
   ledgerTime(): Promise<number>
-  /** Sends `invocation` signed by `signer` and waits for success; returns the transaction hash. */
-  send(signer: Keypair, invocation: ContractInvocation): Promise<string>
+  /** Sends `invocation` signed by `signer` and waits for success; returns the hash and the call's return value. */
+  send(signer: Keypair, invocation: ContractInvocation): Promise<{ hash: string; returnValue: unknown }>
 }
 
 /** The RPC calls the real chain makes; `rpc.Server` satisfies it, tests inject a fake. */
@@ -97,7 +97,7 @@ export function createOracleChain(manifest: Manifest, deps: { server?: OracleRpc
       const polled = await pollTransactionStatus({ rpcUrl, hash, server, attempts: 30, intervalMs: 1_000 })
       if (polled.status === "FAILED") throw new Error(`the oracle update failed on-chain (${hash})`)
       if (polled.status !== "SUCCESS") throw new Error(`the oracle update was not confirmed in time (${hash})`)
-      return hash
+      return { hash, returnValue: polled.returnValue }
     },
   }
 }
@@ -105,6 +105,25 @@ export function createOracleChain(manifest: Manifest, deps: { server?: OracleRpc
 export type OracleTick =
   | { status: "unchanged"; value: string; timestamp: number }
   | { status: "updated"; value: string; timestamp: number; hash: string }
+  /** The oracle refused the value (R4-8): the transaction succeeded, `set_reference_value` returned false. */
+  | { status: "rejected"; value: string; timestamp: number; hash: string; reason: string }
+
+/** The source id (R4-8) from `get_primary_source()`: `Option<BytesN<32>>` decoded as bytes, or null. */
+function sourceHex(value: unknown): string | null {
+  if (value instanceof Uint8Array) return Buffer.from(value).toString("hex")
+  if (typeof value === "string" && /^[0-9a-f]{64}$/i.test(value)) return value.toLowerCase()
+  return null
+}
+
+/** Why the oracle refused: `last_rejection().reason`, or "unknown" when it cannot be read. */
+async function rejectionReason(chain: OracleChain): Promise<string> {
+  try {
+    const rejection = (await chain.read("last_rejection")) as { reason?: unknown } | null
+    return typeof rejection?.reason === "string" ? rejection.reason : "unknown"
+  } catch {
+    return "unknown"
+  }
+}
 
 /** One keeper run: checks the key is the oracle admin, then pushes the next value unless the clock has not moved. */
 export async function tickOracle(deps: { manifest: Manifest; secret: string | undefined; chain?: OracleChain }): Promise<OracleTick> {
@@ -129,14 +148,20 @@ export async function tickOracle(deps: { manifest: Manifest; secret: string | un
   const next = nextReferenceValue({ current, lastTimestamp, now })
   if (next === null) return { status: "unchanged", value: current.toString(), timestamp: lastTimestamp }
 
-  const hash = await chain.send(keeper, {
+  const source = sourceHex(await chain.read("get_primary_source"))
+  if (!source) throw new OracleKeeperConfigError("the oracle has no primary source (set_sources was never called, or it is a v1 oracle).")
+
+  const { hash, returnValue } = await chain.send(keeper, {
     contractId: manifest.shared.oracle,
     functionName: "set_reference_value",
     args: [
       { type: "address", value: keeper.publicKey() },
+      { type: "bytes", value: source },
       { type: "i128", value: next.toString() },
       { type: "u64", value: String(now) },
     ],
   })
+  // A rejection is a successful transaction that returned false: never report it as an update (R4-8).
+  if (returnValue !== true) return { status: "rejected", value: next.toString(), timestamp: now, hash, reason: await rejectionReason(chain) }
   return { status: "updated", value: next.toString(), timestamp: now, hash }
 }

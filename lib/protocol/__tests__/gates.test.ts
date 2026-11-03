@@ -51,6 +51,7 @@ function healthyMarket(): MarketState {
     oracleRate: live(RATE),
     oracleTimestamp: live(BigInt(BEFORE)),
     oracleFresh: live(true),
+    oracleMaxStaleSeconds: live(3600n),
     maturity: live(BigInt(MATURITY)),
     settledRate: live(null),
     ytFrozen: live(false),

@@ -63,6 +63,13 @@ describe("GET and POST /api/cron/oracle", () => {
     expect(mocks.tickOracle).toHaveBeenCalledWith(expect.objectContaining({ secret: "S-not-read-by-these-tests" }))
   })
 
+  it("500 rejected for a rejected tick, with the reason: a rejection is a successful transaction (R4-8)", async () => {
+    mocks.tickOracle.mockResolvedValue({ status: "rejected", value: "1", timestamp: 2_800, hash: "ab".repeat(32), reason: "deviate" })
+    const res = await call({ authorization: `Bearer ${SECRET}` })
+    expect(res.status).toBe(500)
+    expect(await res.json()).toMatchObject({ status: "rejected", reason: "deviate" })
+  })
+
   it("503 not_configured when the keeper cannot run (no key, wrong key, mainnet)", async () => {
     mocks.tickOracle.mockRejectedValue(new mocks.OracleKeeperConfigError("ORACLE_ADMIN_SECRET is not set."))
     const res = await call({ authorization: `Bearer ${SECRET}` })

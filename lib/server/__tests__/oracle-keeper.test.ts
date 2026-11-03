@@ -25,14 +25,33 @@ const keeper = Keypair.random()
 const YEAR = 31_536_000
 
 /** A chain whose reads answer from `state` and whose sends are recorded. */
-function fakeChain(state: { admin: string; value: bigint; timestamp: bigint; now: number }) {
+const SOURCE = "cd".repeat(32)
+function fakeChain(state: {
+  admin: string
+  value: bigint
+  timestamp: bigint
+  now: number
+  source?: unknown
+  returned?: unknown
+  rejection?: unknown
+}) {
   const sent: { signer: string; invocation: ContractInvocation }[] = []
   const chain: OracleChain = {
-    read: vi.fn(async (fn) => (fn === "get_admin" ? state.admin : fn === "get_reference_value" ? state.value : state.timestamp)),
+    read: vi.fn(async (fn) =>
+      fn === "get_admin"
+        ? state.admin
+        : fn === "get_reference_value"
+          ? state.value
+          : fn === "get_primary_source"
+            ? ("source" in state ? state.source : Buffer.from(SOURCE, "hex"))
+            : fn === "last_rejection"
+              ? (state.rejection ?? null)
+              : state.timestamp,
+    ),
     ledgerTime: vi.fn(async () => state.now),
     send: vi.fn(async (signer, invocation) => {
       sent.push({ signer: signer.publicKey(), invocation })
-      return "ab".repeat(32)
+      return { hash: "ab".repeat(32), returnValue: "returned" in state ? state.returned : true }
     }),
   }
   return { chain, sent }
@@ -70,12 +89,35 @@ describe("tickOracle", () => {
           functionName: "set_reference_value",
           args: [
             { type: "address", value: keeper.publicKey() },
+            { type: "bytes", value: SOURCE },
             { type: "i128", value: "10000027" },
             { type: "u64", value: "2800" },
           ],
         },
       },
     ])
+  })
+
+  it("reports a rejected tick with the contract's reason, never as updated (R4-8)", async () => {
+    const { chain } = fakeChain({ ...base, returned: false, rejection: { reason: "deviate", timestamp: 2_800n, value: 99n } })
+    expect(await tickOracle({ manifest, secret: keeper.secret(), chain })).toEqual({
+      status: "rejected",
+      value: "10000027",
+      timestamp: 2_800,
+      hash: "ab".repeat(32),
+      reason: "deviate",
+    })
+  })
+
+  it("a rejected tick without a readable reason is still rejected", async () => {
+    const { chain } = fakeChain({ ...base, returned: false })
+    expect(await tickOracle({ manifest, secret: keeper.secret(), chain })).toMatchObject({ status: "rejected", reason: "unknown" })
+  })
+
+  it("refuses with a config error, sending nothing, when the oracle has no primary source", async () => {
+    const { chain, sent } = fakeChain({ ...base, source: null })
+    await expect(tickOracle({ manifest, secret: keeper.secret(), chain })).rejects.toThrow(OracleKeeperConfigError)
+    expect(sent).toEqual([])
   })
 
   it("sends nothing when the ledger clock has not moved", async () => {
@@ -134,6 +176,7 @@ describe("the RPC oracle chain", () => {
     functionName: "set_reference_value",
     args: [
       { type: "address", value: keeper.publicKey() },
+      { type: "bytes", value: SOURCE },
       { type: "i128", value: "10000027" },
       { type: "u64", value: "2800" },
     ],
@@ -149,7 +192,7 @@ describe("the RPC oracle chain", () => {
   it("sends the call it built, prepared by RPC, signed by the keeper, and waits for success", async () => {
     const { server, sent } = fakeRpc()
     const chain = createOracleChain(manifest, { server })
-    const hash = await chain.send(keeper, invocation)
+    const { hash } = await chain.send(keeper, invocation)
     expect(server.prepareTransaction).toHaveBeenCalledTimes(1)
     expect(sent).toHaveLength(1)
     const [tx] = sent
@@ -170,7 +213,7 @@ describe("the RPC oracle chain", () => {
         source: keeper.publicKey(),
         sequence: "70",
         networkPassphrase: manifest.networkPassphrase,
-        invocation: { ...invocation, args: [invocation.args[0], { type: "i128", value: "99999999" }, invocation.args[2]] },
+        invocation: { ...invocation, args: [invocation.args[0], invocation.args[1], { type: "i128", value: "99999999" }, invocation.args[3]] },
       }),
     )
     const chain = createOracleChain(manifest, { server })
