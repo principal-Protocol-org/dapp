@@ -2,7 +2,7 @@ import "server-only"
 
 /**
  * `GET` or `POST /api/cron/oracle`: the oracle keeper for the app's own test deployments, called
- * every 30 minutes by a scheduler (the OracleAdapter's value is fresh for 3600 s). The same callers
+ * every 30 minutes by a scheduler (the OracleAdapter's value is fresh for its max_stale_seconds). The same callers
  * as the recorder may run it (`cronAuthorized`); any other caller gets 401 and nothing runs. It
  * answers the tick (`unchanged` or `updated`), 500 with the reason for a `rejected` one (the
  * oracle refused the value; the transaction itself succeeded, R4-8), 503 `not_configured` when the keeper cannot run (no

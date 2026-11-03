@@ -14,7 +14,7 @@
 import type { AccountState } from "./account-state"
 import type { ActionId, ActionInput } from "./actions"
 import type { ComplianceItem } from "./compliance"
-import { formatAmount } from "./format"
+import { formatAmount, formatWindow } from "./format"
 import type { MarketState } from "./market-state"
 import { SCALE } from "./math"
 import type { SimulationOutcome } from "./stellar"
@@ -430,9 +430,11 @@ function oracleGate(input: ActionInput, ctx: GateContext, g: Gates): void {
   if (!needsFresh) return
   const fresh = g.need(m.oracleFresh, "the oracle's freshness")
   if (fresh === false) {
+    const win = m.oracleMaxStaleSeconds
+    const span = win.status === "live" ? `in the last ${formatWindow(win.value)}` : "recently"
     g.block(
       "oracle",
-      `The oracle price is stale: it has not been updated in the last hour (the protocol accepts prices up to 3600 s old).${why} Wait for the next oracle update, then try again.`,
+      `The oracle price is stale: it has not been updated ${span}.${why} Wait for the next oracle update, then try again.`,
     )
   }
 }

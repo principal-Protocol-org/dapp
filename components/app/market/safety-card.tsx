@@ -4,7 +4,7 @@ import { useAccountState } from "@/hooks/use-account-state"
 import { useLedgerClock } from "@/hooks/use-ledger-clock"
 import { useMarketState } from "@/hooks/use-market-state"
 import { useWallet } from "@/hooks/use-wallet"
-import { formatAmount } from "@/lib/protocol/format"
+import { formatAmount, formatBps, formatRate, formatWindow, shorten } from "@/lib/protocol/format"
 import { getMarket } from "@/lib/protocol/manifest"
 import { useManifest } from "@/components/app/manifest-provider"
 import type { Live } from "@/lib/protocol/types"
@@ -19,6 +19,13 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
       <dd className="font-mono text-sm tabular-nums">{children}</dd>
     </div>
   )
+}
+
+const REJECTION_WORDS: Record<string, string> = {
+  deviate: "Moved more than the cap",
+  decrease: "Lower than the current value",
+  stale_ts: "Not newer than the current value",
+  fb_value: "Fallback tried to change the value",
 }
 
 const pause = (paused: boolean) => (paused ? "Paused: new actions are refused" : "Not paused")
@@ -44,10 +51,23 @@ export function SafetyContent({ marketId }: { marketId: string }) {
 
   const oracle = (): string => {
     if (!ms) return UNAVAILABLE
-    if (ms.oracleFresh.status === "unavailable") return UNAVAILABLE
-    const fresh = ms.oracleFresh.value ? "Fresh (updated within the last hour)" : "Stale (not updated within the last hour)"
+    if (ms.oracleFresh.status === "unavailable" || ms.oracleMaxStaleSeconds.status === "unavailable") return UNAVAILABLE
+    const window = formatWindow(ms.oracleMaxStaleSeconds.value)
+    const fresh = ms.oracleFresh.value ? `Fresh (updated within the last ${window})` : `Stale (not updated within the last ${window})`
     if (ledgerTime === null || ms.oracleTimestamp.status === "unavailable") return fresh
     return `${fresh}, updated ${formatDuration(ledgerTime - Number(ms.oracleTimestamp.value))} ago`
+  }
+
+  const source = (v: string | null) => (v === null ? "None" : shorten(v))
+
+  const lastRejection = (): string => {
+    if (!ms) return UNAVAILABLE
+    return showLive(ms.oracleLastRejection, (r) => {
+      if (r === null) return "None"
+      const why = REJECTION_WORDS[r.reason] ?? r.reason
+      const when = ledgerTime === null ? null : `${formatDuration(ledgerTime - Number(r.timestamp))} ago`
+      return `${why} (value ${formatRate(r.value)}${when ? `, ${when}` : ""})`
+    })
   }
 
   const depositCap = (): string => {
@@ -66,6 +86,10 @@ export function SafetyContent({ marketId }: { marketId: string }) {
       <Row label="Market pool">{showLive(ms.poolPaused, pause)}</Row>
       <Row label="Risk control">{showLive(ms.riskPaused, pause)}</Row>
       <Row label="Oracle">{oracle()}</Row>
+      <Row label="Oracle deviation cap">{showLive(ms.oracleMaxDeviationBps, formatBps)}</Row>
+      <Row label="Oracle primary source">{showLive(ms.oraclePrimarySource, source)}</Row>
+      <Row label="Oracle fallback source">{showLive(ms.oracleFallbackSource, source)}</Row>
+      <Row label="Oracle last rejected update">{lastRejection()}</Row>
       <Row label="Circuit breaker, protocol-wide">{roomLeft(ms.cb.limit, ms.cb.volume, amount)}</Row>
       <Row label={`Circuit breaker, ${market.underlying.code}`}>
         {roomLeft(ms.cb.assetLimit, ms.cb.assetVolume, amount)}

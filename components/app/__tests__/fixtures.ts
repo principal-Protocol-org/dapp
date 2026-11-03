@@ -1,5 +1,5 @@
 import type { AccountState } from "@/lib/protocol/account-state"
-import type { MarketState } from "@/lib/protocol/market-state"
+import type { MarketState, OracleRejection } from "@/lib/protocol/market-state"
 import type { Live } from "@/lib/protocol/types"
 
 export const live = <T,>(value: T): Live<T> => ({ status: "live", value, ledger: 100 })
@@ -14,6 +14,10 @@ export function marketState(over: Partial<MarketState> = {}): MarketState {
     oracleTimestamp: live(BigInt(LEDGER_TIME - 600)),
     oracleFresh: live(true),
     oracleMaxStaleSeconds: live(3600n),
+    oracleMaxDeviationBps: live(1000n),
+    oraclePrimarySource: live<string | null>("ab".repeat(32)),
+    oracleFallbackSource: live<string | null>(null),
+    oracleLastRejection: live<OracleRejection | null>(null),
     maturity: live(MATURITY),
     settledRate: live<bigint | null>(null),
     ytFrozen: live(false),

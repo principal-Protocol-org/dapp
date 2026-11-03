@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react"
+import { cleanup, render, screen, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import type { AccountState } from "@/lib/protocol/account-state"
@@ -430,7 +430,7 @@ describe("SafetyContent", () => {
     wrap(<SafetyContent marketId="m1" />)
     expect(screen.getByText("SY wrapper").nextSibling?.textContent).toBe("Not paused")
     expect(screen.getByText("Risk control").nextSibling?.textContent).toMatch(/^Paused/)
-    expect(screen.getByText("Oracle").nextSibling?.textContent).toBe("Fresh (updated within the last hour), updated 10m 0s ago")
+    expect(screen.getByText("Oracle").nextSibling?.textContent).toBe("Fresh (updated within the last 1 hour), updated 10m 0s ago")
     expect(screen.getByText("Circuit breaker, protocol-wide").nextSibling?.textContent).toBe("75000 left of 100000")
     expect(screen.getByText("Circuit breaker, STA").nextSibling?.textContent).toBe("No limit (disabled)")
     expect(screen.getByText("Your deposit cap").nextSibling?.textContent).toMatch(/Connect a wallet/)
@@ -444,7 +444,56 @@ describe("SafetyContent", () => {
   it("says a stale oracle is stale", () => {
     mocks.ms = marketState({ oracleFresh: live(false) })
     wrap(<SafetyContent marketId="m1" />)
-    expect(screen.getByText("Oracle").nextSibling?.textContent).toBe("Stale (not updated within the last hour), updated 10m 0s ago")
+    expect(screen.getByText("Oracle").nextSibling?.textContent).toBe("Stale (not updated within the last 1 hour), updated 10m 0s ago")
+  })
+  it("uses the oracle's own window, not a fixed hour", () => {
+    mocks.ms = marketState({ oracleMaxStaleSeconds: live(1800n) })
+    wrap(<SafetyContent marketId="m1" />)
+    expect(screen.getByText("Oracle").nextSibling?.textContent).toBe("Fresh (updated within the last 30 minutes), updated 10m 0s ago")
+  })
+  it("shows the oracle policy: deviation cap, primary source, fallback and last rejection", () => {
+    mocks.ms = marketState({
+      oracleMaxDeviationBps: live(1000n),
+      oraclePrimarySource: live("ab".repeat(32)),
+      oracleFallbackSource: live<string | null>(null),
+      oracleLastRejection: live({ reason: "deviate", value: 12_000_000n, timestamp: BigInt(LEDGER_TIME - 120) }),
+    })
+    wrap(<SafetyContent marketId="m1" />)
+    const row = (l: string) => screen.getByText(l).nextSibling?.textContent
+    expect(row("Oracle deviation cap")).toBe("10.00%")
+    expect(row("Oracle primary source")).toBe("ababab...ababab")
+    expect(row("Oracle fallback source")).toBe("None")
+    expect(row("Oracle last rejected update")).toBe("Moved more than the cap (value 1.2000, 2m 0s ago)")
+  })
+  it("says none when no update was ever rejected, and words every reason", () => {
+    mocks.ms = marketState()
+    wrap(<SafetyContent marketId="m1" />)
+    expect(screen.getByText("Oracle last rejected update").nextSibling?.textContent).toBe("None")
+    cleanup()
+    const words: Record<string, string> = {
+      decrease: "Lower than the current value",
+      stale_ts: "Not newer than the current value",
+      fb_value: "Fallback tried to change the value",
+      other: "other",
+    }
+    for (const [reason, text] of Object.entries(words)) {
+      mocks.ms = marketState({ oracleLastRejection: live({ reason, value: 10_000_000n, timestamp: BigInt(LEDGER_TIME - 5) }) })
+      wrap(<SafetyContent marketId="m1" />)
+      expect(screen.getByText("Oracle last rejected update").nextSibling?.textContent).toMatch(new RegExp(`^${text}`))
+      cleanup()
+    }
+  })
+  it("shows Unavailable for each unreadable oracle policy field", () => {
+    mocks.ms = marketState({ oracleMaxDeviationBps: down(), oraclePrimarySource: down(), oracleFallbackSource: down(), oracleLastRejection: down() })
+    wrap(<SafetyContent marketId="m1" />)
+    for (const l of ["Oracle deviation cap", "Oracle primary source", "Oracle fallback source", "Oracle last rejected update"]) {
+      expect(screen.getByText(l).nextSibling?.textContent).toBe("Unavailable")
+    }
+  })
+  it("shows Unavailable for the oracle row when its window cannot be read", () => {
+    mocks.ms = marketState({ oracleMaxStaleSeconds: down() })
+    wrap(<SafetyContent marketId="m1" />)
+    expect(screen.getByText("Oracle").nextSibling?.textContent).toBe("Unavailable")
   })
   it("hides old values after a failed refresh", () => {
     mocks.stale = true

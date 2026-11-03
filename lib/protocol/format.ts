@@ -140,3 +140,15 @@ export function formatBps(bps: bigint): string {
 export function formatFeeRate(rate: bigint): string {
   return percentFrom((rate * 100n * 10_000n) / 1_000_000_000_000n, 4);
 }
+
+/** A duration in plain words: 3600n -> "1 hour", 5400n -> "1 hour 30 minutes". Display only. */
+export function formatWindow(totalSeconds: bigint): string {
+  let rest = totalSeconds < 0n ? 0n : totalSeconds;
+  const parts: string[] = [];
+  for (const [unit, size] of [["day", 86400n], ["hour", 3600n], ["minute", 60n], ["second", 1n]] as const) {
+    const n = rest / size;
+    rest %= size;
+    if (n > 0n) parts.push(`${n} ${unit}${n === 1n ? "" : "s"}`);
+  }
+  return parts.length > 0 ? parts.join(" ") : "0 seconds";
+}

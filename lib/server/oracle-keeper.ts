@@ -2,7 +2,7 @@ import "server-only"
 
 /**
  * The oracle keeper behind `/api/cron/oracle`, for the app's own test deployments (testnet, local).
- * The OracleAdapter's value is fresh for `max_stale_seconds` (3600) and only its admin may push one, so a schedule calls
+ * The OracleAdapter's value is fresh for `max_stale_seconds` (read from the contract) and only its admin may push one, so a schedule calls
  * this every 30 minutes with `ORACLE_ADMIN_SECRET`, a key that is the oracle's admin and nothing else
  * (the protocol admin key never reaches the server). It pushes the value grown at
  * `ORACLE_APY_PERCENT` a year for the time elapsed, stamped with the ledger time, as

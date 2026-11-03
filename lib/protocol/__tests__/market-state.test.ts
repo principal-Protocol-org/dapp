@@ -43,6 +43,10 @@ function healthy(): Record<string, Handler> {
     [`${c.oracle}.get_reference_timestamp`]: 1_790_000_000n,
     [`${c.oracle}.is_available`]: true,
     [`${c.oracle}.max_stale_seconds`]: 3600n,
+    [`${c.oracle}.max_deviation_bps`]: 1000,
+    [`${c.oracle}.get_primary_source`]: new Uint8Array(32).fill(0xab),
+    [`${c.oracle}.get_fallback_source`]: null,
+    [`${c.oracle}.last_rejection`]: null,
     [`${c.manager}.maturity`]: BigInt(market.maturity),
     [`${c.manager}.settled_rate`]: null,
     [`${c.yt}.is_frozen`]: false,
@@ -118,6 +122,44 @@ describe("fetchMarketState", () => {
     const s = await fetchMarketState(fakeReader(table), manifest, market.marketId)
     expect(s.oracleFresh.status).toBe("unavailable")
     expect(s.oracleMaxStaleSeconds.status).toBe("unavailable")
+  })
+
+  it("reads the oracle policy: deviation cap, sources and the last rejection (Task 7)", async () => {
+    const table = healthy()
+    table[`${c.oracle}.last_rejection`] = { reason: "deviate", value: 12_000_000n, timestamp: 1_790_000_100n }
+    table[`${c.oracle}.get_fallback_source`] = new Uint8Array(32).fill(0x01)
+    const s = await fetchMarketState(fakeReader(table), manifest, market.marketId)
+    expect(s.oracleMaxDeviationBps).toMatchObject({ status: "live", value: 1000n })
+    expect(s.oraclePrimarySource).toMatchObject({ status: "live", value: "ab".repeat(32) })
+    expect(s.oracleFallbackSource).toMatchObject({ status: "live", value: "01".repeat(32) })
+    expect(s.oracleLastRejection).toMatchObject({
+      status: "live",
+      value: { reason: "deviate", value: 12_000_000n, timestamp: 1_790_000_100n },
+    })
+  })
+
+  it("no fallback and no rejection read as live null; a v1 oracle reads each as unavailable", async () => {
+    const ok = await fetchMarketState(fakeReader(healthy()), manifest, market.marketId)
+    expect(ok.oracleFallbackSource).toMatchObject({ status: "live", value: null })
+    expect(ok.oracleLastRejection).toMatchObject({ status: "live", value: null })
+    const table = healthy()
+    for (const fn of ["max_deviation_bps", "get_primary_source", "get_fallback_source", "last_rejection"]) {
+      table[`${c.oracle}.${fn}`] = new Error(`HostError: no function ${fn}`)
+    }
+    const v1 = await fetchMarketState(fakeReader(table), manifest, market.marketId)
+    expect(v1.oracleMaxDeviationBps.status).toBe("unavailable")
+    expect(v1.oraclePrimarySource.status).toBe("unavailable")
+    expect(v1.oracleFallbackSource.status).toBe("unavailable")
+    expect(v1.oracleLastRejection.status).toBe("unavailable")
+  })
+
+  it("a malformed source or rejection is unavailable, not a guess", async () => {
+    const table = healthy()
+    table[`${c.oracle}.get_primary_source`] = "not bytes"
+    table[`${c.oracle}.last_rejection`] = { reason: 5, value: 1n, timestamp: 1n }
+    const s = await fetchMarketState(fakeReader(table), manifest, market.marketId)
+    expect(s.oraclePrimarySource.status).toBe("unavailable")
+    expect(s.oracleLastRejection.status).toBe("unavailable")
   })
 
   it("an unreadable manager SY balance is unavailable, not zero", async () => {

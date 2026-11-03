@@ -142,3 +142,15 @@ describe("formatGainLoss (an amount gained or lost, against the reader)", () => 
     expect(formatGainLoss(-12_345_678_900_000n, 7, 2, { group: true })).toBe("-1,234,567.89");
   });
 });
+
+describe("formatWindow", () => {
+  it("words a duration in whole units", async () => {
+    const { formatWindow } = await import("../format")
+    expect(formatWindow(3600n)).toBe("1 hour")
+    expect(formatWindow(1800n)).toBe("30 minutes")
+    expect(formatWindow(5400n)).toBe("1 hour 30 minutes")
+    expect(formatWindow(90n)).toBe("1 minute 30 seconds")
+    expect(formatWindow(172800n)).toBe("2 days")
+    expect(formatWindow(0n)).toBe("0 seconds")
+  })
+})

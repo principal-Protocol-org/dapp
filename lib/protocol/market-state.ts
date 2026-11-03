@@ -1,5 +1,6 @@
 import { allLive, readLive, toBigint, toBool, unavailable, type ContractReader } from "./reader"
 import { getMarket } from "./manifest"
+import { bytesToHex } from "./bytes"
 import type { Live, Manifest, Market } from "./types"
 
 export type PoolStateView = {
@@ -12,6 +13,8 @@ export type PoolStateView = {
   secondsToMaturity: bigint
 }
 
+export type OracleRejection = { reason: string; value: bigint; timestamp: bigint }
+
 export type Topology = { matches: boolean; mismatches: string[] }
 
 export type MarketState = {
@@ -21,6 +24,13 @@ export type MarketState = {
   oracleFresh: Live<boolean>
   /** `max_stale_seconds()`: the freshness window the oracle was initialized with (Task 7). */
   oracleMaxStaleSeconds: Live<bigint>
+  /** `max_deviation_bps()`: the largest move one update may make, in basis points (10000 = 100 %). */
+  oracleMaxDeviationBps: Live<bigint>
+  /** `get_primary_source()` as hex; `null` when none is set. Unavailable on a v1 oracle. */
+  oraclePrimarySource: Live<string | null>
+  oracleFallbackSource: Live<string | null>
+  /** `last_rejection()`: why the latest refused update was refused; `null` when none ever was. */
+  oracleLastRejection: Live<OracleRejection | null>
   maturity: Live<bigint>
   /** `null` while the market is unsettled (`Option::None`). */
   settledRate: Live<bigint | null>
@@ -76,6 +86,19 @@ function parsePoolState(raw: unknown): PoolStateView {
 function parseReserves(raw: unknown): [bigint, bigint] {
   if (!Array.isArray(raw) || raw.length !== 2) throw new Error("reserves did not return a pair")
   return [toBigint(raw[0]), toBigint(raw[1])]
+}
+
+function parseSource(raw: unknown): string | null {
+  if (raw === null || raw === undefined) return null
+  if (raw instanceof Uint8Array && raw.length === 32) return bytesToHex(raw)
+  throw new Error("source id is not 32 bytes")
+}
+
+function parseRejection(raw: unknown): OracleRejection | null {
+  if (raw === null || raw === undefined) return null
+  const o = asObject<Record<string, unknown>>(raw, "last_rejection")
+  if (typeof o.reason !== "string") throw new Error("rejection reason is not a symbol")
+  return { reason: o.reason, value: toBigint(o.value), timestamp: toBigint(o.timestamp) }
 }
 
 function parseSettledRate(raw: unknown): bigint | null {
@@ -164,7 +187,8 @@ export async function fetchMarketState(reader: ContractReader, m: Manifest, mark
   )
 
   const [
-    oracleRate, oracleTimestamp, oracleFresh, oracleMaxStaleSeconds, settledRate, ytFrozen, ytAccruedIndex, totalPt, totalYt,
+    oracleRate, oracleTimestamp, oracleFresh, oracleMaxStaleSeconds,
+    oracleMaxDeviationBps, oraclePrimarySource, oracleFallbackSource, oracleLastRejection, settledRate, ytFrozen, ytAccruedIndex, totalPt, totalYt,
     lpTotalSupply, tokenizationBps, ytBps, swapTierBps, protocolShareBps, exchangeRate, syPaused, poolPaused,
     riskPaused, cbLimit, cbVolume, assetLimit, assetVolume, poolState, seeded, swapFeeRate, info, matured, managerSy,
   ] = await Promise.all([
@@ -173,6 +197,11 @@ export async function fetchMarketState(reader: ContractReader, m: Manifest, mark
     // R4-2: a v1 oracle has no is_available, the read fails and the oracle counts as unavailable.
     bool(c.oracle, "is_available"),
     big(c.oracle, "max_stale_seconds"),
+    // Oracle v2 policy views (Task 7); a v1 oracle lacks them and each read is unavailable.
+    big(c.oracle, "max_deviation_bps"),
+    readLive<unknown, string | null>(reader, { contractId: c.oracle, functionName: "get_primary_source" }, parseSource),
+    readLive<unknown, string | null>(reader, { contractId: c.oracle, functionName: "get_fallback_source" }, parseSource),
+    readLive<unknown, OracleRejection | null>(reader, { contractId: c.oracle, functionName: "last_rejection" }, parseRejection),
     readLive<unknown, bigint | null>(reader, { contractId: c.manager, functionName: "settled_rate" }, parseSettledRate),
     bool(c.yt, "is_frozen"),
     big(c.yt, "accrued_yield_index"),
@@ -204,6 +233,10 @@ export async function fetchMarketState(reader: ContractReader, m: Manifest, mark
     oracleTimestamp,
     oracleFresh,
     oracleMaxStaleSeconds,
+    oracleMaxDeviationBps,
+    oraclePrimarySource,
+    oracleFallbackSource,
+    oracleLastRejection,
     maturity: matured,
     settledRate,
     ytFrozen,

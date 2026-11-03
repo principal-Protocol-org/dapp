@@ -7,7 +7,7 @@ import { useLedgerClock } from "@/hooks/use-ledger-clock"
 import { useMarketState } from "@/hooks/use-market-state"
 import type { HistoryData } from "@/hooks/use-history"
 import type { AccountState } from "@/lib/protocol/account-state"
-import { formatPercent, formatRate, formatUsd, formatUsdCents } from "@/lib/protocol/format"
+import { formatPercent, formatRate, formatUsd, formatUsdCents, formatWindow } from "@/lib/protocol/format"
 import { getMarket } from "@/lib/protocol/manifest"
 import { useManifest } from "@/components/app/manifest-provider"
 import type { MarketState } from "@/lib/protocol/market-state"
@@ -250,7 +250,7 @@ function OracleLine({ ms, ledgerTime }: { ms: MarketState; ledgerTime: number | 
     ms.oracleTimestamp.status === "live" && ledgerTime !== null
       ? `updated ${formatDuration(ledgerTime - Number(ms.oracleTimestamp.value))} ago`
       : null
-  const fresh = ms.oracleFresh.status === "unavailable" ? UNAVAILABLE : ms.oracleFresh.value ? "fresh" : "stale (older than 1 hour)"
+  const fresh = ms.oracleFresh.status === "unavailable" ? UNAVAILABLE : ms.oracleFresh.value ? "fresh" : ms.oracleMaxStaleSeconds.status === "live" ? `stale (older than ${formatWindow(ms.oracleMaxStaleSeconds.value)})` : "stale"
   return (
     <dl>
       <Metric label="Oracle rate">
