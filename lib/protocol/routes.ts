@@ -3,10 +3,11 @@ import { formatAmount } from "./format"
 import type { ActionOutput } from "./guards"
 
 /**
- * Route planner (spec 0002 §4). Until the Router gains USDY-denominated functions, each panel
- * action is a route: an ordered list of existing contract actions, one signature each. Plans are
- * plain serializable data (a later task persists and resumes them); amounts that depend on an
- * earlier step's real output are `AmountSource`s resolved by `resolveStep` at run time.
+ * Route planner (spec 0002 §4). Each panel action is a route: an ordered list of contract actions,
+ * one signature each. When the manifest lists the Router's USDY-denominated function for it
+ * (`SINGLE_STEP`, R4-3), the route is that one call; otherwise it is the existing actions in a row.
+ * Plans are plain serializable data (the route log persists and resumes them); amounts that depend
+ * on an earlier step's real output are `AmountSource`s resolved by `resolveStep` at run time.
  */
 
 export type RouteKind =
@@ -52,19 +53,35 @@ export type StepPlan = {
   takes: string
   /** Checked by `resolveStep`: `value` must be at least `atLeast`, else the route stops here. */
   requires?: { value: AmountSource; atLeast: AmountSource; reason: string }[]
+  /**
+   * R4-3, on the first step only: why this route was planned instead of the one-signature Router
+   * function the manifest lists (the wallet holds SY it would sweep), in plain English for the route
+   * note. Display text, like `gives` and `takes`: it changes nothing the step signs.
+   */
+  fallback?: string
 }
 
 export type RouteDisabled = { disabled: string }
 
-/** A Router function that does a whole route in one signature. */
-export type SingleStep = { fn: string; action: ActionId }
+/**
+ * A Router function that does a whole route in one signature. `sweepsSy`: it ends with
+ * `SYWrapper.withdraw_all`, so it reverts `PreexistingSyBalance` (Router error 9) when the wallet
+ * already holds SY (R4-3).
+ */
+export type SingleStep = { fn: string; action: ActionId; sweepsSy?: true }
 
 /**
- * Single-step table: route kind -> the USDY-denominated Router function replacing the route when
- * the manifest lists it. Empty today: no such function ships. Adding one later is one entry here
- * plus one `ActionId`.
+ * Single-step table (principal 97ac23e): route kind -> the USDY-denominated Router function that
+ * replaces the route when the manifest lists it (R4-3). A buy uses it when paid in USDY, a sale when
+ * received in USDY; paid or received in SY, the route is already one step or needs no Router call.
  */
-export const SINGLE_STEP: Partial<Record<RouteKind, SingleStep>> = {}
+export const SINGLE_STEP: Partial<Record<RouteKind, SingleStep>> = {
+  buy_pt: { fn: "swap_underlying_for_pt", action: "buy_pt_underlying" },
+  sell_pt: { fn: "swap_pt_for_underlying", action: "sell_pt_underlying", sweepsSy: true },
+  buy_yt: { fn: "swap_underlying_for_yt", action: "buy_yt_underlying", sweepsSy: true },
+  sell_yt: { fn: "swap_yt_for_underlying", action: "sell_yt_underlying", sweepsSy: true },
+  lp_keep_yt: { fn: "add_liquidity_keep_yt", action: "add_liquidity_keep_yt" },
+}
 
 export type RouteContext = {
   routerFunctions: string[]
@@ -76,6 +93,16 @@ export type RouteContext = {
   buyYt?: { syIn: bigint; depositUnderlying?: bigint }
   /** LP "keep YT": underlying split between minting PT+YT and depositing for the SY side. */
   keepYtSplit?: { mintUnderlying: bigint; depositUnderlying: bigint }
+  /**
+   * One-step Keep YT (R4-4): the SY shares of the deposit `add_liquidity_keep_yt` mints into PT + YT,
+   * sized by the caller with `1 ≤ mint < shares` (the Router adds `shares − mint` SY).
+   */
+  keepYtMintSy?: bigint
+  /**
+   * The connected account's live SY balance; absent when it is not known. Above zero, the routes whose
+   * one-step function sweeps SY are planned the old way, with the reason (R4-3).
+   */
+  syBalance?: bigint
   /** Overrides `SINGLE_STEP` (used by tests; keys are route kinds). */
   singleStep?: Partial<Record<RouteKind, SingleStep>>
 }
@@ -125,25 +152,62 @@ const TAKES: Record<RouteKind, string> = {
   recombine: "USDY",
 }
 
+/**
+ * The one-step Router function for `req`, when the manifest lists it (R4-3). For buy kinds the
+ * payment token decides (`receive` is ignored); for sell kinds the receive token decides (`pay` is
+ * ignored). It does not look at the SY balance: `planRoute` does.
+ */
+export function singleStepFor(
+  req: Pick<RouteRequest, "kind" | "pay" | "receive">,
+  ctx: Pick<RouteContext, "routerFunctions" | "singleStep">,
+): SingleStep | undefined {
+  const single = (ctx.singleStep ?? SINGLE_STEP)[req.kind]
+  const inUnderlying = BUY_KINDS.includes(req.kind) ? req.pay === "underlying" : req.receive === "underlying"
+  return single && inUnderlying && ctx.routerFunctions.includes(single.fn) ? single : undefined
+}
+
+/** R4-3's reason, on the first step of a route planned instead of a one-step function that sweeps SY. */
+const sweepFallback = (sy: bigint, signatures: number) =>
+  `You hold ${formatAmount(sy, PRINCIPAL_DECIMALS, PRINCIPAL_DECIMALS)} SY, so this takes ${signatures} signatures: the one-signature trade would withdraw all your SY. Withdraw it first to trade in one signature.`
+
+/**
+ * The one step, with the amounts it signs: the input, except Buy YT, which tokenizes the solver's
+ * deposit (R4-5), and Keep YT, which also mints the SY shares the caller sized (R4-4).
+ */
+function oneStep(req: RouteRequest, ctx: RouteContext, single: SingleStep): StepPlan[] | RouteDisabled {
+  const isBuy = BUY_KINDS.includes(req.kind)
+  const shape = { action: single.action, gives: isBuy ? "USDY" : GIVES[req.kind], takes: isBuy ? TAKES[req.kind] : "USDY" }
+  if (req.kind === "buy_yt") {
+    const dep = ctx.buyYt?.depositUnderlying
+    if (dep === undefined) return disabledIf("Buy YT with USDY needs the amount of USDY to deposit first.")
+    return [{ ...shape, amount: { from: "value", value: dep } }]
+  }
+  if (req.kind === "lp_keep_yt") {
+    const mint = ctx.keepYtMintSy
+    if (mint === undefined) return disabledIf("Adding liquidity and keeping YT needs the SY to mint first.")
+    return [{ ...shape, amount: input, secondaryAmount: { from: "value", value: mint } }]
+  }
+  return [{ ...shape, amount: input }]
+}
+
 export function planRoute(req: RouteRequest, ctx: RouteContext): StepPlan[] | RouteDisabled {
+  const single = singleStepFor(req, ctx)
+  if (!single) return multiStep(req, ctx)
+  // R4-3: a one-step function that ends with withdraw_all reverts on a wallet that already holds SY.
+  // A known balance above zero keeps the old route and says why; an unknown one plans the one step,
+  // and the `sy_balance` gate refuses it if the live balance turns out above zero.
+  const sy = ctx.syBalance
+  if (!single.sweepsSy || sy === undefined || sy <= 0n) return oneStep(req, ctx, single)
+  const planned = multiStep(req, ctx)
+  if (!Array.isArray(planned) || planned.length === 0) return planned
+  const [first, ...rest] = planned
+  return [{ ...first, fallback: sweepFallback(sy, planned.length) }, ...rest]
+}
+
+/** The route as the existing contract actions, one signature each (spec §4). */
+function multiStep(req: RouteRequest, ctx: RouteContext): StepPlan[] | RouteDisabled {
   const payUnderlying = req.pay === "underlying"
   const recvUnderlying = req.receive === "underlying"
-
-  // Single-step Router function, when one ships and the manifest lists it. For buy kinds the
-  // payment token decides (`receive` is ignored); for sell kinds the receive token decides (`pay`
-  // is ignored).
-  const single = (ctx.singleStep ?? SINGLE_STEP)[req.kind]
-  const isBuy = BUY_KINDS.includes(req.kind)
-  if (single && (isBuy ? payUnderlying : recvUnderlying) && ctx.routerFunctions.includes(single.fn)) {
-    return [
-      {
-        action: single.action,
-        amount: input,
-        gives: isBuy ? "USDY" : GIVES[req.kind],
-        takes: isBuy ? TAKES[req.kind] : "USDY",
-      },
-    ]
-  }
 
   switch (req.kind) {
     case "buy_pt": {

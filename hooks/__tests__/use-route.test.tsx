@@ -805,10 +805,8 @@ describe("useRoute", () => {
     const YT_KINDS: readonly RouteKind[] = ["buy_yt", "sell_yt"]
     const req: RouteRequest = { ...buyPt, kind: "buy_yt", amount: 100n * S }
     const oneStep = () => {
-      const p = planRoute(req, {
-        routerFunctions: ["swap_underlying_for_yt"],
-        singleStep: { buy_yt: { fn: "swap_underlying_for_yt", action: "buy_yt_underlying" } },
-      })
+      // R4-5: the one step signs the solver's deposit; here it is the 100 USDY of the request.
+      const p = planRoute(req, { routerFunctions: ["swap_underlying_for_yt"], buyYt: { syIn: 100n * S, depositUnderlying: 100n * S } })
       if ("disabled" in p) throw new Error(p.disabled)
       return p
     }
