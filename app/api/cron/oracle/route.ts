@@ -19,7 +19,12 @@ export async function GET(request: Request) {
   if (!(await cronAuthorized(request))) return json({ error: "unauthorized" }, 401)
   try {
     const tick = await tickOracle({ manifest: activeManifest(), secret: process.env.ORACLE_ADMIN_SECRET })
-    return json(tick, tick.status === "rejected" ? 500 : 200)
+    if (tick.status === "rejected") {
+      // The scheduler sees a 500; the log says why. Public values only: the key is never in a tick.
+      console.error(`oracle keeper: the oracle rejected value ${tick.value} at timestamp ${tick.timestamp} (reason ${tick.reason}, tx ${tick.hash})`)
+      return json(tick, 500)
+    }
+    return json(tick, 200)
   } catch (error) {
     // The config errors are this app's own words; anything else is logged by name only (RPC text
     // may carry a provider URL).

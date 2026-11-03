@@ -70,6 +70,25 @@ describe("GET and POST /api/cron/oracle", () => {
     expect(await res.json()).toMatchObject({ status: "rejected", reason: "deviate" })
   })
 
+  it("logs a rejected tick as an error, with its reason, value, timestamp and hash, never the key (final review 5)", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {})
+    try {
+      mocks.tickOracle.mockResolvedValue({ status: "rejected", value: "10000027", timestamp: 2_800, hash: "cd".repeat(32), reason: "deviation" })
+      await call({ authorization: `Bearer ${SECRET}` })
+      expect(error).toHaveBeenCalledTimes(1)
+      const line = error.mock.calls[0].map(String).join(" ")
+      expect(line).toBe(`oracle keeper: the oracle rejected value 10000027 at timestamp 2800 (reason deviation, tx ${"cd".repeat(32)})`)
+      expect(line).not.toContain("S-not-read-by-these-tests")
+      // An update or an unchanged tick logs nothing.
+      error.mockClear()
+      mocks.tickOracle.mockResolvedValue(UPDATED)
+      await call({ authorization: `Bearer ${SECRET}` })
+      expect(error).not.toHaveBeenCalled()
+    } finally {
+      error.mockRestore()
+    }
+  })
+
   it("503 not_configured when the keeper cannot run (no key, wrong key, mainnet)", async () => {
     mocks.tickOracle.mockRejectedValue(new mocks.OracleKeeperConfigError("ORACLE_ADMIN_SECRET is not set."))
     const res = await call({ authorization: `Bearer ${SECRET}` })
