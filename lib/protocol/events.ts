@@ -241,6 +241,12 @@ const TRANSFERS = new Set(["pt.transfer", "yt.transfer", "sy.sy_xfer", "pool.lp_
 
 /** First match wins. `needs` must all be present; every other non-secondary event must be in `allowed`. */
 const RULES: { kind: HistoryKind; needs: string[]; allowed: string[] }[] = [
+  // R4-10: the one-transaction Router functions. They sit before the plain rules, which would
+  // otherwise refuse the extra SY events (first match wins) and fall to "other".
+  { kind: "buy_yt", needs: ["sy.deposit", "manager.mint", "pool.sell_pt", "sy.withdraw"], allowed: ["sy.deposit", "manager.mint", "pool.sell_pt", "sy.withdraw"] },
+  { kind: "buy_pt", needs: ["sy.deposit", "pool.buy_pt"], allowed: ["sy.deposit", "pool.buy_pt"] },
+  { kind: "sell_pt", needs: ["pool.sell_pt", "sy.withdraw"], allowed: ["pool.sell_pt", "sy.withdraw"] },
+  { kind: "sell_yt", needs: ["pool.sell_yt", "sy.withdraw"], allowed: ["pool.sell_yt", "sy.withdraw"] },
   { kind: "redeem", needs: ["manager.redeem"], allowed: ["manager.redeem", "yt.claim", "sy.withdraw"] },
   { kind: "recombine", needs: ["manager.recombine"], allowed: ["manager.recombine"] },
   { kind: "claim", needs: ["manager.yt_claim"], allowed: ["manager.yt_claim", "yt.claim", "sy.withdraw"] },
@@ -261,6 +267,15 @@ function classify(items: Item[]): HistoryKind {
   const primary = [...keys].filter((k) => !SECONDARY.has(k))
   // add_liq and zap_liq are one kind with two topics.
   if (primary.length > 0 && primary.every((k) => k === "pool.add_liq" || k === "pool.zap_liq")) return "add_liquidity"
+  // R4-10: Keep YT is a deposit, a mint of part of it and a two-sided add in one transaction.
+  if (
+    keys.has("pool.add_liq") &&
+    keys.has("sy.deposit") &&
+    keys.has("manager.mint") &&
+    primary.every((k) => k === "pool.add_liq" || k === "sy.deposit" || k === "manager.mint")
+  ) {
+    return "add_liquidity"
+  }
   for (const r of RULES) {
     if (!r.needs.every((n) => keys.has(n))) continue
     return primary.every((k) => r.allowed.includes(k)) ? r.kind : "other"
@@ -278,7 +293,8 @@ function lineFor(i: Item, kind: HistoryKind, c: Ctx): string | null {
     case "sy.deposit":
       return `Deposited ${amt("amount")} ${c.code}`
     case "sy.withdraw":
-      return kind === "withdraw" ? `Withdrew ${amt("shares")} SY for ${amt("underlying_out")} ${c.code}` : null
+      // Also inside the one-transaction sells and Buy YT (R4-10), where it is the last leg.
+      return kind === "withdraw" || kind === "sell_pt" || kind === "sell_yt" || kind === "buy_yt" ? `Withdrew ${amt("shares")} SY for ${amt("underlying_out")} ${c.code}` : null
     case "manager.mint":
       return `Minted ${amt("notional")} PT + ${amt("notional")} YT`
     case "manager.recombine":

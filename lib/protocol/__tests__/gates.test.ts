@@ -36,11 +36,19 @@ const UNIT = 10_000_000n // one token at 7 decimals
 const BIG = 1_000_000n * UNIT
 
 const ALL = Object.keys(ACTION_META) as ActionId[]
-const TRADES: ActionId[] = ["buy_pt", "sell_pt", "buy_yt", "sell_yt"]
-const ADDS: ActionId[] = ["add_liquidity", "add_liquidity_sy"]
+/** R4-3: each one-transaction Router action is in every gate set any of its components is in. */
+const TRADES: ActionId[] = ["buy_pt", "sell_pt", "buy_yt", "sell_yt", "buy_pt_underlying", "sell_pt_underlying", "buy_yt_underlying", "sell_yt_underlying"]
+const ADDS: ActionId[] = ["add_liquidity", "add_liquidity_sy", "add_liquidity_keep_yt"]
+/** The three that end with SYWrapper.withdraw_all and revert on any SY in the wallet (Router error 9). */
+const SWEEPS: ActionId[] = ["sell_pt_underlying", "sell_yt_underlying", "buy_yt_underlying"]
+/** Deposit (+ mint) first: charged against the deposit cap and RiskControl. */
+const DEPOSITS: ActionId[] = ["buy_pt_underlying", "buy_yt_underlying", "add_liquidity_keep_yt"]
 /** R22b: actions that move PT / YT to or from the account need its per-asset grant. */
-const NEEDS_PT: ActionId[] = ["mint", "buy_pt", "buy_yt", "sell_pt", "add_liquidity", "add_liquidity_sy", "remove_liquidity"]
-const NEEDS_YT: ActionId[] = ["mint", "buy_yt", "sell_yt"]
+const NEEDS_PT: ActionId[] = [
+  "mint", "buy_pt", "buy_yt", "sell_pt", "add_liquidity", "add_liquidity_sy", "remove_liquidity",
+  "buy_pt_underlying", "sell_pt_underlying", "buy_yt_underlying", "add_liquidity_keep_yt",
+]
+const NEEDS_YT: ActionId[] = ["mint", "buy_yt", "sell_yt", "buy_yt_underlying", "sell_yt_underlying", "add_liquidity_keep_yt"]
 const except = (...out: ActionId[]) => ALL.filter((a) => !out.includes(a))
 
 const live = <T,>(value: T): Live<T> => ({ status: "live", value, ledger: 500 })
@@ -123,6 +131,9 @@ const okSimulation: SimulationOutcome = { ok: true, retval: 1n, latestLedger: 50
  */
 function healthyCtx(action: ActionId): GateContext {
   const market = healthyMarket()
+  const account = healthyAccount()
+  // A sweeping trade needs a zero SY balance (R4-3); every other action spends or ignores SY.
+  if (SWEEPS.includes(action)) account.sy = live(0n)
   if (action === "redeem") {
     market.settledRate = live(RATE)
     market.ytFrozen = live(true)
@@ -131,7 +142,7 @@ function healthyCtx(action: ActionId): GateContext {
     findings: [],
     wallet: { status: "connected", publicKey: USER, networkPassphrase: TESTNET },
     market,
-    account: healthyAccount(),
+    account,
     compliance: healthyCompliance(),
     ledgerTime: action === "redeem" ? AFTER : BEFORE,
     simulation: okSimulation,
@@ -140,7 +151,7 @@ function healthyCtx(action: ActionId): GateContext {
 }
 
 function inputFor(action: ActionId, overrides: Partial<ActionInput> = {}): ActionInput {
-  const twoSided = action === "add_liquidity" || action === "redeem"
+  const twoSided = action === "add_liquidity" || action === "redeem" || action === "add_liquidity_keep_yt"
   return {
     action,
     marketId: "testnet-sta",
@@ -453,14 +464,14 @@ const MATRIX: Row[] = [
     blocks: ["remove_liquidity", "withdraw", "claim_yield"],
   },
   {
-    rule: "riskPaused blocks deposit, mint and buy_yt",
+    rule: "riskPaused blocks deposit, mint, buy_yt and the three Router actions that deposit",
     mutate: (c) => {
       c.market.riskPaused = live(true)
     },
     code: "pause",
     message: /risk control/i,
-    blocks: ["deposit", "mint", "buy_yt"],
-    allows: except("deposit", "mint", "buy_yt"),
+    blocks: ["deposit", "mint", "buy_yt", ...DEPOSITS],
+    allows: except("deposit", "mint", "buy_yt", ...DEPOSITS),
   },
   {
     rule: "a manager contract_error #9 means PrincipalManager is paused for mint, buy_yt, sell_yt, recombine, claim_yield and redeem",
@@ -469,7 +480,7 @@ const MATRIX: Row[] = [
     },
     code: "pause",
     message: /PrincipalManager is paused/,
-    blocks: ["mint", "buy_yt", "sell_yt", "recombine", "claim_yield", "redeem"],
+    blocks: ["mint", "buy_yt", "sell_yt", "buy_yt_underlying", "sell_yt_underlying", "add_liquidity_keep_yt", "recombine", "claim_yield", "redeem"],
   },
   {
     rule: "a manager contract_error #9 on an action the manager pause does not cover is a failed quote",
@@ -478,7 +489,7 @@ const MATRIX: Row[] = [
     },
     code: "quote",
     message: /#9/,
-    blocks: ["deposit", "withdraw", "buy_pt", "sell_pt", "add_liquidity", "add_liquidity_sy", "remove_liquidity"],
+    blocks: ["deposit", "withdraw", "buy_pt", "sell_pt", "add_liquidity", "add_liquidity_sy", "remove_liquidity", "buy_pt_underlying", "sell_pt_underlying"],
   },
   {
     // Code 9 is NotAuthorizedOnSac on SYWrapper and InsufficientLiquidity on MarketPool: only the
@@ -602,8 +613,8 @@ const MATRIX: Row[] = [
     },
     code: "risk",
     message: /counts twice/i,
-    blocks: ["mint"],
-    allows: except("mint"),
+    blocks: ["mint", "buy_yt_underlying"],
+    allows: except("mint", "buy_yt_underlying"),
   },
   {
     rule: "cb volume + amount > limit blocks deposit and buy_yt",
@@ -613,8 +624,8 @@ const MATRIX: Row[] = [
     },
     code: "risk",
     message: /circuit breaker/i,
-    blocks: ["deposit", "mint", "buy_yt"],
-    allows: except("deposit", "mint", "buy_yt"),
+    blocks: ["deposit", "mint", "buy_yt", ...DEPOSITS],
+    allows: except("deposit", "mint", "buy_yt", ...DEPOSITS),
   },
   {
     rule: "cb volume + amount exactly at the limit passes (the contract trips on total > limit)",
@@ -623,8 +634,9 @@ const MATRIX: Row[] = [
       c.market.cb.volume = live(90n * UNIT)
     },
     code: "risk",
-    blocks: ["mint"],
-    allows: ["deposit", "buy_yt"],
+    // Buy YT with the underlying reports 2x, Keep YT its deposit plus the mint (10 + 5): both exceed 10.
+    blocks: ["mint", "buy_yt_underlying", "add_liquidity_keep_yt"],
+    allows: ["deposit", "buy_yt", "buy_pt_underlying"],
   },
   {
     rule: "a cb limit of 0 disables the breaker",
@@ -637,15 +649,15 @@ const MATRIX: Row[] = [
     allows: ALL,
   },
   {
-    rule: "assetVolume + amount over assetLimit blocks deposit, mint and buy_yt",
+    rule: "assetVolume + amount over assetLimit blocks deposit, mint, buy_yt and the Router actions that deposit",
     mutate: (c) => {
       c.market.cb.assetLimit = live(100n * UNIT)
       c.market.cb.assetVolume = live(95n * UNIT)
     },
     code: "risk",
     message: /per-asset/i,
-    blocks: ["deposit", "mint", "buy_yt"],
-    allows: except("deposit", "mint", "buy_yt"),
+    blocks: ["deposit", "mint", "buy_yt", ...DEPOSITS],
+    allows: except("deposit", "mint", "buy_yt", ...DEPOSITS),
   },
   {
     rule: "assetVolume + 2·amount over assetLimit blocks mint",
@@ -654,8 +666,8 @@ const MATRIX: Row[] = [
       c.market.cb.assetVolume = live(85n * UNIT)
     },
     code: "risk",
-    blocks: ["mint"],
-    allows: ["deposit", "buy_yt"],
+    blocks: ["mint", "buy_yt_underlying"],
+    allows: ["deposit", "buy_yt", "buy_pt_underlying", "add_liquidity_keep_yt"],
   },
   {
     // PrincipalManager.mint reports sy_shares·exchange_rate/SCALE (principal_manager:363-368).
@@ -666,8 +678,9 @@ const MATRIX: Row[] = [
       c.market.cb.volume = live(85n * UNIT)
     },
     code: "risk",
-    blocks: ["buy_yt", "mint"],
-    allows: ["deposit"],
+    // Keep YT: its 10 deposit plus a 5 SY mint worth 10 at this rate.
+    blocks: ["buy_yt", "mint", "buy_yt_underlying", "add_liquidity_keep_yt"],
+    allows: ["deposit", "buy_pt_underlying"],
   },
 
   // §5 "Deposit cap" → deposit, mint from underlying.
@@ -679,8 +692,8 @@ const MATRIX: Row[] = [
     },
     code: "cap",
     message: /deposit cap/i,
-    blocks: ["deposit", "mint"],
-    allows: except("deposit", "mint"),
+    blocks: ["deposit", "mint", ...DEPOSITS],
+    allows: except("deposit", "mint", ...DEPOSITS),
   },
   {
     rule: "netDeposited + amount exactly at the cap passes",
@@ -690,7 +703,7 @@ const MATRIX: Row[] = [
     },
     code: "cap",
     blocks: [],
-    allows: ["deposit", "mint"],
+    allows: ["deposit", "mint", ...DEPOSITS],
   },
   {
     rule: "a deposit cap of 0 disables the cap",
@@ -700,7 +713,7 @@ const MATRIX: Row[] = [
     },
     code: "cap",
     blocks: [],
-    allows: ["deposit", "mint"],
+    allows: ["deposit", "mint", ...DEPOSITS],
   },
 
   // §5 "Exact quote available" and archived entries.
@@ -1087,7 +1100,7 @@ describe("unavailable read blocks", () => {
   type Dep = { field: string; set: Mutate; label: RegExp; needs: ActionId[] }
   const m = (set: (market: MarketState) => void): Mutate => (c) => set(c.market)
   const a = (set: (account: AccountState) => void): Mutate => (c) => set(c.account!)
-  const BREAKER: ActionId[] = ["deposit", "mint", "buy_yt"]
+  const BREAKER: ActionId[] = ["deposit", "mint", "buy_yt", ...DEPOSITS]
 
   const DEPS: Dep[] = [
     { field: "topology", set: m((x) => (x.topology = down())), label: /contracts/, needs: ALL },
@@ -1096,14 +1109,14 @@ describe("unavailable read blocks", () => {
       field: "oracleFresh",
       set: m((x) => (x.oracleFresh = down())),
       label: /oracle.*fresh/i,
-      needs: ["mint", ...TRADES, "add_liquidity_sy", "recombine", "claim_yield"],
+      needs: ["mint", ...TRADES, "add_liquidity_sy", "add_liquidity_keep_yt", "recombine", "claim_yield"],
     },
     { field: "settledRate", set: m((x) => (x.settledRate = down())), label: /settle/i, needs: ["claim_yield", "redeem"] },
     { field: "ytFrozen", set: m((x) => (x.ytFrozen = down())), label: /frozen/i, needs: ["claim_yield"] },
     { field: "ytAccruedIndex", set: m((x) => (x.ytAccruedIndex = down())), label: /yield index/i, needs: ["claim_yield"] },
     { field: "oracleRate", set: m((x) => (x.oracleRate = down())), label: /oracle rate/i, needs: ["claim_yield"] },
     { field: "fees.ytBps", set: m((x) => (x.fees.ytBps = down())), label: /YT fee/, needs: ["claim_yield"] },
-    { field: "exchangeRate", set: m((x) => (x.exchangeRate = down())), label: /exchange rate/i, needs: ["claim_yield", "buy_yt"] },
+    { field: "exchangeRate", set: m((x) => (x.exchangeRate = down())), label: /exchange rate/i, needs: ["claim_yield", "buy_yt", "add_liquidity_keep_yt"] },
     { field: "poolSeeded", set: m((x) => (x.poolSeeded = down())), label: /reserves/i, needs: [...TRADES, ...ADDS] },
     { field: "syPaused", set: m((x) => (x.syPaused = down())), label: /SY.*pause/i, needs: ALL },
     { field: "poolPaused", set: m((x) => (x.poolPaused = down())), label: /pool.*pause/i, needs: [...TRADES, ...ADDS, "remove_liquidity"] },
@@ -1131,7 +1144,7 @@ describe("unavailable read blocks", () => {
       field: "account.sy",
       set: a((x) => (x.sy = down())),
       label: /SY balance/,
-      needs: ["withdraw", "buy_pt", "buy_yt", "add_liquidity", "add_liquidity_sy"],
+      needs: ["withdraw", "buy_pt", "buy_yt", "add_liquidity", "add_liquidity_sy", ...SWEEPS],
     },
     {
       field: "account.pt",
@@ -1148,8 +1161,8 @@ describe("unavailable read blocks", () => {
     { field: "account.lp", set: a((x) => (x.lp = down())), label: /LP balance/, needs: ["remove_liquidity"] },
     { field: "account.ytLastClaimedIndex", set: a((x) => (x.ytLastClaimedIndex = down())), label: /last claim/i, needs: ["claim_yield"] },
     { field: "account.ytPendingClaim", set: a((x) => (x.ytPendingClaim = down())), label: /settled.*yield/i, needs: ["claim_yield"] },
-    { field: "account.depositCap", set: a((x) => (x.depositCap = down())), label: /deposit cap/i, needs: ["deposit", "mint"] },
-    { field: "account.netDeposited", set: a((x) => (x.netDeposited = down())), label: /net deposits/i, needs: ["deposit", "mint"] },
+    { field: "account.depositCap", set: a((x) => (x.depositCap = down())), label: /deposit cap/i, needs: ["deposit", "mint", ...DEPOSITS] },
+    { field: "account.netDeposited", set: a((x) => (x.netDeposited = down())), label: /net deposits/i, needs: ["deposit", "mint", ...DEPOSITS] },
   ]
 
   for (const dep of DEPS) {
@@ -1375,6 +1388,7 @@ describe("several failing gates", () => {
       "network",
       "amount",
       "balance",
+      "sy_balance",
       "maturity",
       "oracle",
       "pause",
@@ -1397,6 +1411,109 @@ describe("several failing gates", () => {
       const before = structuredClone({ ctx, input })
       evaluateGates(input, ctx)
       expect({ ctx, input }).toEqual(before)
+    }
+  })
+})
+
+// ---------------------------------------------------------------- 0004 Task 4: one-transaction Router actions
+
+describe("sy_balance — the sweeping Router actions refuse any SY in the wallet (R4-3, Review Focus 1)", () => {
+  const withSy = (value: bigint): Mutate => (c) => {
+    c.account!.sy = live(value)
+  }
+
+  it.each(SWEEPS)("%s with SY held is blocked, naming the SY and Quick actions → Withdraw", (action) => {
+    const blockers = gates(action, withSy(3n * UNIT))
+    expect(blockers).toEqual([{ code: "sy_balance", message: expect.stringMatching(/hold 3 SY.*Quick actions → Withdraw/) }])
+  })
+
+  it.each(SWEEPS)("%s blocks on one stroop of SY dust", (action) => {
+    expect(codes(gates(action, withSy(1n)))).toEqual(["sy_balance"])
+  })
+
+  it.each(SWEEPS)("%s with a zero SY balance passes", (action) => {
+    expect(gates(action, withSy(0n))).toEqual([])
+  })
+
+  it.each(SWEEPS)("%s with an unreadable SY balance is unavailable, never a pass", (action) => {
+    const blockers = gates(action, (c) => {
+      c.account!.sy = down()
+    })
+    expect(blockers).toEqual([{ code: "unavailable", message: expect.stringMatching(/SY balance/) }])
+  })
+
+  it.each(except(...SWEEPS))("%s ignores the SY held", (action) => {
+    expect(codes(gates(action, withSy(3n * UNIT)))).not.toContain("sy_balance")
+  })
+
+  it("buy_pt_underlying and Keep YT hold SY in between but are not refused for it", () => {
+    expect(gates("buy_pt_underlying", withSy(3n * UNIT))).toEqual([])
+    expect(gates("add_liquidity_keep_yt", withSy(3n * UNIT))).toEqual([])
+  })
+})
+
+describe("one-transaction Router actions: amounts and balances (0004 Task 4)", () => {
+  const short = (pick: (a: AccountState) => void): Mutate => (c) => pick(c.account!)
+
+  it.each([
+    ["buy_pt_underlying", short((a) => (a.underlying = live(UNIT))), /underlying/],
+    ["buy_yt_underlying", short((a) => (a.underlying = live(UNIT))), /underlying/],
+    ["add_liquidity_keep_yt", short((a) => (a.underlying = live(UNIT))), /underlying/],
+    ["sell_pt_underlying", short((a) => (a.pt = live(UNIT))), /PT/],
+    ["sell_yt_underlying", short((a) => (a.yt = live(UNIT))), /YT/],
+  ] as [ActionId, Mutate, RegExp][])("%s short of %s", (action, mutate, token) => {
+    expect(gates(action, mutate)).toEqual([{ code: "balance", message: expect.stringMatching(token) }])
+  })
+
+  it("Keep YT spends the underlying only: its SY shares are the deposit's own, not a wallet balance", () => {
+    expect(gates("add_liquidity_keep_yt", short((a) => (a.sy = live(0n))))).toEqual([])
+  })
+
+  it("Keep YT needs both amounts above zero", () => {
+    expect(codes(gates("add_liquidity_keep_yt", undefined, { secondaryAmount: 0n }))).toEqual(["amount"])
+    expect(codes(gates("add_liquidity_keep_yt", undefined, { secondaryAmount: undefined }))).toEqual(["amount"])
+    expect(codes(gates("add_liquidity_keep_yt", undefined, { secondaryAmount: -1n }))).toEqual(["amount"])
+    expect(codes(gates("add_liquidity_keep_yt", undefined, { amount: 0n }))).toEqual(["amount"])
+  })
+
+  it("the maturity refusal of a one-step trade says trading closed; Keep YT gets the general message", () => {
+    const after: Mutate = (c) => {
+      c.ledgerTime = AFTER
+    }
+    for (const a of TRADES) expect(gates(a, after)[0].message).toMatch(/^Trading closed at maturity/)
+    expect(gates("add_liquidity_keep_yt", after)[0].message).toMatch(/^This market has matured/)
+  })
+})
+
+describe("breakerReport and capCharge for the one-transaction Router actions (R2-61, R2-62)", () => {
+  const market = healthyMarket()
+  const at = (action: ActionId, extra: Partial<ActionInput> = {}) => inputFor(action, extra)
+
+  it("Buy PT with the underlying reports and charges its deposit", () => {
+    expect(breakerReport(at("buy_pt_underlying"), { market })).toBe(10n * UNIT)
+    expect(capCharge(at("buy_pt_underlying"))).toBe(10n * UNIT)
+  })
+
+  it("Buy YT with the underlying reports twice (deposit and mint), charges the deposit once", () => {
+    expect(breakerReport(at("buy_yt_underlying"), { market })).toBe(20n * UNIT)
+    expect(capCharge(at("buy_yt_underlying"))).toBe(10n * UNIT)
+  })
+
+  it("Keep YT reports its deposit plus the mint's SY at the SY rate, and charges the deposit only", () => {
+    expect(breakerReport(at("add_liquidity_keep_yt"), { market })).toBe(15n * UNIT)
+    const twice = { ...market, exchangeRate: live(2n * SCALE) }
+    expect(breakerReport(at("add_liquidity_keep_yt"), { market: twice })).toBe(20n * UNIT)
+    expect(capCharge(at("add_liquidity_keep_yt"))).toBe(10n * UNIT)
+  })
+
+  it("Keep YT's report is unknown while the SY exchange rate cannot be read", () => {
+    expect(breakerReport(at("add_liquidity_keep_yt"), { market: { ...market, exchangeRate: down() } })).toBeUndefined()
+  })
+
+  it("the sells report and charge nothing", () => {
+    for (const a of ["sell_pt_underlying", "sell_yt_underlying"] as const) {
+      expect(breakerReport(at(a), { market })).toBe(0n)
+      expect(capCharge(at(a))).toBe(0n)
     }
   })
 })

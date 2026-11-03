@@ -36,7 +36,7 @@ import type { SimulationOutcome } from "./stellar"
  * What a later step spends comes from the steps before it, and its exact quote from its own
  * simulation once they are confirmed: those gates run when the route prepares it (`useRoute`).
  */
-const LATER_STEP_SKIPS = new Set<BlockerCode>(["amount", "balance", "quote", "archived"])
+const LATER_STEP_SKIPS = new Set<BlockerCode>(["amount", "balance", "sy_balance", "quote", "archived"])
 
 /** Whether an amount reads no step output other than step 1's. */
 const readsOnlyFirst = (src: AmountSource): boolean => (src.from === "step" ? src.index === 0 : src.from === "sum" ? src.parts.every(readsOnlyFirst) : true)

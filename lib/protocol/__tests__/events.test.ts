@@ -180,6 +180,63 @@ describe("fetchAccountHistory", () => {
     expect(entries[0].lines.join("\n")).toContain(line)
   })
 
+  describe("one-transaction Router functions (R4-10)", () => {
+    const A = addr(ACCOUNT)
+    const dep = (h = "h") => ev(200, h, C.sy, "deposit", A, i128(100_000_000n), i128(95_000_000n))
+    const wd = (h = "h") => ev(200, h, C.sy, "withdraw", A, i128(95_000_000n), i128(100_000_000n))
+    const mint = (h = "h") => ev(200, h, C.manager, "mint", A, i128(95_000_000n), i128(94_000_000n), i128(1_000n))
+    const buyPt = (h = "h") => ev(200, h, C.pool, "buy_pt", A, A, i128(95_000_000n), i128(99_000_000n), i128(0n))
+    const sellPt = (h = "h") => ev(200, h, C.pool, "sell_pt", A, A, i128(10_000_000n), i128(9_000_000n), i128(0n))
+    const sellYt = (h = "h") => ev(200, h, C.pool, "sell_yt", A, A, i128(10_000_000n), i128(5_000_000n), i128(0n))
+    const addLiq = (h = "h") => ev(200, h, C.pool, "add_liq", A, i128(10_000_000n), i128(20_000_000n), i128(30_000_000n))
+    const kindOf = async (events: FakeEvent[]) => (await run(events).promise).entries
+
+    it("deposit + buy_pt is Buy PT, with its facts and both lines", async () => {
+      const entries = await kindOf([dep(), buyPt()])
+      expect(entries).toHaveLength(1)
+      expect(entries[0].kind).toBe("buy_pt")
+      expect(entries[0].lines).toEqual(["Deposited 10 STA", "Bought 9.9 PT for 9.5 SY"])
+      expect(entries[0].facts).toEqual({ buyPt: { syIn: 95_000_000n, ptOut: 99_000_000n } })
+    })
+
+    it("sell_pt + withdraw is Sell PT, and sell_yt + withdraw is Sell YT", async () => {
+      const pt = await kindOf([sellPt(), wd()])
+      expect(pt[0].kind).toBe("sell_pt")
+      expect(pt[0].lines).toEqual(["Sold 1 PT for 0.9 SY", "Withdrew 9.5 SY for 10 STA"])
+      const yt = await kindOf([sellYt(), wd()])
+      expect(yt[0].kind).toBe("sell_yt")
+      expect(yt[0].lines).toEqual(["Sold 1 YT for 0.5 SY", "Withdrew 9.5 SY for 10 STA"])
+    })
+
+    it("deposit + mint + sell_pt + withdraw is Buy YT", async () => {
+      const entries = await kindOf([dep(), mint(), sellPt(), wd()])
+      expect(entries).toHaveLength(1)
+      expect(entries[0].kind).toBe("buy_yt")
+      expect(entries[0].lines).toEqual(["Deposited 10 STA", "Minted 9.4 PT + 9.4 YT", "Sold 1 PT for 0.9 SY", "Withdrew 9.5 SY for 10 STA"])
+    })
+
+    it("deposit + mint + add_liq is Add liquidity", async () => {
+      const entries = await kindOf([dep(), mint(), addLiq()])
+      expect(entries).toHaveLength(1)
+      expect(entries[0].kind).toBe("add_liquidity")
+      expect(entries[0].lines).toEqual(["Deposited 10 STA", "Minted 9.4 PT + 9.4 YT", "Added 1 PT + 2 SY, received 3 LP"])
+    })
+
+    it("the token bookkeeping events of the Router functions do not change the kind", async () => {
+      const x = (h = "h") => ev(200, h, C.pt, "transfer", A, addr(C.pool), i128(1n))
+      expect((await kindOf([dep(), buyPt(), x()]))[0].kind).toBe("buy_pt")
+      expect((await kindOf([dep(), mint(), x(), sellPt(), wd()]))[0].kind).toBe("buy_yt")
+    })
+
+    it("near-misses stay as before: a withdraw beside a mint + sell_pt, or a lone deposit with a sell, is not reclassified", async () => {
+      expect((await kindOf([mint(), sellPt(), wd()]))[0].kind).toBe("other")
+      expect((await kindOf([dep(), sellPt()]))[0].kind).toBe("other")
+      expect((await kindOf([dep(), addLiq()]))[0].kind).toBe("other")
+      expect((await kindOf([dep(), mint()]))[0].kind).toBe("mint")
+      expect((await kindOf([wd()]))[0].kind).toBe("withdraw")
+    })
+  })
+
   it("claim: the YT token's claim event does not add a second row or line", async () => {
     const { promise } = run([
       ev(200, "h", C.yt, "claim", addr(ACCOUNT), i128(20_000_000n)),
