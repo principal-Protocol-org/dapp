@@ -17,7 +17,7 @@ import type { ComplianceItem } from "./compliance"
 import { formatAmount, formatWindow } from "./format"
 import type { MarketState } from "./market-state"
 import { SCALE } from "./math"
-import { syTooSmallToWithdraw } from "./routes"
+import { SINGLE_STEP, syTooSmallToWithdraw } from "./routes"
 import type { SimulationOutcome } from "./stellar"
 import type { Finding, Live, WalletState } from "./types"
 import { pendingYield } from "./yield"
@@ -98,8 +98,12 @@ const TRADES: readonly ActionId[] = [
   "sell_yt_underlying",
 ]
 const ADDS: readonly ActionId[] = ["add_liquidity", "add_liquidity_sy", "add_liquidity_keep_yt"]
-/** R4-3: these end with `SYWrapper.withdraw_all`, which reverts `PreexistingSyBalance` (Router error 9) if the wallet holds SY. */
-const SWEEPS_SY = new Set<ActionId>(["sell_pt_underlying", "sell_yt_underlying", "buy_yt_underlying"])
+/**
+ * R4-3: these end with `SYWrapper.withdraw_all`, which reverts `PreexistingSyBalance` (Router error 9)
+ * if the wallet holds SY: sell_pt_underlying, sell_yt_underlying and buy_yt_underlying. Read from the
+ * planner's `SINGLE_STEP` (`sweepsSy`), so the gate and the fallback never disagree.
+ */
+const SWEEPS_SY: ReadonlySet<ActionId> = new Set(Object.values(SINGLE_STEP).flatMap((s) => (s?.sweepsSy ? [s.action] : [])))
 
 /** Closed at maturity: `assert_not_mature` (manager) and `assert_active` (pool, :1032-1037). */
 const BEFORE_MATURITY_ONLY = new Set<ActionId>(["mint", ...TRADES, ...ADDS, "recombine"])

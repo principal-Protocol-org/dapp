@@ -16,6 +16,7 @@ import {
 } from "../gates"
 import type { MarketState } from "../market-state"
 import { SCALE } from "../math"
+import { SINGLE_STEP } from "../routes"
 import type { SimulationOutcome } from "../stellar"
 import type { Live, WalletState } from "../types"
 import { indexFor } from "../yield"
@@ -1467,6 +1468,13 @@ describe("sy_balance — the sweeping Router actions refuse any SY in the wallet
       c.simulation = { ok: false, kind: "contract_error", contractId: ROUTER, code: 9, message: "HostError: Error(Contract, #9)" }
     })
     expect(blockers).toEqual([{ code: "sy_balance", message: expect.stringMatching(/^You hold 3 SY\. .*Quick actions → Withdraw/) }])
+  })
+
+  it("refuses SY for exactly the actions the planner marks sweepsSy, the three that end with withdraw_all (final review 4)", () => {
+    const planner = Object.values(SINGLE_STEP).flatMap((x) => (x?.sweepsSy ? [x.action] : []))
+    expect([...planner].sort()).toEqual([...SWEEPS].sort())
+    const refused = ALL.filter((action) => codes(gates(action, withSy(3n * UNIT))).includes("sy_balance"))
+    expect(refused.sort()).toEqual([...planner].sort())
   })
 
   it("buy_pt_underlying and Keep YT hold SY in between but are not refused for it", () => {
