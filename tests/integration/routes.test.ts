@@ -482,6 +482,9 @@ describe.skipIf(skip !== null)("every route on the local USDY market (Task 24; 0
     expect(delta(t, "pt")).toBe(leftPt)
     expect(delta(t, "sy")).toBe(leftSy)
     expect(leftPt >= 0n && leftSy >= 0n && leftPt + leftSy <= 10n, `left ${leftPt} PT, ${leftSy} SY`).toBe(true)
+    // Final review 1: the split leaves no SY, so the next one-signature sale is not sent multi-step.
+    expect(leftSy, "SY left by the one-step Keep YT").toBe(0n)
+    expect(t.quote.leftover?.filter((l) => l.token === "sy")).toEqual([])
     expect(t.quote.priceImpactPpm).toBe(0n)
     expect(t.quote.alsoOut?.amount).toBe(keep.decoded.yt_minted)
     log(`lp_keep_yt (one step): ${units(req.amount)} USDY -> ${units(shares)} SY, ${units(mint)} SY minted; LP ${units(keep.decoded.lp)}, YT kept ${units(keep.decoded.yt_minted)}; left ${leftPt} PT + ${leftSy} SY raw`)
