@@ -30,10 +30,19 @@ scripts/dev-stack/oracle-tick.sh                          # run this every 30 mi
   `docs/DEPLOYMENT.md`. It then deposits 200,000 USDY, mints PT/YT from 100,000 SY, and seeds the
   pool with all the PT and 95 % of its value in SY. It also deploys the stateless `MarketFactory` (its address is `shared.factory`, the wasm hashes of the seven market contracts are recorded) and runs `scripts/db-migrate.mjs` when that file exists. Every run deploys a new market and overwrites `config/manifests/local.json`.
   Allow for the run: a deploy takes a few minutes, so do not set `MATURITY_SECONDS` below about 600.
+- The OracleAdapter is v2, which the dApp requires (R4-9). `deploy.sh` initializes it with
+  `max_stale_seconds = 3600` and `max_deviation_bps = 1000`, sets one primary source and no
+  fallback (`set_sources`, signed by the oracle admin), and pushes the genesis value `10000000`
+  (1.0). The primary source id is `sha256("principal-oracle-source:<network>:<ASSET_CODE>:app-team:keeper")`
+  in hex; on the local stack, the hash of `principal-oracle-source:local:USDY:app-team:keeper`.
 - `oracle-tick.sh [--apy <percent>] [rate]` sets the oracle to `rate` (7 decimals, `10000000` = 1.0) or, by default,
   to current x (1 + apy/100)^(elapsed/year) with `--apy` defaulting to 5 and elapsed counted from the last reference
-  timestamp (rounded down, never decreasing); an explicit rate wins. The value is stamped with the latest ledger close time. The oracle is stale after
+  timestamp (rounded down, never decreasing); an explicit rate wins. The value is stamped with the latest ledger close time
+  and sent under the oracle's primary source (`get_primary_source()`). The oracle is stale after
   one hour; the ticks keep minting, swaps and quotes working. Rates cannot go down.
+  A v2 oracle may refuse a value: `set_reference_value` then returns `false` in a successful
+  transaction, and the script fails with the oracle's `last_rejection()`. It also fails on an oracle
+  with no primary source (a v1 oracle, or one never given `set_sources`).
 
 Outputs (both git-ignored; never commit them):
 
@@ -86,6 +95,7 @@ runs it for you). Call `GET /api/cron/record` with `Authorization: Bearer $CRON_
 | `curve.test.ts` | The off-chain curve port equals the pool's quote views. |
 | `registry.test.ts` | Market discovery and validation against the real contracts and `principal-pg`. |
 | `history.test.ts` | The history queries, and the recorder writing one snapshot of the live market to `principal-pg` (the row is deleted afterwards). |
+| `oracle.test.ts` | The OracleAdapter v2 policy read through the app's reader (the primary source id above, no fallback, no rejection, 3,600 s, 1,000 bps), and one keeper tick (`tickOracle`, behind `/api/cron/oracle`) that reports `updated`. |
 | `lifecycle.test.ts` | The full lifecycle proof of plan 0001. Skipped unless `LIFECYCLE_REDEPLOY=1`. |
 
 - The suites sign with the throwaway dev accounts (`principal-localdev-admin`, `principal-localdev-treasury`).
