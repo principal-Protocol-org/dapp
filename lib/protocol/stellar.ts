@@ -24,7 +24,12 @@ export type ScArg =
   | { type: "symbol"; value: string }
   | { type: "string"; value: string }
   /** `BytesN` / `Bytes` from hex (R4-9: the oracle source id). */
-  | { type: "bytes"; value: string };
+  | { type: "bytes"; value: string }
+  /**
+   * A Soroban `#[contracttype]` struct: a map with one symbol key per field, sorted, as the host
+   * encodes it (R5-10: the MarketFactory's `TokenParams`, `EngineParams`, ... structs).
+   */
+  | { type: "struct"; value: Record<string, ScArg> };
 
 export type ContractInvocation = {
   contractId: string;
@@ -97,7 +102,23 @@ export function createRpcServer(rpcUrl: string) {
 export function scArgToVal(arg: ScArg): xdr.ScVal {
   if (arg.type === "string") return nativeToScVal(arg.value);
   if (arg.type === "bytes") return xdr.ScVal.scvBytes(Buffer.from(arg.value, "hex"));
+  if (arg.type === "struct") {
+    // Field names are ASCII identifiers, so code-unit order is the host's byte order.
+    const names = Object.keys(arg.value).sort();
+    return xdr.ScVal.scvMap(
+      names.map((name) => new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol(name), val: scArgToVal(arg.value[name]) })),
+    );
+  }
   return nativeToScVal(arg.value, { type: arg.type });
+}
+
+/** Two arguments are the same when they encode to the same `ScVal`: the transaction carries exactly that. */
+export function scArgEquals(a: ScArg, b: ScArg): boolean {
+  try {
+    return a.type === b.type && scArgToVal(a).toXDR("base64") === scArgToVal(b).toXDR("base64");
+  } catch {
+    return false;
+  }
 }
 
 function invocationCall(invocation: ContractInvocation) {

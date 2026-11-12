@@ -34,7 +34,7 @@ export type RoleRequirement = { role: Role; who: string; can: string }
  * Permissioning's `assert_admin` for the grants (permissioning:50,96); the contract's own
  * `assert_admin` for `set_paused` (market_pool:734, sy_wrapper:421, principal_manager:662); the
  * Router's and RiskControl's for wiring a market (router:187, risk_control:190), the protocol
- * admin's (spec §5 step 4). The fee claims are permissionless (market_pool:606-613,
+ * admin's (spec §5 step 4); the SAC's admin for the factory's calls (R5-10). The fee claims are permissionless (market_pool:606-613,
  * principal_manager:557-565): anyone may trigger them, the fees go to the payee the config fixes.
  */
 export const REQUIRED_ROLE: Record<ManagerCallKind, RoleRequirement | null> = {
@@ -46,6 +46,11 @@ export const REQUIRED_ROLE: Record<ManagerCallKind, RoleRequirement | null> = {
   add_consumer: { role: "riskControlAdmin", who: "the RiskControl admin", can: "add a risk control consumer" },
   claim_protocol_fees: null,
   claim_creator_fees: null,
+  // R5-10: every contract the factory deploys checks its admin against the underlying SAC's admin()
+  // live (`principal_compliance::is_authority`), so only that account can deploy a market.
+  create_tokens: { role: "issuer", who: "the asset's issuer", can: "deploy a market on it" },
+  create_engine: { role: "issuer", who: "the asset's issuer", can: "deploy a market on it" },
+  create_pool_and_escrow: { role: "issuer", who: "the asset's issuer", can: "deploy a market on it" },
 }
 
 /**

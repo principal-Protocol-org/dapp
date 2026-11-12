@@ -12,13 +12,28 @@
  *
  * Signatures are those of `principal` `origin/feat/tranche-1-mvp` (ABI pin `be2a1a5`); the SAC's
  * `set_authorized(id, authorize)` is the host's Stellar Asset Contract interface. The MarketFactory
- * `create_*` calls and their structs come with the creation wizard (Task 22, ruling R2-51): the
- * factory's ABI changes with the AMM migration, these calls do not.
+ * `create_*` calls (the creation wizard's step 3, R5-10) are those of 665bb67: their structs are
+ * encoded in `factory.ts`, which takes the factory, the shared contracts and the Wasm hashes from the
+ * manifest and derives the market's addresses from the salt.
  */
 import { StrKey } from "@stellar/stellar-sdk"
+import {
+  createEngineInvocation,
+  createPoolAndEscrowInvocation,
+  createTokensInvocation,
+  decodeEngineParams,
+  decodePoolEscrowParams,
+  decodeSalt,
+  decodeTokenParams,
+  knownUnderlyings,
+  maturityText,
+  type EngineParamsInput,
+  type PoolParamsInput,
+  type TokenParamsInput,
+} from "./factory"
 import { shorten } from "./format"
 import { getMarket } from "./manifest"
-import type { ContractInvocation, ScArg } from "./stellar"
+import { scArgEquals, type ContractInvocation, type ScArg } from "./stellar"
 import type { Manifest, Market, MarketContractName } from "./types"
 
 export type ManagerCallKind =
@@ -30,6 +45,13 @@ export type ManagerCallKind =
   | "set_paused"
   | "register_market"
   | "add_consumer"
+  | "create_tokens"
+  | "create_engine"
+  | "create_pool_and_escrow"
+
+/** The MarketFactory's three deployment calls (spec 0002 §5 step 3). */
+export const FACTORY_CALLS = ["create_tokens", "create_engine", "create_pool_and_escrow"] as const satisfies readonly ManagerCallKind[]
+export type FactoryCallKind = (typeof FACTORY_CALLS)[number]
 
 /** A manager call, ready for review: `source` signs it, `label` says what it does in plain words. */
 export type ManagerCall = { kind: ManagerCallKind; source: string; invocation: ContractInvocation; label: string }
@@ -46,9 +68,13 @@ export type FeeContract = "pool" | "manager"
  * market_pool:1013; sy_wrapper:581; principal_manager:918; router:504; risk_control:441), the SAC
  * its admin's, and none of them makes an authorized sub-call. `none`: the fee claims are
  * permissionless and pay a payee the config fixes (market_pool:606-613, principal_manager:557-565);
- * the SY moves out of the claiming contract's own balance, which needs no entry.
+ * the SY moves out of the claiming contract's own balance, which needs no entry. `caller_tree`, for
+ * the factory's calls (R5-10): the issuer, once, for exactly this call, with the factory's own calls
+ * beneath it: each child contract's `initialize` and wiring calls `admin.require_auth()` again
+ * (sy_wrapper:151, pt_token:141, yt_token:210, market_pool:275, ...), so the issuer's authorization of
+ * the factory call carries them.
  */
-export const MANAGER_CALL_AUTH: Record<ManagerCallKind, "caller" | "none"> = {
+export const MANAGER_CALL_AUTH: Record<ManagerCallKind, "caller" | "caller_tree" | "none"> = {
   set_authorized: "caller",
   grant_account: "caller",
   grant_asset: "caller",
@@ -57,6 +83,9 @@ export const MANAGER_CALL_AUTH: Record<ManagerCallKind, "caller" | "none"> = {
   set_paused: "caller",
   register_market: "caller",
   add_consumer: "caller",
+  create_tokens: "caller_tree",
+  create_engine: "caller_tree",
+  create_pool_and_escrow: "caller_tree",
 }
 
 /** Contract type names, as call trees show them. */
@@ -232,6 +261,64 @@ export function addConsumerCall(manifest: Manifest, p: { source: string; consume
   }
 }
 
+/** The asset code a factory call's label names. */
+function codeOf(manifest: Manifest, sac: string): string {
+  return knownUnderlyings(manifest).get(sac)?.code ?? shorten(sac)
+}
+
+type FactoryCallParams<P> = { source: string; salt: string; params: P }
+
+/**
+ * MarketFactory `create_tokens(issuer, salt, wasm, params)`: the SY wrapper, PT and YT. The signer is
+ * the issuer, which the contracts check live against the underlying SAC's `admin()` (R5-10).
+ */
+export function createTokensCall(manifest: Manifest, p: FactoryCallParams<TokenParamsInput>): ManagerCall {
+  const source = signerOf(p.source)
+  return {
+    kind: "create_tokens",
+    source,
+    invocation: createTokensInvocation(manifest, { issuer: source, salt: p.salt, params: p.params }),
+    label: `Deploy the SY wrapper, ${p.params.ptSymbol} and ${p.params.ytSymbol} of a new ${codeOf(manifest, p.params.underlying)} market maturing ${maturityText(p.params.maturity)}`,
+  }
+}
+
+/** MarketFactory `create_engine(issuer, salt, wasm, tokens, params)`: the market config and PrincipalManager. */
+export function createEngineCall(manifest: Manifest, p: FactoryCallParams<EngineParamsInput>): ManagerCall {
+  const source = signerOf(p.source)
+  const q = p.params
+  return {
+    kind: "create_engine",
+    source,
+    invocation: createEngineInvocation(manifest, { issuer: source, salt: p.salt, params: q }),
+    label:
+      `Deploy the market config and PrincipalManager of the new ${codeOf(manifest, q.underlying)} market maturing ${maturityText(q.maturity)}: ` +
+      `fees ${q.tokenizationFeeBps}, ${q.ytFeeBps} and ${q.swapFeeTierBps} bps (tokenization, YT, swap tier), protocol share ${q.protocolShareBps} bps, treasury ${nameOf(manifest, q.treasury)}`,
+  }
+}
+
+/** MarketFactory `create_pool_and_escrow(issuer, salt, wasm, tokens, engine, params)`: the pool and the recovery escrow. */
+export function createPoolAndEscrowCall(manifest: Manifest, p: FactoryCallParams<PoolParamsInput>): ManagerCall {
+  const source = signerOf(p.source)
+  const years = p.params.timeStretchYears
+  return {
+    kind: "create_pool_and_escrow",
+    source,
+    invocation: createPoolAndEscrowInvocation(manifest, { issuer: source, salt: p.salt, params: p.params }),
+    label: `Deploy the pool (time stretch ${years} year${years === 1 ? "" : "s"}) and recovery escrow of the new ${codeOf(manifest, p.params.underlying)} market`,
+  }
+}
+
+const isFactoryCall = (kind: ManagerCallKind): kind is FactoryCallKind => (FACTORY_CALLS as readonly string[]).includes(kind)
+
+/** The asset a factory call deploys a market on (its params' `underlying`); undefined for any other call or an unreadable one. */
+export function factoryCallUnderlying(call: ManagerCall): string | undefined {
+  if (!isFactoryCall(call.kind)) return undefined
+  const params = call.invocation.args[call.invocation.args.length - 1]
+  if (params?.type !== "struct") return undefined
+  const underlying = params.value.underlying
+  return underlying?.type === "address" && typeof underlying.value === "string" ? underlying.value : undefined
+}
+
 /** The market and contract name of `contractId`, among `which` of every market; refuses any other contract. */
 function marketContractOf<K extends PausableContract>(manifest: Manifest, contractId: string, which: readonly K[]): { marketId: string; contract: K } {
   for (const market of manifest.markets) {
@@ -255,6 +342,12 @@ function argValues(fn: string, args: ScArg[], types: readonly ("address" | "bool
     if (!ok) throw new Error(`argument ${i + 1} of ${fn} must be ${type === "address" ? "an address" : "a bool"}.`)
     return arg.value as string | boolean
   })
+}
+
+/** A factory call's salt (argument 2) and params (its last argument), from exactly `count` arguments. */
+function factoryArgs(fn: FactoryCallKind, args: ScArg[], count: number): [string, ScArg] {
+  if (args.length !== count) throw new Error(`${fn} takes ${count} arguments, not ${args.length}.`)
+  return [decodeSalt(args[1], `argument 2 of ${fn}`), args[count - 1]]
 }
 
 /** Reads `call` back into its builder's parameters and builds it again. */
@@ -291,6 +384,21 @@ function rebuild(manifest: Manifest, call: ManagerCall): ManagerCall {
       const [, consumer] = argValues(kind, args, ["address", "address"]) as [string, string]
       return addConsumerCall(manifest, { source, consumer })
     }
+    // The caller-chosen fields are read back; the factory, the Wasm hashes, the shared contracts and the
+    // tokens and engine are not: the builder takes them from the manifest and the salt, and the
+    // comparison below refuses any other value.
+    case "create_tokens": {
+      const [salt, params] = factoryArgs(kind, args, 4)
+      return createTokensCall(manifest, { source, salt, params: decodeTokenParams(params) })
+    }
+    case "create_engine": {
+      const [salt, params] = factoryArgs(kind, args, 5)
+      return createEngineCall(manifest, { source, salt, params: decodeEngineParams(params) })
+    }
+    case "create_pool_and_escrow": {
+      const [salt, params] = factoryArgs(kind, args, 6)
+      return createPoolAndEscrowCall(manifest, { source, salt, params: decodePoolEscrowParams(params) })
+    }
     default: {
       const unknown: never = kind
       throw new Error(`"${String(unknown)}" is not a manager call this app builds.`)
@@ -308,7 +416,8 @@ function sameCall(a: ManagerCall, b: ManagerCall): boolean {
     x.contractId === y.contractId &&
     x.functionName === y.functionName &&
     x.args.length === y.args.length &&
-    x.args.every((arg, i) => arg.type === y.args[i].type && arg.value === y.args[i].value)
+    // Compared as encoded: a struct argument is equal field by field, as the transaction carries it.
+    x.args.every((arg, i) => scArgEquals(arg, y.args[i]))
   )
 }
 
@@ -339,6 +448,29 @@ export function managerCallTree(manifest: Manifest, call: ManagerCall): string[]
       return [`Router.${functionName}`]
     case "add_consumer":
       return [`RiskControl.${functionName}`]
+    // The factory's own calls into the contracts it deploys, in the order it makes them (market_factory).
+    case "create_tokens":
+      return ["MarketFactory.create_tokens", "SYWrapper.initialize", "PTToken.initialize", "YTToken.initialize"]
+    case "create_engine":
+      return [
+        "MarketFactory.create_engine",
+        "MarketConfig.initialize",
+        "PrincipalManager.initialize",
+        "PTToken.set_minter",
+        "YTToken.set_minter",
+        "SYWrapper.set_risk_control",
+        "PrincipalManager.set_risk_control",
+      ]
+    case "create_pool_and_escrow":
+      return [
+        "MarketFactory.create_pool_and_escrow",
+        "MarketPool.initialize",
+        "RecoveryEscrow.initialize",
+        "SYWrapper.set_recovery_escrow",
+        "PTToken.set_recovery_escrow",
+        "YTToken.set_recovery_escrow",
+        "MarketPool.set_recovery_escrow",
+      ]
     case "set_paused":
       return [`${CONTRACT_TYPE[marketContractOf(manifest, contractId, PAUSABLE).contract]}.${functionName}`]
     case "claim_protocol_fees":

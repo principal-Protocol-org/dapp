@@ -1,5 +1,5 @@
 // @vitest-environment node
-import { Keypair, StrKey, Transaction, nativeToScVal, rpc, xdr } from "@stellar/stellar-sdk";
+import { Keypair, StrKey, Transaction, nativeToScVal, rpc, scValToNative, xdr } from "@stellar/stellar-sdk";
 import { describe, expect, it } from "vitest";
 import testnetJson from "@/lib/protocol/__tests__/fixtures/testnet-interim.json";
 import { parseManifest } from "../manifest";
@@ -13,10 +13,13 @@ import {
   getLedgerClock,
   SubmissionRejectedError,
   pollTransactionStatus,
+  scArgEquals,
+  scArgToVal,
   simulateContractRead,
   simulateInvocation,
   submitSignedTransaction,
   type ContractInvocation,
+  type ScArg,
 } from "../stellar";
 
 const manifest = parseManifest(testnetJson);
@@ -41,6 +44,60 @@ function principalInvocationForIntent(
     ],
   };
 }
+
+describe("scArgToVal: a contracttype struct (MarketFactory params, R5-10)", () => {
+  const contract = StrKey.encodeContract(new Uint8Array(32).fill(3));
+  const struct: ScArg = {
+    type: "struct",
+    value: {
+      yt_symbol: { type: "string", value: "YT-USDY" },
+      maturity: { type: "u64", value: 1_800_000_000n },
+      decimals: { type: "u32", value: 7 },
+      underlying: { type: "address", value: contract },
+      salt: { type: "bytes", value: "ab".repeat(32) },
+    },
+  };
+
+  it("encodes as a map with symbol keys in sorted order, each field with its own type", () => {
+    const val = scArgToVal(struct);
+    if (val.type !== "scvMap") throw new Error(`expected a map, got ${val.type}`);
+    const entries = val.value ?? [];
+    expect(entries.map((e) => (e.key.type === "scvSymbol" ? String(e.key.value) : e.key.type))).toEqual([
+      "decimals",
+      "maturity",
+      "salt",
+      "underlying",
+      "yt_symbol",
+    ]);
+    expect(entries.map((e) => e.val.type)).toEqual(["scvU32", "scvU64", "scvBytes", "scvAddress", "scvString"]);
+    expect(scValToNative(val)).toEqual({
+      decimals: 7,
+      maturity: 1_800_000_000n,
+      salt: Buffer.from("ab".repeat(32), "hex"),
+      underlying: contract,
+      yt_symbol: "YT-USDY",
+    });
+  });
+
+  it("nests: a struct field may be a struct", () => {
+    const outer: ScArg = { type: "struct", value: { inner: struct, b: { type: "bool", value: true } } };
+    const native = scValToNative(scArgToVal(outer)) as { inner: { maturity: bigint } };
+    expect(native.inner.maturity).toBe(1_800_000_000n);
+  });
+
+  it("scArgEquals compares the encoded value, so equal structs built apart are equal", () => {
+    const copy: ScArg = structuredClone(struct);
+    expect(scArgEquals(struct, copy)).toBe(true);
+    // Field order does not change the encoding: the map is sorted.
+    const reordered: ScArg = { type: "struct", value: Object.fromEntries(Object.entries(struct.value as Record<string, ScArg>).reverse()) };
+    expect(scArgEquals(struct, reordered)).toBe(true);
+    const changed: ScArg = structuredClone(struct);
+    (changed.value as Record<string, ScArg>).decimals = { type: "u32", value: 6 };
+    expect(scArgEquals(struct, changed)).toBe(false);
+    expect(scArgEquals({ type: "u32", value: 7 }, { type: "u64", value: 7n })).toBe(false);
+    expect(scArgEquals({ type: "address", value: contract }, { type: "address", value: contract })).toBe(true);
+  });
+});
 
 describe("buildInvokeTransaction", () => {
   it("builds parseable unsigned XDR for a Principal Router call", () => {

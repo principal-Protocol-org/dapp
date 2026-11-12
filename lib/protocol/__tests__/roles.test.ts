@@ -2,7 +2,7 @@
 import { Keypair, StrKey } from "@stellar/stellar-sdk"
 import { describe, expect, it } from "vitest"
 import testnetJson from "@/lib/protocol/__tests__/fixtures/testnet-interim.json"
-import { claimCreatorFeesCall, grantAccountCall, registerMarketCall, setAuthorizedCall, setPausedCall, addConsumerCall } from "../manager-calls"
+import { claimCreatorFeesCall, createTokensCall, grantAccountCall, registerMarketCall, setAuthorizedCall, setPausedCall, addConsumerCall } from "../manager-calls"
 import { parseManifest } from "../manifest"
 import type { ContractReader } from "../reader"
 import { accruedFees, heldRoles, rolesForCall, rolesOf, sharedRolesOf } from "../roles"
@@ -113,6 +113,17 @@ describe("sharedRolesOf and rolesForCall", () => {
     const roles = await rolesOf(reader(market(A, { issuer: ME })), A, ME)
     const call = setAuthorizedCall(manifest, { source: ME, sac: A.underlying.sac, account: OTHER, authorize: true })
     expect(rolesForCall(call, roles, undefined)).toMatchObject({ status: "live", value: ["issuer"] })
+  })
+
+  it("a factory call needs the issuer role on the asset it deploys on (R5-10), and no other market's", async () => {
+    const m = { ...manifest, shared: { ...manifest.shared, factory: contractAt(40) }, wasmHashes: { sy: "a1".repeat(32), pt: "a2".repeat(32), yt: "a3".repeat(32) } }
+    const params = { underlying: A.underlying.sac, maturity: 1_807_776_000n, ptName: "PT", ptSymbol: "PT-STA", ytName: "YT", ytSymbol: "YT-STA" }
+    const call = createTokensCall(m, { source: ME, salt: "11".repeat(32), params })
+    const roles = await rolesOf(reader(market(A, { issuer: ME })), A, ME)
+    expect(rolesForCall(call, roles, undefined)).toMatchObject({ status: "live", value: ["issuer"] })
+    // Roles read on a market of another asset say nothing about this one.
+    expect(rolesForCall(call, { ...roles, sac: contractAt(77) }, undefined)).toMatchObject({ status: "unavailable" })
+    expect(rolesForCall(call, undefined, undefined)).toMatchObject({ status: "unavailable" })
   })
 
   it("a call that needs no role never looks at the reads", () => {

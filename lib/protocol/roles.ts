@@ -14,7 +14,7 @@
  * RiskControl and Permissioning; `accrued_fees() -> (protocol, creator)` on MarketPool and
  * PrincipalManager, in SY shares.
  */
-import type { ManagerCall } from "./manager-calls"
+import { factoryCallUnderlying, type ManagerCall } from "./manager-calls"
 import { allLive, liveValue, readLive, toAddress, toBigint, unavailable, type ContractReader } from "./reader"
 import type { Live, Manifest, Market } from "./types"
 
@@ -148,6 +148,13 @@ export function rolesForCall(call: ManagerCall, market: MarketRoles | undefined,
     case "claim_protocol_fees":
     case "claim_creator_fees":
       return NOTHING
+    // R5-10: the issuer of the asset the factory call deploys on; roles read on another asset's market say nothing.
+    case "create_tokens":
+    case "create_engine":
+    case "create_pool_and_escrow": {
+      const underlying = factoryCallUnderlying(call)
+      return asRoles("issuer", market && market.sac === underlying ? market.issuer : undefined, "Your issuer role on this asset")
+    }
   }
 }
 

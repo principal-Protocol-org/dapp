@@ -19,10 +19,13 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import testnetJson from "@/lib/protocol/__tests__/fixtures/testnet-interim.json"
 import { ACTION_META, invocationFor, type ActionId, type ActionInput, type GuardValues } from "../actions"
 import { hashLike } from "../hash"
+import { deriveMarketContracts, type MarketParams } from "../factory"
 import {
   addConsumerCall,
   claimCreatorFeesCall,
   claimProtocolFeesCall,
+  createEngineCall,
+  createTokensCall,
   grantAccountCall,
   grantAssetCall,
   registerMarketCall,
@@ -33,7 +36,7 @@ import {
 import { evaluateManagerGates } from "../manager-gates"
 import type { Role } from "../roles"
 import { parseManifest } from "../manifest"
-import { AMOUNTS_MOVED_REASON, SubmissionRejectedError, createRpcServer, transactionEnvelopeHash } from "../stellar"
+import { AMOUNTS_MOVED_REASON, SubmissionRejectedError, createRpcServer, scArgToVal, transactionEnvelopeHash } from "../stellar"
 import {
   MAX_TX_FEE_STROOPS,
   REVIEW_TTL_MS,
@@ -49,7 +52,7 @@ import {
   type ReviewRpcServer,
   TX_TIMEOUT_SECONDS,
 } from "../review"
-import type { Finding, Live, WalletState } from "../types"
+import type { Finding, Live, Manifest, WalletState } from "../types"
 
 const manifest = parseManifest(structuredClone(testnetJson))
 const market = manifest.markets[0]
@@ -1271,7 +1274,7 @@ describe("manager reviews (0002 §5): the same review → sign pipeline as an ac
   const argsOf = (call: ManagerCall) =>
     callOf(
       new TransactionBuilder(new Account(SOURCE, SEQUENCE), { fee: BASE_FEE, networkPassphrase: passphrase })
-        .addOperation(new Contract(call.invocation.contractId).call(call.invocation.functionName, ...call.invocation.args.map((a) => nativeToScVal(a.value, { type: a.type }))))
+        .addOperation(new Contract(call.invocation.contractId).call(call.invocation.functionName, ...call.invocation.args.map(scArgToVal)))
         .setTimeout(300)
         .build(),
     )
@@ -1428,6 +1431,99 @@ describe("manager reviews (0002 §5): the same review → sign pipeline as an ac
           "is more than the base fee plus the resource fee it declares",
         )
       })
+    })
+  })
+
+  describe("a MarketFactory call (R5-10): the issuer's own authorization, with the factory's calls beneath it", () => {
+    const at = (fill: number) => StrKey.encodeContract(new Uint8Array(32).fill(fill))
+    const pins = (fill: string) => fill.repeat(32)
+    const factoryManifest: Manifest = {
+      ...manifest,
+      shared: { ...manifest.shared, factory: at(40) },
+      wasmHashes: { sy: pins("a1"), pt: pins("a2"), yt: pins("a3"), config: pins("a4"), manager: pins("a5"), pool: pins("a6"), recoveryEscrow: pins("a7") },
+    }
+    const SALT = "11".repeat(32)
+    const params: MarketParams = {
+      underlying: market.underlying.sac,
+      maturity: 1_807_776_000n,
+      ptName: "Principal Token STA",
+      ptSymbol: "PT-STA",
+      ytName: "Yield Token STA",
+      ytSymbol: "YT-STA",
+      protocolAdmin: SOURCE,
+      treasury: GRANTEE,
+      tokenizationFeeBps: 5,
+      ytFeeBps: 1000,
+      swapFeeTierBps: 10,
+      protocolShareBps: 2000,
+      timeStretchYears: 4,
+    }
+    const predicted = deriveMarketContracts(factoryManifest, SALT)
+    const tokens = () => createTokensCall(factoryManifest, { source: SOURCE, salt: SALT, params })
+    const initialize = (contractId: string) =>
+      new xdr.InvokeContractArgs({ contractAddress: new Address(contractId).toScAddress(), functionName: "initialize", args: [] })
+    const childInits = () => [initialize(predicted.sy), initialize(predicted.pt), initialize(predicted.yt)]
+    const preparedBy = (prepare: (tx: Transaction) => Transaction, call = tokens()) =>
+      prepareManagerReview({ manifest: factoryManifest, call, rpc: fakeRpc({ prepareTransaction: async (tx) => prepare(tx) }) })
+    const foreignAuth = "RPC added an authorization for something other than this call. Refusing to review it; try again or use another RPC."
+
+    it("prepares, re-verifies and signs it: one entry, the source account's, rooted at exactly the call, the children's initialize beneath", async () => {
+      const server = fakeRpc({ prepareTransaction: async (tx) => assemble(tx, { auth: [authWith(callOf(tx), childInits())] }) })
+      const r = await prepareManagerReview({ manifest: factoryManifest, call: tokens(), rpc: server })
+      expect(r.callTree).toEqual(["MarketFactory.create_tokens", "SYWrapper.initialize", "PTToken.initialize", "YTToken.initialize"])
+      expect(r.summary.give).toEqual([])
+      const sign = signWith()
+      const result = await executeReview({ review: r, manifest: factoryManifest, sign, rpc: server, nowMs: r.preparedAtMs + 1_000 })
+      expect(result.status).toBe("SUCCESS")
+      expect(sign.seen).toHaveLength(1)
+      // create_engine carries more calls beneath it; their number is the factory's, not pinned here.
+      const engine = createEngineCall(factoryManifest, { source: SOURCE, salt: SALT, params })
+      await expect(preparedBy((tx) => assemble(tx, { auth: [authWith(callOf(tx), [...childInits(), ...childInits()])] }), engine)).resolves.toBeTruthy()
+    })
+
+    it("refuses a create-contract authorization beneath the call: the issuer authorizes only contract calls under it", async () => {
+      const create = new xdr.SorobanAuthorizedInvocation({
+        function: xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeCreateContractHostFn(
+          new xdr.CreateContractArgs({
+            contractIdPreimage: xdr.ContractIdPreimage.contractIdPreimageFromAddress(
+              new xdr.ContractIdPreimageFromAddress({ address: new Address(SOURCE).toScAddress(), salt: Buffer.alloc(32) }),
+            ),
+            executable: xdr.ContractExecutable.contractExecutableWasm(Buffer.alloc(32)),
+          }),
+        ),
+        subInvocations: [],
+      })
+      await expect(
+        preparedBy((tx) => {
+          const entry = authWith(callOf(tx), childInits())
+          entry.rootInvocation.subInvocations.push(create)
+          return assemble(tx, { auth: [entry] })
+        }),
+      ).rejects.toThrow(foreignAuth)
+    })
+
+    it("refuses another root, a second entry, and another account's authorization (naming it)", async () => {
+      await expect(preparedBy((tx) => assemble(tx, { auth: [authWith(argsOf(grant()), childInits())] }))).rejects.toThrow(foreignAuth)
+      await expect(preparedBy((tx) => assemble(tx, { auth: [authWith(callOf(tx), childInits()), authFor(callOf(tx))] }))).rejects.toThrow(foreignAuth)
+      const issuer = Keypair.random().publicKey()
+      await expect(preparedBy((tx) => assemble(tx, { auth: [authBy(issuer, callOf(tx))] }))).rejects.toThrow(
+        `This call needs an authorization from another account (${short(issuer)})`,
+      )
+      await expect(preparedBy((tx) => rpc.assembleTransaction(tx, simulationSuccess({ auth: [] })).build())).rejects.toThrow(
+        "RPC left out the authorization this call needs.",
+      )
+    })
+
+    it("only the asset's issuer may sign it (R5-10): a wallet without the role is told so", () => {
+      const connected: WalletState = { status: "connected", publicKey: SOURCE, networkPassphrase: passphrase }
+      const roles = (...value: Role[]): Live<Role[]> => ({ status: "live", value, ledger: 90 })
+      expect(evaluateManagerGates(tokens(), { wallet: connected, roles: roles("issuer"), findings: [], listed: true })).toEqual([])
+      expect(evaluateManagerGates(tokens(), { wallet: connected, roles: roles(), findings: [], listed: true })).toEqual([
+        {
+          code: "wallet",
+          message: `Only the asset's issuer can deploy a market on it. You are connected as ${short(SOURCE)}, which is not the asset's issuer. Connect the asset's issuer's wallet to sign this.`,
+        },
+      ])
     })
   })
 

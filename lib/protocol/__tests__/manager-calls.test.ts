@@ -3,10 +3,15 @@ import { Keypair, StrKey, type Transaction } from "@stellar/stellar-sdk"
 import { describe, expect, it } from "vitest"
 import testnetJson from "@/lib/protocol/__tests__/fixtures/testnet-interim.json"
 import { parseManifest } from "../manifest"
+import { createEngineInvocation, createPoolAndEscrowInvocation, createTokensInvocation, deriveMarketContracts, type MarketParams } from "../factory"
 import {
   MANAGER_CALL_AUTH,
   addConsumerCall,
   claimCreatorFeesCall,
+  createEngineCall,
+  createPoolAndEscrowCall,
+  createTokensCall,
+  factoryCallUnderlying,
   claimProtocolFeesCall,
   grantAccountCall,
   grantAssetCall,
@@ -29,10 +34,14 @@ import type { Manifest } from "../types"
 
 const contractAt = (fill: number) => StrKey.encodeContract(new Uint8Array(32).fill(fill))
 const TEST_SAC = contractAt(7)
+const FACTORY = contractAt(40)
 const base = parseManifest(structuredClone(testnetJson))
-/** The testnet manifest plus a test asset, whose SAC the issuer authorizes accounts on. */
+const pin = (fill: string) => fill.repeat(32)
+/** The testnet manifest plus a test asset (whose SAC the issuer authorizes accounts on), a MarketFactory and its pins. */
 const manifest: Manifest = {
   ...base,
+  shared: { ...base.shared, factory: FACTORY },
+  wasmHashes: { sy: pin("a1"), pt: pin("a2"), yt: pin("a3"), config: pin("a4"), manager: pin("a5"), pool: pin("a6"), recoveryEscrow: pin("a7") },
   testAsset: { code: "USDY", issuer: Keypair.random().publicKey(), sac: TEST_SAC, decimals: 7, displayName: "USDY (test)" },
 }
 const market = manifest.markets[0]
@@ -48,6 +57,25 @@ const NEW_SY = contractAt(10)
 const FOREIGN = contractAt(5)
 
 const short = (value: string) => `${value.slice(0, 6)}...${value.slice(-6)}`
+
+/** A new market's parameters (the wizard's step 1) and its salt. */
+const SALT = "11".repeat(32)
+const TREASURY = Keypair.random().publicKey()
+const PARAMS: MarketParams = {
+  underlying: TEST_SAC,
+  maturity: 1_807_776_000n, // 2027-04-15 08:00 UTC
+  ptName: "Principal Token USDY",
+  ptSymbol: "PT-USDY",
+  ytName: "Yield Token USDY",
+  ytSymbol: "YT-USDY",
+  protocolAdmin: ACCOUNT,
+  treasury: TREASURY,
+  tokenizationFeeBps: 5,
+  ytFeeBps: 1000,
+  swapFeeTierBps: 10,
+  protocolShareBps: 2000,
+  timeStretchYears: 4,
+}
 const address = (value: string): ScArg => ({ type: "address", value })
 const bool = (value: boolean): ScArg => ({ type: "bool", value })
 
@@ -75,6 +103,9 @@ function everyCall(): ManagerCall[] {
     setPausedCall(manifest, { source: SIGNER, marketId: market.marketId, contract: "sy", paused: true }),
     registerMarketCall(manifest, { source: SIGNER, pool: NEW_POOL }),
     addConsumerCall(manifest, { source: SIGNER, consumer: NEW_SY }),
+    createTokensCall(manifest, { source: SIGNER, salt: SALT, params: PARAMS }),
+    createEngineCall(manifest, { source: SIGNER, salt: SALT, params: PARAMS }),
+    createPoolAndEscrowCall(manifest, { source: SIGNER, salt: SALT, params: PARAMS }),
   ]
 }
 
@@ -177,8 +208,8 @@ describe("manager call builders encode each call as the contract declares it", (
     expect(addConsumerCall(manifest, { source: SIGNER, consumer: sy }).label).toBe(`Let the SY wrapper of ${NAME} report deposits to risk control`)
   })
 
-  it("names who authorizes each call: the signer once, or nobody for the permissionless fee claims (R29)", () => {
-    const expected: Record<ManagerCallKind, "caller" | "none"> = {
+  it("names who authorizes each call: the signer once, the issuer over the factory's own calls, or nobody for the permissionless fee claims (R29)", () => {
+    const expected: Record<ManagerCallKind, "caller" | "caller_tree" | "none"> = {
       set_authorized: "caller",
       grant_account: "caller",
       grant_asset: "caller",
@@ -187,6 +218,10 @@ describe("manager call builders encode each call as the contract declares it", (
       set_paused: "caller",
       register_market: "caller",
       add_consumer: "caller",
+      // R5-10: each child contract's initialize and wiring checks the issuer again, beneath the factory call.
+      create_tokens: "caller_tree",
+      create_engine: "caller_tree",
+      create_pool_and_escrow: "caller_tree",
     }
     expect(MANAGER_CALL_AUTH).toEqual(expected)
   })
@@ -202,7 +237,96 @@ describe("manager call builders encode each call as the contract declares it", (
       ["SYWrapper.set_paused"],
       ["Router.register_market"],
       ["RiskControl.add_consumer"],
+      ["MarketFactory.create_tokens", "SYWrapper.initialize", "PTToken.initialize", "YTToken.initialize"],
+      [
+        "MarketFactory.create_engine",
+        "MarketConfig.initialize",
+        "PrincipalManager.initialize",
+        "PTToken.set_minter",
+        "YTToken.set_minter",
+        "SYWrapper.set_risk_control",
+        "PrincipalManager.set_risk_control",
+      ],
+      [
+        "MarketFactory.create_pool_and_escrow",
+        "MarketPool.initialize",
+        "RecoveryEscrow.initialize",
+        "SYWrapper.set_recovery_escrow",
+        "PTToken.set_recovery_escrow",
+        "YTToken.set_recovery_escrow",
+        "MarketPool.set_recovery_escrow",
+      ],
     ])
+  })
+})
+
+describe("MarketFactory create_* calls (spec 0002 §5 step 3, R5-10): the issuer signs, one salt, everything else from the manifest", () => {
+  const issuer = address(SIGNER)
+
+  it("create_tokens: the factory's invocation, the signer as the issuer, and a label that says what it deploys", () => {
+    const call = createTokensCall(manifest, { source: SIGNER, salt: SALT, params: PARAMS })
+    expect(call).toEqual({
+      kind: "create_tokens",
+      source: SIGNER,
+      invocation: createTokensInvocation(manifest, { issuer: SIGNER, salt: SALT, params: PARAMS }),
+      label: "Deploy the SY wrapper, PT-USDY and YT-USDY of a new USDY market maturing 2027-04-15 08:00 UTC",
+    })
+    expect(call.invocation.contractId).toBe(FACTORY)
+    expect(call.invocation.args[0]).toEqual(issuer)
+    expect(encodedTypes(call)).toEqual(["scvAddress", "scvBytes", "scvMap", "scvMap"])
+  })
+
+  it("create_engine: the fees, the protocol share and the treasury in the label", () => {
+    const call = createEngineCall(manifest, { source: SIGNER, salt: SALT, params: PARAMS })
+    expect(call.kind).toBe("create_engine")
+    expect(call.invocation).toEqual(createEngineInvocation(manifest, { issuer: SIGNER, salt: SALT, params: PARAMS }))
+    expect(call.label).toBe(
+      `Deploy the market config and PrincipalManager of the new USDY market maturing 2027-04-15 08:00 UTC: fees 5, 1000 and 10 bps (tokenization, YT, swap tier), protocol share 2000 bps, treasury ${short(TREASURY)}`,
+    )
+    expect(encodedTypes(call)).toEqual(["scvAddress", "scvBytes", "scvMap", "scvMap", "scvMap"])
+  })
+
+  it("create_pool_and_escrow: the time stretch in the label", () => {
+    const call = createPoolAndEscrowCall(manifest, { source: SIGNER, salt: SALT, params: PARAMS })
+    expect(call.kind).toBe("create_pool_and_escrow")
+    expect(call.invocation).toEqual(createPoolAndEscrowInvocation(manifest, { issuer: SIGNER, salt: SALT, params: PARAMS }))
+    expect(call.label).toBe("Deploy the pool (time stretch 4 years) and recovery escrow of the new USDY market")
+    expect(encodedTypes(call)).toEqual(["scvAddress", "scvBytes", "scvMap", "scvMap", "scvMap", "scvMap"])
+  })
+
+  it("factoryCallUnderlying names the asset a factory call deploys on, and nothing for another call", () => {
+    for (const call of everyCall().slice(-3)) expect(factoryCallUnderlying(call)).toBe(TEST_SAC)
+    expect(factoryCallUnderlying(grantAccountCall(manifest, { source: SIGNER, account: ACCOUNT }))).toBeUndefined()
+  })
+
+  const notOurs = "This manager call is not one this app builds for this network: its contract, function or arguments differ."
+  const struct = (arg: ScArg) => (arg as { type: "struct"; value: Record<string, ScArg> }).value
+
+  it("rebuild refuses code that is not the manifest's pin, tokens that are not the salt's, and shared contracts that are not the manifest's", () => {
+    const tokens = () => createTokensCall(manifest, { source: SIGNER, salt: SALT, params: PARAMS })
+    const engine = () => createEngineCall(manifest, { source: SIGNER, salt: SALT, params: PARAMS })
+    const pool = () => createPoolAndEscrowCall(manifest, { source: SIGNER, salt: SALT, params: PARAMS })
+    const tamper = (make: () => ManagerCall, change: (args: ScArg[]) => void) => {
+      const call = make()
+      change(call.invocation.args)
+      return () => rebuildManagerCall(manifest, call)
+    }
+    // A Wasm hash other than the pin: the factory would deploy other code.
+    expect(tamper(tokens, (a) => (struct(a[2]).sy_wrapper = { type: "bytes", value: pin("ee") }))).toThrow(notOurs)
+    // Tokens or engine that are not the ones this salt derives.
+    const other = deriveMarketContracts(manifest, "22".repeat(32))
+    expect(tamper(engine, (a) => (struct(a[3]).sy_wrapper = address(other.sy)))).toThrow(notOurs)
+    expect(tamper(pool, (a) => (struct(a[4]).market_config = address(other.config)))).toThrow(notOurs)
+    // A shared contract that is not the manifest's.
+    expect(tamper(tokens, (a) => (struct(a[3]).permissioning = address(FOREIGN)))).toThrow(notOurs)
+    expect(tamper(engine, (a) => (struct(a[4]).risk_control = address(FOREIGN)))).toThrow(notOurs)
+    // The issuer must be the signer; the salt must be 32 bytes.
+    expect(tamper(tokens, (a) => (a[0] = address(ACCOUNT)))).toThrow(notOurs)
+    expect(tamper(tokens, (a) => (a[1] = { type: "bytes", value: "11" }))).toThrow("argument 2 of create_tokens must be a salt of 32 bytes.")
+    // A field the contract does not declare, a missing argument, a fee above the cap.
+    expect(tamper(pool, (a) => (struct(a[5]).extra = bool(true)))).toThrow("PoolEscrowParams has a field extra the contract does not declare.")
+    expect(tamper(engine, (a) => a.pop())).toThrow("create_engine takes 5 arguments, not 4.")
+    expect(tamper(engine, (a) => (struct(a[4]).yt_fee_bps = { type: "u32", value: 9000 }))).toThrow("YT fee")
   })
 })
 

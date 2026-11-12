@@ -265,9 +265,12 @@ function assertFeeCapped(fee: bigint, what: string): void {
  * What a prepared transaction may authorize (R29). `rooted`, for an action: every entry is for
  * exactly this call, with the call's own nested transfers beneath it. `caller`, for a manager call
  * its signer authorizes: exactly one entry, the source account's own, for exactly this call and
- * nothing beneath it. `none`, for a permissionless manager call: no entry at all.
+ * nothing beneath it. `caller_tree`, for a MarketFactory call its issuer signs (R5-10): the same
+ * single entry, with contract calls beneath it (the factory's calls into the contracts it deploys,
+ * each re-checking the issuer) and no other kind of authorization. `none`, for a permissionless
+ * manager call: no entry at all.
  */
-export type AuthRule = "rooted" | "caller" | "none"
+export type AuthRule = "rooted" | "caller" | "caller_tree" | "none"
 
 type AuthFault = { kind: "foreign" } | { kind: "missing" } | { kind: "other_signer"; account: string }
 
@@ -332,6 +335,11 @@ function isCall(fn: xdr.SorobanAuthorizedFunction, callXdr: string): boolean {
   return fn.type === "sorobanAuthorizedFunctionTypeContractFn" && fn.contractFn.toXdr("base64") === callXdr
 }
 
+/** Every invocation, at every depth, is a contract function call: no contract creation is authorized. */
+function onlyContractCalls(invocations: readonly xdr.SorobanAuthorizedInvocation[]): boolean {
+  return invocations.every((i) => i.function.type === "sorobanAuthorizedFunctionTypeContractFn" && onlyContractCalls(i.subInvocations))
+}
+
 /** Why the transaction's authorizations break `rule` for the call `callXdr`; undefined when they keep it. */
 function authFault(transaction: Transaction, callXdr: string, rule: AuthRule): AuthFault | undefined {
   const [operation] = transaction.operations
@@ -340,7 +348,9 @@ function authFault(transaction: Transaction, callXdr: string, rule: AuthRule): A
   if (rule === "none") return auth.length === 0 ? undefined : { kind: "foreign" }
   if (auth.length === 0) return { kind: "missing" }
   const [entry] = auth
-  if (auth.length > 1 || !isCall(entry.rootInvocation.function, callXdr) || entry.rootInvocation.subInvocations.length > 0) {
+  const beneath = entry.rootInvocation.subInvocations
+  const beneathAllowed = rule === "caller_tree" ? onlyContractCalls(beneath) : beneath.length === 0
+  if (auth.length > 1 || !isCall(entry.rootInvocation.function, callXdr) || !beneathAllowed) {
     return { kind: "foreign" }
   }
   const { credentials } = entry
