@@ -395,11 +395,9 @@ describe("LP tab — Deposit, Keep YT off (R4-7)", () => {
     expect(detail("Minimum received")).toBe(`${amount(minAfterSlippage(zapped.lp, 50n))} LP`)
     expect(detail("Pool share")).toMatch(/→/)
     expect(detail("Signatures")).toBe("2")
-    const refunds = [
-      ...(buy.amountOut > zapped.ptUsed ? [`${amount(buy.amountOut - zapped.ptUsed)} PT`] : []),
-      ...(SYX > zapped.syUsed ? [`${amount(SYX - zapped.syUsed)} SY`] : []),
-    ]
-    if (refunds.length > 0) expect(detail("Refunded to your wallet")).toBe(refunds.join(" + "))
+    // The PT bought and not used stays in the pool (R5-5): only SY comes back.
+    if (SYX > zapped.syUsed) expect(detail("Refunded to your wallet")).toBe(`${amount(SYX - zapped.syUsed)} SY`)
+    else expect(screen.queryByText("Refunded to your wallet")).toBeNull()
     expect(screen.queryByText(/split into PT/)).toBeNull()
   })
 
@@ -416,6 +414,78 @@ describe("LP tab — Deposit, Keep YT off (R4-7)", () => {
     expect(mocks.prepareReview.mock.calls[0][0].input).toMatchObject({ action: "deposit", amount: 100n * UNIT, source: A })
     expect(readRoutes(A)[0].plans.map((p) => p.action)).toEqual(["deposit", "add_liquidity_sy"])
     expect(mocks.executeReview).not.toHaveBeenCalled()
+  })
+})
+
+describe("LP tab — one signature in and out of USDY (R5-5, R5-6)", () => {
+  const SYX = previewDeposit(100n * UNIT, SCALE)
+  const split = zapSplit(POOL, SYX)
+  const buy = buyPt(POOL, split)
+  const zapped = previewAddLiquiditySingleSy(SYX, split, { ptOut: buy.amountOut, feeShares: buy.feeShares }, RESERVES, POOL.totalLp)
+  const LP_IN = 1_000n * UNIT
+  const removed = previewRemoveLiquidity(LP_IN, RESERVES, POOL.totalLp)
+  const sale = sellPt({ ...POOL, ptReserve: POOL.ptReserve - removed.pt, syReserve: POOL.syReserve - removed.sy }, removed.pt)
+  const listed = { ...usdyManifest, routerFunctions: ["add_liquidity_single_underlying", "remove_liquidity_to_underlying"] }
+
+  it("LP only in USDY is one signature: the deposit's SY is signed as sy_in, and the SY the pool does not use comes back", async () => {
+    mocks.manifest = listed as typeof mocks.manifest
+    const added = { pt_used: zapped.ptUsed, sy_used: zapped.syUsed - 5n, lp: zapped.lp - 3n }
+    simulateReturns(mocks, [added.pt_used, added.sy_used, added.lp])
+    await renderUi(<LpTab marketId="m1" side="deposit" />)
+    await user().click(keepYt())
+    await settle()
+    await enter("You pay", "100")
+    expect(detail("Signatures")).toBe("1")
+    expect(await tipOf("Signatures")).toMatch(/This is one step, one signature: Add liquidity \(LP only\) \(you give USDY, you get LP\)\./)
+    expect(screen.getByText("Exact (simulated)")).toBeTruthy()
+    expect(received()).toBe(`${amount(added.lp)} LP`)
+    expect(detail("Refunded to your wallet")).toBe(`${amount(SYX - added.sy_used)} SY`)
+    expect(await tipOf("Minimum received")).toMatch(/^Signed into the transaction/)
+    await user().click(reviewButton("Add liquidity"))
+    await settle()
+    const dialog = await screen.findByRole("dialog", { name: "Review route: Add liquidity" })
+    expect(stepsIn(dialog)).toHaveLength(1)
+    const input = mocks.prepareReview.mock.calls[0][0].input
+    expect(input).toMatchObject({ action: "add_liquidity_underlying", amount: 100n * UNIT, secondaryAmount: SYX })
+    expect(input.guards).toEqual({ minOut: minAfterSlippage(added.lp, 50n) })
+  })
+
+  it("a withdraw to USDY is one signature before maturity, priced on the reserves the removal leaves; to SY it stays two", async () => {
+    mocks.manifest = listed as typeof mocks.manifest
+    let answer: (value: unknown) => void = () => {}
+    mocks.simulateInvocation.mockImplementation(() => new Promise((resolve) => (answer = resolve)))
+    await renderUi(<LpTab marketId="m1" side="withdraw" />)
+    await enter("You pay", "1000")
+    expect(detail("Signatures")).toBe("1")
+    expect(await tipOf("Signatures")).toMatch(/This is one step, one signature: Remove liquidity \(you give LP, you get USDY\)\./)
+    expect(received()).toBe(`${amount(previewWithdraw(removed.sy + sale.amountOut, SCALE))} USDY`)
+    expect(detail("Fixed APY")).toBe(`${apy(501023n)} → ${apy(impliedRate(sale.next))}`)
+    answer({ ok: true, retval: 6_543_210_000n, latestLedger: 1, minResourceFee: "100" })
+    await settle()
+    expect(screen.getByText("Exact (simulated)")).toBeTruthy()
+    expect(received()).toBe(`${amount(6_543_210_000n)} USDY`)
+    expect(detail("Minimum received")).toBe(`${amount(minAfterSlippage(6_543_210_000n, 50n))} USDY`)
+    // The route simulates its step again when it prepares it.
+    simulateReturns(mocks, 6_543_210_000n)
+    await user().click(reviewButton("Withdraw liquidity"))
+    await settle()
+    const dialog = await screen.findByRole("dialog", { name: "Review route: Withdraw liquidity" })
+    expect(stepsIn(dialog)).toHaveLength(1)
+    expect(mocks.prepareReview.mock.calls[0][0].input).toMatchObject({ action: "remove_liquidity_underlying", amount: LP_IN, guards: { minOut: minAfterSlippage(6_543_210_000n, 50n) } })
+    await user().keyboard("{Escape}")
+    await settle()
+    await pick("Receive as", /SY/)
+    expect(detail("Signatures")).toBe("2")
+  })
+
+  it("after maturity a withdraw to USDY keeps its three steps: the pool sells no PT then (R5-6)", async () => {
+    mocks.manifest = listed as typeof mocks.manifest
+    mocks.getLedgerClock.mockImplementation(AFTER_MATURITY)
+    mocks.fetchMarketState.mockResolvedValue(maturedMarket())
+    await renderPanel("tab=lp&side=withdraw")
+    await enter("You pay", "1000")
+    expect(detail("Signatures")).toBe("3")
+    expect(await tipOf("Signatures")).toMatch(/step 2, Redeem at maturity/)
   })
 })
 

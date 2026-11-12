@@ -32,9 +32,8 @@ const TOKEN_DECIMALS = 7
  * The PT tab (spec 0002 §3): buy or sell PT, paying or receiving the underlying or its SY, on the
  * trade adapter (R2-55) and the route runner. The route is the one the adapter planned: one Router
  * call when the manifest lists it, or the deposit or withdraw around the swap, and the copy reads
- * its steps; when the wallet's SY keeps a sale off its one call, the reason is shown (R4-3). The
- * details show the fixed APY before → after the trade, the effective fixed APY, the fee, the minimum
- * received and the payoff at maturity, fixed in USD.
+ * its steps. The details show the fixed APY before → after the trade, the effective fixed APY, the
+ * fee, the minimum received and the payoff at maturity, fixed in USD.
  *
  * One `RouteFlow` serves both sides, so a route started on one side (or resumed from History)
  * stays on screen when the side changes; it shows only PT routes (R2-77). The amounts reset once a
@@ -155,7 +154,6 @@ export function PtTab({ marketId, side, routeId, onRouteOpened }: { marketId: st
             <p className="text-sm text-ink-muted">Enter an amount to see the trade&apos;s details.</p>
           )}
           {!q && note ? <PreviewList lines={[signaturesLine(note)]} /> : null}
-          {note?.fallback ? <p className="text-sm text-ink wrap-anywhere">{note.fallback}</p> : null}
         </section>
 
         <RouteFlow

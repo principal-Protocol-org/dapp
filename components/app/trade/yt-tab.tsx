@@ -10,7 +10,7 @@ import { TxNoticeView } from "@/components/app/actions/tx-feedback"
 import { UNAVAILABLE } from "@/components/app/live"
 import { ROUTE_HOSTS, RouteFlow } from "@/components/app/route/route-flow"
 import { RouteResume } from "@/components/app/trade/route-resume"
-import { LabelWithTip } from "@/components/app/info-tip"
+import { InfoTip, LabelWithTip } from "@/components/app/info-tip"
 import { routeNote, signaturesLine } from "@/components/app/trade/route-note"
 import { TokenPicker, type PayToken } from "@/components/app/trade/token-picker"
 import { useTradeRoute } from "@/components/app/trade/use-trade-route"
@@ -31,11 +31,13 @@ export type YtSide = "buy" | "sell"
 const TOKEN_DECIMALS = 7
 
 /**
- * The YT tab (spec 0002 §3): buy YT with the amount the user SPENDS, in the underlying or its SY, or
- * sell YT for either, on the trade adapter (R2-55) and the route runner. A buy shows the capital its
- * route moves (R2-59: only when the adapter reports one), the fixed APY before → after, the effective
- * implied APY (the break-even rate), leverage, fees, the minimum YT and the most it may spend (R2-58),
- * and a plain sentence on what the YT pays. After maturity there is no form (R2-60).
+ * The YT tab (spec 0002 §3): buy YT in the underlying or its SY, or sell YT for either, on the trade
+ * adapter (R2-55) and the route runner. A flash Buy YT (R5-2) takes a budget, the most it may pay,
+ * and shows it with the expected cost and what comes back in the same transaction; without the
+ * flash, a buy takes the amount to spend and shows the capital its route moves (R2-59: only when the
+ * adapter reports one) and the most it may spend (R2-58). Either shows the fixed APY before → after,
+ * the effective implied APY (the break-even rate), leverage, fees, the minimum YT and a plain
+ * sentence on what the YT pays. After maturity there is no form (R2-60).
  *
  * One `RouteFlow` serves both sides, so a route started on one side (or resumed from History) stays
  * on screen when the side changes; it shows only YT routes (R2-77). The amounts reset once a step
@@ -139,7 +141,8 @@ function YtTrade({ marketId, side, routeId, onRouteOpened }: { marketId: string;
     setTouched({ buy: false, sell: false })
   }
 
-  // Max on a buy: the balance divided by the moved ratio, never a spend that moves more than it.
+  // Max on a buy: the balance divided by the moved ratio, never a spend that moves more than it; a
+  // flash moves only what it spends, so its Max is the balance (Review Focus 2).
   const onMax =
     side === "buy"
       ? () => {
@@ -183,7 +186,9 @@ function YtTrade({ marketId, side, routeId, onRouteOpened }: { marketId: string;
     }
     // The step that signs the Buy YT bound, from the plan (R2-55: never a literal step number).
     const buyStep = route.plans.findIndex((p) => p.action === "buy_yt") + 1
-    details.push(...detailLines(q, side, code, slippageBps, steps, buyStep, amountText, unitOf, side === "buy" && q.yieldOn !== undefined ? breakEven(q, code, spentText(q.capital?.spent ?? trade.amount), amountText(q.yieldOn, "underlying")) : undefined))
+    // What the YT costs: the flash's expected cost, the route's spend, else the amount typed.
+    const spent = q.flash?.expectedCost ?? q.capital?.spent ?? trade.amount
+    details.push(...detailLines(q, side, code, slippageBps, steps, buyStep, amountText, unitOf, side === "buy" && q.yieldOn !== undefined ? breakEven(q, code, spentText(spent), amountText(q.yieldOn, "underlying")) : undefined))
     if (side === "buy" && q.yieldOn !== undefined) {
       details.push({
         label: "At maturity",
@@ -251,13 +256,13 @@ function YtTrade({ marketId, side, routeId, onRouteOpened }: { marketId: string;
               <p className="label">
                 <LabelWithTip label={exactLabel} tip={exactnessTip || undefined} />
               </p>
+              {side === "buy" && q.flash ? <FlashLine flash={q.flash} text={spentText} slippage={formatBps(slippageBps)} /> : null}
               <PreviewList lines={details} />
             </>
           ) : (
             <p className="text-sm text-ink-muted">Enter an amount to see the trade&apos;s details.</p>
           )}
           {!q && note ? <PreviewList lines={[signaturesLine(note)]} /> : null}
-          {note?.fallback ? <p className="text-sm text-ink wrap-anywhere">{note.fallback}</p> : null}
         </section>
 
         <RouteFlow
@@ -279,6 +284,22 @@ function YtTrade({ marketId, side, routeId, onRouteOpened }: { marketId: string;
         {last && last.owner === owner ? <TxNoticeView notice={last.notice} /> : null}
       </CardContent>
     </Card>
+  )
+}
+
+/**
+ * The flash Buy YT's cost line (R5-2), in the token paid: the budget, the most the call may take; the
+ * cost expected; and what comes back in the same transaction. The tip says why only the cost leaves
+ * the wallet and how the bound is signed (R5-3).
+ */
+function FlashLine({ flash, text, slippage }: { flash: NonNullable<TradeQuote["flash"]>; text: (raw: bigint) => string; slippage: string }) {
+  return (
+    <p className="flex min-w-0 items-center gap-1.5 text-sm text-ink">
+      <span className="wrap-anywhere">{`Pay at most ${text(flash.budget)} · expected ${text(flash.expectedCost)} · about ${text(flash.expectedBack)} back in the same transaction`}</span>
+      <InfoTip label="Pay at most">
+        {`A flash swap: the pool mints the YT from its own SY and sells the PT back in the same transaction, so only the cost leaves your wallet. The transaction is signed with the most it may spend, from its own simulation at your ${slippage} slippage tolerance and never above your budget, and fails rather than cost more. The rest of your budget comes back in the same transaction, in the token you paid.`}
+      </InfoTip>
+    </p>
   )
 }
 
@@ -361,7 +382,8 @@ function detailLines(
           : `Signed into the transaction at your ${slippage} slippage tolerance: it fails rather than give less.`,
     },
   )
-  if (side === "buy" && q.maxCost !== undefined) {
+  // A flash states its bound in its own line: the budget (`FlashLine`).
+  if (side === "buy" && q.maxCost !== undefined && !q.flash) {
     // M15: the figure is this preview's, in the token paid; what is signed is the step's own SY bound
     // (max_net_cost), from that step's own simulation.
     // A one-step route has no "Step 1": its one transaction carries the bound.

@@ -8,7 +8,7 @@
  */
 import { describe, expect, it } from "vitest"
 import { buyExactPt, buyPt, impliedRate, sellPt, spotPrice, zapSplit, type CurveState } from "../curve"
-import { minAfterSlippage, type ActionOutput } from "../guards"
+import { guardsFrom, minAfterSlippage, type ActionOutput } from "../guards"
 import type { MarketState } from "../market-state"
 import { aprToApy, BPS, ceilDiv, FEE_RATE_SCALE, SCALE } from "../math"
 import { previewAddLiquidity, previewAddLiquiditySingleSy, previewDeposit, previewMint, previewRedeemPt, previewRemoveLiquidity, previewSellYt, previewWithdraw } from "../previews"
@@ -52,7 +52,9 @@ function quoted(result: Live<TradeQuote>): TradeQuote {
   if (result.status !== "live") throw new Error(`expected a live quote, got: ${result.error}`)
   return result.value
 }
-const CTX = { marketId: "m1", source: "GABC", matured: false, routerFunctions: [] as string[] }
+/** The slippage tolerance every quote below uses; the plan sizes with the same one (R5-2). */
+const SLIPPAGE = 50n
+const CTX: PlanContext = { marketId: "m1", source: "GABC", matured: false, routerFunctions: [] as string[], slippageBps: SLIPPAGE }
 
 /** Today's route for `req` (adapter #1's plan), sized from `ms` (Buy YT's steps are). */
 function plansFor(req: TradeRequest, ms: MarketState = market()): StepPlan[] {
@@ -61,8 +63,10 @@ function plansFor(req: TradeRequest, ms: MarketState = market()): StepPlan[] {
   return plans
 }
 
-/** The five one-step Router functions a 97ac23e manifest lists (R4-3). */
+/** The five one-step Router functions a 97ac23e manifest lists. */
 const FIVE = ["swap_underlying_for_pt", "swap_pt_for_underlying", "swap_underlying_for_yt", "swap_yt_for_underlying", "add_liquidity_keep_yt"]
+/** What a 665bb67 manifest adds: the flash Buy YTs (R5-2), LP only from USDY (R5-5) and LP out to USDY (R5-6). */
+const NEW = ["flash_mint_yt", "flash_mint_yt_from_underlying", "add_liquidity_single_underlying", "remove_liquidity_to_underlying"]
 
 /** A one-step route, as `planRoute` builds it when the manifest lists the kind's Router function. */
 function oneStep(req: TradeRequest): StepPlan[] {
@@ -72,7 +76,7 @@ function oneStep(req: TradeRequest): StepPlan[] {
 }
 
 const quote = (req: TradeRequest, state: Partial<Parameters<typeof currentContractsAdapter.quote>[1]> = {}) =>
-  currentContractsAdapter.quote(req, { ms: market(), slippageBps: 50n, ...state, plans: state.plans ?? plansFor(req, state.ms ?? market()) })
+  currentContractsAdapter.quote(req, { ms: market(), slippageBps: SLIPPAGE, ...state, plans: state.plans ?? plansFor(req, state.ms ?? market()) })
 
 describe("trade adapter #1 — buy PT", () => {
   it("an SY payer gets the curve's PT for the curve's fee, and the fixed APY falls (R2-15)", () => {
@@ -267,7 +271,7 @@ describe("trade adapter #1 — unavailable, never a guess", () => {
 })
 
 describe("trade adapter #1 — plan", () => {
-  const ctx = { marketId: "m1", source: "GABC", matured: false, routerFunctions: [] as string[] }
+  const ctx = CTX
   const actions = (req: TradeRequest) => {
     const plans = currentContractsAdapter.plan(req, ctx)
     if (!Array.isArray(plans)) throw new Error(plans.disabled)
@@ -678,20 +682,21 @@ describe("trade adapter #1 — LP only (Keep YT off, R4-7)", () => {
     expect(q.minOutToken).toBe("lp")
     expect(q.priceImpactPpm).toBe(priceImpactPpm("buy", split, buy.amountOut, ptSpot(spotPrice(A), A.rate)))
     expect(q.priceImpactPpm!).toBeGreaterThan(0n)
-    // The pool once the add lands: pt − bought + pt_used, sy − fee + (split + sy_used) − split... = sy − fee + syUsed.
-    const after: CurveState = { ...A, ptReserve: A.ptReserve - buy.amountOut + add.ptUsed, syReserve: A.syReserve - buy.feeShares + add.syUsed, totalLp: A.totalLp + add.lp }
+    // The pool once the add lands (665bb67): the PT bought and not used stays in its reserve, so the PT
+    // reserve is back where it was; the SY reserve gains what was kept, less the swap fee.
+    const after: CurveState = { ...A, syReserve: A.syReserve - buy.feeShares + add.syUsed, totalLp: A.totalLp + add.lp }
     expect(q.apyBefore).toBe(apy(impliedRate(A)))
     expect(q.apyAfter).toBe(apy(impliedRate(after)))
     expect(q.poolShare).toEqual({ before: Number(1_000_000_000n) / Number(A.totalLp), after: Number(1_000_000_000n + add.lp) / Number(A.totalLp + add.lp) })
   })
 
-  it("leftover lists the PT and SY the pool refunds", () => {
+  it("leftover lists only the SY the pool sends back: the PT dust stays in the pool (R5-5)", () => {
     const { buy, add } = zap(USDY_100_LP)
     const q = quoted(quote(lpSy()))
-    const ptRefund = buy.amountOut - add.ptUsed
+    expect(buy.amountOut - add.ptUsed).toBeGreaterThanOrEqual(0n)
     const syRefund = USDY_100_LP - add.syUsed
-    expect(q.leftover).toEqual([...(ptRefund > 0n ? [{ amount: ptRefund, token: "pt" }] : []), ...(syRefund > 0n ? [{ amount: syRefund, token: "sy" }] : [])])
-    expect(ptRefund + syRefund).toBeGreaterThanOrEqual(0n)
+    expect(q.leftover).toEqual(syRefund > 0n ? [{ amount: syRefund, token: "sy" }] : [])
+    expect(q.leftover?.some((l) => l.token === "pt")).toBe(false)
   })
 
   it("a USDY payer is priced on the SY its deposit gives, the fee shown in USDY", () => {
@@ -715,8 +720,8 @@ describe("trade adapter #1 — LP only (Keep YT off, R4-7)", () => {
     const q = quoted(quote(lpSy(), { firstStep: { action: "add_liquidity_sy", output: sim } }))
     expect(q).toMatchObject({ out: add.lp - 3n, exactness: "simulated" })
     expect(q.minOut).toBe(minAfterSlippage(add.lp - 3n, 50n))
-    expect(q.leftover).toContainEqual({ amount: USDY_100_LP - (add.syUsed - 2n), token: "sy" })
-    expect(q.leftover).toContainEqual({ amount: buy.amountOut - (add.ptUsed - 1n), token: "pt" })
+    expect(q.leftover).toEqual([{ amount: USDY_100_LP - (add.syUsed - 2n), token: "sy" }])
+    expect(buy.amountOut - (add.ptUsed - 1n)).toBeGreaterThan(0n)
   })
 
   it("an amount too small to add any liquidity is unavailable with the plain reason, never a throw", () => {
@@ -821,10 +826,10 @@ describe("trade adapter #1 — LP withdraw: remove, then sell the PT, or redeem 
 
 // ---------------------------------------------------------------------------------------------
 // One-step Router functions (0004 Task 5): with the five names listed, the PT, YT and LP tabs plan
-// one call (R4-3), sized as R4-4 and R4-5 say, and each quote reads that call's simulation.
+// one call, sized as R4-4 and R4-5 say, and each quote reads that call's simulation.
 // ---------------------------------------------------------------------------------------------
 
-describe("trade adapter #1 — one-step Router functions (R4-3, R4-4, R4-5)", () => {
+describe("trade adapter #1 — one-step Router functions (R4-4, R4-5, R5-2, R5-5, R5-6)", () => {
   const XR = 10_200_000n // 1.02 USDY per SY share
   const LISTED: PlanContext = { ...CTX, routerFunctions: FIVE }
   const planned = (req: TradeRequest, ms = market(), extra: Partial<PlanContext> = {}) => {
@@ -832,14 +837,12 @@ describe("trade adapter #1 — one-step Router functions (R4-3, R4-4, R4-5)", ()
     if (!Array.isArray(plans)) throw new Error(plans.disabled)
     return plans
   }
-  const FALLBACK = (sy: string, k: number) =>
-    `You hold ${sy} SY, so this takes ${k} signatures: the one-signature trade would withdraw all your SY. Withdraw it first (Quick actions → Withdraw) to trade in one signature.`
 
   it("each kind paid or received in USDY plans its one step; paid or received in SY, the old route", () => {
     expect(planned(buy("underlying")).map((p) => [p.action, p.amount])).toEqual([["buy_pt_underlying", { from: "input" }]])
     expect(planned(sell("underlying")).map((p) => [p.action, p.amount])).toEqual([["sell_pt_underlying", { from: "input" }]])
     expect(planned(sellYt("underlying")).map((p) => [p.action, p.amount])).toEqual([["sell_yt_underlying", { from: "input" }]])
-    // Buy YT in USDY keeps its multi-step route until the flash is routed (R5-2, Task 3).
+    // Review Focus 4: a 97ac23e manifest lists no flash, so Buy YT keeps its multi-step route.
     expect(planned(buyYt("underlying")).map((p) => p.action)).toEqual(["deposit", "buy_yt", "withdraw"])
     expect(planned(keepYt()).map((p) => p.action)).toEqual(["add_liquidity_keep_yt"])
     expect(planned(buy("sy")).map((p) => p.action)).toEqual(["buy_pt"])
@@ -849,33 +852,12 @@ describe("trade adapter #1 — one-step Router functions (R4-3, R4-4, R4-5)", ()
     expect(currentContractsAdapter.plan(keepYt("sy"), { ...LISTED, ms: market() })).toEqual({ disabled: expect.stringMatching(/needs USDY/) })
   })
 
-  it("R4-3: a wallet holding SY keeps the two sweeping routes, and the first step says why", () => {
-    const held = { syBalance: 87n }
-    const sale = planned(sell("underlying"), market(), held)
-    expect(sale.map((p) => p.action)).toEqual(["sell_pt", "withdraw"])
-    expect(sale[0].fallback).toBe(FALLBACK("0.0000087", 2))
-    const ytSale = planned(sellYt("underlying"), market(), held)
-    expect(ytSale.map((p) => p.action)).toEqual(["sell_yt", "withdraw"])
-    expect(ytSale[0].fallback).toBe(FALLBACK("0.0000087", 2))
-    // Buy PT and Keep YT never sweep SY: one step whatever the wallet holds.
-    expect(planned(buy("underlying"), market(), held).map((p) => [p.action, p.fallback])).toEqual([["buy_pt_underlying", undefined]])
-    expect(planned(keepYt(), market(), held).map((p) => [p.action, p.fallback])).toEqual([["add_liquidity_keep_yt", undefined]])
-    // A zero balance, or one not read: the one step (the sy_balance gate checks the live balance).
-    for (const extra of [{ syBalance: 0n }, {}]) {
-      for (const req of [sell("underlying"), sellYt("underlying")]) expect(planned(req, market(), extra)).toHaveLength(1)
+  it("R5-4: the SY the wallet holds plays no part: the plan context has no SY balance, and no step carries a sweep fallback", () => {
+    const all = { routerFunctions: [...FIVE, ...NEW] }
+    for (const req of [buy("underlying"), sell("underlying"), sellYt("underlying"), buyYt("underlying"), buyYt("sy"), keepYt(), lpOnly(), withdrawLp("underlying")]) {
+      for (const p of planned(req, market(), all)) expect(Object.keys(p)).not.toContain("fallback")
     }
-  })
-
-  it("final review 2: the fallback reason reads the market's SY rate, so dust too small to withdraw says so", () => {
-    const dust = (k: number) =>
-      `You hold 0.0000001 SY, so this takes ${k} signatures: the one-signature trade would withdraw all your SY. An amount this small cannot be withdrawn, so this trade keeps its multi-step route.`
-    const held = { syBalance: 1n }
-    expect(planned(sell("underlying"), market(), held)[0].fallback).toBe(dust(2))
-    expect(planned(sellYt("underlying"), market(), held)[0].fallback).toBe(dust(2))
-    // The SY rate not read: the withdraw text stays.
-    expect(planned(sell("underlying"), market({ exchangeRate: down }), held)[0].fallback).toBe(FALLBACK("0.0000001", 2))
-    // A balance that withdraws to 2 raw USDY or more keeps the withdraw text.
-    expect(planned(sell("underlying"), market(), { syBalance: 2n })[0].fallback).toBe(FALLBACK("0.0000002", 2))
+    expect(Object.keys(LISTED)).not.toContain("syBalance")
   })
 
   it("Buy PT, Sell PT and Sell YT: the one step's simulation is what the user receives, exact", () => {
@@ -956,7 +938,7 @@ describe("trade adapter #1 — one-step Router functions (R4-3, R4-4, R4-5)", ()
       }
     })
 
-    it("Final review 1: the split leaves no SY behind and no less LP, so Keep YT never makes the next sale multi-step (R4-3)", () => {
+    it("Final review 1: the split leaves no SY behind and no less LP", () => {
       // The sizing before this fix: bisection, then the most LP in lo−1..lo+2, then the least left behind.
       const windowSizing = (shares: bigint, s: CurveState, oracleRate: bigint) => {
         const at = (m: bigint) => {
@@ -1063,5 +1045,244 @@ describe("trade adapter #1 — one-step Router functions (R4-3, R4-4, R4-5)", ()
       // With no amount yet the step keeps its shape and mints nothing.
       expect(planned(keepYt("underlying", 0n)).map((p) => [p.action, p.secondaryAmount])).toEqual([["add_liquidity_keep_yt", { from: "value", value: 0n }]])
     })
+  })
+})
+
+// ---------------------------------------------------------------------------------------------
+// 0005 Task 3: the flash Buy YT (R5-2, R5-3), LP only from USDY (R5-5) and LP out to USDY (R5-6),
+// each one signature when a 665bb67 manifest lists it.
+// ---------------------------------------------------------------------------------------------
+
+describe("trade adapter #1 — flash Buy YT (R5-2): the budget in, sy_in sized for the target net cost", () => {
+  const XR = 10_200_000n
+  const ALL: PlanContext = { ...CTX, routerFunctions: [...FIVE, ...NEW] }
+  const planFlash = (req: TradeRequest, ms = market(), extra: Partial<PlanContext> = {}) => {
+    const plans = currentContractsAdapter.plan(req, { ...ALL, ms, ...extra })
+    if (!Array.isArray(plans)) throw new Error(plans.disabled)
+    return plans
+  }
+  /** The solver's answer for the net cost a budget of `budgetSy` SY targets at `slippage`. */
+  const flashSolved = (budgetSy: bigint, slippage = SLIPPAGE) => solved((budgetSy * BPS) / (BPS + slippage))
+  const signedSyIn = (plans: StepPlan[]) => {
+    const src = plans[0].secondaryAmount
+    if (src?.from !== "value") throw new Error("expected a sized sy_in")
+    return src.value
+  }
+
+  it("both payers plan one flash step: the budget is the input, sy_in the solver's for the target net cost", () => {
+    const sy = planFlash(buyYt("sy"))
+    expect(sy).toEqual([
+      { action: "buy_yt_flash", amount: { from: "input" }, secondaryAmount: { from: "value", value: flashSolved(USDY_100).syIn }, gives: "SY", takes: "YT" },
+    ])
+    const ms = market({ exchangeRate: live(XR) })
+    const usdy = planFlash(buyYt("underlying"), ms)
+    expect(usdy).toEqual([
+      {
+        action: "buy_yt_flash_underlying",
+        amount: { from: "input" },
+        secondaryAmount: { from: "value", value: flashSolved(previewDeposit(USDY_100, XR)).syIn },
+        gives: "USDY",
+        takes: "YT",
+      },
+    ])
+  })
+
+  it("an SY payer's quote: the flash figures in SY, no capital, and the most it may spend is the budget", () => {
+    const r = flashSolved(USDY_100)
+    const q = quoted(quote(buyYt("sy"), { plans: planFlash(buyYt("sy")) }))
+    expect(q).toMatchObject({ kind: "buy_yt", out: r.ytOut, outToken: "yt", exactness: "indicative", minOut: minAfterSlippage(r.ytOut, 50n), minOutToken: "yt" })
+    expect(q.flash).toEqual({ budget: USDY_100, expectedCost: r.netCost, expectedBack: USDY_100 - r.netCost })
+    expect(q.capital).toBeUndefined()
+    expect(q.maxCost).toBe(USDY_100)
+    expect(q.feeToken).toBe("sy")
+    // The mint's fee and the swap fee on the PT the pool sells into itself.
+    const mint = previewMint(r.syIn, ORACLE, FEE_BPS)
+    const sale = sellPt(A, mint.pt)
+    expect(q.fee).toBe(mint.feeShares + sale.feeShares)
+    // The pool sells PT into itself: the fixed APY rises (R2-15).
+    expect(q.apyAfter).toBe(apy(impliedRate(sale.next)))
+    expect(q.apyAfter!).toBeGreaterThan(q.apyBefore!)
+    expect(q.effectiveApy).toBe(effectiveImpliedApy({ spentUnderlying: r.netCost, oracleRate: ORACLE, ytOut: r.ytOut, secondsToMaturity: A.secondsToMaturity }))
+  })
+
+  it("a USDY payer's quote: the budget deposited, the SY not spent withdrawn back, all in USDY", () => {
+    const ms = market({ exchangeRate: live(XR) })
+    const budgetSy = previewDeposit(USDY_100, XR)
+    const r = flashSolved(budgetSy)
+    const q = quoted(quote(buyYt("underlying"), { ms, plans: planFlash(buyYt("underlying"), ms) }))
+    const back = previewWithdraw(budgetSy - r.netCost, XR)
+    expect(q).toMatchObject({ out: r.ytOut, exactness: "indicative", maxCost: USDY_100, feeToken: "underlying" })
+    expect(q.flash).toEqual({ budget: USDY_100, expectedCost: USDY_100 - back, expectedBack: back })
+    expect(q.capital).toBeUndefined()
+  })
+
+  it("simulated, the YT out and the cost are the call's own, exact (USDY: the budget less underlying_back)", () => {
+    const r = flashSolved(USDY_100)
+    const sim = { kind: "flash_yt" as const, yt_out: r.ytOut - 5n, net_cost: r.netCost + 7n }
+    const q = quoted(quote(buyYt("sy"), { plans: planFlash(buyYt("sy")), firstStep: { action: "buy_yt_flash", output: sim } }))
+    expect(q).toMatchObject({ out: sim.yt_out, exactness: "simulated", minOut: minAfterSlippage(sim.yt_out, 50n), maxCost: USDY_100 })
+    expect(q.flash).toEqual({ budget: USDY_100, expectedCost: sim.net_cost, expectedBack: USDY_100 - sim.net_cost })
+
+    const ms = market({ exchangeRate: live(XR) })
+    const ru = flashSolved(previewDeposit(USDY_100, XR))
+    const out = { kind: "flash_yt_underlying" as const, yt_out: ru.ytOut - 3n, net_cost: ru.netCost, underlying_back: 12_345n }
+    const u = quoted(quote(buyYt("underlying"), { ms, plans: planFlash(buyYt("underlying"), ms), firstStep: { action: "buy_yt_flash_underlying", output: out } }))
+    expect(u).toMatchObject({ out: out.yt_out, exactness: "simulated" })
+    expect(u.flash).toEqual({ budget: USDY_100, expectedCost: USDY_100 - out.underlying_back, expectedBack: out.underlying_back })
+    // A simulation of the other payer's call is not this route's.
+    const other = quoted(quote(buyYt("sy"), { plans: planFlash(buyYt("sy")), firstStep: { action: "buy_yt_flash_underlying", output: out } }))
+    expect(other.exactness).toBe("indicative")
+  })
+
+  it("a simulated net cost of zero or less (PT at or above par) is not offered", () => {
+    const r = flashSolved(USDY_100)
+    const sim = { kind: "flash_yt" as const, yt_out: r.ytOut, net_cost: 0n }
+    expect(quote(buyYt("sy"), { plans: planFlash(buyYt("sy")), firstStep: { action: "buy_yt_flash", output: sim } })).toEqual({
+      status: "unavailable",
+      error: expect.stringMatching(/priced at zero or less/),
+    })
+    // A cost above the budget would trip the bound capped at the budget (R5-3): not offered either.
+    const over = { kind: "flash_yt" as const, yt_out: r.ytOut, net_cost: USDY_100 + 1n }
+    expect(quote(buyYt("sy"), { plans: planFlash(buyYt("sy")), firstStep: { action: "buy_yt_flash", output: over } })).toEqual({
+      status: "unavailable",
+      error: expect.stringMatching(/costs more than the budget allows/),
+    })
+  })
+
+  it("Review Focus 1: at the quoted net cost, the signed max_net_cost already fits the budget, so it never reaches SY held before", () => {
+    for (const xr of [SCALE, XR]) {
+      const ms = market({ exchangeRate: live(xr) })
+      for (const slippage of [0n, 1n, 50n, 300n, 9_999n])
+        for (const budget of [1_000_003n, USDY_100, 123_456_789_012n]) {
+          for (const pay of ["sy", "underlying"] as const) {
+            const req = buyYt(pay, budget)
+            const plans = planFlash(req, ms, { slippageBps: slippage })
+            const syIn = signedSyIn(plans)
+            const mint = previewMint(syIn, ORACLE, FEE_BPS)
+            const net = syIn - sellPt(A, mint.pt).amountOut
+            const output: ActionOutput =
+              pay === "sy"
+                ? { kind: "flash_yt", yt_out: mint.yt, net_cost: net }
+                : { kind: "flash_yt_underlying", yt_out: mint.yt, net_cost: net, underlying_back: 0n }
+            const input = { action: plans[0].action, marketId: "m1", source: "GABC", amount: budget, secondaryAmount: syIn, guards: {}, deadline: 1n }
+            const g = guardsFrom(plans[0].action, input, output, slippage, { exchangeRate: xr })
+            if (!g.ok) throw new Error(g.reason)
+            const budgetSy = pay === "sy" ? budget : previewDeposit(budget, xr)
+            const margin = ceilDiv(net * (BPS + slippage), BPS)
+            expect(g.guards.maxNetCost, `${pay} ${budget} at ${slippage} bps, xr ${xr}`).toBe(margin)
+            expect(margin <= budgetSy).toBe(true)
+          }
+        }
+    }
+  })
+
+  it("the plan sizes with the quote's slippage, and the quote prices the sy_in the plan signs", () => {
+    const at100 = planFlash(buyYt("sy"), market(), { slippageBps: 100n })
+    expect(signedSyIn(at100)).toBe(flashSolved(USDY_100, 100n).syIn)
+    expect(signedSyIn(at100)).toBeLessThan(signedSyIn(planFlash(buyYt("sy"))))
+    // Quoted against a plan sized elsewhere, the quote prices the planned sy_in, never its own.
+    const q = quoted(quote(buyYt("sy"), { plans: at100 }))
+    expect(q.out).toBe(previewMint(signedSyIn(at100), ORACLE, FEE_BPS).yt)
+  })
+
+  it("Review Focus 2: Max is the balance, for either payer", () => {
+    const BALANCE = 100_000_000_000n
+    for (const pay of ["sy", "underlying"] as const) {
+      const at = (amount: bigint) => quote(buyYt(pay, amount), { plans: planFlash(buyYt(pay, amount)) })
+      expect(maxSpend(at, BALANCE)).toEqual({ ok: true, amount: BALANCE })
+      expect(maxSpend(at, BALANCE, 5_000_000_000n)).toEqual({ ok: true, amount: BALANCE })
+    }
+  })
+
+  it("Review Focus 4: without the flash functions, the multi-step route and its capital disclosure are unchanged", () => {
+    const old: Partial<PlanContext> = { routerFunctions: FIVE }
+    const usdy = planFlash(buyYt("underlying"), market(), old)
+    expect(usdy.map((p) => p.action)).toEqual(["deposit", "buy_yt", "withdraw"])
+    const q = quoted(quote(buyYt("underlying"), { plans: usdy }))
+    expect(q.capital).toBeDefined()
+    expect(q.flash).toBeUndefined()
+    expect(q).toEqual(quoted(quote(buyYt("underlying"))))
+    expect(planFlash(buyYt("sy"), market(), old).map((p) => p.action)).toEqual(["buy_yt"])
+  })
+
+  it("with no amount the step keeps its shape; without the market data, or a budget the solver refuses, it is disabled with the reason", () => {
+    expect(planFlash(buyYt("underlying", 0n))).toEqual([
+      { action: "buy_yt_flash_underlying", amount: { from: "input" }, secondaryAmount: { from: "value", value: 0n }, gives: "USDY", takes: "YT" },
+    ])
+    expect(currentContractsAdapter.plan(buyYt("sy"), ALL)).toEqual({ disabled: expect.stringMatching(/market's data/) })
+    expect(currentContractsAdapter.plan(buyYt("sy", 29_000_000_000_000n), { ...ALL, ms: market() })).toEqual({ disabled: expect.stringMatching(/pool cannot absorb/) })
+    expect(currentContractsAdapter.plan(buyYt("underlying"), { ...ALL, ms: market({ exchangeRate: down }) })).toEqual({
+      disabled: expect.stringMatching(/Could not read the SY exchange rate/),
+    })
+  })
+})
+
+describe("trade adapter #1 — LP only from USDY in one call (R5-5)", () => {
+  const XR = 10_200_000n
+  const ALL: PlanContext = { ...CTX, routerFunctions: [...FIVE, ...NEW] }
+  const ms = market({ exchangeRate: live(XR) })
+  const syIn = previewDeposit(USDY_100_LP, XR)
+  const split = zapSplit(A, syIn)
+  const bought = buyPt(A, split)
+  const add = previewAddLiquiditySingleSy(syIn, split, { ptOut: bought.amountOut, feeShares: bought.feeShares }, RESERVES, A.totalLp)
+
+  it("plans one step whose sy_in is previewDeposit(amount, xr); without the rate it is not offered, with the reason", () => {
+    const plans = currentContractsAdapter.plan(lpOnly(), { ...ALL, ms })
+    expect(plans).toEqual([
+      { action: "add_liquidity_underlying", amount: { from: "input" }, secondaryAmount: { from: "value", value: syIn }, gives: "USDY", takes: "LP" },
+    ])
+    expect(currentContractsAdapter.plan(lpOnly(), { ...ALL, ms: market({ exchangeRate: down }) })).toEqual({
+      disabled: expect.stringMatching(/needs the SY exchange rate/),
+    })
+    expect(currentContractsAdapter.plan(lpOnly(), ALL)).toEqual({ disabled: expect.stringMatching(/needs the SY exchange rate/) })
+  })
+
+  it("indicative from the zap on that sy_in; simulated, the LP and the SY sent back are exact", () => {
+    const plans = currentContractsAdapter.plan(lpOnly(), { ...ALL, ms }) as StepPlan[]
+    const q = quoted(quote(lpOnly(), { ms, plans }))
+    expect(q).toMatchObject({ out: add.lp, exactness: "indicative", feeToken: "underlying", fee: previewWithdraw(bought.feeShares, XR), minOut: minAfterSlippage(add.lp, 50n) })
+    const sim: ActionOutput = { kind: "add_liquidity", pt_used: add.ptUsed, sy_used: add.syUsed - 4n, lp: add.lp - 9n }
+    const s = quoted(quote(lpOnly(), { ms, plans, firstStep: { action: "add_liquidity_underlying", output: sim } }))
+    expect(s).toMatchObject({ out: add.lp - 9n, exactness: "simulated", minOut: minAfterSlippage(add.lp - 9n, 50n) })
+    expect(s.leftover).toEqual([{ amount: syIn - (add.syUsed - 4n), token: "sy" }])
+  })
+})
+
+describe("trade adapter #1 — LP withdraw to USDY in one call (R5-6)", () => {
+  const XR = 10_200_000n
+  const ALL: PlanContext = { ...CTX, routerFunctions: [...FIVE, ...NEW] }
+  const ms = market({ exchangeRate: live(XR) })
+  const LP_IN = 10_000_000_000n
+  const removed = previewRemoveLiquidity(LP_IN, RESERVES, A.totalLp)
+  /** MarketPool.quote_lp_exit: the PT sold on the reserves as the removal left them (its total_lp is not used by the sale). */
+  const exitSale = sellPt({ ...A, ptReserve: A.ptReserve - removed.pt, syReserve: A.syReserve - removed.sy }, removed.pt)
+
+  it("one step before maturity; the old route after it, and for an SY receiver", () => {
+    expect(currentContractsAdapter.plan(withdrawLp("underlying"), { ...ALL, ms })).toEqual([
+      { action: "remove_liquidity_underlying", amount: { from: "input" }, gives: "LP", takes: "USDY" },
+    ])
+    const matured = market({ poolState: live({ ...A, secondsToMaturity: 0n }), settledRate: live(ORACLE) })
+    const after = currentContractsAdapter.plan(withdrawLp("underlying"), { ...ALL, matured: true, ms: matured }) as StepPlan[]
+    expect(after.map((p) => p.action)).toEqual(["remove_liquidity", "redeem", "withdraw"])
+    const sy = currentContractsAdapter.plan(withdrawLp("sy"), { ...ALL, ms }) as StepPlan[]
+    expect(sy.map((p) => p.action)).toEqual(["remove_liquidity", "sell_pt"])
+  })
+
+  it("the indicative quote prices the PT sale against the post-removal reserves, as quote_lp_exit does", () => {
+    const plans = currentContractsAdapter.plan(withdrawLp("underlying"), { ...ALL, ms }) as StepPlan[]
+    const q = quoted(quote(withdrawLp("underlying"), { ms, plans }))
+    const out = previewWithdraw(removed.sy + exitSale.amountOut, XR)
+    expect(q).toMatchObject({ out, outToken: "underlying", exactness: "indicative", minOut: minAfterSlippage(out, 50n), minOutToken: "underlying" })
+    expect(q.fee).toBe(previewWithdraw(exitSale.feeShares, XR))
+    expect(q.swapOut).toBeUndefined()
+    expect(q.apyAfter).toBe(apy(impliedRate(exitSale.next)))
+    // Not the sale on the pool before the removal, which overstates the payout.
+    expect(sellPt(A, removed.pt).amountOut).toBeGreaterThan(exitSale.amountOut)
+  })
+
+  it("simulated, the USDY out is the call's own, exact", () => {
+    const plans = currentContractsAdapter.plan(withdrawLp("underlying"), { ...ALL, ms }) as StepPlan[]
+    const q = quoted(quote(withdrawLp("underlying"), { ms, plans, firstStep: { action: "remove_liquidity_underlying", output: { kind: "amount", value: 7_654_321_000n } } }))
+    expect(q).toMatchObject({ out: 7_654_321_000n, exactness: "simulated", minOut: minAfterSlippage(7_654_321_000n, 50n) })
   })
 })

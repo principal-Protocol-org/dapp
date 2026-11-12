@@ -211,7 +211,7 @@ describe("previewAddLiquiditySingleSy (T17)", () => {
   const reserves = { pt: 10_000_000_000n, sy: 20_000_000_000n };
   const totalLp = 10_000_000_000n;
 
-  it("mirrors add_liquidity_single_sy: LP, PT and SY used, PT refunded, SY kept", () => {
+  it("mirrors add_liquidity_single_sy: LP, PT and SY used, the PT not used (kept by the pool), the SY sent back", () => {
     expect(previewAddLiquiditySingleSy(1_000_000_000n, 500_000_000n, { ptOut: 245_000_000n, feeShares: 1_500_000n }, reserves, totalLp)).toEqual({
       lp: 243_920_286n,
       ptUsed: 237_944_239n,

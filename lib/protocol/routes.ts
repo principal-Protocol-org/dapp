@@ -1,12 +1,14 @@
 import type { ActionId } from "./actions"
 import { formatAmount } from "./format"
 import type { ActionOutput } from "./guards"
-import { previewWithdraw } from "./previews"
+import { previewDeposit } from "./previews"
 
 /**
  * Route planner (spec 0002 §4). Each panel action is a route: an ordered list of contract actions,
- * one signature each. When the manifest lists the Router's USDY-denominated function for it
- * (`SINGLE_STEP`, R4-3), the route is that one call; otherwise it is the existing actions in a row.
+ * one signature each. When the manifest lists the Router function that does it in one call
+ * (`SINGLE_STEP`, and `FLASH_BUY_YT` for Buy YT, R5-2), the route is that one call; otherwise it is
+ * the existing actions in a row. The manifest's `routerFunctions` alone decides (R5-4): the contracts
+ * sweep only what a call produced, so the SY or PT a wallet already holds never changes the route.
  * Plans are plain serializable data (the route log persists and resumes them); amounts that depend
  * on an earlier step's real output are `AmountSource`s resolved by `resolveStep` at run time.
  */
@@ -56,33 +58,37 @@ export type StepPlan = {
   takes: string
   /** Checked by `resolveStep`: `value` must be at least `atLeast`, else the route stops here. */
   requires?: { value: AmountSource; atLeast: AmountSource; reason: string }[]
-  /**
-   * R4-3, on the first step only: why this route was planned instead of the one-signature Router
-   * function the manifest lists (the wallet holds SY it would sweep), in plain English for the route
-   * note. Display text, like `gives` and `takes`: it changes nothing the step signs.
-   */
-  fallback?: string
 }
 
 export type RouteDisabled = { disabled: string }
 
-/**
- * A Router function that does a whole route in one signature. `sweepsSy`: it ends with
- * `SYWrapper.withdraw_all`, so it reverts `PreexistingSyBalance` (Router error 9) when the wallet
- * already holds SY (R4-3).
- */
-export type SingleStep = { fn: string; action: ActionId; sweepsSy?: true }
+/** A Router function that does a whole route in one signature, and the action that signs it. */
+export type SingleStep = { fn: string; action: ActionId }
 
 /**
- * Single-step table (principal 97ac23e): route kind -> the USDY-denominated Router function that
- * replaces the route when the manifest lists it (R4-3). A buy uses it when paid in USDY, a sale when
- * received in USDY; paid or received in SY, the route is already one step or needs no Router call.
+ * Single-step table (principal 665bb67): route kind -> the USDY-denominated Router function that
+ * replaces the route when the manifest lists it. A buy or a deposit uses it when paid in USDY, a sale
+ * or a withdraw when received in USDY; paid or received in SY, the route is already one step or needs
+ * no Router call. The LP withdraw's function sells the PT, which the pool refuses after maturity, so
+ * it is used only before (R5-6).
  */
 export const SINGLE_STEP: Partial<Record<RouteKind, SingleStep>> = {
   buy_pt: { fn: "swap_underlying_for_pt", action: "buy_pt_underlying" },
-  sell_pt: { fn: "swap_pt_for_underlying", action: "sell_pt_underlying", sweepsSy: true },
-  sell_yt: { fn: "swap_yt_for_underlying", action: "sell_yt_underlying", sweepsSy: true },
+  sell_pt: { fn: "swap_pt_for_underlying", action: "sell_pt_underlying" },
+  sell_yt: { fn: "swap_yt_for_underlying", action: "sell_yt_underlying" },
   lp_keep_yt: { fn: "add_liquidity_keep_yt", action: "add_liquidity_keep_yt" },
+  lp_only: { fn: "add_liquidity_single_underlying", action: "add_liquidity_underlying" },
+  lp_withdraw: { fn: "remove_liquidity_to_underlying", action: "remove_liquidity_underlying" },
+}
+
+/**
+ * Buy YT as a flash swap (R5-2), by the token paid: the pool mints PT + YT from its own SY and sells
+ * the PT back into itself, so the wallet pays only the net cost. One signature for either payer when
+ * the manifest lists that payer's function; without it, Buy YT keeps its multi-step route.
+ */
+export const FLASH_BUY_YT: Record<Token, SingleStep> = {
+  sy: { fn: "flash_mint_yt", action: "buy_yt_flash" },
+  underlying: { fn: "flash_mint_yt_from_underlying", action: "buy_yt_flash_underlying" },
 }
 
 export type RouteContext = {
@@ -93,6 +99,11 @@ export type RouteContext = {
    * chosen by the caller so the deposit yields at least `syIn` SY.
    */
   buyYt?: { syIn: bigint; depositUnderlying?: bigint }
+  /**
+   * The flash Buy YT (R5-2): the `sy_in` it mints, from `solveBuyYt` for the target net cost, sized by
+   * the caller. The budget is the input.
+   */
+  buyYtFlash?: { syIn: bigint }
   /** LP "keep YT": underlying split between minting PT+YT and depositing for the SY side. */
   keepYtSplit?: { mintUnderlying: bigint; depositUnderlying: bigint }
   /**
@@ -105,12 +116,7 @@ export type RouteContext = {
    * `pt = previewMint(mint, oracleRate, feeBps).pt` and `sy = shares − mint`, sized by the caller.
    */
   keepYtDesired?: { pt: bigint; sy: bigint }
-  /**
-   * The connected account's live SY balance; absent when it is not known. Above zero, the routes whose
-   * one-step function sweeps SY are planned the old way, with the reason (R4-3).
-   */
-  syBalance?: bigint
-  /** The SY exchange rate (USDY per SY share), when read: the reason tells a balance too small to withdraw. */
+  /** The SY exchange rate (USDY per SY share), when read: LP only's one step signs `sy_in` from it (R5-5). */
   exchangeRate?: bigint
   /** Overrides `SINGLE_STEP` (used by tests; keys are route kinds). */
   singleStep?: Partial<Record<RouteKind, SingleStep>>
@@ -162,64 +168,63 @@ const TAKES: Record<RouteKind, string> = {
 }
 
 /**
- * The one-step Router function for `req`, when the manifest lists it (R4-3). For buy kinds the
- * payment token decides (`receive` is ignored); for sell kinds the receive token decides (`pay` is
- * ignored). It does not look at the SY balance: `planRoute` does.
+ * The one-step Router function for `req`, when the manifest lists it. Buy YT's flash is chosen by the
+ * token paid, for either (R5-2). For the other buy kinds the payment token decides (`receive` is
+ * ignored); for sell kinds the receive token decides (`pay` is ignored). The LP withdraw's one step
+ * only before maturity (R5-6).
  */
 export function singleStepFor(
-  req: Pick<RouteRequest, "kind" | "pay" | "receive">,
+  req: Pick<RouteRequest, "kind" | "pay" | "receive" | "matured">,
   ctx: Pick<RouteContext, "routerFunctions" | "singleStep">,
 ): SingleStep | undefined {
+  if (req.kind === "buy_yt") {
+    const flash = FLASH_BUY_YT[req.pay]
+    return ctx.routerFunctions.includes(flash.fn) ? flash : undefined
+  }
+  if (req.kind === "lp_withdraw" && req.matured) return undefined
   const single = (ctx.singleStep ?? SINGLE_STEP)[req.kind]
   const inUnderlying = BUY_KINDS.includes(req.kind) ? req.pay === "underlying" : req.receive === "underlying"
   return single && inUnderlying && ctx.routerFunctions.includes(single.fn) ? single : undefined
 }
 
 /**
- * Whether `sy` SY is too small to withdraw: it gives under 2 raw USDY at the SY rate, so any slippage
- * floor rounds to 0, which the withdraw refuses (guards.ts). False when the rate is not known, so the
- * text that points at Withdraw stays.
- */
-export function syTooSmallToWithdraw(sy: bigint, exchangeRate: bigint | undefined): boolean {
-  return exchangeRate !== undefined && exchangeRate > 0n && previewWithdraw(sy, exchangeRate) < 2n
-}
-
-/** R4-3's reason, on the first step of a route planned instead of a one-step function that sweeps SY. */
-function sweepFallback(sy: bigint, signatures: number, exchangeRate: bigint | undefined): string {
-  const head = `You hold ${formatAmount(sy, PRINCIPAL_DECIMALS, PRINCIPAL_DECIMALS, { group: true })} SY, so this takes ${signatures} signatures: the one-signature trade would withdraw all your SY.`
-  return syTooSmallToWithdraw(sy, exchangeRate)
-    ? `${head} An amount this small cannot be withdrawn, so this trade keeps its multi-step route.`
-    : `${head} Withdraw it first (Quick actions → Withdraw) to trade in one signature.`
-}
-
-/**
- * The one step, with the amounts it signs: the input, except Keep YT, which also mints the SY shares
- * the caller sized (R4-4) and offers the pool the PT and SY it sized (R5-7).
+ * The one step, with the amounts it signs: the input, plus the literal the caller sized for the
+ * calls that take one. Keep YT mints the SY shares sized for it (R4-4) and offers the pool the PT and
+ * SY sized for it (R5-7); the flash Buy YT mints the solved `sy_in` (R5-2); LP only from USDY adds
+ * the SY its deposit gives at the exchange rate (R5-5).
  */
 function oneStep(req: RouteRequest, ctx: RouteContext, single: SingleStep): StepPlan[] | RouteDisabled {
   const isBuy = BUY_KINDS.includes(req.kind)
-  const shape = { action: single.action, gives: isBuy ? "USDY" : GIVES[req.kind], takes: isBuy ? TAKES[req.kind] : "USDY" }
-  if (req.kind === "lp_keep_yt") {
-    const mint = ctx.keepYtMintSy
-    const desired = ctx.keepYtDesired
-    if (mint === undefined || desired === undefined) return disabledIf("Adding liquidity and keeping YT needs the SY to mint first.")
-    return [{ ...shape, amount: input, secondaryAmount: { from: "value", value: mint }, desired }]
+  const paid = req.pay === "sy" ? "SY" : "USDY"
+  const shape = { action: single.action, gives: isBuy ? paid : GIVES[req.kind], takes: isBuy ? TAKES[req.kind] : "USDY" }
+  const value = (v: bigint): AmountSource => ({ from: "value", value: v })
+  switch (req.kind) {
+    case "lp_keep_yt": {
+      const mint = ctx.keepYtMintSy
+      const desired = ctx.keepYtDesired
+      if (mint === undefined || desired === undefined) return disabledIf("Adding liquidity and keeping YT needs the SY to mint first.")
+      return [{ ...shape, amount: input, secondaryAmount: value(mint), desired }]
+    }
+    case "buy_yt": {
+      const syIn = ctx.buyYtFlash?.syIn
+      if (syIn === undefined) return disabledIf("Buy YT needs the solved SY amount first.")
+      return [{ ...shape, amount: input, secondaryAmount: value(syIn) }]
+    }
+    case "lp_only": {
+      const xr = ctx.exchangeRate
+      if (xr === undefined || xr <= 0n) {
+        return disabledIf("Adding liquidity in one signature needs the SY exchange rate, to size the SY it adds. It is not offered until the market data loads.")
+      }
+      return [{ ...shape, amount: input, secondaryAmount: value(previewDeposit(req.amount, xr)) }]
+    }
+    default:
+      return [{ ...shape, amount: input }]
   }
-  return [{ ...shape, amount: input }]
 }
 
 export function planRoute(req: RouteRequest, ctx: RouteContext): StepPlan[] | RouteDisabled {
   const single = singleStepFor(req, ctx)
-  if (!single) return multiStep(req, ctx)
-  // R4-3: a one-step function that ends with withdraw_all reverts on a wallet that already holds SY.
-  // A known balance above zero keeps the old route and says why; an unknown one plans the one step,
-  // and the `sy_balance` gate refuses it if the live balance turns out above zero.
-  const sy = ctx.syBalance
-  if (!single.sweepsSy || sy === undefined || sy <= 0n) return oneStep(req, ctx, single)
-  const planned = multiStep(req, ctx)
-  if (!Array.isArray(planned) || planned.length === 0) return planned
-  const [first, ...rest] = planned
-  return [{ ...first, fallback: sweepFallback(sy, planned.length, ctx.exchangeRate) }, ...rest]
+  return single ? oneStep(req, ctx, single) : multiStep(req, ctx)
 }
 
 /** The route as the existing contract actions, one signature each (spec §4). */
@@ -354,11 +359,9 @@ export function resolveStep(
       throw new Error(r.reason)
     }
   }
-  const amount = resolveSource(plan.amount, input, outputs)
-  if (!plan.secondaryAmount) return { amount }
   return {
-    amount,
-    secondaryAmount: resolveSource(plan.secondaryAmount, input, outputs),
+    amount: resolveSource(plan.amount, input, outputs),
+    ...(plan.secondaryAmount ? { secondaryAmount: resolveSource(plan.secondaryAmount, input, outputs) } : {}),
     ...(plan.desired ? { desired: plan.desired } : {}),
   }
 }
@@ -380,7 +383,11 @@ const HOLDING_LABEL: Record<Exclude<Holding, "underlying">, string> = { sy: "SY"
  * the ones the step was signed with (resolved again from the same plan and outputs) and its decoded
  * output. Undefined if the output does not belong to the action.
  */
-function moved(action: ActionId, a: { amount: bigint; secondaryAmount?: bigint }, out: ActionOutput): [Holding, bigint][] | undefined {
+function moved(
+  action: ActionId,
+  a: { amount: bigint; secondaryAmount?: bigint; desired?: { pt: bigint; sy: bigint } },
+  out: ActionOutput,
+): [Holding, bigint][] | undefined {
   const value = out.kind === "amount" ? out.value : undefined
   switch (action) {
     case "deposit":
@@ -406,8 +413,7 @@ function moved(action: ActionId, a: { amount: bigint; secondaryAmount?: bigint }
       return out.kind !== "add_liquidity" ? undefined : [["pt", -out.pt_used], ["sy", -out.sy_used], ["lp", out.lp]]
     case "add_liquidity_sy":
       // R4-7: the pool takes the whole `sy_in` and refunds the rest, so `sy_used` in the return value
-      // is `split + sy_used`, what it kept. The PT it bought and did not use is refunded too, but it is
-      // not in the return value, so it is not counted here.
+      // is `split + sy_used`, what it kept. The PT it bought and did not use stays in its reserve (R5-5).
       return out.kind !== "add_liquidity" ? undefined : [["sy", -out.sy_used], ["lp", out.lp]]
     case "remove_liquidity":
       return out.kind !== "remove_liquidity" ? undefined : [["lp", -a.amount], ["pt", out.pt], ["sy", out.sy]]
@@ -428,17 +434,24 @@ function moved(action: ActionId, a: { amount: bigint; secondaryAmount?: bigint }
     case "buy_yt_flash_underlying":
       return out.kind !== "flash_yt_underlying" ? undefined : [["underlying", out.underlying_back - a.amount], ["yt", out.yt_out]]
     case "add_liquidity_underlying":
-      // R5-5: the SY the pool does not use is refunded, and is not counted here (as add_liquidity_sy).
-      return out.kind !== "add_liquidity" ? undefined : [["underlying", -a.amount], ["lp", out.lp]]
+      // R5-5: the deposit gives the `sy_in` signed (`secondaryAmount`, sized at the exchange rate); the
+      // pool keeps `sy_used` of it and sends the rest back, which stays with the user.
+      if (out.kind !== "add_liquidity" || a.secondaryAmount === undefined) return undefined
+      return [["underlying", -a.amount], ["sy", a.secondaryAmount - out.sy_used], ["lp", out.lp]]
     case "remove_liquidity_underlying":
       return value === undefined ? undefined : [["lp", -a.amount], ["underlying", value]]
     case "add_liquidity_keep_yt":
       // PrincipalManager.mint mints PT 1:1 with YT, so the PT the pool did not take is
-      // yt_minted − pt_used. The SY left over (deposit shares − mint_amount − sy_used) needs the
-      // deposit's shares, which KeepYtResult does not return, so it is not counted here.
-      return out.kind !== "keep_yt"
-        ? undefined
-        : [["underlying", -a.amount], ["pt", out.yt_minted - out.pt_used], ["yt", out.yt_minted], ["lp", out.lp]]
+      // yt_minted − pt_used; the SY it did not take is the `sy_desired` signed less sy_used (R5-7).
+      // A plan without its desired amounts cannot say what SY is left: unknown, never guessed.
+      if (out.kind !== "keep_yt" || a.desired === undefined) return undefined
+      return [
+        ["underlying", -a.amount],
+        ["pt", out.yt_minted - out.pt_used],
+        ["sy", a.desired.sy - out.sy_used],
+        ["yt", out.yt_minted],
+        ["lp", out.lp],
+      ]
   }
 }
 
@@ -465,7 +478,7 @@ export function routeHoldings(
     try {
       const amount = resolveSource(plan.amount, req, known)
       const secondaryAmount = plan.secondaryAmount ? resolveSource(plan.secondaryAmount, req, known) : undefined
-      flows = moved(plan.action, { amount, secondaryAmount }, out)
+      flows = moved(plan.action, { amount, secondaryAmount, ...(plan.desired ? { desired: plan.desired } : {}) }, out)
     } catch {
       return undefined
     }
@@ -509,8 +522,7 @@ export type Unwind = { available: true; amount: bigint; plan: StepPlan } | { ava
  * The single call back to USDY from what an interrupted route left, where one exists: SY is
  * unwrapped by `withdraw` (Router.unwrap). Only SY gets this plan. PT or YT go back from the Trade
  * tab, which the reason names: in one Router call (`swap_pt_for_underlying`, `swap_yt_for_underlying`)
- * when the manifest lists it and the wallet holds no SY, else a sale then a withdraw (R4-3), as when
- * the route also left SY. LP needs more than one call (remove, sell the PT, withdraw). After
+ * when the manifest lists it, else a sale then a withdraw. LP goes back from the LP tab. After
  * maturity (`matured`) PT and YT can no longer be sold: it names Redeem in the PT tab instead, the
  * LP's withdraw (open at maturity), and the SY's withdraw.
  */

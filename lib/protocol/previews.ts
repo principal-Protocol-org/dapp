@@ -185,9 +185,10 @@ export function previewBuyYt(
  * `pt1 = pt_res − ptOut`, `sy1 = sy_res + split − feeShares`; then
  * `lp = min(ptOut·total_lp/pt1, (syIn − split)·total_lp/sy1)` (each floored),
  * `pt_used = min(ceil(lp·pt1/total_lp), ptOut)`, `sy_used = min(ceil(lp·sy1/total_lp), syIn − split)`.
- * The pool takes the whole `syIn` up front (R4-7: 3cb1942) and refunds what it does not use.
- * `syUsed` is `split + sy_used`, the SY it keeps and returns; `ptRefund = ptOut − pt_used` PT and
- * `syKept = syIn − split − sy_used` SY are sent back to the caller.
+ * The pool takes the whole `syIn` up front (R4-7: 3cb1942) and refunds the SY it does not use.
+ * `syUsed` is `split + sy_used`, the SY it keeps and returns; `syKept = syIn − split − sy_used` SY is
+ * sent back to the caller. `ptRefund = ptOut − pt_used` is the PT bought and not used, which stays in
+ * the pool's reserve (principal 665bb67, R5-5).
  * Zero LP (the contract reverts `ZeroAmount`) gives all zeros. Throws on an unseeded pool (R18:
  * the contract reverts `InsufficientLiquidity`) or a split larger than the deposit.
  */

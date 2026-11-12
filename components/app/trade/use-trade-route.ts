@@ -24,10 +24,7 @@ export type TradeRoute = {
   source: string | null
   /** What `RouteFlow` starts; null while the amount is not valid or no wallet is connected. */
   request: RouteRequest | null
-  /**
-   * The route's steps; empty when the route is not offered (its reason is among `blockers`). A route
-   * planned instead of a listed one-step function carries why on its first step (R4-3, `routeNote`).
-   */
+  /** The route's steps; empty when the route is not offered (its reason is among `blockers`). */
   plans: StepPlan[]
   /** The adapter's figures for this trade; null while there is no amount or no market data. */
   quote: Live<TradeQuote> | null
@@ -72,16 +69,15 @@ export function useTradeRoute({
   const { wallet, ms } = gate
   const source = wallet.status === "connected" ? wallet.publicKey : null
 
-  // R4-3: the connected account's SY, when it is read, decides whether a one-step trade that would
-  // sweep it is planned; unknown, the one step is planned and its `sy_balance` gate checks.
-  const sy = gate.account?.sy
+  // The manifest alone decides a one-step route (R5-4). The plan sizes with the quote's slippage, so
+  // the flash Buy YT's planned sy_in is the one quoted (R5-2).
   const ctx: PlanContext = {
     marketId,
     source: source ?? "",
     matured,
     routerFunctions: manifest.routerFunctions ?? [],
+    slippageBps,
     ...(ms ? { ms } : {}),
-    ...(sy?.status === "live" ? { syBalance: sy.value } : {}),
   }
   const planned = adapter.plan(trade, ctx)
   const plans = Array.isArray(planned) ? planned : []

@@ -2,7 +2,7 @@
 /**
  * Every route of spec 0002 §4 end to end on the local USDY market (Task 24, ruling R2-68; plan 0004
  * Task 8), through the pipeline the app runs: the trade adapter plans the route
- * (`currentContractsAdapter.plan`, with the account's live SY balance as `useTradeRoute` passes it)
+ * (`currentContractsAdapter.plan`, with the slippage tolerance as `useTradeRoute` passes it)
  * and quotes it, `useTradeRoute`'s checks before the start pass, then each step is resolved from the
  * real outputs of the steps before it, simulated as the user, gated, given floors from its own
  * simulation, reviewed and signed (`route-runner.ts`). A fresh keypair, onboarded through the real
@@ -12,10 +12,7 @@
  * - One step each, on a wallet with no SY: Buy PT paid in USDY (`swap_underlying_for_pt`), Sell PT
  *   and Sell YT to USDY (`swap_pt_for_underlying`, `swap_yt_for_underlying`), and Keep YT
  *   (`add_liquidity_keep_yt`, minting the SY the dApp sized, R4-4, with the desired PT and SY, R5-7).
- *   Buy YT paid in USDY is the flash swap (R5-2): its steps are added to this file with Task 3.
- * - R4-3: with 1 raw SY in the wallet, the three that end with `withdraw_all` are planned the old
- *   way, say why, and complete; with the balance unknown, the one step is planned and the
- *   `sy_balance` gate refuses it, as the Router itself does (error 9).
+ *   Buy YT paid in USDY is the flash swap (R5-2): its steps are added to this file with Task 5.
  * - LP only (Keep YT off) for both payers (R4-7: 3cb1942 takes `sy_in` up front and refunds the
  *   rest; R47 is lifted): SY payer one step, signed after a user's approval time; USDY payer, deposit
  *   then add.
@@ -79,7 +76,7 @@ import {
   units,
   type Balances,
 } from "./local-stack"
-import { createRunner, SLIPPAGE_BPS, showOutput, type Runner, type Snapshot, type StepRecord } from "./route-runner"
+import { createRunner, SLIPPAGE_BPS, type Runner, type Snapshot, type StepRecord } from "./route-runner"
 
 /** The run takes minutes; below this much life left the suite skips (R2-68: it never redeploys). */
 const MIN_RUNWAY_SECONDS = 1_800
@@ -205,16 +202,16 @@ describe.skipIf(skip !== null)("every route on the local USDY market (Task 24; 0
     `fees pool ${s.poolFees.join("/")} manager ${s.managerFees.join("/")} (protocol/creator, SY raw); treasury ${showBalances(s.treasury)}`
 
   /**
-   * `useTradeRoute`'s plan context: the account's SY balance goes in when it is read (R4-3).
-   * `knownSy: false` plans as the tab does while that read is not live.
+   * `useTradeRoute`'s plan context: the manifest alone decides a one-step route (R5-4), and the plan
+   * sizes with the slippage the quote uses (R5-2).
    */
-  const planCtx = (s: Snapshot, opts: { knownSy?: boolean } = {}): PlanContext => ({
+  const planCtx = (s: Snapshot): PlanContext => ({
     marketId: market.marketId,
     source: r.account,
     matured: false,
     routerFunctions: manifest.routerFunctions ?? [],
+    slippageBps: SLIPPAGE_BPS,
     ms: s.ms,
-    ...(opts.knownSy !== false && s.acc.sy.status === "live" ? { syBalance: s.acc.sy.value } : {}),
   })
 
   type TradeRun = {
@@ -357,7 +354,7 @@ describe.skipIf(skip !== null)("every route on the local USDY market (Task 24; 0
     out.summary()
   }, 2 * MINUTE)
 
-  // --- One transaction each, on a wallet with no SY (R4-3) ---
+  // --- One transaction each ---
 
   it("Buy PT with USDY: one transaction (swap_underlying_for_pt); the implied rate falls", async () => {
     const t = await trade({ kind: "buy_pt", amount: 300n * U, pay: "underlying", receive: "underlying" }, ["buy_pt_underlying"])
@@ -379,7 +376,7 @@ describe.skipIf(skip !== null)("every route on the local USDY market (Task 24; 0
     const [sell] = t.steps
     expect(t.bal0.sy).toBe(0n)
     expect(delta(t, "pt")).toBe(-100n * U)
-    // withdraw_all unwraps exactly the sale's SY: nothing is left.
+    // The call unwraps exactly the sale's SY (it withdraws the gain, R5-4): nothing is left.
     expect(delta(t, "sy")).toBe(0n)
     expect(delta(t, "underlying")).toBe(value(sell.decoded))
     expect(t.quote.exactness).toBe("simulated")
@@ -577,53 +574,8 @@ describe.skipIf(skip !== null)("every route on the local USDY market (Task 24; 0
     )
   }, 3 * MINUTE)
 
-  // --- R4-3: 1 raw SY in the wallet ---
-
-  /** A sale or Buy YT that would sweep SY, as the tabs offer them in USDY. */
-  const SWEEPING: { req: () => Promise<TradeRequest>; one: ActionInput["action"]; multi: ActionInput["action"][] }[] = [
-    { req: async () => ({ kind: "sell_pt", amount: 50n * U, pay: "underlying", receive: "underlying" }), one: "sell_pt_underlying", multi: ["sell_pt", "withdraw"] },
-    {
-      req: async () => ({ kind: "sell_yt", amount: balancesOf((await r.snapshot()).acc).yt / 2n, pay: "underlying", receive: "underlying" }),
-      one: "sell_yt_underlying",
-      multi: ["sell_yt", "withdraw"],
-    },
-  ]
-
-  // R5-4: the Router sweeps by gain and has no error 9, so there is no "SY held, balance not read" backstop
-  // to exercise. The fallback tests below are retired with the route-note fallback (plan 0005 Task 3).
-
-  for (const { req: make, one, multi } of SWEEPING) {
-    it(`1 raw SY held: ${one} falls back to ${multi.join(", ")}, says why (R4-3), and completes`, async () => {
-      await holdSy(1n, `${one} fallback`)
-      const req = await make()
-      expect(req.amount > 0n).toBe(true)
-      const t = await trade(req, multi, (plans) => {
-        expect(plans[0].fallback).toBe(
-          `You hold 0.0000001 SY, so this takes ${multi.length} signatures: the one-signature trade would withdraw all your SY. An amount this small cannot be withdrawn, so this trade keeps its multi-step route.`,
-        )
-        expect(plans.slice(1).every((p) => p.fallback === undefined)).toBe(true)
-      })
-      expect(t.bal0.sy).toBe(1n)
-      const last = t.steps.at(-1)!
-      expect(last.action).toBe("withdraw")
-      if (req.kind === "buy_yt") {
-        const [dep, buy, withdraw] = t.steps
-        if (buy.decoded.kind !== "buy_yt") throw new Error("not a buy_yt output")
-        expect(withdraw.amount).toBe(buy.decoded.sy_back)
-        expect(delta(t, "yt")).toBe(buy.decoded.yt_out)
-        // The 1 raw SY is untouched; the deposit's SY beyond sy_in stays beside it.
-        expect(delta(t, "sy")).toBe(value(dep.decoded) - buy.amount)
-      } else {
-        const [sell, withdraw] = t.steps
-        // The withdraw takes exactly what the sale gave: the 1 raw SY stays.
-        expect(withdraw.amount).toBe(value(sell.decoded))
-        expect(delta(t, "sy")).toBe(0n)
-        expect(delta(t, req.kind === "sell_pt" ? "pt" : "yt")).toBe(-req.amount)
-        expect(delta(t, "underlying")).toBe(value(withdraw.decoded))
-      }
-      log(`${req.kind} with 1 raw SY: ${t.steps.map((s) => `${s.action} tx ${s.hash.slice(0, 12)} ${showOutput(s.decoded)}`).join("; ")}`)
-    }, 4 * MINUTE)
-  }
+  // R5-4: the Router sweeps by gain, so SY already in the wallet no longer changes the route (the R4-3
+  // fallback and its tests are retired). Task 5 checks live that a one-step trade leaves it untouched.
 
   // --- Quick actions, LP withdraw, interruption ---
 

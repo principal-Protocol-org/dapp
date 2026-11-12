@@ -7,6 +7,7 @@ import { aprToApy, BPS, ceilDiv, SCALE } from "@/lib/protocol/math"
 import { previewDeposit, previewMint, previewSellYt, previewWithdraw } from "@/lib/protocol/previews"
 import { effectiveImpliedApy } from "@/lib/protocol/rates"
 import { solveBuyYt, type YtSolution } from "@/lib/protocol/yt-solver"
+import { maxText } from "@/lib/app/amounts"
 import { writeRoute } from "@/lib/app/route-log"
 import { planRoute, type RouteRequest, type StepPlan } from "@/lib/protocol/routes"
 import { accountState, live, marketState, MATURITY } from "./fixtures"
@@ -519,15 +520,16 @@ describe("YT tab — one-step Router functions (0004 Task 5)", () => {
   const noSy = () =>
     (mocks.accounts[A] = accountState({ underlying: live(100_000n * UNIT), sy: live(0n), yt: live(1_000n * UNIT), permYt: live(true), depositCap: live(0n) }))
 
-  it("Buy YT in USDY keeps its three steps until the flash is routed (R5-2, Task 3), with no one-signature note", async () => {
+  it("Review Focus 4: without the flash functions, Buy YT in USDY keeps its three steps and its capital rows", async () => {
     mocks.manifest = listed as typeof mocks.manifest
     const r = solved(100n * UNIT)
     simulateReturns(mocks, depositFor(r.syIn))
     await renderUi(<YtTab marketId="m1" side="buy" />)
     await enter("You pay", "100")
     expect(detail("Signatures")).toBe("3")
-    expect(screen.queryByText(/so this takes \d signatures/)).toBeNull()
+    expect(detail("Moves")).toBe(`${amount(depositFor(r.syIn))} USDY`)
     expect(detail("Comes back (step 3)")).toBe(`${amount(previewWithdraw(r.syBack, SCALE))} USDY`)
+    expect(screen.queryByText(/^Pay at most/)).toBeNull()
     await user().click(reviewButton("Buy YT"))
     await settle()
     const dialog = await screen.findByRole("dialog", { name: "Review route: Buy YT" })
@@ -553,6 +555,87 @@ describe("YT tab — one-step Router functions (0004 Task 5)", () => {
     const dialog = await screen.findByRole("dialog", { name: "Review route: Sell YT" })
     expect(within(within(dialog).getByRole("list", { name: "Route steps" })).getAllByRole("listitem")).toHaveLength(1)
     expect(mocks.prepareReview.mock.calls[0][0].input).toMatchObject({ action: "sell_yt_underlying", amount: 100n * UNIT, guards: { minOut: minAfterSlippage(usdy, 50n) } })
+  })
+})
+
+describe("YT tab — flash Buy YT (R5-2)", () => {
+  const flash = { ...usdyManifest, routerFunctions: ["flash_mint_yt", "flash_mint_yt_from_underlying"] }
+  const BUDGET = 100n * UNIT
+  /** The flash's sy_in for a budget of `budgetSy` SY, at the tab's 0.5 % slippage: its net cost and margin fit the budget. */
+  const flashSolved = (budgetSy: bigint) => solved((budgetSy * BPS) / (BPS + 50n))
+  const line = (budget: bigint, cost: bigint, back: bigint, unit: string) =>
+    `Pay at most ${amount(budget)} ${unit} · expected ${amount(cost)} ${unit} · about ${amount(back)} ${unit} back in the same transaction`
+
+  beforeEach(() => {
+    mocks.manifest = flash as typeof mocks.manifest
+  })
+
+  it("paying USDY: one signature, the budget line, no capital rows; simulated, the cost is the call's own", async () => {
+    const r = flashSolved(BUDGET)
+    let answer: (value: unknown) => void = () => {}
+    mocks.simulateInvocation.mockImplementation(() => new Promise((resolve) => (answer = resolve)))
+    await renderUi(<YtTab marketId="m1" side="buy" />)
+    await enter("You pay", "100")
+    expect(detail("Signatures")).toBe("1")
+    expect(await tipOf("Signatures")).toMatch(/This is one step, one signature: Buy YT \(you give USDY, you get YT\)\./)
+    // At an SY rate of 1, the SY not spent comes back as as much USDY.
+    expect(screen.getByText(line(BUDGET, r.netCost, BUDGET - r.netCost, "USDY"))).toBeTruthy()
+    expect(received()).toBe(`${amount(r.ytOut)} YT`)
+    for (const row of ["Moves", "Spends", "Spends at most"]) expect(screen.queryByText(row)).toBeNull()
+    expect(screen.queryByText(/^Comes back/)).toBeNull()
+    expect(await tipOf("Pay at most")).toMatch(/only the cost leaves your wallet/)
+    // The break-even sentence is for what the YT costs, never the whole budget.
+    expect(await tipOf("Break-even APY")).toMatch(new RegExp(`until maturity, for ${amount(r.netCost)} USDY\\.`))
+
+    answer({ ok: true, retval: [r.ytOut - 5n, r.netCost + 7n, BUDGET - r.netCost - 9n], latestLedger: 1, minResourceFee: "100" })
+    await settle()
+    expect(screen.getByText("Exact (simulated)")).toBeTruthy()
+    expect(received()).toBe(`${amount(r.ytOut - 5n)} YT`)
+    expect(screen.getByText(line(BUDGET, r.netCost + 9n, BUDGET - r.netCost - 9n, "USDY"))).toBeTruthy()
+  })
+
+  it("paying USDY reaches the review on the one flash call, signed with the solved sy_in and R5-3's bounds", async () => {
+    const r = flashSolved(BUDGET)
+    simulateReturns(mocks, [r.ytOut, r.netCost, BUDGET - r.netCost])
+    await renderUi(<YtTab marketId="m1" side="buy" />)
+    await enter("You pay", "100")
+    await user().click(reviewButton("Buy YT"))
+    await settle()
+    const dialog = await screen.findByRole("dialog", { name: "Review route: Buy YT" })
+    expect(within(within(dialog).getByRole("list", { name: "Route steps" })).getAllByRole("listitem")).toHaveLength(1)
+    const input = mocks.prepareReview.mock.calls[0][0].input
+    expect(input).toMatchObject({ action: "buy_yt_flash_underlying", amount: BUDGET, secondaryAmount: r.syIn })
+    const maxNetCost = ceilDiv(r.netCost * (BPS + 50n), BPS)
+    expect(maxNetCost).toBeLessThanOrEqual(BUDGET)
+    expect(input.guards).toEqual({ minOut: minAfterSlippage(r.ytOut, 50n), maxNetCost, minOut2: previewWithdraw(BUDGET - maxNetCost, SCALE) })
+    expect(mocks.executeReview).not.toHaveBeenCalled()
+  })
+
+  it("paying SY: one signature, the line in SY, and the review signs the SY flash", async () => {
+    const r = flashSolved(BUDGET)
+    simulateReturns(mocks, [r.ytOut, r.netCost])
+    await renderUi(<YtTab marketId="m1" side="buy" />)
+    await pick("Pay with", /SY/)
+    await enter("You pay", "100")
+    expect(detail("Signatures")).toBe("1")
+    expect(screen.getByText(line(BUDGET, r.netCost, BUDGET - r.netCost, "SY"))).toBeTruthy()
+    expect(screen.queryByText("Moves")).toBeNull()
+    await user().click(reviewButton("Buy YT"))
+    await settle()
+    const input = mocks.prepareReview.mock.calls[0][0].input
+    expect(input).toMatchObject({ action: "buy_yt_flash", amount: BUDGET, secondaryAmount: r.syIn })
+    expect(input.guards).toEqual({ minOut: minAfterSlippage(r.ytOut, 50n), maxNetCost: ceilDiv(r.netCost * (BPS + 50n), BPS) })
+  })
+
+  it("Review Focus 2: Max fills in the balance, the most the flash may take", async () => {
+    await renderUi(<YtTab marketId="m1" side="buy" />)
+    await user().click(screen.getByRole("button", { name: "Max You pay" }))
+    await settle()
+    expect(payField().value).toBe(maxText(100_000n * UNIT, 7))
+    await pick("Pay with", /SY/)
+    await user().click(screen.getByRole("button", { name: "Max You pay" }))
+    await settle()
+    expect(payField().value).toBe(maxText(100_000n * UNIT, 7))
   })
 })
 

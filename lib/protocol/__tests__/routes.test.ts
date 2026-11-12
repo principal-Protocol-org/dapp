@@ -4,11 +4,13 @@ import testnetJson from "@/lib/protocol/__tests__/fixtures/testnet-interim.json"
 import { parseManifest } from "../manifest"
 import { ACTION_META, invocationFor, type ActionId } from "../actions"
 import type { ActionOutput } from "../guards"
+import { previewDeposit } from "../previews"
 import {
   describeHoldings,
   planRoute,
   resolveStep,
   routeHoldings,
+  FLASH_BUY_YT,
   SINGLE_STEP,
   unwindFrom,
   type RouteContext,
@@ -77,26 +79,38 @@ describe("single-step functions", () => {
   })
 })
 
-describe("one-step Router functions (0004 Task 5, R4-3)", () => {
+describe("one-step Router functions (0004 Task 5; 0005 Task 3: R5-2, R5-4, R5-5, R5-6)", () => {
   /** The five names a 97ac23e manifest lists; the planner's own table, with no test override. */
   const FIVE = ["swap_underlying_for_pt", "swap_pt_for_underlying", "swap_underlying_for_yt", "swap_yt_for_underlying", "add_liquidity_keep_yt"]
-  const listed: RouteContext = { ...ctx, routerFunctions: FIVE, keepYtMintSy: 62n, keepYtDesired: { pt: 41n, sy: 38n } }
+  /** What a 665bb67 manifest adds: the two flash Buy YTs and LP in and out of USDY in one call. */
+  const NEW = ["flash_mint_yt", "flash_mint_yt_from_underlying", "add_liquidity_single_underlying", "remove_liquidity_to_underlying"]
+  const XR = 10_200_000n
+  const listed: RouteContext = {
+    ...ctx,
+    routerFunctions: [...FIVE, ...NEW],
+    keepYtMintSy: 62n,
+    keepYtDesired: { pt: 41n, sy: 38n },
+    buyYtFlash: { syIn: 4_216n },
+    exchangeRate: XR,
+  }
   const plan = (r: RouteRequest, c: RouteContext = listed) => {
     const p = planRoute(r, c)
     if ("disabled" in p) throw new Error(p.disabled)
     return p
   }
-  const FALLBACK = (sy: string, k: number) =>
-    `You hold ${sy} SY, so this takes ${k} signatures: the one-signature trade would withdraw all your SY. Withdraw it first (Quick actions → Withdraw) to trade in one signature.`
-  const DUST = (sy: string, k: number) =>
-    `You hold ${sy} SY, so this takes ${k} signatures: the one-signature trade would withdraw all your SY. An amount this small cannot be withdrawn, so this trade keeps its multi-step route.`
 
-  it("the table names the four functions (Buy YT is routed in Task 3, R5-2), and the two that end with withdraw_all sweep SY", () => {
+  it("the table names one function per kind, none of them flagged as sweeping SY (R5-4), and the flash is chosen by the pay token (R5-2)", () => {
     expect(SINGLE_STEP).toEqual({
       buy_pt: { fn: "swap_underlying_for_pt", action: "buy_pt_underlying" },
-      sell_pt: { fn: "swap_pt_for_underlying", action: "sell_pt_underlying", sweepsSy: true },
-      sell_yt: { fn: "swap_yt_for_underlying", action: "sell_yt_underlying", sweepsSy: true },
+      sell_pt: { fn: "swap_pt_for_underlying", action: "sell_pt_underlying" },
+      sell_yt: { fn: "swap_yt_for_underlying", action: "sell_yt_underlying" },
       lp_keep_yt: { fn: "add_liquidity_keep_yt", action: "add_liquidity_keep_yt" },
+      lp_only: { fn: "add_liquidity_single_underlying", action: "add_liquidity_underlying" },
+      lp_withdraw: { fn: "remove_liquidity_to_underlying", action: "remove_liquidity_underlying" },
+    })
+    expect(FLASH_BUY_YT).toEqual({
+      sy: { fn: "flash_mint_yt", action: "buy_yt_flash" },
+      underlying: { fn: "flash_mint_yt_from_underlying", action: "buy_yt_flash_underlying" },
     })
   })
 
@@ -120,6 +134,60 @@ describe("one-step Router functions (0004 Task 5, R4-3)", () => {
     expect(resolveStep(plan(r)[0], r, [])).toEqual({ amount: 100n, secondaryAmount: 62n, desired: { pt: 41n, sy: 38n } })
   })
 
+  it("R5-2: with the flash functions listed, Buy YT is one flash step for either payer: the budget in, the solved sy_in signed", () => {
+    expect(plan({ ...base, kind: "buy_yt", pay: "sy" })).toEqual([
+      { action: "buy_yt_flash", amount: { from: "input" }, secondaryAmount: { from: "value", value: 4_216n }, gives: "SY", takes: "YT" },
+    ])
+    expect(plan({ ...base, kind: "buy_yt", pay: "underlying" })).toEqual([
+      { action: "buy_yt_flash_underlying", amount: { from: "input" }, secondaryAmount: { from: "value", value: 4_216n }, gives: "USDY", takes: "YT" },
+    ])
+    const r = { ...base, kind: "buy_yt" as const }
+    expect(resolveStep(plan(r)[0], r, [])).toEqual({ amount: 100n, secondaryAmount: 4_216n })
+    // Each payer's flash is used only when its own function is listed.
+    const syOnly = { ...listed, routerFunctions: ["flash_mint_yt"] }
+    expect(actions({ ...base, kind: "buy_yt", pay: "sy" }, syOnly)).toEqual(["buy_yt_flash"])
+    expect(actions({ ...base, kind: "buy_yt", pay: "underlying" }, syOnly)).toEqual(["deposit", "buy_yt", "withdraw"])
+    const usdyOnly = { ...listed, routerFunctions: ["flash_mint_yt_from_underlying"] }
+    expect(actions({ ...base, kind: "buy_yt", pay: "underlying" }, usdyOnly)).toEqual(["buy_yt_flash_underlying"])
+    expect(actions({ ...base, kind: "buy_yt", pay: "sy" }, usdyOnly)).toEqual(["buy_yt"])
+    // Not sized yet: the flash is disabled, never signed with a stand-in sy_in.
+    const noFlash: RouteContext = { routerFunctions: listed.routerFunctions, exchangeRate: XR }
+    expect(planRoute({ ...base, kind: "buy_yt" }, noFlash)).toEqual({ disabled: expect.stringMatching(/needs the solved SY amount first/) })
+  })
+
+  it("Review Focus 4: without the flash functions (a 97ac23e manifest), Buy YT keeps its multi-step route", () => {
+    const old = { ...listed, routerFunctions: FIVE }
+    expect(actions({ ...base, kind: "buy_yt", pay: "underlying" }, old)).toEqual(["deposit", "buy_yt", "withdraw"])
+    expect(actions({ ...base, kind: "buy_yt", pay: "sy" }, old)).toEqual(["buy_yt"])
+  })
+
+  it("R5-5: LP only in USDY is one step whose sy_in is the deposit's SY at the exchange rate, signed as a literal", () => {
+    const r = { ...base, kind: "lp_only" as const, amount: 1_000_000_000n }
+    expect(plan(r)).toEqual([
+      {
+        action: "add_liquidity_underlying",
+        amount: { from: "input" },
+        secondaryAmount: { from: "value", value: previewDeposit(1_000_000_000n, XR) },
+        gives: "USDY",
+        takes: "LP",
+      },
+    ])
+    expect(resolveStep(plan(r)[0], r, [])).toEqual({ amount: 1_000_000_000n, secondaryAmount: previewDeposit(1_000_000_000n, XR) })
+    // Paid in SY it is the plain zap; not listed, deposit then the zap.
+    expect(actions({ ...r, pay: "sy" }, listed)).toEqual(["add_liquidity_sy"])
+    expect(actions(r, { ...listed, routerFunctions: FIVE })).toEqual(["deposit", "add_liquidity_sy"])
+    // Without the rate the sy_in cannot be worked out: unavailable, with the reason.
+    const noRate: RouteContext = { routerFunctions: listed.routerFunctions }
+    expect(planRoute(r, noRate)).toEqual({ disabled: expect.stringMatching(/needs the SY exchange rate/) })
+  })
+
+  it("R5-6: LP withdraw to USDY is one step before maturity and the old route after it", () => {
+    expect(plan({ ...base, kind: "lp_withdraw" })).toEqual([{ action: "remove_liquidity_underlying", amount: { from: "input" }, gives: "LP", takes: "USDY" }])
+    expect(actions({ ...base, kind: "lp_withdraw", matured: true }, listed)).toEqual(["remove_liquidity", "redeem", "withdraw"])
+    expect(actions({ ...base, kind: "lp_withdraw", receive: "sy" }, listed)).toEqual(["remove_liquidity", "sell_pt"])
+    expect(actions({ ...base, kind: "lp_withdraw" }, { ...listed, routerFunctions: FIVE })).toEqual(["remove_liquidity", "sell_pt", "withdraw"])
+  })
+
   it("without the names, or paying / receiving SY, the old routes stand", () => {
     for (const c of [ctx, { ...listed, routerFunctions: [] }]) {
       expect(actions({ ...base, kind: "buy_pt" }, c)).toEqual(["deposit", "buy_pt"])
@@ -127,9 +195,10 @@ describe("one-step Router functions (0004 Task 5, R4-3)", () => {
       expect(actions({ ...base, kind: "buy_yt" }, c)).toEqual(["deposit", "buy_yt", "withdraw"])
       expect(actions({ ...base, kind: "sell_yt" }, c)).toEqual(["sell_yt", "withdraw"])
       expect(actions({ ...base, kind: "lp_keep_yt" }, c)).toEqual(["mint", "deposit", "add_liquidity"])
+      expect(actions({ ...base, kind: "lp_only" }, c)).toEqual(["deposit", "add_liquidity_sy"])
+      expect(actions({ ...base, kind: "lp_withdraw" }, c)).toEqual(["remove_liquidity", "sell_pt", "withdraw"])
     }
     expect(actions({ ...base, kind: "buy_pt", pay: "sy" }, listed)).toEqual(["buy_pt"])
-    expect(actions({ ...base, kind: "buy_yt", pay: "sy" }, listed)).toEqual(["buy_yt"])
     expect(actions({ ...base, kind: "sell_pt", receive: "sy" }, listed)).toEqual(["sell_pt"])
     expect(actions({ ...base, kind: "sell_yt", receive: "sy" }, listed)).toEqual(["sell_yt"])
     expect(planRoute({ ...base, kind: "lp_keep_yt", pay: "sy" }, listed)).toEqual({ disabled: expect.stringMatching(/needs USDY/) })
@@ -139,56 +208,28 @@ describe("one-step Router functions (0004 Task 5, R4-3)", () => {
     expect(actions({ ...base, kind: "sell_pt" }, one)).toEqual(["sell_pt", "withdraw"])
   })
 
-  it("R4-3: a known SY balance above zero keeps the two sweeping routes, with the reason on their first step", () => {
-    const held = { ...listed, syBalance: 87n }
-    const sellPt = plan({ ...base, kind: "sell_pt" }, held)
-    expect(sellPt.map((p) => p.action)).toEqual(["sell_pt", "withdraw"])
-    expect(sellPt[0].fallback).toBe(FALLBACK("0.0000087", 2))
-    expect(sellPt[1].fallback).toBeUndefined()
-    const sellYt = plan({ ...base, kind: "sell_yt" }, { ...listed, syBalance: 1_000n * 10_000_000n })
-    expect(sellYt.map((p) => p.action)).toEqual(["sell_yt", "withdraw"])
-    expect(sellYt[0].fallback).toBe(FALLBACK("1,000", 2))
-    // Buy PT and Keep YT do not sweep SY: they stay one step whatever the wallet holds.
-    expect(plan({ ...base, kind: "buy_pt" }, held)).toEqual([{ action: "buy_pt_underlying", amount: { from: "input" }, gives: "USDY", takes: "PT" }])
-    expect(plan({ ...base, kind: "lp_keep_yt" }, held).map((p) => [p.action, p.fallback])).toEqual([["add_liquidity_keep_yt", undefined]])
-  })
-
-  it("final review 2: SY that withdraws to under 2 raw USDY cannot be withdrawn (its floor is 0), and the reason says so", () => {
-    const SCALE = 10_000_000n
-    const reason = (syBalance: bigint, exchangeRate?: bigint) =>
-      plan({ ...base, kind: "sell_pt" }, { ...listed, syBalance, ...(exchangeRate !== undefined ? { exchangeRate } : {}) })[0].fallback
-    expect(reason(1n, SCALE)).toBe(DUST("0.0000001", 2))
-    // 2 raw SY at 0.9999999 USDY each withdraw to 1 raw USDY; at 1.0, to 2.
-    expect(reason(2n, 9_999_999n)).toBe(DUST("0.0000002", 2))
-    expect(reason(2n, SCALE)).toBe(FALLBACK("0.0000002", 2))
-    // 1 raw SY at 2.0 USDY each withdraws to 2 raw USDY: it can be withdrawn.
-    expect(reason(1n, 2n * SCALE)).toBe(FALLBACK("0.0000001", 2))
-    // No SY rate read: the reason cannot tell, so it keeps the withdraw text.
-    expect(reason(1n)).toBe(FALLBACK("0.0000001", 2))
-  })
-
-  it("the SY held is grouped like the other amounts", () => {
-    expect(plan({ ...base, kind: "sell_yt" }, { ...listed, syBalance: 12_345_678_901_234n })[0].fallback).toBe(FALLBACK("1,234,567.8901234", 2))
-  })
-
-  it("R4-3: a zero or unknown SY balance plans the one step (the sy_balance gate checks the live balance)", () => {
-    for (const c of [{ ...listed, syBalance: 0n }, listed]) {
-      for (const kind of ["sell_pt", "sell_yt"] as const) {
-        const p = plan({ ...base, kind }, c)
-        expect(p).toHaveLength(1)
-        expect(p[0].fallback).toBeUndefined()
-      }
-    }
+  it("R5-4: no route carries a sweep fallback: routerFunctions alone decides the one step", () => {
+    const kinds = ["buy_pt", "sell_pt", "buy_yt", "sell_yt", "lp_keep_yt", "lp_only", "lp_withdraw", "split", "recombine"] as const
+    for (const c of [ctx, listed])
+      for (const kind of kinds)
+        for (const matured of [false, true])
+          for (const pay of ["underlying", "sy"] as const)
+            for (const receive of ["underlying", "sy"] as const) {
+              const p = planRoute({ ...base, kind, matured, pay, receive }, c)
+              if ("disabled" in p) continue
+              for (const s of p) expect(Object.keys(s)).not.toContain("fallback")
+            }
   })
 
   it("a one step whose amount is sized by the dApp is disabled until it is, Keep YT's desired PT and SY too (R5-7)", () => {
-    expect(planRoute({ ...base, kind: "lp_keep_yt" }, { routerFunctions: FIVE, keepYtMintSy: 62n })).toEqual({ disabled: expect.stringMatching(/needs the SY to mint first/) })
-    expect(planRoute({ ...base, kind: "lp_keep_yt" }, { routerFunctions: FIVE })).toEqual({ disabled: expect.stringMatching(/needs the SY to mint first/) })
+    const fns = [...FIVE, ...NEW]
+    expect(planRoute({ ...base, kind: "lp_keep_yt" }, { routerFunctions: fns, keepYtMintSy: 62n })).toEqual({ disabled: expect.stringMatching(/needs the SY to mint first/) })
+    expect(planRoute({ ...base, kind: "lp_keep_yt" }, { routerFunctions: fns })).toEqual({ disabled: expect.stringMatching(/needs the SY to mint first/) })
   })
 
-  it("a fallback route stays plain data", () => {
-    const p = plan({ ...base, kind: "sell_pt" }, { ...listed, syBalance: 5n })
-    expect(JSON.parse(JSON.stringify(p, (_, x) => (typeof x === "bigint" ? String(x) : x)))[0].fallback).toBe(FALLBACK("0.0000005", 2))
+  it("resolveStep hands Keep YT's desired PT and SY through on their own, never tied to the second amount", () => {
+    const plan: StepPlan = { action: "add_liquidity_keep_yt", amount: { from: "input" }, desired: { pt: 1n, sy: 2n }, gives: "USDY", takes: "LP + YT" }
+    expect(resolveStep(plan, base, [])).toEqual({ amount: 100n, desired: { pt: 1n, sy: 2n } })
   })
 })
 
@@ -355,6 +396,15 @@ describe("route holdings (spec §4 interruption)", () => {
     expect(unwindFrom({ sy: 5n * S }, { matured: true })).toMatchObject({ available: true, amount: 5n * S })
   })
 
+  it("R5-4: the way back never depends on the SY the wallet holds: no reason mentions it", () => {
+    const cases: Parameters<typeof unwindFrom>[0][] = [{ pt: S }, { yt: S, sy: S }, { lp: S }, { pt: S, sy: 2n * S }, { underlying: S }, {}, undefined]
+    for (const h of cases)
+      for (const matured of [false, true]) {
+        const u = unwindFrom(h, { matured })
+        if (!u.available) expect(u.reason).not.toMatch(/holds? no SY|withdraw all your SY/)
+      }
+  })
+
   it("LP keep YT interrupted before add_liquidity lists PT, YT and SY", () => {
     const r = { ...base, kind: "lp_keep_yt" as const }
     const outs: ActionOutput[] = [
@@ -364,7 +414,7 @@ describe("route holdings (spec §4 interruption)", () => {
     expect(describeHoldings(routeHoldings(r, plan(r), outs, 2)!, usdy)).toBe("You hold 40 PT, 40 YT and 59 SY")
   })
 
-  describe("one-transaction Router actions (0004 Task 3)", () => {
+  describe("one-transaction Router actions (0004 Task 3, 0005 Task 3)", () => {
     const ONE_STEP: RouteContext["singleStep"] = {
       buy_pt: { fn: "swap_underlying_for_pt", action: "buy_pt_underlying" },
       sell_pt: { fn: "swap_pt_for_underlying", action: "sell_pt_underlying" },
@@ -379,14 +429,17 @@ describe("route holdings (spec §4 interruption)", () => {
       return routeHoldings(r, plans, [out], 1)
     }
     /** `action` after a step that left 300 USDY: shows the underlying the action takes or pays. */
-    const afterUsdy = (action: ActionId, out: ActionOutput) => {
+    const afterUsdy = (action: ActionId, out: ActionOutput, extra: Partial<StepPlan> = {}) => {
       const r = { ...base, amount: 100n * S }
       const plans: StepPlan[] = [
         { action: "withdraw", amount: { from: "value", value: 300n * S }, gives: "SY", takes: "USDY" },
-        { action, amount: { from: "input" }, gives: "x", takes: "y" },
+        { action, amount: { from: "input" }, gives: "x", takes: "y", ...extra },
       ]
       return routeHoldings(r, plans, [{ kind: "amount", value: 300n * S }, out], 2)
     }
+    /** `action` as the route's only step, on 100 of the input: what it leaves beside the LP or YT. */
+    const alone = (action: ActionId, out: ActionOutput, extra: Partial<StepPlan> = {}) =>
+      routeHoldings({ ...base, amount: 100n * S }, [{ action, amount: { from: "input" }, gives: "x", takes: "y", ...extra }], [out], 1)
 
     it("Buy PT and Sell PT / YT: the underlying in or out, PT out or in", () => {
       expect(held("buy_pt", { kind: "amount", value: 98n * S })).toEqual({ pt: 98n * S })
@@ -399,25 +452,42 @@ describe("route holdings (spec §4 interruption)", () => {
 
     it("flash Buy YT: the YT arrives, and only the net cost leaves (R5-2)", () => {
       const sy: ActionOutput = { kind: "flash_yt", yt_out: 40n * S, net_cost: 10n * S }
-      expect(afterUsdy("buy_yt_flash", sy)).toEqual({ yt: 40n * S, underlying: 300n * S })
+      const syIn = { secondaryAmount: { from: "value", value: 4_000n * S } as const }
+      expect(afterUsdy("buy_yt_flash", sy, syIn)).toEqual({ yt: 40n * S, underlying: 300n * S })
       // The USDY payer's budget goes in and underlying_back comes back with the YT.
       const usdy: ActionOutput = { kind: "flash_yt_underlying", yt_out: 40n * S, net_cost: 10n * S, underlying_back: 85n * S }
-      expect(afterUsdy("buy_yt_flash_underlying", usdy)).toEqual({ yt: 40n * S, underlying: 285n * S })
-      expect(afterUsdy("buy_yt_flash_underlying", sy)).toBeUndefined()
+      expect(afterUsdy("buy_yt_flash_underlying", usdy, syIn)).toEqual({ yt: 40n * S, underlying: 285n * S })
+      expect(afterUsdy("buy_yt_flash_underlying", sy, syIn)).toBeUndefined()
     })
 
-    it("LP only from USDY and the exit to USDY", () => {
-      expect(afterUsdy("add_liquidity_underlying", { kind: "add_liquidity", pt_used: 1n * S, sy_used: 2n * S, lp: 50n * S })).toEqual({ lp: 50n * S, underlying: 200n * S })
+    it("LP only from USDY: the LP, and the SY of its sy_in the pool did not use, which it sends back (R5-5)", () => {
+      const add: ActionOutput = { kind: "add_liquidity", pt_used: 1n * S, sy_used: 97n * S, lp: 50n * S }
+      expect(alone("add_liquidity_underlying", add, { secondaryAmount: { from: "value", value: 98n * S } })).toEqual({ lp: 50n * S, sy: 1n * S })
+      // All of it used: nothing comes back.
+      expect(alone("add_liquidity_underlying", add, { secondaryAmount: { from: "value", value: 97n * S } })).toEqual({ lp: 50n * S })
+      expect(afterUsdy("add_liquidity_underlying", add, { secondaryAmount: { from: "value", value: 98n * S } })).toMatchObject({ lp: 50n * S, underlying: 200n * S })
+      // Without the sy_in it signed, what came back cannot be said: unknown, never guessed.
+      expect(alone("add_liquidity_underlying", add)).toBeUndefined()
+    })
+
+    it("LP out to USDY: the LP in, the underlying out (R5-6)", () => {
       expect(afterUsdy("remove_liquidity_underlying", { kind: "amount", value: 90n * S })).toEqual({ underlying: 390n * S })
     })
 
-    it("Keep YT: LP and YT, and the PT the pool did not take (PT is minted 1:1 with YT)", () => {
-      const out: ActionOutput = { kind: "keep_yt", pt_used: 38n * S, sy_used: 59n * S, lp: 50n * S, yt_minted: 40n * S }
+    it("Keep YT: LP and YT, the PT the pool did not take (PT is minted 1:1 with YT) and the SY it did not take (R5-7)", () => {
+      // desired.sy is 38: the pool took 37 of it.
+      const out: ActionOutput = { kind: "keep_yt", pt_used: 38n * S, sy_used: 37n * S, lp: 50n * S, yt_minted: 40n * S }
       const h = held("lp_keep_yt", out)
-      expect(h).toEqual({ pt: 2n * S, yt: 40n * S, lp: 50n * S })
-      expect(describeHoldings(h!, usdy)).toBe("You hold 2 PT, 40 YT and 50 LP")
-      expect(afterUsdy("add_liquidity_keep_yt", out)).toEqual({ pt: 2n * S, yt: 40n * S, lp: 50n * S, underlying: 200n * S })
+      expect(h).toEqual({ pt: 2n * S, yt: 40n * S, lp: 50n * S, sy: 1n * S })
+      expect(describeHoldings(h!, usdy)).toBe("You hold 2 PT, 40 YT, 50 LP and 1 SY")
+      // All the SY taken: only the PT is left.
+      expect(held("lp_keep_yt", { ...out, sy_used: 38n * S })).toEqual({ pt: 2n * S, yt: 40n * S, lp: 50n * S })
+      const desired = { secondaryAmount: { from: "value", value: 60n * S } as const, desired: { pt: 41n * S, sy: 38n * S } }
+      expect(alone("add_liquidity_keep_yt", out, desired)).toEqual({ pt: 2n * S, yt: 40n * S, lp: 50n * S, sy: 1n * S })
+      expect(afterUsdy("add_liquidity_keep_yt", out, desired)).toMatchObject({ pt: 2n * S, yt: 40n * S, lp: 50n * S, underlying: 200n * S })
       expect(held("lp_keep_yt", { kind: "add_liquidity", pt_used: 1n, sy_used: 1n, lp: 1n })).toBeUndefined()
+      // A plan without the desired amounts cannot say what SY is left: unknown, never guessed.
+      expect(alone("add_liquidity_keep_yt", out, { secondaryAmount: { from: "value", value: 60n * S } })).toBeUndefined()
     })
   })
 

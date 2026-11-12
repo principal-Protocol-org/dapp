@@ -332,21 +332,18 @@ describe("PT tab — whatever the route's shape", () => {
     expect(screen.getByRole<HTMLButtonElement>("button", { name: "Review Sell PT" }).disabled).toBe(true)
   })
 
-  it("holding SY, Sell PT to USDY keeps its two steps and says why in plain sight; Buy PT never sweeps SY (R4-3)", async () => {
+  it("holding SY, Sell PT to USDY is still one signature: the sale withdraws only what it produced (R5-4)", async () => {
     mocks.manifest = { ...usdyManifest, routerFunctions: ["swap_underlying_for_pt", "swap_pt_for_underlying"] } as typeof mocks.manifest
+    // The default account holds 1,000 SY.
     await renderUi(<PtTab marketId="m1" side="sell" />)
     await enter("You pay", "100")
-    expect(detail("Signatures")).toBe("2")
-    expect(
-      screen.getByText(
-        "You hold 1,000 SY, so this takes 2 signatures: the one-signature trade would withdraw all your SY. Withdraw it first (Quick actions → Withdraw) to trade in one signature.",
-      ),
-    ).toBeTruthy()
+    expect(detail("Signatures")).toBe("1")
+    expect(screen.queryByText(/so this takes \d signatures/)).toBeNull()
+    expect(screen.queryByText(/withdraw all your SY/)).toBeNull()
     cleanup()
     await renderUi(<PtTab marketId="m1" side="buy" />)
     await enter("You pay", "100")
     expect(detail("Signatures")).toBe("1")
-    expect(screen.queryByText(/so this takes \d signatures/)).toBeNull()
   })
 })
 

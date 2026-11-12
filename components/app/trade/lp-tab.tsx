@@ -43,9 +43,13 @@ const shareText = (share: number) => (share > 0 && share < 0.0001 ? "<0.01%" : f
  *   into PT + YT and the PT and the rest go into the pool at its ratio: LP and YT out, the fixed APY
  *   unchanged, no price impact, the tokenization fee on the split part. Off ("LP only", R4-7) swaps
  *   part of the payment into PT and adds both: LP out, the swap fee, the price impact, the fixed APY
- *   before and after, and the PT and SY the pool refunds. Paying SY turns Keep YT off (R2-22).
+ *   before and after, and the SY the pool refunds (the PT dust stays in the pool, R5-5). Paying SY
+ *   turns Keep YT off (R2-22).
  * - Withdraw takes LP and pays the underlying or SY: the PT removed is sold, which raises the fixed
  *   APY (R2-15), or redeemed after maturity (R2-20).
+ *
+ * LP only from USDY and the withdraw to USDY before maturity are one signature when the manifest
+ * lists their Router functions (R5-5, R5-6); the signature count and copy follow the planned steps.
  *
  * One `RouteFlow` serves both sides and stays mounted after maturity, when Deposit has closed, so a
  * route started here (or resumed from History's Continue) stays on screen; it shows only LP routes
@@ -393,7 +397,7 @@ function lpOnlyLines(q: TradeQuote, c: LineContext): PreviewLine[] {
     lines.push({
       label: "Refunded to your wallet",
       value: q.leftover.map((l) => c.amountText(l.amount, l.token)).join(" + "),
-      hint: "The pool takes PT and SY only in its exact ratio and sends back what it did not use.",
+      hint: "The pool takes PT and SY only in its exact ratio and sends back the SY it did not use. The few raw units of PT it bought and did not use stay in the pool.",
     })
   }
   return lines
