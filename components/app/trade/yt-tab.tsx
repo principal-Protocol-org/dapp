@@ -23,6 +23,7 @@ import type { TxNotice } from "@/lib/app/tx-notice"
 import { formatBps, formatPercent, formatTokenAmount } from "@/lib/protocol/format"
 import { getMarket } from "@/lib/protocol/manifest"
 import { formatImpact } from "@/lib/protocol/prices"
+import { singleStepFor } from "@/lib/protocol/routes"
 import { maxSpend, type TradeQuote, type TradeRequest, type TradeToken } from "@/lib/protocol/trade-adapter"
 
 export type YtSide = "buy" | "sell"
@@ -90,7 +91,8 @@ function YtClosed({ marketId, onRedeem, routeId, onRouteOpened }: { marketId: st
 
 function YtTrade({ marketId, side, routeId, onRouteOpened }: { marketId: string; side: YtSide; routeId?: string | null; onRouteOpened?: (id: string) => void }) {
   const baseId = useId()
-  const market = getMarket(useManifest(), marketId)
+  const manifest = useManifest()
+  const market = getMarket(manifest, marketId)
   const { slippageBps } = useSettings()
   const gate = useGateContext(marketId)
   const [texts, setTexts] = useState<Record<YtSide, string>>({ buy: "", sell: "" })
@@ -114,8 +116,10 @@ function YtTrade({ marketId, side, routeId, onRouteOpened }: { marketId: string;
   const amountText = (raw: bigint, t: TradeToken) => `${formatTokenAmount(raw, decimalsOf(t), true)} ${unitOf(t)}`
 
   // --- The amount (0001's field and checks: the hostile-input rules hold here too). A buy's amount
-  // is what the user spends, in the token paid; the gates check what its route moves.
+  // is what the user spends in the token paid, or, on a flash plan (R5-2), the budget, the most the
+  // trade may spend; the gates check what its route moves.
   const payToken: TradeToken = side === "buy" ? token : "yt"
+  const flashBuy = side === "buy" && singleStepFor({ kind: "buy_yt", pay: token, receive: token, matured: false }, { routerFunctions: manifest.routerFunctions ?? [] }) !== undefined
   const { account, ms } = gate
   const balance = account ? (payToken === "yt" ? account.yt : payToken === "sy" ? account.sy : account.underlying) : undefined
   const text = texts[side]
@@ -209,7 +213,7 @@ function YtTrade({ marketId, side, routeId, onRouteOpened }: { marketId: string;
         <CardTitle>{side === "buy" ? "Buy YT" : "Sell YT"}</CardTitle>
         <CardDescription>
           {side === "buy"
-            ? `A YT earns ${code}'s variable yield until maturity, then is worth 0. Enter what you want to spend.`
+            ? `A YT earns ${code}'s variable yield until maturity, then is worth 0. ${flashBuy ? "Enter the most you want to spend." : "Enter what you want to spend."}`
             : `Sell YT before maturity, for ${code} or its SY.`}
         </CardDescription>
       </CardHeader>

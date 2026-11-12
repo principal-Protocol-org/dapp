@@ -520,6 +520,12 @@ describe("YT tab — one-step Router functions (0004 Task 5)", () => {
   const noSy = () =>
     (mocks.accounts[A] = accountState({ underlying: live(100_000n * UNIT), sy: live(0n), yt: live(1_000n * UNIT), permYt: live(true), depositCap: live(0n) }))
 
+  it("without the flash functions the card keeps the capital wording", async () => {
+    await renderUi(<YtTab marketId="m1" side="buy" />)
+    expect(screen.getByText(/Enter what you want to spend\./)).toBeTruthy()
+    expect(screen.queryByText(/Enter the most/)).toBeNull()
+  })
+
   it("Review Focus 4: without the flash functions, Buy YT in USDY keeps its three steps and its capital rows", async () => {
     mocks.manifest = listed as typeof mocks.manifest
     const r = solved(100n * UNIT)
@@ -568,6 +574,12 @@ describe("YT tab — flash Buy YT (R5-2)", () => {
 
   beforeEach(() => {
     mocks.manifest = flash as typeof mocks.manifest
+  })
+
+  it("the card says the typed amount is the most to spend (the budget)", async () => {
+    await renderUi(<YtTab marketId="m1" side="buy" />)
+    expect(screen.getByText(/Enter the most you want to spend\./)).toBeTruthy()
+    expect(screen.queryByText(/Enter what you want to spend/)).toBeNull()
   })
 
   it("paying USDY: one signature, the budget line, no capital rows; simulated, the cost is the call's own", async () => {

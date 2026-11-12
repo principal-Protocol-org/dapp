@@ -14,7 +14,7 @@ describe("safetyIssues", () => {
     // Not even a known problem is counted beside an unreadable row: the count would be a guess.
     expect(safetyIssues(marketState({ poolPaused: live(true), riskPaused: down() }), undefined)).toBeUndefined()
   })
-  it.each([["syPaused"], ["poolPaused"], ["riskPaused"], ["oracleFresh"]])("is undefined when %s is unreadable", (k) => {
+  it.each([["syPaused"], ["poolPaused"], ["riskPaused"], ["managerPaused"], ["oracleFresh"]])("is undefined when %s is unreadable", (k) => {
     expect(safetyIssues(marketState({ [k]: down() }), undefined)).toBeUndefined()
   })
   it.each([["limit"], ["volume"], ["assetLimit"], ["assetVolume"]])("is undefined when the breaker's %s is unreadable, even with its limit off", (k) => {
@@ -28,7 +28,7 @@ describe("safetyIssues", () => {
     // No wallet: the deposit-cap row asks to connect one, and is not counted.
     expect(safetyIssues(marketState(), undefined)).toBe(0)
   })
-  it.each([["syPaused"], ["poolPaused"], ["riskPaused"]])("counts 1 when %s", (k) => {
+  it.each([["syPaused"], ["poolPaused"], ["riskPaused"], ["managerPaused"]])("counts 1 when %s", (k) => {
     expect(safetyIssues(marketState({ [k]: live(true) }), undefined)).toBe(1)
   })
   it("counts a stale oracle", () => {

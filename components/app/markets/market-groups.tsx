@@ -32,12 +32,12 @@ const COLUMNS =
 type Slot = { data: MarketState | undefined; isPending: boolean; stale: boolean }
 
 /**
- * Paused (SY, pool or RiskControl) wins; then settled; then matured; else live.
+ * Paused (SY, pool, PrincipalManager or RiskControl) wins; then settled; then matured; else live.
  * Needs the ledger clock and the fields it reads: anything missing is "unavailable", never a guess.
  */
 export function marketStatus(ms: MarketState, ledgerTime: number | null): MarketStatus {
   if (ledgerTime === null) return "unavailable"
-  const pauses = [ms.syPaused, ms.poolPaused, ms.riskPaused]
+  const pauses = [ms.syPaused, ms.poolPaused, ms.riskPaused, ms.managerPaused]
   if (pauses.some((p) => p.status === "live" && p.value)) return "paused"
   if (pauses.some((p) => p.status === "unavailable")) return "unavailable"
   if (ms.maturity.status === "unavailable" || ms.settledRate.status === "unavailable") return "unavailable"
@@ -51,12 +51,15 @@ function secondsLeft(ms: MarketState, ledgerTime: number | null): bigint | undef
   return ms.maturity.value - BigInt(Math.floor(ledgerTime))
 }
 
-function daysLeft(seconds: bigint | undefined): string {
-  if (seconds === undefined) return UNAVAILABLE
+function daysLeft(seconds: bigint | undefined, clockLoading: boolean): string {
+  if (seconds === undefined) return clockLoading ? LOADING : UNAVAILABLE
   if (seconds <= 0n) return "Matured"
   if (seconds >= 86400n) return `${seconds / 86400n} d left`
   return seconds >= 3600n ? `${seconds / 3600n} h left` : "<1 h left"
 }
+
+/** Shown while the ledger clock has not answered yet; Unavailable only after a failed read. */
+const LOADING = "Loading"
 
 const DATE = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" })
 const SHORT_DATE = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", timeZone: "UTC" })
@@ -237,11 +240,13 @@ function MaturityRow({
   market,
   slot,
   ledgerTime,
+  clockLoading,
   sparks,
 }: {
   market: Market
   slot: Slot
   ledgerTime: number | null
+  clockLoading: boolean
   sparks: { spark: Spark | undefined; isPending: boolean; failed: boolean }
 }) {
   // After a failed refetch the old data is not shown as current.
@@ -259,8 +264,8 @@ function MaturityRow({
         </Link>
         {ms && (
           <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-ink-muted">
-            <StatusBadge status={marketStatus(ms, ledgerTime)} />
-            <span>{maturityText(ms, ledgerTime)}</span>
+            <StatusBadge status={ledgerTime === null && clockLoading ? "loading" : marketStatus(ms, ledgerTime)} />
+            <span>{maturityText(ms, ledgerTime, clockLoading)}</span>
           </div>
         )}
       </div>
@@ -275,7 +280,7 @@ function MaturityRow({
           <Cell label="Fixed APY, 30 d" className="md:flex md:justify-end">
             <SparkCell {...sparks} spark={sparks.spark} />
           </Cell>
-          <ChipCells market={market} ms={ms} ledgerTime={ledgerTime} />
+          <ChipCells market={market} ms={ms} ledgerTime={ledgerTime} clockLoading={clockLoading} />
         </>
       ) : slot.isPending ? (
         <div data-testid="market-loading" className="md:col-span-5">
@@ -290,16 +295,16 @@ function MaturityRow({
   )
 }
 
-function maturityText(ms: MarketState, ledgerTime: number | null): string {
+function maturityText(ms: MarketState, ledgerTime: number | null, clockLoading: boolean): string {
   if (ms.maturity.status === "unavailable") return UNAVAILABLE
-  return `${DATE.format(new Date(Number(ms.maturity.value) * 1000))} (${daysLeft(secondsLeft(ms, ledgerTime))})`
+  return `${DATE.format(new Date(Number(ms.maturity.value) * 1000))} (${daysLeft(secondsLeft(ms, ledgerTime), clockLoading)})`
 }
 
 /** The YT and PT chips of one maturity; only a live or paused market offers them. */
-function ChipCells({ market, ms, ledgerTime }: { market: Market; ms: MarketState; ledgerTime: number | null }) {
+function ChipCells({ market, ms, ledgerTime, clockLoading }: { market: Market; ms: MarketState; ledgerTime: number | null; clockLoading: boolean }) {
   const status = marketStatus(ms, ledgerTime)
   const open = status === "live" || status === "paused"
-  const closed = status === "matured" ? "Matured" : status === "settled" ? "Settled" : UNAVAILABLE
+  const closed = status === "matured" ? "Matured" : status === "settled" ? "Settled" : ledgerTime === null && clockLoading ? LOADING : UNAVAILABLE
   const closedReason = open ? undefined : "This market cannot be bought into right now."
   const lev = open ? leverageOf(ms) : noFigure(closedReason!)
   const fixed = open ? fixedApyOf(ms, ledgerTime) : noFigure(closedReason!)
@@ -355,12 +360,14 @@ function AssetGroup({
   group,
   slots,
   ledgerTime,
+  clockLoading,
   defaultOpen,
   sparks,
 }: {
   group: Group
   slots: Slot[]
   ledgerTime: number | null
+  clockLoading: boolean
   defaultOpen: boolean
   sparks: { map: Record<string, Spark> | undefined; isPending: boolean; failed: boolean }
 }) {
@@ -433,6 +440,7 @@ function AssetGroup({
               market={market}
               slot={slots[i]}
               ledgerTime={ledgerTime}
+              clockLoading={clockLoading}
               sparks={{ spark: sparks.map?.[market.contracts.pool], isPending: sparks.isPending, failed: sparks.failed }}
             />
           ))}
@@ -444,7 +452,8 @@ function AssetGroup({
 
 export function MarketGroups() {
   const manifest = useManifest()
-  const { ledgerTime } = useLedgerClock()
+  const { ledgerTime, isError: clockFailed } = useLedgerClock()
+  const clockLoading = ledgerTime === null && !clockFailed
   const slots = useMarketStates(manifest.markets.map((m) => m.marketId))
   const sparks = useSparks(manifest.markets.map((m) => m.contracts.pool))
   const groups = groupMarkets(manifest)
@@ -467,6 +476,7 @@ export function MarketGroups() {
             group={g}
             slots={g.markets.map((m) => slotOf.get(m.marketId)!)}
             ledgerTime={ledgerTime}
+            clockLoading={clockLoading}
             defaultOpen={groups.length === 1}
             sparks={{ map: sparks.data?.sparks, isPending: sparks.isPending && sparks.fetchStatus !== "idle", failed: sparks.isError }}
           />

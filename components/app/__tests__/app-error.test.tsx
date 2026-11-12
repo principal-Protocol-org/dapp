@@ -13,7 +13,8 @@ describe("/app error boundary (M9)", () => {
     const retry = vi.fn()
     render(<AppError error={new Error("Manifest is invalid: markets[0].maturity")} retry={retry} />)
     expect(screen.getByRole("heading", { name: "This page could not be shown" })).toBeTruthy()
-    expect(screen.getByText(/Nothing was signed or sent/)).toBeTruthy()
+    expect(screen.getByText(/If you signed a transaction just before this, check History before trying again\./)).toBeTruthy()
+    expect(screen.queryByText(/Nothing was signed or sent/)).toBeNull()
     // The cause stays available, folded away.
     expect(screen.getByText("Manifest is invalid: markets[0].maturity")).toBeTruthy()
     await userEvent.click(screen.getByRole("button", { name: "Try again" }))

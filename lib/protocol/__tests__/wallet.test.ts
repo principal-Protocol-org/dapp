@@ -117,6 +117,19 @@ describe("freighterAdapter.restore", () => {
     expect(isConnected).toHaveBeenCalled();
   });
 
+  it("the legacy API must answer true or { isConnected: true }; a truthy string or other object is not a yes", async () => {
+    m.isConnected.mockResolvedValue({ isConnected: false })
+    for (const answer of ["false", "yes", 1, {}, { isConnected: "true" }]) {
+      ;(window as { freighterApi?: unknown }).freighterApi = { isConnected: vi.fn(async () => answer) }
+      await expect(freighterAdapter.restore(manifest)).resolves.toEqual({ status: "locked" })
+    }
+    m.isAllowed.mockResolvedValue({ isAllowed: false })
+    for (const answer of [true, { isConnected: true }]) {
+      ;(window as { freighterApi?: unknown }).freighterApi = { isConnected: vi.fn(async () => answer) }
+      await expect(freighterAdapter.restore(manifest)).resolves.toEqual({ status: "disconnected" })
+    }
+  })
+
   it("restore yields wrong_network when the Freighter passphrase differs from the manifest (R27)", async () => {
     m.isConnected.mockResolvedValue({ isConnected: true });
     m.isAllowed.mockResolvedValue({ isAllowed: true });

@@ -1,7 +1,7 @@
 import { render, screen } from "@testing-library/react"
 import { describe, expect, it } from "vitest"
 import { formatUnixTime } from "@/lib/protocol/format"
-import type { ManagerReview, Review } from "@/lib/protocol/review"
+import { TX_TIMEOUT_SECONDS, type ManagerReview, type Review } from "@/lib/protocol/review"
 import { ReviewDialog } from "../actions/review-dialog"
 
 const NOW = 1_800_000_000
@@ -66,6 +66,14 @@ describe("ReviewDialog time limits (M3)", () => {
   it("says to check the device clock when the time bound has already passed by ledger time", () => {
     const text = show(review({ deadline: NOW + 300, validUntil: NOW - 600 }))
     expect(text).toContain("Check your device clock")
+    // A bound already passed reads as passed, never as "in 0s".
+    expect(text).toContain("already passed by ledger time")
+    expect(text).not.toContain("in 0s")
+  })
+
+  it("takes the valid-for minutes from TX_TIMEOUT_SECONDS", () => {
+    const text = show(review({ deadline: undefined, validUntil: NOW + 300 }))
+    expect(text).toContain(`valid for ${TX_TIMEOUT_SECONDS / 60} minutes from when it was prepared`)
   })
 })
 

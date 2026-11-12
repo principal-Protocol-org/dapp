@@ -22,8 +22,8 @@ export default function AppError({ error, retry }: { error: unknown; retry: () =
         This page could not be shown
       </h1>
       <p className="text-ink-muted">
-        Something went wrong while showing this page. Nothing was signed or sent. Try again; if it keeps happening, reload the page or
-        come back later.
+        Something went wrong while showing this page. Try again; if it keeps happening, reload the page or come back later. If you signed a
+        transaction just before this, check History before trying again.
       </p>
       <div>
         <Button type="button" onClick={() => retry()}>

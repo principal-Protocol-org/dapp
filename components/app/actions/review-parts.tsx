@@ -1,20 +1,21 @@
 import { formatDuration } from "@/components/app/live"
 import { formatUnixTime, shorten } from "@/lib/protocol/format"
-import type { AnyReview } from "@/lib/protocol/review"
+import { TX_TIMEOUT_SECONDS, type AnyReview } from "@/lib/protocol/review"
 
 /**
  * When the transaction can no longer land, in plain words (M3). Two limits apply: the contract
- * call's deadline (actions that take one) and the transaction's own time bound, 5 minutes after it
+ * call's deadline (actions that take one) and the transaction's own time bound, TX_TIMEOUT_SECONDS after it
  * was prepared. The network checks both against ledger time; the earlier one is the one shown, and
  * says who refuses the transaction after it.
  */
 export function TimeLimit({ deadline, validUntil, ledgerTime }: { deadline?: number; validUntil: number; ledgerTime: number | null }) {
-  const at = (t: number) => `${formatUnixTime(t)}${ledgerTime !== null ? `, in ${formatDuration(t - ledgerTime)} by ledger time` : ""}`
+  const at = (t: number) =>
+    `${formatUnixTime(t)}${ledgerTime === null ? "" : t <= ledgerTime ? ", already passed by ledger time" : `, in ${formatDuration(t - ledgerTime)} by ledger time`}`
   const lines =
     deadline !== undefined && deadline <= validUntil
       ? [`${at(deadline)}. If the transaction lands after it, the contract refuses it and only the network fee is spent.`]
       : [
-          `${at(validUntil)}. After it the network refuses the transaction: it is valid for 5 minutes from when it was prepared.`,
+          `${at(validUntil)}. After it the network refuses the transaction: it is valid for ${TX_TIMEOUT_SECONDS / 60} minutes from when it was prepared.`,
           ...(deadline !== undefined ? [`Your deadline, ${formatUnixTime(deadline)}, comes later, so this is the limit that applies.`] : []),
         ]
   // The time bound comes from the device clock; one already past by ledger time can never land.

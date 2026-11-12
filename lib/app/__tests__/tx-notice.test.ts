@@ -49,7 +49,7 @@ describe("noticeForResult", () => {
   })
 
   it("names the cause of a failed transaction (R49)", () => {
-    const reason = "Amounts moved between your review and inclusion (the pool or oracle changed). Nothing was taken except the network fee; prepare again."
+    const reason = "Amounts moved between your review and inclusion. Nothing was taken except the network fee; prepare again."
     const n = noticeForResult("Buy YT", { hash: HASH, status: "FAILED", reason }, "testnet")
     expect(n.tone).toBe("error")
     expect(n.title).toBe("Buy YT failed on-chain.")

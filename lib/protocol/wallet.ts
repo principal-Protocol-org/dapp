@@ -24,7 +24,7 @@ export interface WalletAdapter {
 }
 
 type FreighterLike = {
-  isConnected?: () => Promise<boolean>
+  isConnected?: () => Promise<unknown>
   getPublicKey?: () => Promise<string>
   getNetwork?: () => Promise<string>
   signTransaction?: (xdr: string, options: { networkPassphrase: string }) => Promise<string>
@@ -79,11 +79,13 @@ async function resolveState(
  */
 async function probe(api: FreighterLike | undefined): Promise<WalletState | "ok"> {
   const pkg = await isConnected()
-  if (!pkg.error && pkg.isConnected) return "ok"
+  if (!pkg.error && (pkg.isConnected as unknown) === true) return "ok"
   if (!api) return { status: "not_installed" }
   // An injected legacy API means an extension is there, so it alone decides; fail closed to locked
   // when it cannot confirm.
-  const connected = api.isConnected ? await api.isConnected() : false
+  // Only a real `true`, or `{ isConnected: true }`, counts: a truthy string or object is not a yes.
+  const answer = api.isConnected ? await api.isConnected() : false
+  const connected = answer === true || (typeof answer === "object" && answer !== null && (answer as { isConnected?: unknown }).isConnected === true)
   return connected ? "ok" : { status: "locked" }
 }
 

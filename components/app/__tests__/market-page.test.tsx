@@ -424,12 +424,25 @@ describe("ComplianceContent", () => {
   })
 })
 
+describe("SafetyContent manager pause", () => {
+  it("shows a paused PrincipalManager, and Unavailable when its pause cannot be read", () => {
+    mocks.ms = marketState({ managerPaused: live(true) })
+    wrap(<SafetyContent marketId="m1" />)
+    expect(screen.getByText("Principal manager").nextSibling?.textContent).toMatch(/^Paused/)
+    cleanup()
+    mocks.ms = marketState({ managerPaused: down() })
+    wrap(<SafetyContent marketId="m1" />)
+    expect(screen.getByText("Principal manager").nextSibling?.textContent).toBe("Unavailable")
+  })
+})
+
 describe("SafetyContent", () => {
   it("lists pauses, oracle freshness and circuit-breaker room", () => {
     mocks.ms = marketState({ riskPaused: live(true) })
     wrap(<SafetyContent marketId="m1" />)
     expect(screen.getByText("SY wrapper").nextSibling?.textContent).toBe("Not paused")
     expect(screen.getByText("Risk control").nextSibling?.textContent).toMatch(/^Paused/)
+    expect(screen.getByText("Principal manager").nextSibling?.textContent).toBe("Not paused")
     expect(screen.getByText("Oracle").nextSibling?.textContent).toBe("Fresh (updated within the last 1 hour), updated 10m 0s ago")
     expect(screen.getByText("Circuit breaker, protocol-wide").nextSibling?.textContent).toBe("75000 left of 100000")
     expect(screen.getByText("Circuit breaker, STA").nextSibling?.textContent).toBe("No limit (disabled)")

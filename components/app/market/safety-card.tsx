@@ -85,6 +85,7 @@ export function SafetyContent({ marketId }: { marketId: string }) {
       <Row label="SY wrapper">{showLive(ms.syPaused, pause)}</Row>
       <Row label="Market pool">{showLive(ms.poolPaused, pause)}</Row>
       <Row label="Risk control">{showLive(ms.riskPaused, pause)}</Row>
+      <Row label="Principal manager">{showLive(ms.managerPaused, pause)}</Row>
       <Row label="Oracle">{oracle()}</Row>
       <Row label="Oracle deviation cap">{showLive(ms.oracleMaxDeviationBps, formatBps)}</Row>
       <Row label="Oracle primary source">{showLive(ms.oraclePrimarySource, source)}</Row>

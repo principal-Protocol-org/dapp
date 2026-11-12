@@ -14,6 +14,7 @@ type Query<T> = { data: T | undefined; isPending: boolean; isError: boolean }
 const mocks = vi.hoisted(() => ({
   states: {} as Record<string, { data: unknown; isPending: boolean; stale: boolean }>,
   ledgerTime: null as number | null,
+  clockError: false,
   testAsset: true,
   extraAsset: false,
   history: {} as Record<string, unknown>,
@@ -66,7 +67,7 @@ vi.mock("@/hooks/use-market-history", () => ({
         : { data: mocks.sparks as { sparks: Record<string, Spark>; stale: boolean }, isPending: false, isError: false },
 }))
 vi.mock("@/hooks/use-ledger-clock", () => ({
-  useLedgerClock: () => ({ ledgerTime: mocks.ledgerTime, sequence: 1, isError: false }),
+  useLedgerClock: () => ({ ledgerTime: mocks.ledgerTime, sequence: 1, isError: mocks.clockError }),
 }))
 
 import { MarketGroups, marketStatus } from "../markets/market-groups"
@@ -110,6 +111,7 @@ beforeEach(() => {
   mocks.testAsset = true
   mocks.extraAsset = false
   mocks.ledgerTime = LEDGER_TIME
+  mocks.clockError = false
   // m1: PT 0.98 -> 50x, 5% APR. m2: PT 0.95 -> 20x, 7% APR (longer-dated look, same maturity in the fixture).
   setMarket("m1", marketState())
   setMarket("m2", marketState({ ptPrice: live(9_500_000n), impliedRate: live(700_000n) }))
@@ -138,12 +140,14 @@ describe("marketStatus", () => {
     expect(marketStatus(marketState({ riskPaused: live(true) }), LEDGER_TIME)).toBe("paused")
     expect(marketStatus(marketState({ syPaused: live(true) }), LEDGER_TIME)).toBe("paused")
     expect(marketStatus(marketState({ poolPaused: live(true) }), LEDGER_TIME)).toBe("paused")
+    expect(marketStatus(marketState({ managerPaused: live(true) }), LEDGER_TIME)).toBe("paused")
   })
   it("is unavailable without the ledger clock or a needed field", () => {
     expect(marketStatus(marketState(), null)).toBe("unavailable")
     expect(marketStatus(marketState({ maturity: down() }), LEDGER_TIME)).toBe("unavailable")
     expect(marketStatus(marketState({ settledRate: down() }), LEDGER_TIME)).toBe("unavailable")
     expect(marketStatus(marketState({ poolPaused: down() }), LEDGER_TIME)).toBe("unavailable")
+    expect(marketStatus(marketState({ managerPaused: down() }), LEDGER_TIME)).toBe("unavailable")
   })
 })
 
@@ -294,12 +298,24 @@ describe("MarketGroups", () => {
     expect(within(card).queryByText(/^0/)).toBeNull()
   })
 
-  it("shows Unavailable for the ledger-dependent figures while the ledger clock is missing", () => {
+  it("shows Loading, not Unavailable, for the ledger-dependent figures while the ledger clock loads", () => {
     mocks.ledgerTime = null
     renderList()
     const card = marketCard("m1")
     expect(within(card).queryByRole("link", { name: /PT.*%/ })).toBeNull()
+    expect(within(card).getAllByText("Loading").length).toBeGreaterThanOrEqual(2)
+    expect(within(card).queryByText("Unavailable")).toBeNull()
+    expect(within(card).getByText(/\(Loading\)/)).toBeTruthy()
+  })
+
+  it("shows Unavailable for the ledger-dependent figures only after the ledger clock read failed", () => {
+    mocks.ledgerTime = null
+    mocks.clockError = true
+    renderList()
+    const card = marketCard("m1")
+    expect(within(card).queryByRole("link", { name: /PT.*%/ })).toBeNull()
     expect(within(card).getAllByText("Unavailable").length).toBeGreaterThanOrEqual(2)
+    expect(within(card).queryByText("Loading")).toBeNull()
   })
 
   it("shows Matured, no chips, after maturity", () => {
