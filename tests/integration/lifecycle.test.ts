@@ -230,7 +230,6 @@ describe.skipIf(skip !== null)("protocol layer on the local network", () => {
       ledgerTime: s.ledgerTime,
       simulation,
       managerId: market.contracts.manager,
-      routerId: market.contracts.router,
     }
   }
 

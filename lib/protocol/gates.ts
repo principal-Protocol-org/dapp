@@ -17,7 +17,6 @@ import type { ComplianceItem } from "./compliance"
 import { formatAmount, formatWindow } from "./format"
 import type { MarketState } from "./market-state"
 import { SCALE } from "./math"
-import { SINGLE_STEP, syTooSmallToWithdraw } from "./routes"
 import type { SimulationOutcome } from "./stellar"
 import type { Finding, Live, WalletState } from "./types"
 import { pendingYield } from "./yield"
@@ -36,7 +35,6 @@ export const BLOCKER_ORDER = [
   "network",
   "amount",
   "balance",
-  "sy_balance",
   "maturity",
   "oracle",
   "pause",
@@ -69,8 +67,6 @@ export type GateContext = {
   simulation?: SimulationOutcome
   /** The market's PrincipalManager: its `Error(Contract, #9)` is `Paused`. */
   managerId: string
-  /** The Router: its `Error(Contract, #9)` is `PreexistingSyBalance` (router:182). */
-  routerId: string
 }
 
 /** Token decimals: every Principal token, and the release's underlying, use 7. */
@@ -78,15 +74,17 @@ const DECIMALS = 7
 
 /** `PrincipalManager` `Error::Paused` (`principal_manager/src/lib.rs:203`). */
 const MANAGER_PAUSED_CODE = 9
-/** `Router` `Error::PreexistingSyBalance` (`router/src/lib.rs:182`), raised by the three that sweep SY. */
-const ROUTER_PREEXISTING_SY_CODE = 9
 
 /**
- * 0004 Task 4 (R4-3): each one-transaction Router action is in every gate set any of its components
- * is in. buy_pt_underlying = deposit + buy_pt; sell_pt_underlying = sell_pt + withdraw;
- * sell_yt_underlying = sell_yt + withdraw;
- * add_liquidity_keep_yt = deposit + mint + add_liquidity.
+ * Each one-transaction Router action is in every gate set any of its components is in (0004, R5-2):
+ * buy_pt_underlying = deposit + buy_pt; sell_pt_underlying = sell_pt + withdraw;
+ * sell_yt_underlying = sell_yt + withdraw; add_liquidity_keep_yt = deposit + mint + add_liquidity;
+ * add_liquidity_underlying = deposit + add_liquidity_sy; the flash Buy YTs mint and sell PT inside the
+ * pool (the USDY one also deposits first and withdraws the unspent budget).
+ * Sweeps are by gain (R5-4): the Router withdraws only what the call produced, so holding SY blocks
+ * nothing and there is no gate for it.
  */
+const FLASH_BUY_YT: readonly ActionId[] = ["buy_yt_flash", "buy_yt_flash_underlying"]
 const TRADES: readonly ActionId[] = [
   "buy_pt",
   "sell_pt",
@@ -95,23 +93,43 @@ const TRADES: readonly ActionId[] = [
   "buy_pt_underlying",
   "sell_pt_underlying",
   "sell_yt_underlying",
+  ...FLASH_BUY_YT,
 ]
-const ADDS: readonly ActionId[] = ["add_liquidity", "add_liquidity_sy", "add_liquidity_keep_yt"]
+const ADDS: readonly ActionId[] = ["add_liquidity", "add_liquidity_sy", "add_liquidity_keep_yt", "add_liquidity_underlying"]
 /**
- * R4-3: these end with `SYWrapper.withdraw_all`, which reverts `PreexistingSyBalance` (Router error 9)
- * if the wallet holds SY: sell_pt_underlying and sell_yt_underlying. Read from the
- * planner's `SINGLE_STEP` (`sweepsSy`), so the gate and the fallback never disagree.
+ * R5-6: LP out to USDY removes liquidity and sells the PT in the pool, so it needs the pool open, a
+ * fresh oracle and the time before maturity (`assert_active`); after maturity the route stays multi-step.
  */
-const SWEEPS_SY: ReadonlySet<ActionId> = new Set(Object.values(SINGLE_STEP).flatMap((s) => (s?.sweepsSy ? [s.action] : [])))
+const REMOVE_TO_UNDERLYING: ActionId = "remove_liquidity_underlying"
 
 /** Closed at maturity: `assert_not_mature` (manager) and `assert_active` (pool, :1032-1037). */
-const BEFORE_MATURITY_ONLY = new Set<ActionId>(["mint", ...TRADES, ...ADDS, "recombine"])
+const BEFORE_MATURITY_ONLY = new Set<ActionId>(["mint", ...TRADES, ...ADDS, REMOVE_TO_UNDERLYING, "recombine"])
 /** Need `is_available()` (a fresh, accepted price) always. Claim and redeem need it only until settlement (see `oracleGate`). */
-const NEEDS_FRESH_ORACLE = new Set<ActionId>(["mint", ...TRADES, "add_liquidity_sy", "add_liquidity_keep_yt", "recombine"])
+const NEEDS_FRESH_ORACLE = new Set<ActionId>([
+  "mint",
+  ...TRADES,
+  "add_liquidity_sy",
+  "add_liquidity_keep_yt",
+  "add_liquidity_underlying",
+  REMOVE_TO_UNDERLYING,
+  "recombine",
+])
 /** Go through the pool's reserves: `assert_seeded` panics on an empty pool (`market_pool:930-935`). */
-const USES_POOL = new Set<ActionId>([...TRADES, ...ADDS])
-/** Call `RiskControl.check_deposit`, which refuses while RiskControl is paused. */
-const RISK_CHECKED = new Set<ActionId>(["deposit", "mint", "buy_yt", "buy_pt_underlying", "add_liquidity_keep_yt"])
+const USES_POOL = new Set<ActionId>([...TRADES, ...ADDS, REMOVE_TO_UNDERLYING])
+/**
+ * Call `RiskControl.check_deposit`, which refuses while RiskControl is paused. Both SYWrapper (every
+ * deposit) and PrincipalManager (every mint) are its consumers (`deploy.sh` `add_consumer`), so the
+ * flash Buy YT counts its mint, the USDY one its deposit too (R5-2), and LP only from USDY its deposit (R5-5).
+ */
+const RISK_CHECKED = new Set<ActionId>([
+  "deposit",
+  "mint",
+  "buy_yt",
+  "buy_pt_underlying",
+  "add_liquidity_keep_yt",
+  ...FLASH_BUY_YT,
+  "add_liquidity_underlying",
+])
 /** Call `PrincipalManager` entry points that `assert_not_paused`: mint, recombine, redeem, claim. */
 const MANAGER_PAUSABLE = new Set<ActionId>([
   "mint",
@@ -119,12 +137,24 @@ const MANAGER_PAUSABLE = new Set<ActionId>([
   "sell_yt",
   "sell_yt_underlying",
   "add_liquidity_keep_yt",
+  // The pool mints PT and YT through the manager, as itself (R5-2).
+  ...FLASH_BUY_YT,
   "recombine",
   "claim_yield",
   "redeem",
 ])
-/** Charge `SYWrapper.deposit`'s per-address cap (wrap_and_mint deposits first). */
-const DEPOSIT_CAPPED = new Set<ActionId>(["deposit", "mint", "buy_pt_underlying", "add_liquidity_keep_yt"])
+/**
+ * Charge `SYWrapper.deposit`'s per-address cap (wrap_and_mint deposits first). The USDY flash and LP
+ * only from USDY deposit their budget; the SY flash only mints, so it is not charged.
+ */
+const DEPOSIT_CAPPED = new Set<ActionId>([
+  "deposit",
+  "mint",
+  "buy_pt_underlying",
+  "add_liquidity_keep_yt",
+  "buy_yt_flash_underlying",
+  "add_liquidity_underlying",
+])
 /** R22: compliance items every write needs (all protocol writes are SAC- and Permissioning-gated). */
 const EVERY_WRITE_ITEMS: readonly ComplianceItem["id"][] = ["account", "trustline", "authorized", "permissioning"]
 /**
@@ -133,6 +163,11 @@ const EVERY_WRITE_ITEMS: readonly ComplianceItem["id"][] = ["account", "trustlin
  * :427; yt_token:282-285). Buy YT mints PT and sells it (router:347, market_pool:329); sell PT,
  * two-sided add (market_pool:446) and sell YT (:363) send PT/YT; the zap can refund PT
  * (:499-502). Recombine and redeem only burn, with no per-asset check.
+ *
+ * R5-5: neither LP only action (`add_liquidity_sy`, `add_liquidity_underlying`) needs the PT grant: the
+ * contract keeps the PT dust in the reserve and never sends PT to the caller (9509529). R5-2: the flash
+ * Buy YT mints as the pool, so the user only receives YT: the YT grant, not the PT one. R5-6: LP out to
+ * USDY receives PT before it sells it, so it needs the PT grant.
  */
 const NEEDS_PT_GRANT = new Set<ActionId>([
   "mint",
@@ -140,13 +175,13 @@ const NEEDS_PT_GRANT = new Set<ActionId>([
   "buy_yt",
   "sell_pt",
   "add_liquidity",
-  "add_liquidity_sy",
   "remove_liquidity",
+  "remove_liquidity_underlying",
   "buy_pt_underlying",
   "sell_pt_underlying",
   "add_liquidity_keep_yt",
 ])
-const NEEDS_YT_GRANT = new Set<ActionId>(["mint", "buy_yt", "sell_yt", "sell_yt_underlying", "add_liquidity_keep_yt"])
+const NEEDS_YT_GRANT = new Set<ActionId>(["mint", "buy_yt", "sell_yt", "sell_yt_underlying", "add_liquidity_keep_yt", ...FLASH_BUY_YT])
 
 const ITEM_LABEL: Record<ComplianceItem["id"], string> = {
   account: "account",
@@ -170,11 +205,6 @@ export class Gates {
 
   block(code: BlockerCode, message: string, fix?: ComplianceItem["fix"]): void {
     this.out.push(fix ? { code, message, fix } : { code, message })
-  }
-
-  /** Whether a blocker of `code` is already recorded. */
-  has(code: BlockerCode): boolean {
-    return this.out.some((b) => b.code === code)
   }
 
   /** Refuses once per `key` because something needed could not be verified. */
@@ -225,19 +255,6 @@ function isManagerPause(action: ActionId, ctx: GateContext): boolean {
     s.kind === "contract_error" &&
     s.code === MANAGER_PAUSED_CODE &&
     s.contractId === ctx.managerId
-  )
-}
-
-/** The Router refused a sweeping action because the wallet already holds SY (R4-3). */
-function isRouterPreexistingSy(action: ActionId, ctx: GateContext): boolean {
-  const s = ctx.simulation
-  return (
-    SWEEPS_SY.has(action) &&
-    s !== undefined &&
-    !s.ok &&
-    s.kind === "contract_error" &&
-    s.code === ROUTER_PREEXISTING_SY_CODE &&
-    s.contractId === ctx.routerId
   )
 }
 
@@ -396,29 +413,6 @@ function balanceGate(input: ActionInput, acc: AccountState, g: Gates): void {
   }
 }
 
-/**
- * R4-3 / Review Focus 1: the three actions that end with `SYWrapper.withdraw_all` revert
- * `PreexistingSyBalance` (Router error 9) when the wallet holds any SY. Reads the live balance, never
- * a route's recorded holdings (Keep YT's omit its SY dust). An unreadable balance is `unavailable`.
- * SY too small to withdraw (final review 2) is not sent to Withdraw, which would refuse it; the SY
- * rate that tells it is read only when live, since this gate does not need it otherwise.
- */
-function syBalanceGate(input: ActionInput, ctx: GateContext, acc: AccountState, g: Gates): void {
-  if (!SWEEPS_SY.has(input.action)) return
-  const have = g.need(acc.sy, "your SY balance")
-  if (have === undefined || have <= 0n) return
-  const xr = ctx.market.exchangeRate
-  g.block("sy_balance", sweepRefusal(`You hold ${fmt(have)} SY`, syTooSmallToWithdraw(have, xr.status === "live" ? xr.value : undefined)))
-}
-
-/** The `sy_balance` words, shared with the Router's own refusal (`simulationGate`). */
-function sweepRefusal(held: string, tooSmallToWithdraw: boolean): string {
-  const then = tooSmallToWithdraw
-    ? "it is not available while you hold it. An amount this small cannot be withdrawn: the trade keeps its multi-step route."
-    : "withdraw it first with Quick actions → Withdraw, then try again."
-  return `${held}. This one-signature trade withdraws all the SY in your wallet, so ${then}`
-}
-
 function maturityGate(input: ActionInput, ctx: GateContext, g: Gates): void {
   const closesAtMaturity = BEFORE_MATURITY_ONLY.has(input.action)
   const opensAtMaturity = input.action === "redeem"
@@ -430,7 +424,9 @@ function maturityGate(input: ActionInput, ctx: GateContext, g: Gates): void {
       "maturity",
       TRADES.includes(input.action)
         ? "Trading closed at maturity: this market has matured, so PT and YT can no longer be bought or sold in the pool. You can still redeem, claim yield, remove liquidity and withdraw SY."
-        : "This market has matured: minting, trading, adding liquidity and recombining are closed. You can still redeem, claim yield, remove liquidity and withdraw SY.",
+        : input.action === REMOVE_TO_UNDERLYING
+          ? "This market has matured: removing liquidity straight to the underlying is closed, because it sells PT in the pool. Remove liquidity as PT and SY instead, then redeem and withdraw."
+          : "This market has matured: minting, trading, adding liquidity and recombining are closed. You can still redeem, claim yield, remove liquidity and withdraw SY.",
     )
   }
   if (opensAtMaturity && !matured) {
@@ -491,7 +487,9 @@ function pauseGate(input: ActionInput, ctx: GateContext, g: Gates): void {
 
   if (USES_POOL.has(a) || a === "remove_liquidity") {
     if (g.need(m.poolPaused, "the pool's pause state") === true) {
-      if (a !== "remove_liquidity") {
+      if (a === REMOVE_TO_UNDERLYING) {
+        g.block("pause", "The pool is paused: removing liquidity to the underlying is stopped until it is unpaused.")
+      } else if (a !== "remove_liquidity") {
         g.block("pause", "The pool is paused: trading and adding liquidity are stopped until it is unpaused.")
       } else if (isMatured(ctx, g) === false) {
         // The pool pause never holds LPs in after maturity (market_pool:522-526).
@@ -504,7 +502,9 @@ function pauseGate(input: ActionInput, ctx: GateContext, g: Gates): void {
     g.block("pause", "Risk control is paused: depositing, minting and buying YT are stopped until it is unpaused.")
   }
 
-  if (isManagerPause(a, ctx)) {
+  // R5-8: `is_paused()` is read up front; the simulation's own `#9` stays as the fallback. One refusal either way.
+  const managerPaused = MANAGER_PAUSABLE.has(a) ? g.need(m.managerPaused, "PrincipalManager's pause state") : undefined
+  if (managerPaused === true || isManagerPause(a, ctx)) {
     g.block(
       "pause",
       "PrincipalManager is paused: minting, buying and selling YT, recombining, claiming and redeeming are stopped until it is unpaused.",
@@ -547,7 +547,9 @@ function complianceGate(input: ActionInput, ctx: GateContext, g: Gates): void {
  * What one action adds to `RiskControl.check_deposit`'s window (risk_control:233-290), in the
  * underlying: a deposit its amount; wrap_and_mint twice (SYWrapper.deposit, then
  * PrincipalManager.mint), bounded from above by `2·amount` (`floor(floor(a/r)·r) <= a`);
- * swap_sy_for_yt once, from mint, at the SY's underlying value (principal_manager:363-368). 0 for an
+ * swap_sy_for_yt once, from mint, at the SY's underlying value (principal_manager:363-368); the
+ * flash Buy YT its minted `sy_in` the same way, plus the budget for the USDY one (R5-2);
+ * LP only from USDY its deposit (R5-5). 0 for an
  * action that does not report, or no amount; undefined when it cannot be worked out (buy_yt with the
  * SY exchange rate unreadable).
  */
@@ -557,9 +559,17 @@ export function breakerReport(input: ActionInput, ctx: Pick<GateContext, "market
   if (!RISK_CHECKED.has(a) || amount <= 0n) return 0n
   if (a === "deposit") return amount
   if (a === "mint") return 2n * amount
-  if (a === "buy_pt_underlying") return amount
+  if (a === "buy_pt_underlying" || a === "add_liquidity_underlying") return amount
   const rate = ctx.market.exchangeRate
   if (rate.status !== "live") return undefined
+  if (a === "buy_yt_flash" || a === "buy_yt_flash_underlying") {
+    // R5-2: the PrincipalManager mint of `secondaryAmount` (sy_in) SY at the SY's value; the USDY flash
+    // also deposits its budget (`amount`) through SYWrapper first. Without sy_in, the budget bounds it.
+    const deposited = a === "buy_yt_flash_underlying" ? amount : 0n
+    const shares = input.secondaryAmount ?? 0n
+    const minted = shares > 0n ? (shares * rate.value) / SCALE : (amount * rate.value) / SCALE
+    return deposited + (minted > 0n ? minted : shares > 0n ? shares : amount)
+  }
   if (a === "add_liquidity_keep_yt") {
     // The deposit (its amount), then the mint of `secondaryAmount` SY shares at the SY's value.
     const shares = input.secondaryAmount ?? 0n
@@ -595,7 +605,8 @@ export function withEarlierReports<C extends Pick<GateContext, "market">>(ctx: C
  * What one action charges against `SYWrapper.charge_deposit_cap` (sy_wrapper:636-650), in the
  * underlying: a deposit its amount (sy_wrapper:207-225), and wrap_and_mint its amount too, since it
  * runs SYWrapper.deposit first (router:261-273). 0 for any other action, buy_yt included: its mint
- * takes SY through PrincipalManager.mint, with no SYWrapper.deposit (R2-62).
+ * takes SY through PrincipalManager.mint, with no SYWrapper.deposit (R2-62); the SY flash neither. The USDY
+ * flash and LP only from USDY deposit their budget (R5-2, R5-5).
  */
 export function capCharge(input: ActionInput): bigint {
   return DEPOSIT_CAPPED.has(input.action) && input.amount > 0n ? input.amount : 0n
@@ -647,7 +658,7 @@ function breakerGate(input: ActionInput, ctx: GateContext, g: Gates): void {
   const report = (): bigint | undefined => {
     if (reported !== null) return reported
     reported = breakerReport(input, ctx)
-    // Only buy_yt's and Keep YT's reports can be unknown: their SY is valued at the exchange rate. Name that read.
+    // Only the reports of buy_yt, Keep YT and the flash Buy YT can be unknown: their SY is valued at the exchange rate. Name that read.
     if (reported === undefined) g.need(ctx.market.exchangeRate, "the SY exchange rate")
     return reported
   }
@@ -664,7 +675,9 @@ function breakerGate(input: ActionInput, ctx: GateContext, g: Gates): void {
         ? " Minting from the underlying counts twice against it (the deposit and the mint)."
         : a === "add_liquidity_keep_yt"
           ? " Keeping YT counts the deposit and the mint against it."
-          : ""
+          : a === "buy_yt_flash_underlying"
+            ? " Buying YT with the underlying counts the deposit and the mint against it."
+            : ""
     g.block(
       "risk",
       `This would trip the ${scope} circuit breaker: ${fmt(volume)} of its ${fmt(limit)} limit is already used in the current window and this adds ${fmt(adds)}.${twice} Room left: ${fmt(max0(limit - volume))}. Lower the amount or wait for the window to reset.`,
@@ -745,11 +758,6 @@ function simulationGate(input: ActionInput, ctx: GateContext, g: Gates): void {
       return
     case "contract_error":
       if (isManagerPause(input.action, ctx)) return // reported by pauseGate
-      if (isRouterPreexistingSy(input.action, ctx)) {
-        // Reported by syBalanceGate when the live balance shows the SY; else the amount is not known.
-        if (!g.has("sy_balance")) g.block("quote", sweepRefusal("The simulation found SY in your wallet", false))
-        return
-      }
       g.block(
         "quote",
         `The simulation was refused with contract error #${s.code}, so there is no exact quote and this would fail on-chain. Check the amount and any reason listed above, then try again.`,
@@ -792,7 +800,6 @@ export function evaluateGates(input: ActionInput, ctx: GateContext): Blocker[] {
       g.unverified("account", "Your account (balances and deposit cap) has not been read yet, so this cannot be checked. Wait for it to load.")
     } else {
       balanceGate(input, acc, g)
-      syBalanceGate(input, ctx, acc, g)
       capGate(input, acc, g)
       claimGate(input, ctx, acc, g)
     }

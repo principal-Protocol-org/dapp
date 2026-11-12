@@ -23,6 +23,7 @@ describe("decodeEvent: one decoder per topic", () => {
     ["pool", "sell_yt", [ACCOUNT, ACCOUNT, 10n, 9n, 1n], { from: ACCOUNT, to: ACCOUNT, yt_in: 10n, sy_out: 9n, fee_shares: 1n }],
     ["pool", "add_liq", [ACCOUNT, 5n, 6n, 7n], { from: ACCOUNT, pt_used: 5n, sy_used: 6n, lp: 7n }],
     ["pool", "zap_liq", [ACCOUNT, 5n, 6n, 7n], { from: ACCOUNT, pt_used: 5n, sy_used: 6n, lp: 7n }],
+    ["pool", "flash_yt", [ACCOUNT, OTHER, 10n, 12n, 3n], { from: ACCOUNT, to: OTHER, sy_in: 10n, yt_out: 12n, net_cost: 3n }],
     ["pool", "rem_liq", [ACCOUNT, ACCOUNT, 7n, 5n, 6n], { from: ACCOUNT, to: ACCOUNT, lp: 7n, pt_out: 5n, sy_out: 6n }],
     ["pool", "lp_xfer", [ACCOUNT, OTHER, 3n], { from: ACCOUNT, to: OTHER, amount: 3n }],
     ["manager", "mint", [ACCOUNT, 100n, 90n, 10n], { from: ACCOUNT, sy_shares: 100n, notional: 90n, fee_shares: 10n }],
@@ -50,6 +51,11 @@ describe("decodeEvent: one decoder per topic", () => {
     expect(Object.keys(p?.fields ?? {})).toEqual(["to", "amount"])
     expect(decodeEvent("pt", "mint", [ACCOUNT, 100n, 90n, 10n])).toBeNull()
     expect(decodeEvent("manager", "mint", [ACCOUNT, 90n])).toBeNull()
+  })
+
+  it("flash_yt has five fields: a shorter or longer tuple is not decoded (R5-9)", () => {
+    expect(decodeEvent("pool", "flash_yt", [ACCOUNT, OTHER, 10n, 12n])).toBeNull()
+    expect(decodeEvent("pool", "flash_yt", [ACCOUNT, OTHER, 10n, 12n, 3n, 1n])).toBeNull()
   })
 
   it("returns null for an unknown topic or a wrong shape", () => {
@@ -190,6 +196,11 @@ describe("fetchAccountHistory", () => {
     const sellYt = (h = "h") => ev(200, h, C.pool, "sell_yt", A, A, i128(10_000_000n), i128(5_000_000n), i128(0n))
     const addLiq = (h = "h") => ev(200, h, C.pool, "add_liq", A, i128(10_000_000n), i128(20_000_000n), i128(30_000_000n))
     const kindOf = async (events: FakeEvent[]) => (await run(events).promise).entries
+    const zapLiq = (h = "h") => ev(200, h, C.pool, "zap_liq", A, i128(1_000_000n), i128(20_000_000n), i128(30_000_000n))
+    const remLiq = (h = "h") => ev(200, h, C.pool, "rem_liq", A, A, i128(30_000_000n), i128(10_000_000n), i128(20_000_000n))
+    const flash = (h = "h") => ev(200, h, C.pool, "flash_yt", A, A, i128(60_000_000n), i128(63_000_000n), i128(2_000_000n))
+    // The pool mints as itself: the manager's mint names the pool, never the user, so it is filtered out of the user's history.
+    const poolMint = (h = "h") => ev(200, h, C.manager, "mint", addr(C.pool), i128(60_000_000n), i128(63_000_000n), i128(1_000n))
 
     it("deposit + buy_pt is Buy PT, with its facts and both lines", async () => {
       const entries = await kindOf([dep(), buyPt()])
@@ -220,6 +231,59 @@ describe("fetchAccountHistory", () => {
       expect(entries).toHaveLength(1)
       expect(entries[0].kind).toBe("add_liquidity")
       expect(entries[0].lines).toEqual(["Deposited 10 STA", "Minted 9.4 PT + 9.4 YT", "Added 1 PT + 2 SY, received 3 LP"])
+    })
+
+    describe("R5-9: flash Buy YT, LP only from USDY, and LP out to USDY", () => {
+      it("a lone flash_yt is Buy YT (the SY payer)", async () => {
+        const entries = await kindOf([flash()])
+        expect(entries).toHaveLength(1)
+        expect(entries[0].kind).toBe("buy_yt")
+        expect(entries[0].lines).toEqual(["Bought 6.3 YT for 0.2 SY"])
+      })
+
+      it("deposit + flash_yt + withdraw is Buy YT (the USDY payer), with or without the user's own mint", async () => {
+        const usdy = await kindOf([dep(), flash(), wd()])
+        expect(usdy).toHaveLength(1)
+        expect(usdy[0].kind).toBe("buy_yt")
+        expect(usdy[0].lines).toEqual(["Deposited 10 STA", "Bought 6.3 YT for 0.2 SY", "Withdrew 9.5 SY for 10 STA"])
+        expect((await kindOf([dep(), flash(), poolMint(), wd()]))[0].kind).toBe("buy_yt")
+        expect((await kindOf([flash(), mint()]))[0].kind).toBe("buy_yt")
+      })
+
+      it("flash_yt bookkeeping (YT moving pool to user) does not change the kind", async () => {
+        const x = (h = "h") => ev(200, h, C.yt, "transfer", addr(C.pool), A, i128(1n))
+        expect((await kindOf([flash(), x()]))[0].kind).toBe("buy_yt")
+      })
+
+      it("flash_yt beside a foreign event stays unclassified", async () => {
+        expect((await kindOf([flash(), buyPt()]))[0].kind).toBe("other")
+        expect((await kindOf([flash(), sellYt()]))[0].kind).toBe("other")
+      })
+
+      it("deposit + zap_liq is Add liquidity", async () => {
+        const entries = await kindOf([dep(), zapLiq()])
+        expect(entries).toHaveLength(1)
+        expect(entries[0].kind).toBe("add_liquidity")
+        expect(entries[0].lines).toEqual(["Deposited 10 STA", "Added 0.1 PT + 2 SY, received 3 LP"])
+      })
+
+      it("rem_liq + sell_pt + withdraw is Remove liquidity, not a PT sale", async () => {
+        const entries = await kindOf([remLiq(), sellPt(), wd()])
+        expect(entries).toHaveLength(1)
+        expect(entries[0].kind).toBe("remove_liquidity")
+        expect(entries[0].lines).toEqual(["Removed 3 LP, received 1 PT + 2 SY", "Sold 1 PT for 0.9 SY", "Withdrew 9.5 SY for 10 STA"])
+      })
+
+      it("a plain remove, and a rem_liq with an unrelated event, behave as before", async () => {
+        expect((await kindOf([remLiq()]))[0].kind).toBe("remove_liquidity")
+        expect((await kindOf([remLiq(), buyPt()]))[0].kind).toBe("other")
+      })
+
+      it("R4-10's rules stay: deposit + mint + sell_pt + withdraw is still Buy YT (swap_underlying_for_yt transactions are on testnet)", async () => {
+        expect((await kindOf([dep(), mint(), sellPt(), wd()]))[0].kind).toBe("buy_yt")
+        expect((await kindOf([dep(), mint(), addLiq()]))[0].kind).toBe("add_liquidity")
+        expect((await kindOf([sellPt(), wd()]))[0].kind).toBe("sell_pt")
+      })
     })
 
     it("the token bookkeeping events of the Router functions do not change the kind", async () => {

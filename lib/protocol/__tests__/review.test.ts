@@ -266,7 +266,7 @@ describe("prepareReview", () => {
   it("lists each one-transaction Router function, then its downstream calls in contract order", async () => {
     const trees: [ActionId, string[]][] = [
       ["buy_pt_underlying", ["Router.swap_underlying_for_pt", "SYWrapper.deposit", "MarketPool.swap_sy_for_pt"]],
-      // The three gain-based sales end with withdraw_gained (R5-4).
+      // The gain-based sales end with withdraw_gained (R5-4), and so does the exit to USDY below.
       ["sell_pt_underlying", ["Router.swap_pt_for_underlying", "MarketPool.swap_pt_for_sy", "SYWrapper.withdraw_gained"]],
       ["sell_yt_underlying", ["Router.swap_yt_for_underlying", "MarketPool.swap_yt_for_sy", "SYWrapper.withdraw_gained"]],
       ["add_liquidity_keep_yt", ["Router.add_liquidity_keep_yt", "SYWrapper.deposit", "PrincipalManager.mint", "MarketPool.add_liquidity"]],

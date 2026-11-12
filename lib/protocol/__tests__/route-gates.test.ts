@@ -50,6 +50,7 @@ function market(): MarketState {
     syPaused: live(false),
     poolPaused: live(false),
     riskPaused: live(false),
+    managerPaused: live(false),
     cb: { limit: live(BIG), volume: live(0n), assetLimit: live(0n), assetVolume: live(0n) },
     topology: live({ matches: true, mismatches: [] }),
   }
@@ -91,7 +92,6 @@ function base(patch: (b: Omit<GateContext, "simulation">) => void = () => {}): O
     compliance,
     ledgerTime: BEFORE,
     managerId: "CMANAGER",
-    routerId: "CROUTER",
   }
   patch(b)
   return b

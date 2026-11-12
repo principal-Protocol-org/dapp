@@ -67,6 +67,9 @@ const SHAPES: Record<Role, Record<string, readonly string[]>> = {
     buy_pt: ["from", "to", "sy_in", "pt_out", "fee_shares"], // :303
     sell_pt: ["from", "to", "pt_in", "sy_out", "fee_shares"], // :332
     sell_yt: ["from", "to", "yt_in", "sy_out", "fee_shares"], // :377
+    // R5-9: the flash Buy YT. The pool mints as itself (the manager's `mint` names the pool, so it is
+    // not in the user's history) and sends the YT to `to`.
+    flash_yt: ["from", "to", "sy_in", "yt_out", "net_cost"],
     add_liq: ["from", "pt_used", "sy_used", "lp"], // :449
     zap_liq: ["from", "pt_used", "sy_used", "lp"], // :505
     rem_liq: ["from", "to", "lp", "pt_out", "sy_out"], // :1106
@@ -241,10 +244,14 @@ const TRANSFERS = new Set(["pt.transfer", "yt.transfer", "sy.sy_xfer", "pool.lp_
 
 /** First match wins. `needs` must all be present; every other non-secondary event must be in `allowed`. */
 const RULES: { kind: HistoryKind; needs: string[]; allowed: string[] }[] = [
+  // R5-9: the flash Buy YT, alone (an SY payer) or with the deposit and the withdraw (a USDY payer).
+  { kind: "buy_yt", needs: ["pool.flash_yt"], allowed: ["pool.flash_yt", "sy.deposit", "manager.mint", "sy.withdraw"] },
   // R4-10: the one-transaction Router functions. They sit before the plain rules, which would
   // otherwise refuse the extra SY events (first match wins) and fall to "other".
   { kind: "buy_yt", needs: ["sy.deposit", "manager.mint", "pool.sell_pt", "sy.withdraw"], allowed: ["sy.deposit", "manager.mint", "pool.sell_pt", "sy.withdraw"] },
   { kind: "buy_pt", needs: ["sy.deposit", "pool.buy_pt"], allowed: ["sy.deposit", "pool.buy_pt"] },
+  // R5-9: LP out to USDY. Before the sell rules, which would refuse the rem_liq (first match wins).
+  { kind: "remove_liquidity", needs: ["pool.rem_liq", "pool.sell_pt", "sy.withdraw"], allowed: ["pool.rem_liq", "pool.sell_pt", "sy.withdraw"] },
   { kind: "sell_pt", needs: ["pool.sell_pt", "sy.withdraw"], allowed: ["pool.sell_pt", "sy.withdraw"] },
   { kind: "sell_yt", needs: ["pool.sell_yt", "sy.withdraw"], allowed: ["pool.sell_yt", "sy.withdraw"] },
   { kind: "redeem", needs: ["manager.redeem"], allowed: ["manager.redeem", "yt.claim", "sy.withdraw"] },
@@ -267,6 +274,10 @@ function classify(items: Item[]): HistoryKind {
   const primary = [...keys].filter((k) => !SECONDARY.has(k))
   // add_liq and zap_liq are one kind with two topics.
   if (primary.length > 0 && primary.every((k) => k === "pool.add_liq" || k === "pool.zap_liq")) return "add_liquidity"
+  // R5-9: LP only from USDY is a deposit and a single-sided add.
+  if (keys.has("pool.zap_liq") && keys.has("sy.deposit") && primary.every((k) => k === "pool.zap_liq" || k === "sy.deposit")) {
+    return "add_liquidity"
+  }
   // R4-10: Keep YT is a deposit, a mint of part of it and a two-sided add in one transaction.
   if (
     keys.has("pool.add_liq") &&
@@ -293,8 +304,8 @@ function lineFor(i: Item, kind: HistoryKind, c: Ctx): string | null {
     case "sy.deposit":
       return `Deposited ${amt("amount")} ${c.code}`
     case "sy.withdraw":
-      // Also inside the one-transaction sells and Buy YT (R4-10), where it is the last leg.
-      return kind === "withdraw" || kind === "sell_pt" || kind === "sell_yt" || kind === "buy_yt" ? `Withdrew ${amt("shares")} SY for ${amt("underlying_out")} ${c.code}` : null
+      // Also inside the one-transaction sells, Buy YT (R4-10) and Remove liquidity (R5-9), where it is the last leg.
+      return kind === "withdraw" || kind === "sell_pt" || kind === "sell_yt" || kind === "buy_yt" || kind === "remove_liquidity" ? `Withdrew ${amt("shares")} SY for ${amt("underlying_out")} ${c.code}` : null
     case "manager.mint":
       return `Minted ${amt("notional")} PT + ${amt("notional")} YT`
     case "manager.recombine":
@@ -309,6 +320,8 @@ function lineFor(i: Item, kind: HistoryKind, c: Ctx): string | null {
       return `Bought ${amt("pt_out")} PT for ${amt("sy_in")} SY`
     case "pool.sell_pt":
       return `Sold ${amt("pt_in")} PT for ${amt("sy_out")} SY`
+    case "pool.flash_yt":
+      return `Bought ${amt("yt_out")} YT for ${amt("net_cost")} SY`
     case "pool.sell_yt":
       return `Sold ${amt("yt_in")} YT for ${amt("sy_out")} SY`
     case "pool.add_liq":

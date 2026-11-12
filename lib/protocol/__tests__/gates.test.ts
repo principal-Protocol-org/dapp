@@ -16,7 +16,6 @@ import {
 } from "../gates"
 import type { MarketState } from "../market-state"
 import { SCALE } from "../math"
-import { SINGLE_STEP } from "../routes"
 import type { SimulationOutcome } from "../stellar"
 import type { Live, WalletState } from "../types"
 import { indexFor } from "../yield"
@@ -38,19 +37,26 @@ const UNIT = 10_000_000n // one token at 7 decimals
 const BIG = 1_000_000n * UNIT
 
 const ALL = Object.keys(ACTION_META) as ActionId[]
-/** R4-3: each one-transaction Router action is in every gate set any of its components is in. */
-const TRADES: ActionId[] = ["buy_pt", "sell_pt", "buy_yt", "sell_yt", "buy_pt_underlying", "sell_pt_underlying", "sell_yt_underlying"]
-const ADDS: ActionId[] = ["add_liquidity", "add_liquidity_sy", "add_liquidity_keep_yt"]
-/** The two that end with SYWrapper.withdraw_all and revert on any SY in the wallet (Router error 9). */
-const SWEEPS: ActionId[] = ["sell_pt_underlying", "sell_yt_underlying"]
+/** R4-3, R5-2: each one-transaction Router action is in every gate set any of its components is in. */
+const FLASH: ActionId[] = ["buy_yt_flash", "buy_yt_flash_underlying"]
+const TRADES: ActionId[] = ["buy_pt", "sell_pt", "buy_yt", "sell_yt", "buy_pt_underlying", "sell_pt_underlying", "sell_yt_underlying", ...FLASH]
+const ADDS: ActionId[] = ["add_liquidity", "add_liquidity_sy", "add_liquidity_keep_yt", "add_liquidity_underlying"]
+/** R5-6: before maturity only, through the pool, with a fresh oracle (it sells PT inside). */
+const REMOVES_U: ActionId[] = ["remove_liquidity_underlying"]
 /** Deposit (+ mint) first: charged against the deposit cap and RiskControl. */
-const DEPOSITS: ActionId[] = ["buy_pt_underlying", "add_liquidity_keep_yt"]
+const DEPOSITS: ActionId[] = ["buy_pt_underlying", "add_liquidity_keep_yt", "buy_yt_flash_underlying", "add_liquidity_underlying"]
+/** Reported to RiskControl through the manager's mint alone (no SYWrapper.deposit): not deposit-capped. */
+const MINTS_ONLY: ActionId[] = ["buy_yt_flash"]
 /** R22b: actions that move PT / YT to or from the account need its per-asset grant. */
 const NEEDS_PT: ActionId[] = [
-  "mint", "buy_pt", "buy_yt", "sell_pt", "add_liquidity", "add_liquidity_sy", "remove_liquidity",
-  "buy_pt_underlying", "sell_pt_underlying", "add_liquidity_keep_yt",
+  "mint", "buy_pt", "buy_yt", "sell_pt", "add_liquidity", "remove_liquidity",
+  "buy_pt_underlying", "sell_pt_underlying", "add_liquidity_keep_yt", "remove_liquidity_underlying",
 ]
-const NEEDS_YT: ActionId[] = ["mint", "buy_yt", "sell_yt", "sell_yt_underlying", "add_liquidity_keep_yt"]
+const NEEDS_YT: ActionId[] = ["mint", "buy_yt", "sell_yt", "sell_yt_underlying", "add_liquidity_keep_yt", ...FLASH]
+/** Entry points that `assert_not_paused` on PrincipalManager: its own, plus every action that mints or burns through it. */
+const MANAGER_PAUSABLE: ActionId[] = [
+  "mint", "buy_yt", "sell_yt", "sell_yt_underlying", "add_liquidity_keep_yt", "recombine", "claim_yield", "redeem", ...FLASH,
+]
 const except = (...out: ActionId[]) => ALL.filter((a) => !out.includes(a))
 
 const live = <T,>(value: T): Live<T> => ({ status: "live", value, ledger: 500 })
@@ -92,6 +98,7 @@ function healthyMarket(): MarketState {
     syPaused: live(false),
     poolPaused: live(false),
     riskPaused: live(false),
+    managerPaused: live(false),
     // A limit of 0 disables a breaker on-chain: the per-asset one is off in the healthy state.
     cb: { limit: live(BIG), volume: live(0n), assetLimit: live(0n), assetVolume: live(0n) },
     topology: live({ matches: true, mismatches: [] }),
@@ -138,8 +145,6 @@ const okSimulation: SimulationOutcome = { ok: true, retval: 1n, latestLedger: 50
 function healthyCtx(action: ActionId): GateContext {
   const market = healthyMarket()
   const account = healthyAccount()
-  // A sweeping trade needs a zero SY balance (R4-3); every other action spends or ignores SY.
-  if (SWEEPS.includes(action)) account.sy = live(0n)
   if (action === "redeem") {
     market.settledRate = live(RATE)
     market.ytFrozen = live(true)
@@ -153,12 +158,18 @@ function healthyCtx(action: ActionId): GateContext {
     ledgerTime: action === "redeem" ? AFTER : BEFORE,
     simulation: okSimulation,
     managerId: MANAGER,
-    routerId: ROUTER,
   }
 }
 
 function inputFor(action: ActionId, overrides: Partial<ActionInput> = {}): ActionInput {
-  const twoSided = action === "add_liquidity" || action === "redeem" || action === "add_liquidity_keep_yt"
+  // secondaryAmount is the second amount of a two-sided action, or the `sy_in` of a flash or a USDY add.
+  const twoSided =
+    action === "add_liquidity" ||
+    action === "redeem" ||
+    action === "add_liquidity_keep_yt" ||
+    action === "buy_yt_flash" ||
+    action === "buy_yt_flash_underlying" ||
+    action === "add_liquidity_underlying"
   return {
     action,
     marketId: "testnet-sta",
@@ -306,7 +317,7 @@ const MATRIX: Row[] = [
     },
     code: "maturity",
     message: /matured/i,
-    blocks: ["mint", ...TRADES, ...ADDS, "recombine"],
+    blocks: ["mint", ...TRADES, ...ADDS, ...REMOVES_U, "recombine"],
     allows: ["deposit", "withdraw", "remove_liquidity", "claim_yield", "redeem"],
   },
   {
@@ -326,6 +337,16 @@ const MATRIX: Row[] = [
     code: "maturity",
     message: /^This market has matured: minting, trading, adding liquidity and recombining are closed/,
     blocks: ["mint", ...ADDS, "recombine"],
+  },
+  {
+    // R5-6: after maturity the contract's PT sale refuses, so the route stays remove + redeem + withdraw.
+    rule: "after maturity, removing liquidity straight to USDY is refused and points at the plain remove",
+    mutate: (c) => {
+      c.ledgerTime = AFTER
+    },
+    code: "maturity",
+    message: /^This market has matured: removing liquidity straight to the underlying is closed.*remove liquidity/i,
+    blocks: REMOVES_U,
   },
   {
     rule: "at the maturity second itself the market counts as matured (timestamp >= maturity)",
@@ -355,7 +376,10 @@ const MATRIX: Row[] = [
     },
     code: "oracle",
     message: /stale/i,
-    blocks: ["buy_pt", "sell_pt", "buy_yt", "sell_yt", "mint", "add_liquidity_sy", "recombine", "claim_yield"],
+    blocks: [
+      "buy_pt", "sell_pt", "buy_yt", "sell_yt", "mint", "add_liquidity_sy", "recombine", "claim_yield",
+      ...FLASH, "add_liquidity_underlying", ...REMOVES_U,
+    ],
     allows: ["deposit", "withdraw", "add_liquidity", "remove_liquidity", "redeem"],
   },
   {
@@ -411,14 +435,14 @@ const MATRIX: Row[] = [
 
   // §5 "Pool seeded".
   {
-    rule: "an unseeded pool blocks every trade and both adds",
+    rule: "an unseeded pool blocks every trade, every add and the USDY remove",
     mutate: (c) => {
       c.market.poolSeeded = live(false)
     },
     code: "pool",
     message: /pool not seeded yet/i,
-    blocks: [...TRADES, ...ADDS],
-    allows: except(...TRADES, ...ADDS),
+    blocks: [...TRADES, ...ADDS, ...REMOVES_U],
+    allows: except(...TRADES, ...ADDS, ...REMOVES_U),
   },
 
   // §5 "Paused".
@@ -429,7 +453,7 @@ const MATRIX: Row[] = [
     },
     code: "pause",
     message: /pool is paused/i,
-    blocks: [...TRADES, ...ADDS, "remove_liquidity"],
+    blocks: [...TRADES, ...ADDS, ...REMOVES_U, "remove_liquidity"],
     allows: ["deposit", "withdraw", "mint", "recombine", "claim_yield", "redeem"],
   },
   {
@@ -464,23 +488,44 @@ const MATRIX: Row[] = [
     blocks: ["remove_liquidity", "withdraw", "claim_yield"],
   },
   {
-    rule: "riskPaused blocks deposit, mint, buy_yt and the three Router actions that deposit",
+    rule: "riskPaused blocks deposit, mint, buy_yt, both flash Buy YTs and the Router actions that deposit",
     mutate: (c) => {
       c.market.riskPaused = live(true)
     },
     code: "pause",
     message: /risk control/i,
-    blocks: ["deposit", "mint", "buy_yt", ...DEPOSITS],
-    allows: except("deposit", "mint", "buy_yt", ...DEPOSITS),
+    blocks: ["deposit", "mint", "buy_yt", ...MINTS_ONLY, ...DEPOSITS],
+    allows: except("deposit", "mint", "buy_yt", ...MINTS_ONLY, ...DEPOSITS),
   },
   {
-    rule: "a manager contract_error #9 means PrincipalManager is paused for mint, buy_yt, sell_yt, recombine, claim_yield and redeem",
+    rule: "a manager contract_error #9 means PrincipalManager is paused for mint, buy_yt, sell_yt, the flash Buy YTs, recombine, claim_yield and redeem",
     mutate: (c) => {
       c.simulation = managerPaused
     },
     code: "pause",
     message: /PrincipalManager is paused/,
-    blocks: ["mint", "buy_yt", "sell_yt", "sell_yt_underlying", "add_liquidity_keep_yt", "recombine", "claim_yield", "redeem"],
+    blocks: MANAGER_PAUSABLE,
+  },
+  {
+    // R5-8: PrincipalManager.is_paused() is read up front, so the pause shows before any simulation.
+    rule: "managerPaused blocks exactly the manager-pausable actions, with the existing words",
+    mutate: (c) => {
+      c.market.managerPaused = live(true)
+    },
+    code: "pause",
+    message: /PrincipalManager is paused/,
+    blocks: MANAGER_PAUSABLE,
+    allows: except(...MANAGER_PAUSABLE),
+  },
+  {
+    rule: "managerPaused and the manager's own #9 together are one refusal, not two",
+    mutate: (c) => {
+      c.market.managerPaused = live(true)
+      c.simulation = managerPaused
+    },
+    code: "pause",
+    message: /PrincipalManager is paused/,
+    blocks: MANAGER_PAUSABLE,
   },
   {
     rule: "a manager contract_error #9 on an action the manager pause does not cover is a failed quote",
@@ -489,7 +534,7 @@ const MATRIX: Row[] = [
     },
     code: "quote",
     message: /#9/,
-    blocks: ["deposit", "withdraw", "buy_pt", "sell_pt", "add_liquidity", "add_liquidity_sy", "remove_liquidity", "buy_pt_underlying", "sell_pt_underlying"],
+    blocks: except(...MANAGER_PAUSABLE),
   },
   {
     // Code 9 is NotAuthorizedOnSac on SYWrapper and InsufficientLiquidity on MarketPool: only the
@@ -503,23 +548,14 @@ const MATRIX: Row[] = [
     blocks: ALL,
   },
   {
-    rule: "the Router's #9 on an action that does not sweep SY is a failed quote",
+    // R5-4: the contracts sweep by gain, so Router error 9 no longer exists and reads like any other code.
+    rule: "the Router's #9 is a failed quote with the generic simulation words, for every action",
     mutate: (c) => {
       c.simulation = { ...managerPaused, contractId: ROUTER }
     },
     code: "quote",
-    message: /#9/,
-    blocks: except(...SWEEPS),
-  },
-  {
-    // Final review 3: Router error 9 is PreexistingSyBalance, which only the three sweeping actions raise.
-    rule: "the Router's #9 on a sweeping action reads as SY in the wallet, in the sy_balance words",
-    mutate: (c) => {
-      c.simulation = { ...managerPaused, contractId: ROUTER }
-    },
-    code: "quote",
-    message: /^The simulation found SY in your wallet\. This one-signature trade withdraws all the SY in your wallet, so withdraw it first with Quick actions → Withdraw, then try again\.$/,
-    blocks: SWEEPS,
+    message: /^The simulation was refused with contract error #9, so there is no exact quote/,
+    blocks: ALL,
   },
 
   // §5 "Something to claim".
@@ -644,6 +680,7 @@ const MATRIX: Row[] = [
     code: "risk",
     message: /circuit breaker/i,
     blocks: ["deposit", "mint", "buy_yt", ...DEPOSITS],
+    // The SY flash reports only its minted sy_in (5): 95 + 5 fits.
     allows: except("deposit", "mint", "buy_yt", ...DEPOSITS),
   },
   {
@@ -654,8 +691,9 @@ const MATRIX: Row[] = [
     },
     code: "risk",
     // Keep YT reports its deposit plus the mint (10 + 5), which exceeds 10.
-    blocks: ["mint", "add_liquidity_keep_yt"],
-    allows: ["deposit", "buy_yt", "buy_pt_underlying"],
+    // The USDY flash reports its deposit plus the minted sy_in (10 + 5).
+    blocks: ["mint", "add_liquidity_keep_yt", "buy_yt_flash_underlying"],
+    allows: ["deposit", "buy_yt", "buy_pt_underlying", "buy_yt_flash", "add_liquidity_underlying"],
   },
   {
     rule: "a cb limit of 0 disables the breaker",
@@ -676,6 +714,7 @@ const MATRIX: Row[] = [
     code: "risk",
     message: /per-asset/i,
     blocks: ["deposit", "mint", "buy_yt", ...DEPOSITS],
+    // The SY flash reports only its minted sy_in (5): 95 + 5 fits.
     allows: except("deposit", "mint", "buy_yt", ...DEPOSITS),
   },
   {
@@ -686,7 +725,7 @@ const MATRIX: Row[] = [
     },
     code: "risk",
     blocks: ["mint"],
-    allows: ["deposit", "buy_yt", "buy_pt_underlying", "add_liquidity_keep_yt"],
+    allows: ["deposit", "buy_yt", "buy_pt_underlying", "add_liquidity_keep_yt", ...FLASH, "add_liquidity_underlying"],
   },
   {
     // PrincipalManager.mint reports sy_shares·exchange_rate/SCALE (principal_manager:363-368).
@@ -698,8 +737,9 @@ const MATRIX: Row[] = [
     },
     code: "risk",
     // Keep YT: its 10 deposit plus a 5 SY mint worth 10 at this rate.
-    blocks: ["buy_yt", "mint", "add_liquidity_keep_yt"],
-    allows: ["deposit", "buy_pt_underlying"],
+    // The flashes mint `secondaryAmount` (5) SY, worth 10: the USDY one reports 10 + 10.
+    blocks: ["buy_yt", "mint", "add_liquidity_keep_yt", "buy_yt_flash_underlying"],
+    allows: ["deposit", "buy_pt_underlying", "buy_yt_flash", "add_liquidity_underlying"],
   },
 
   // §5 "Deposit cap" → deposit, mint from underlying.
@@ -1093,27 +1133,29 @@ describe("unavailable read blocks", () => {
   type Dep = { field: string; set: Mutate; label: RegExp; needs: ActionId[] }
   const m = (set: (market: MarketState) => void): Mutate => (c) => set(c.market)
   const a = (set: (account: AccountState) => void): Mutate => (c) => set(c.account!)
-  const BREAKER: ActionId[] = ["deposit", "mint", "buy_yt", ...DEPOSITS]
+  const BREAKER: ActionId[] = ["deposit", "mint", "buy_yt", ...MINTS_ONLY, ...DEPOSITS]
 
   const DEPS: Dep[] = [
     { field: "topology", set: m((x) => (x.topology = down())), label: /contracts/, needs: ALL },
-    { field: "maturity", set: m((x) => (x.maturity = down())), label: /maturity/, needs: ["mint", ...TRADES, ...ADDS, "recombine", "redeem"] },
+    { field: "maturity", set: m((x) => (x.maturity = down())), label: /maturity/, needs: ["mint", ...TRADES, ...ADDS, ...REMOVES_U, "recombine", "redeem"] },
     {
       field: "oracleFresh",
       set: m((x) => (x.oracleFresh = down())),
       label: /oracle.*fresh/i,
-      needs: ["mint", ...TRADES, "add_liquidity_sy", "add_liquidity_keep_yt", "recombine", "claim_yield"],
+      needs: ["mint", ...TRADES, "add_liquidity_sy", "add_liquidity_keep_yt", "add_liquidity_underlying", ...REMOVES_U, "recombine", "claim_yield"],
     },
     { field: "settledRate", set: m((x) => (x.settledRate = down())), label: /settle/i, needs: ["claim_yield", "redeem"] },
     { field: "ytFrozen", set: m((x) => (x.ytFrozen = down())), label: /frozen/i, needs: ["claim_yield"] },
     { field: "ytAccruedIndex", set: m((x) => (x.ytAccruedIndex = down())), label: /yield index/i, needs: ["claim_yield"] },
     { field: "oracleRate", set: m((x) => (x.oracleRate = down())), label: /oracle rate/i, needs: ["claim_yield"] },
     { field: "fees.ytBps", set: m((x) => (x.fees.ytBps = down())), label: /YT fee/, needs: ["claim_yield"] },
-    { field: "exchangeRate", set: m((x) => (x.exchangeRate = down())), label: /exchange rate/i, needs: ["claim_yield", "buy_yt", "add_liquidity_keep_yt"] },
-    { field: "poolSeeded", set: m((x) => (x.poolSeeded = down())), label: /reserves/i, needs: [...TRADES, ...ADDS] },
+    { field: "exchangeRate", set: m((x) => (x.exchangeRate = down())), label: /exchange rate/i, needs: ["claim_yield", "buy_yt", "add_liquidity_keep_yt", ...FLASH] },
+    { field: "poolSeeded", set: m((x) => (x.poolSeeded = down())), label: /reserves/i, needs: [...TRADES, ...ADDS, ...REMOVES_U] },
     { field: "syPaused", set: m((x) => (x.syPaused = down())), label: /SY.*pause/i, needs: ALL },
-    { field: "poolPaused", set: m((x) => (x.poolPaused = down())), label: /pool.*pause/i, needs: [...TRADES, ...ADDS, "remove_liquidity"] },
+    { field: "poolPaused", set: m((x) => (x.poolPaused = down())), label: /pool.*pause/i, needs: [...TRADES, ...ADDS, ...REMOVES_U, "remove_liquidity"] },
     { field: "riskPaused", set: m((x) => (x.riskPaused = down())), label: /risk.*pause/i, needs: BREAKER },
+    // R5-8: unreadable means unavailable, for every action PrincipalManager can pause.
+    { field: "managerPaused", set: m((x) => (x.managerPaused = down())), label: /PrincipalManager.*pause/i, needs: MANAGER_PAUSABLE },
     { field: "cb.limit", set: m((x) => (x.cb.limit = down())), label: /protocol-wide.*limit/i, needs: BREAKER },
     { field: "cb.volume", set: m((x) => (x.cb.volume = down())), label: /protocol-wide.*volume/i, needs: BREAKER },
     { field: "cb.assetLimit", set: m((x) => (x.cb.assetLimit = down())), label: /per-asset.*limit/i, needs: BREAKER },
@@ -1137,7 +1179,7 @@ describe("unavailable read blocks", () => {
       field: "account.sy",
       set: a((x) => (x.sy = down())),
       label: /SY balance/,
-      needs: ["withdraw", "buy_pt", "buy_yt", "add_liquidity", "add_liquidity_sy", "buy_yt_flash", ...SWEEPS],
+      needs: ["withdraw", "buy_pt", "buy_yt", "add_liquidity", "add_liquidity_sy", "buy_yt_flash"],
     },
     {
       field: "account.pt",
@@ -1381,7 +1423,6 @@ describe("several failing gates", () => {
       "network",
       "amount",
       "balance",
-      "sy_balance",
       "maturity",
       "oracle",
       "pause",
@@ -1410,76 +1451,23 @@ describe("several failing gates", () => {
 
 // ---------------------------------------------------------------- 0004 Task 4: one-transaction Router actions
 
-describe("sy_balance — the sweeping Router actions refuse any SY in the wallet (R4-3, Review Focus 1)", () => {
+describe("sweeps are by gain (R5-4): no wallet SY blocks a one-step sale", () => {
+  const ONE_STEP_SALES: ActionId[] = ["sell_pt_underlying", "sell_yt_underlying", "remove_liquidity_underlying"]
   const withSy = (value: bigint): Mutate => (c) => {
     c.account!.sy = live(value)
   }
 
-  it.each(SWEEPS)("%s with SY held is blocked, naming the SY and Quick actions → Withdraw", (action) => {
-    const blockers = gates(action, withSy(3n * UNIT))
-    expect(blockers).toEqual([{ code: "sy_balance", message: expect.stringMatching(/hold 3 SY.*Quick actions → Withdraw/) }])
+  it.each(ONE_STEP_SALES)("%s passes with SY in the wallet, dust included", (action) => {
+    expect(gates(action, withSy(3n * UNIT))).toEqual([])
+    expect(gates(action, withSy(1n))).toEqual([])
   })
 
-  it.each(SWEEPS)("%s blocks on one stroop of SY dust", (action) => {
-    expect(codes(gates(action, withSy(1n)))).toEqual(["sy_balance"])
+  it("no blocker code is named after the retired SY sweep", () => {
+    expect(BLOCKER_ORDER as readonly string[]).not.toContain("sy_balance")
   })
 
-  const DUST = (sy: string) =>
-    `You hold ${sy} SY. This one-signature trade withdraws all the SY in your wallet, so it is not available while you hold it. An amount this small cannot be withdrawn: the trade keeps its multi-step route.`
-  const syReason = (blockers: Blocker[]) => blockers.find((b) => b.code === "sy_balance")?.message
-
-  it.each(SWEEPS)("%s with SY too small to withdraw (under 2 raw USDY at the SY rate) says so instead of pointing at Withdraw", (action) => {
-    expect(gates(action, withSy(1n))).toEqual([{ code: "sy_balance", message: DUST("0.0000001") }])
-    // 2 raw SY at 0.9999999 USDY each withdraw to 1 raw USDY; at 1.0, to 2, which can be withdrawn.
-    const at = (sy: bigint, rate: bigint): Mutate => (c) => {
-      c.account!.sy = live(sy)
-      c.market.exchangeRate = live(rate)
-    }
-    expect(syReason(gates(action, at(2n, 9_999_999n)))).toBe(DUST("0.0000002"))
-    expect(syReason(gates(action, at(2n, SCALE)))).toMatch(/^You hold 0\.0000002 SY\. .*withdraw it first with Quick actions → Withdraw, then try again\.$/)
-  })
-
-  it.each(SWEEPS)("%s with the SY rate unreadable keeps the withdraw text, and the rate is not a read it needs", (action) => {
-    const blockers = gates(action, (c) => {
-      c.account!.sy = live(1n)
-      c.market.exchangeRate = down()
-    })
-    expect(blockers).toEqual([{ code: "sy_balance", message: expect.stringMatching(/^You hold 0\.0000001 SY\. .*Quick actions → Withdraw/) }])
-  })
-
-  it.each(SWEEPS)("%s with a zero SY balance passes", (action) => {
-    expect(gates(action, withSy(0n))).toEqual([])
-  })
-
-  it.each(SWEEPS)("%s with an unreadable SY balance is unavailable, never a pass", (action) => {
-    const blockers = gates(action, (c) => {
-      c.account!.sy = down()
-    })
-    expect(blockers).toEqual([{ code: "unavailable", message: expect.stringMatching(/SY balance/) }])
-  })
-
-  it.each(except(...SWEEPS))("%s ignores the SY held", (action) => {
-    expect(codes(gates(action, withSy(3n * UNIT)))).not.toContain("sy_balance")
-  })
-
-  it.each(SWEEPS)("%s: the Router's own refusal (#9) of SY the gate already names is not repeated", (action) => {
-    const blockers = gates(action, (c) => {
-      c.account!.sy = live(3n * UNIT)
-      c.simulation = { ok: false, kind: "contract_error", contractId: ROUTER, code: 9, message: "HostError: Error(Contract, #9)" }
-    })
-    expect(blockers).toEqual([{ code: "sy_balance", message: expect.stringMatching(/^You hold 3 SY\. .*Quick actions → Withdraw/) }])
-  })
-
-  it("refuses SY for exactly the actions the planner marks sweepsSy, the two that end with withdraw_all (final review 4)", () => {
-    const planner = Object.values(SINGLE_STEP).flatMap((x) => (x?.sweepsSy ? [x.action] : []))
-    expect([...planner].sort()).toEqual([...SWEEPS].sort())
-    const refused = ALL.filter((action) => codes(gates(action, withSy(3n * UNIT))).includes("sy_balance"))
-    expect(refused.sort()).toEqual([...planner].sort())
-  })
-
-  it("buy_pt_underlying and Keep YT hold SY in between but are not refused for it", () => {
-    expect(gates("buy_pt_underlying", withSy(3n * UNIT))).toEqual([])
-    expect(gates("add_liquidity_keep_yt", withSy(3n * UNIT))).toEqual([])
+  it.each(ONE_STEP_SALES)("%s with an unreadable SY balance is not blocked: it reads none", (action) => {
+    expect(gates(action, (c) => (c.account!.sy = down()))).toEqual([])
   })
 })
 
@@ -1497,6 +1485,21 @@ describe("one-transaction Router actions: amounts and balances (0004 Task 4)", (
 
   it("Keep YT spends the underlying only: its SY shares are the deposit's own, not a wallet balance", () => {
     expect(gates("add_liquidity_keep_yt", short((a) => (a.sy = live(0n))))).toEqual([])
+  })
+
+  it.each([
+    ["buy_yt_flash", short((a) => (a.sy = live(UNIT))), /SY/],
+    ["buy_yt_flash_underlying", short((a) => (a.underlying = live(UNIT))), /underlying/],
+    ["add_liquidity_underlying", short((a) => (a.underlying = live(UNIT))), /underlying/],
+    ["remove_liquidity_underlying", short((a) => (a.lp = live(UNIT))), /LP/],
+  ] as [ActionId, Mutate, RegExp][])("%s short of its budget (%s)", (action, mutate, token) => {
+    expect(gates(action, mutate)).toEqual([{ code: "balance", message: expect.stringMatching(token) }])
+  })
+
+  it("the flash budgets are spent from one balance: an SY budget needs SY, a USDY budget needs USDY only", () => {
+    expect(gates("buy_yt_flash", short((a) => (a.underlying = live(0n))))).toEqual([])
+    expect(gates("buy_yt_flash_underlying", short((a) => ((a.sy = live(0n)), (a.yt = live(0n)))))).toEqual([])
+    expect(gates("add_liquidity_underlying", short((a) => (a.sy = live(0n))))).toEqual([])
   })
 
   it("Keep YT needs both amounts above zero", () => {
@@ -1533,6 +1536,34 @@ describe("breakerReport and capCharge for the one-transaction Router actions (R2
 
   it("Keep YT's report is unknown while the SY exchange rate cannot be read", () => {
     expect(breakerReport(at("add_liquidity_keep_yt"), { market: { ...market, exchangeRate: down() } })).toBeUndefined()
+  })
+
+  it("the flash Buy YT reports the sy_in it mints, at the SY rate (R5-2)", () => {
+    const twice = { ...market, exchangeRate: live(2n * SCALE) }
+    // 10 budget, 5 sy_in: the SY flash mints 5; the USDY flash deposits 10 and mints 5.
+    expect(breakerReport(at("buy_yt_flash"), { market })).toBe(5n * UNIT)
+    expect(breakerReport(at("buy_yt_flash"), { market: twice })).toBe(10n * UNIT)
+    expect(breakerReport(at("buy_yt_flash_underlying"), { market })).toBe(15n * UNIT)
+    expect(breakerReport(at("buy_yt_flash_underlying"), { market: twice })).toBe(20n * UNIT)
+    expect(breakerReport(at("buy_yt_flash"), { market: { ...market, exchangeRate: down() } })).toBeUndefined()
+    expect(breakerReport(at("buy_yt_flash_underlying"), { market: { ...market, exchangeRate: down() } })).toBeUndefined()
+  })
+
+  it("only the USDY flash charges the deposit cap, its budget; the SY flash mints with no SYWrapper.deposit", () => {
+    expect(capCharge(at("buy_yt_flash_underlying"))).toBe(10n * UNIT)
+    expect(capCharge(at("buy_yt_flash"))).toBe(0n)
+  })
+
+  it("LP only from USDY reports and charges its deposit (R5-5)", () => {
+    expect(breakerReport(at("add_liquidity_underlying"), { market: { ...market, exchangeRate: down() } })).toBe(10n * UNIT)
+    expect(capCharge(at("add_liquidity_underlying"))).toBe(10n * UNIT)
+  })
+
+  it("LP only from SY, and the USDY remove, report and charge nothing", () => {
+    for (const a of ["add_liquidity_sy", "remove_liquidity_underlying"] as const) {
+      expect(breakerReport(at(a), { market })).toBe(0n)
+      expect(capCharge(at(a))).toBe(0n)
+    }
   })
 
   it("the sells report and charge nothing", () => {

@@ -44,6 +44,7 @@ export function marketState(over: Partial<MarketState> = {}): MarketState {
     syPaused: live(false),
     poolPaused: live(false),
     riskPaused: live(false),
+    managerPaused: live(false),
     cb: {
       limit: live(1_000_000_000_000n),
       volume: live(250_000_000_000n),

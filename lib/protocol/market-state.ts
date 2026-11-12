@@ -58,6 +58,11 @@ export type MarketState = {
   syPaused: Live<boolean>
   poolPaused: Live<boolean>
   riskPaused: Live<boolean>
+  /**
+   * `PrincipalManager.is_paused()` (R5-8). Unavailable on a manager built before 665bb67, which has no such
+   * view: the actions the manager can pause then wait, never run unchecked.
+   */
+  managerPaused: Live<boolean>
   cb: { limit: Live<bigint>; volume: Live<bigint>; assetLimit: Live<bigint>; assetVolume: Live<bigint> }
   topology: Live<Topology>
 }
@@ -190,7 +195,7 @@ export async function fetchMarketState(reader: ContractReader, m: Manifest, mark
     oracleRate, oracleTimestamp, oracleFresh, oracleMaxStaleSeconds,
     oracleMaxDeviationBps, oraclePrimarySource, oracleFallbackSource, oracleLastRejection, settledRate, ytFrozen, ytAccruedIndex, totalPt, totalYt,
     lpTotalSupply, tokenizationBps, ytBps, swapTierBps, protocolShareBps, exchangeRate, syPaused, poolPaused,
-    riskPaused, cbLimit, cbVolume, assetLimit, assetVolume, poolState, seeded, swapFeeRate, info, matured, managerSy,
+    riskPaused, managerPaused, cbLimit, cbVolume, assetLimit, assetVolume, poolState, seeded, swapFeeRate, info, matured, managerSy,
   ] = await Promise.all([
     big(c.oracle, "get_reference_value"),
     big(c.oracle, "get_reference_timestamp"),
@@ -216,6 +221,7 @@ export async function fetchMarketState(reader: ContractReader, m: Manifest, mark
     bool(c.sy, "is_paused"),
     bool(c.pool, "is_paused"),
     bool(risk, "is_paused"),
+    bool(c.manager, "is_paused"),
     big(risk, "get_cb_limit"),
     big(risk, "get_cb_volume"),
     big(risk, "get_asset_limit", [asset]),
@@ -255,6 +261,7 @@ export async function fetchMarketState(reader: ContractReader, m: Manifest, mark
     syPaused,
     poolPaused,
     riskPaused,
+    managerPaused,
     cb: { limit: cbLimit, volume: cbVolume, assetLimit, assetVolume },
     topology: compareTopology(market, info, matured),
   }

@@ -44,12 +44,11 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
 // The faucet (local-stack's onboarding) is `server-only`; that guard throws outside a react-server bundle.
 vi.mock("server-only", () => ({}))
 
-import { derive, simulate } from "@/hooks/use-simulation"
 import { fetchAccountState, type ComplianceKind } from "@/lib/protocol/account-state"
 import type { ActionInput } from "@/lib/protocol/actions"
 import { impliedRate, curveStateFrom, type CurveState } from "@/lib/protocol/curve"
 import { fetchAccountHistory } from "@/lib/protocol/events"
-import { openGuards, type ActionOutput } from "@/lib/protocol/guards"
+import { type ActionOutput } from "@/lib/protocol/guards"
 import { createHorizon } from "@/lib/protocol/horizon"
 import { validateManifest } from "@/lib/protocol/manifest"
 import { fetchMarketState, type MarketState, type PoolStateView } from "@/lib/protocol/market-state"
@@ -80,7 +79,7 @@ import {
   units,
   type Balances,
 } from "./local-stack"
-import { createRunner, DEADLINE_SECONDS, SLIPPAGE_BPS, showOutput, type Runner, type Snapshot, type StepRecord } from "./route-runner"
+import { createRunner, SLIPPAGE_BPS, showOutput, type Runner, type Snapshot, type StepRecord } from "./route-runner"
 
 /** The run takes minutes; below this much life left the suite skips (R2-68: it never redeploys). */
 const MIN_RUNWAY_SECONDS = 1_800
@@ -590,35 +589,8 @@ describe.skipIf(skip !== null)("every route on the local USDY market (Task 24; 0
     },
   ]
 
-  it("1 raw SY held, balance not read: the one step is planned and the sy_balance gate refuses it, as the Router does (error 9)", async () => {
-    await holdSy(1n, "sweep backstop")
-    const s = await r.snapshot()
-    // A withdraw of that 1 raw SY gets no floor above zero at the slippage setting: logged for the report.
-    const dust: ActionInput = { action: "withdraw", marketId: market.marketId, source: r.account, amount: 1n, guards: openGuards("withdraw", 1n), deadline: BigInt(Math.floor(s.ledgerTime) + DEADLINE_SECONDS) }
-    const dustGuards = derive(dust, await simulate(manifest, dust), SLIPPAGE_BPS).guards
-    log(`withdraw of 1 raw SY at ${SLIPPAGE_BPS} bps: ${json(dustGuards)}`)
-    for (const { req: make, one } of SWEEPING) {
-      const req = await make()
-      const ctx = planCtx(s, { knownSy: false })
-      const plans = currentContractsAdapter.plan(req, ctx)
-      if (!Array.isArray(plans)) throw new Error(`${req.kind}: not offered: ${plans.disabled}`)
-      expect(plans.map((p) => p.action), `${req.kind}, SY not read`).toEqual([one])
-      const pre = await r.preStart(toRouteRequest(req, ctx), plans)
-      expect(pre.blockers.map((b) => b.code), `${req.kind}: refusals`).toContain("sy_balance")
-      // The contract's own refusal, simulated as the user: PreexistingSyBalance, raised by the Router.
-      const draft: ActionInput = {
-        action: one,
-        marketId: market.marketId,
-        source: r.account,
-        amount: req.kind === "buy_yt" ? (plans[0].amount as { value: bigint }).value : req.amount,
-        guards: openGuards(one, req.amount),
-        deadline: BigInt(Math.floor(s.ledgerTime) + DEADLINE_SECONDS),
-      }
-      const sim = await simulate(manifest, draft)
-      expect(sim).toMatchObject({ ok: false, kind: "contract_error", contractId: market.contracts.router, code: 9 })
-      log(`${one} with 1 raw SY: gates ${json(pre.blockers.map((b) => b.code))} ("${pre.blockers.find((b) => b.code === "sy_balance")?.message}"); simulation Router error #9`)
-    }
-  }, 3 * MINUTE)
+  // R5-4: the Router sweeps by gain and has no error 9, so there is no "SY held, balance not read" backstop
+  // to exercise. The fallback tests below are retired with the route-note fallback (plan 0005 Task 3).
 
   for (const { req: make, one, multi } of SWEEPING) {
     it(`1 raw SY held: ${one} falls back to ${multi.join(", ")}, says why (R4-3), and completes`, async () => {

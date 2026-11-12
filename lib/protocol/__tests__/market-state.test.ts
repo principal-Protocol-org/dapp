@@ -59,6 +59,7 @@ function healthy(): Record<string, Handler> {
     [`${c.pool}.implied_rate`]: 600_000n,
     [`${c.pool}.lp_total_supply`]: 400n,
     [`${c.pool}.is_paused`]: false,
+    [`${c.manager}.is_paused`]: false,
     [`${c.config}.tokenization_fee_bps`]: 10,
     [`${c.config}.yt_fee_bps`]: 20,
     [`${c.config}.swap_fee_tier_bps`]: 30,
@@ -103,9 +104,26 @@ describe("fetchMarketState", () => {
     expect(s.syPaused).toMatchObject({ value: false })
     expect(s.poolPaused).toMatchObject({ value: false })
     expect(s.riskPaused).toMatchObject({ value: false })
+    expect(s.managerPaused).toEqual({ status: "live", value: false, ledger: 777 })
     expect(s.cb.limit).toMatchObject({ value: 1_000n })
     expect(s.cb.assetVolume).toMatchObject({ value: 200n })
     expect(s.topology).toMatchObject({ status: "live", value: { matches: true, mismatches: [] } })
+  })
+
+  it("reads PrincipalManager.is_paused() with no arguments (R5-8)", async () => {
+    const table = healthy()
+    table[`${c.manager}.is_paused`] = true
+    const calls: Calls = []
+    const s = await fetchMarketState(fakeReader(table, calls), manifest, market.marketId)
+    expect(s.managerPaused).toMatchObject({ status: "live", value: true })
+    expect(calls.find((x) => x.key === `${c.manager}.is_paused`)?.args).toEqual([])
+  })
+
+  it("a manager without is_paused (a build before 665bb67) is unavailable, never not-paused (R5-8)", async () => {
+    const table = healthy()
+    table[`${c.manager}.is_paused`] = new Error("HostError: no function is_paused")
+    const s = await fetchMarketState(fakeReader(table), manifest, market.marketId)
+    expect(s.managerPaused.status).toBe("unavailable")
   })
 
   it("reads the SY the PrincipalManager holds, via balance_of(manager)", async () => {

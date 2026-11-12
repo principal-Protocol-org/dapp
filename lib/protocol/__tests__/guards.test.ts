@@ -73,7 +73,7 @@ describe("parseOutput", () => {
       underlying_from_yt: 2n,
     })
   })
-  it("parses the shapes of the five one-transaction Router actions", () => {
+  it("parses the shapes of the eight one-transaction Router actions", () => {
     expect(parseOutput("buy_pt_underlying", 5n)).toEqual({ kind: "amount", value: 5n })
     expect(parseOutput("sell_pt_underlying", 6n)).toEqual({ kind: "amount", value: 6n })
     expect(parseOutput("sell_yt_underlying", 7n)).toEqual({ kind: "amount", value: 7n })
@@ -92,7 +92,7 @@ describe("parseOutput", () => {
       yt_minted: 4n,
     })
   })
-  it("refuses any other shape for the five one-transaction Router actions", () => {
+  it("refuses any other shape for the eight one-transaction Router actions", () => {
     expect(() => parseOutput("buy_pt_underlying", [5n])).toThrow()
     expect(() => parseOutput("sell_yt_underlying", 5)).toThrow()
     expect(() => parseOutput("buy_yt_flash", 5n)).toThrow()

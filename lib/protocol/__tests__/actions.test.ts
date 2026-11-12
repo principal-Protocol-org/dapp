@@ -42,7 +42,7 @@ describe("invocationFor", () => {
     ["recombine", router, "recombine", [from, p, i(100n), i(90n), DL]],
     ["claim_yield", router, "claim_yield", [from, p]],
     ["redeem", router, "redeem_at_maturity", [from, p, i(100n), i(0n)]],
-    // The five one-transaction Router functions (0004 Task 3): `(from, pool, …)` as in router/src/lib.rs.
+    // The eight one-transaction Router functions (0004 Task 3, 0005 Task 1): `(from, pool, …)` as in router/src/lib.rs.
     ["buy_pt_underlying", router, "swap_underlying_for_pt", [from, p, i(100n), i(90n), DL]],
     ["sell_pt_underlying", router, "swap_pt_for_underlying", [from, p, i(100n), i(90n), DL]],
     ["sell_yt_underlying", router, "swap_yt_for_underlying", [from, p, i(100n), i(90n), DL]],
