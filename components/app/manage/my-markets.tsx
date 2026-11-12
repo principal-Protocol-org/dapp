@@ -1,5 +1,6 @@
 "use client"
 
+import Link from "next/link"
 import { useState } from "react"
 import { Button } from "@/components/ui/button"
 import { ManagerSignFlow } from "@/components/app/manage/manager-sign-flow"
@@ -12,6 +13,7 @@ import { useLedgerClock } from "@/hooks/use-ledger-clock"
 import { useManifestFindings } from "@/hooks/use-manifest-findings"
 import { useMarketStates } from "@/hooks/use-market-state"
 import { useAccruedFees, useMyRoles } from "@/hooks/use-manage"
+import { useMarketsInProgress } from "@/hooks/use-wizard"
 import { useWallet } from "@/hooks/use-wallet"
 import type { Blocker } from "@/lib/protocol/gates"
 import { formatAmount, shorten } from "@/lib/protocol/format"
@@ -24,10 +26,12 @@ import {
   type PausableContract,
 } from "@/lib/protocol/manager-calls"
 import { evaluateManagerGates } from "@/lib/protocol/manager-gates"
+import type { MarketProgress } from "@/lib/protocol/market-progress"
 import type { MarketState } from "@/lib/protocol/market-state"
 import {
   heldRoles,
   rolesForCall,
+  type AccountRoles,
   type AdminContract,
   type HeldRoles,
   type MarketRoles,
@@ -223,6 +227,52 @@ function MarketCard({ market, ms, ledgerTime, readOnly, roles, shared, account }
 
 type View = "mine" | "all"
 
+/** Whether the account is an asset's issuer (its SAC's `admin()`): the one who can create a market on it (R5-10). Only a "yes" counts. */
+function issuesAnAsset(roles: AccountRoles): boolean {
+  if (roles.testAssetIssuer?.status === "live" && roles.testAssetIssuer.value) return true
+  return [...roles.markets.values()].some((m) => m.issuer.status === "live" && m.issuer.value)
+}
+
+type InProgress = ReturnType<typeof useMarketsInProgress>[number]
+
+/**
+ * The markets this browser started creating and has not finished (spec 0002 §5 "Resuming"): each
+ * with the step the chain says it has reached. Nothing deployed yet is not a market in progress; a
+ * pool already in the list has nothing left to resume.
+ */
+function MarketsInProgress({ markets, listedPools }: { markets: InProgress[]; listedPools: ReadonlySet<string> }) {
+  const shown = markets.filter(({ progress }) => {
+    if (progress.isError) return true
+    const p = progress.data as MarketProgress | undefined
+    return p !== undefined && p.step >= 3 && !listedPools.has(p.predicted.pool)
+  })
+  if (shown.length === 0) return null
+  return (
+    <section aria-labelledby="in-progress-heading" className="grid gap-2">
+      <h2 id="in-progress-heading" className="font-serif text-xl text-ink">
+        Markets being created
+      </h2>
+      <ul className="grid gap-2">
+        {shown.map(({ salt, progress }) => {
+          const p = progress.data as MarketProgress | undefined
+          const href = `/app/manage/new?salt=${salt}`
+          return (
+            <li key={salt} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-line bg-surface p-3 text-sm">
+              <span className="grid min-w-0 gap-0.5">
+                <span className="text-ink">{p ? <>Pool <span className="font-mono">{shorten(p.predicted.pool)}</span></> : "A market in progress"}</span>
+                {progress.isError ? <span className="text-ink-muted">{unavailableText(progress.error?.message ?? "unknown error")}</span> : null}
+              </span>
+              <Button asChild variant="secondary" size="toggle">
+                <Link href={href}>{p ? `Resume at step ${p.step}` : "Open"}</Link>
+              </Button>
+            </li>
+          )
+        })}
+      </ul>
+    </section>
+  )
+}
+
 /**
  * The manager view (spec 0002 §5): the listed markets where the connected wallet holds a role, with
  * only the actions that role can sign, and an "All" toggle for every listed market read-only. Roles
@@ -236,6 +286,9 @@ export function MyMarkets({ invalid }: { invalid: InvalidMarkets }) {
   const { ledgerTime } = useLedgerClock()
   const [view, setView] = useState<View>("mine")
   const states = useMarketStates(manifest.markets.map((m) => m.marketId))
+  const inProgress = useMarketsInProgress()
+  const listedPools = new Set(manifest.markets.map((m) => m.contracts.pool))
+  const issuer = account !== null && issuesAnAsset(roles)
 
   const rolesFor = (m: Market) => roles.markets.get(m.marketId)
   // A market whose roles could not be read is listed with the reason, not hidden.
@@ -263,6 +316,16 @@ export function MyMarkets({ invalid }: { invalid: InvalidMarkets }) {
           </Button>
         </div>
       </div>
+
+      {issuer ? (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-line bg-surface p-4">
+          <p className="min-w-0 text-sm text-ink">You are an asset&apos;s issuer, so you can create a market on it.</p>
+          <Button asChild>
+            <Link href="/app/manage/new">New market</Link>
+          </Button>
+        </div>
+      ) : null}
+      <MarketsInProgress markets={inProgress} listedPools={listedPools} />
 
       {view === "mine" && state.status !== "connected" ? (
         <p className="rounded-lg border border-line bg-surface p-5 text-ink">

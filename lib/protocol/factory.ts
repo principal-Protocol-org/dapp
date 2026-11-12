@@ -12,7 +12,8 @@
  *
  * Pure and reader-injected, like the rest of `lib/protocol`.
  */
-import { Address, StrKey, hash, xdr } from "@stellar/stellar-sdk"
+import { Address, StrKey, xdr } from "@stellar/stellar-sdk"
+import { sha256 } from "js-sha256"
 import { bytesToHex } from "./bytes"
 import { shorten } from "./format"
 import { readLive, toAddress, toBigint, type ContractReader } from "./reader"
@@ -112,6 +113,10 @@ export function randomSalt(random: (n: number) => Uint8Array = (n) => globalThis
   return bytesToHex(random(32)).toLowerCase()
 }
 
+// Buffer-free (bytes.ts): browser code never touches the Node Buffer global.
+const sha = (data: Uint8Array) => new Uint8Array(sha256.arrayBuffer(data))
+const hexToBytes = (hex: string) => Uint8Array.from(hex.match(/../g) ?? [], (b) => parseInt(b, 16))
+
 function saltOf(value: string): string {
   const salt = parseSalt(value)
   if (!salt) throw new Error(`"${value}" is not a salt of 32 bytes (64 hex digits).`)
@@ -135,19 +140,21 @@ export function factoryOf(manifest: Manifest): string {
  */
 export function deriveMarketContracts(manifest: Manifest, salt: string): MarketContracts {
   const factory = new Address(factoryOf(manifest)).toScAddress()
-  const seed = Buffer.from(saltOf(salt), "hex")
-  const networkId = hash(Buffer.from(manifest.networkPassphrase))
+  const seed = hexToBytes(saltOf(salt))
+  const networkId = sha(new TextEncoder().encode(manifest.networkPassphrase))
   const at = (kind: MarketContractName) => {
-    const subSalt = hash(Buffer.concat([seed, Buffer.from([TAG[kind]])]))
+    const tagged = new Uint8Array(seed.length + 1)
+    tagged.set(seed)
+    tagged[seed.length] = TAG[kind]
     const preimage = xdr.HashIdPreimage.envelopeTypeContractId(
       new xdr.HashIdPreimageContractId({
         networkId,
         contractIdPreimage: xdr.ContractIdPreimage.contractIdPreimageFromAddress(
-          new xdr.ContractIdPreimageFromAddress({ address: factory, salt: subSalt }),
+          new xdr.ContractIdPreimageFromAddress({ address: factory, salt: sha(tagged) }),
         ),
       }),
     )
-    return StrKey.encodeContract(hash(preimage.toXDR()))
+    return StrKey.encodeContract(sha(new Uint8Array(preimage.toXDR())))
   }
   return {
     router: manifest.shared.router,
@@ -231,9 +238,13 @@ function textError(value: string, max: number): string | undefined {
   return undefined
 }
 
-/** The UTC date and time the form shows and reads: `YYYY-MM-DDTHH:mm`. */
+/**
+ * The UTC date and time the form shows and reads: `YYYY-MM-DDTHH:mm`, with `:ss` when the seconds
+ * are not zero (a maturity the chain fixed is kept to the second).
+ */
 function utcMinute(seconds: bigint | number): string {
-  return new Date(Number(seconds) * 1000).toISOString().slice(0, 16)
+  const iso = new Date(Number(seconds) * 1000).toISOString()
+  return iso.slice(17, 19) === "00" ? iso.slice(0, 16) : iso.slice(0, 19)
 }
 
 /**
@@ -312,7 +323,7 @@ export const PARAM_LABEL: Record<keyof MarketParams, string> = {
 /** The form's text for each parameter. */
 export type ParamDraft = Record<keyof MarketParams, string>
 
-const MINUTE_RE = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/
+const MINUTE_RE = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/
 
 /** A parameter's text in the form; maturity as a UTC date and time. */
 export function draftFromParams(p: Partial<MarketParams>): Partial<ParamDraft> {
@@ -333,8 +344,10 @@ function wholeNumber(value: string | undefined): number | undefined {
 function maturityOf(value: string | undefined): bigint | undefined {
   const m = value === undefined ? null : MINUTE_RE.exec(value.trim())
   if (!m) return undefined
-  const ms = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5]))
-  return Number.isFinite(ms) && utcMinute(ms / 1000) === value?.trim() ? BigInt(ms / 1000) : undefined
+  const ms = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5]), Number(m[6] ?? 0))
+  // A date that does not exist (2027-02-30) rolls over in Date.UTC: refuse it rather than move it.
+  const exact = m[6] === undefined ? `${value?.trim()}:00` : value?.trim()
+  return Number.isFinite(ms) && new Date(ms).toISOString().slice(0, 19) === exact ? BigInt(ms / 1000) : undefined
 }
 
 /** The parameters a draft states, with every refusal; `params` only when there is none. */

@@ -427,6 +427,15 @@ describe("parameters: the draft the form edits, checked as the contracts check t
     expect(paramsFromDraft(manifest, draft, LEDGER)).toEqual({ params: PARAMS, errors: {} })
   })
 
+  it("a maturity with seconds (one the chain fixed) round-trips exactly", () => {
+    const withSeconds = { ...PARAMS, maturity: 1_810_000_000n }
+    const d = draftFromParams(withSeconds)
+    expect(d.maturity).toBe("2027-05-11T01:46:40")
+    expect(paramsFromDraft(manifest, d, LEDGER).params?.maturity).toBe(1_810_000_000n)
+    // A date that does not exist is refused, never rolled over to another day.
+    expect(paramsFromDraft(manifest, { ...d, maturity: "2027-02-30T00:00" }, LEDGER).errors.maturity).toBe("Enter a date and time (UTC).")
+  })
+
   it("names each field the contracts would refuse, in plain words", () => {
     const { params, errors } = paramsFromDraft(
       manifest,

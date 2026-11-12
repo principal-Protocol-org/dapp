@@ -32,6 +32,7 @@ const mocks = vi.hoisted(() => ({
   prepareManager: vi.fn(),
   execute: vi.fn(),
   toast: vi.fn(),
+  inProgress: [] as { salt: string; progress: { data?: unknown; isPending: boolean; isError: boolean; error?: Error | null } }[],
 }))
 
 vi.mock("@/components/app/manifest-provider", () => ({ useManifest: () => manifest }))
@@ -49,6 +50,7 @@ vi.mock("@/hooks/use-execute", () => ({
   useExecute: () => ({ prepareManager: mocks.prepareManager, execute: mocks.execute, pending: false }),
 }))
 vi.mock("@/components/app/actions/tx-feedback", () => ({ showTxToast: mocks.toast }))
+vi.mock("@/hooks/use-wizard", () => ({ useMarketsInProgress: () => mocks.inProgress }))
 vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} })
 
 import { MyMarkets } from "../manage/my-markets"
@@ -106,6 +108,7 @@ beforeEach(() => {
   mocks.prepareManager.mockReset().mockImplementation(async (call: ManagerCall) => managerReview(call))
   mocks.execute.mockReset().mockResolvedValue({ status: "SUCCESS", hash: "abc" })
   mocks.toast.mockReset()
+  mocks.inProgress = []
 })
 
 describe("My markets / All", () => {
@@ -304,5 +307,43 @@ describe("invalid registry rows (R2-38)", () => {
     show({ status: "unavailable" })
     await userEvent.click(screen.getByRole("button", { name: /^All/ }))
     expect(screen.getByText(/could not be read right now/)).toBeTruthy()
+  })
+})
+
+describe("creating a market (spec 0002 §5, R5-10)", () => {
+  it("the asset's issuer gets a New market entry; a wallet without the role does not", () => {
+    mocks.roles = { ...mocks.roles, testAssetIssuer: live(true) }
+    const { unmount } = show()
+    expect(screen.getByRole("link", { name: "New market" }).getAttribute("href")).toBe("/app/manage/new")
+    unmount()
+    mocks.roles = { ...mocks.roles, testAssetIssuer: live(false) }
+    show()
+    expect(screen.queryByRole("link", { name: "New market" })).toBeNull()
+  })
+
+  it("the issuer of a listed market's asset gets it too", () => {
+    setRoles(marketRoles(A, { issuer: yes }), marketRoles(B))
+    show()
+    expect(screen.getByRole("link", { name: "New market" })).toBeTruthy()
+  })
+
+  it("a half-finished market is listed with Resume at step N; nothing deployed yet, or listed already, is not", () => {
+    const salt = (fill: string) => fill.repeat(32)
+    const at = (step: number, pool: string) => ({ isPending: false, isError: false, data: { step, predicted: { ...A.contracts, pool } } })
+    mocks.inProgress = [
+      { salt: salt("a1"), progress: at(4, contractAt(61)) },
+      { salt: salt("a2"), progress: at(1, contractAt(62)) },
+      // Seeded and already in the list: nothing left to resume.
+      { salt: salt("a3"), progress: at(7, A.contracts.pool) },
+      { salt: salt("a4"), progress: { isPending: false, isError: true, error: new Error("rpc 503") } },
+    ]
+    show()
+    const section = screen.getByRole("region", { name: "Markets being created" })
+    const resume = within(section).getByRole("link", { name: "Resume at step 4" })
+    expect(resume.getAttribute("href")).toBe(`/app/manage/new?salt=${salt("a1")}`)
+    expect(within(section).queryByText(/step 1\b/)).toBeNull()
+    expect(within(section).queryByText(/step 7/)).toBeNull()
+    expect(within(section).getByText(/Unavailable \(rpc 503\)/)).toBeTruthy()
+    expect(within(section).getByRole("link", { name: "Open" }).getAttribute("href")).toBe(`/app/manage/new?salt=${salt("a4")}`)
   })
 })
