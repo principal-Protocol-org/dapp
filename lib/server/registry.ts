@@ -31,7 +31,7 @@ import { parseMarket } from "@/lib/protocol/manifest"
 import { fetchTopology } from "@/lib/protocol/market-state"
 import { isContractError, readLive, toBool, type ContractReader } from "@/lib/protocol/reader"
 import type { Manifest, Market, MarketContractName } from "@/lib/protocol/types"
-import { contractWasmHash, WasmReadError, type LedgerEntriesRpc } from "@/lib/protocol/wasm"
+import { contractWasmHash, contractWasmHashesSettled, WasmReadError, type LedgerEntriesRpc } from "@/lib/protocol/wasm"
 import { DatabaseConfigError, type Sql } from "./db"
 import { createRollingLimiter, redact } from "./request"
 
@@ -86,8 +86,14 @@ export type RegistryWrite = {
 /** The factory phase an event shows done: `mkt_tok` (tokens), `mkt_eng` (engine), `mkt_new` (pool and escrow). */
 export type SaltPhase = "tokens" | "engine" | "pool"
 
-/** One `market_salts` row: a market the factory started, by salt (lower-case hex), at the furthest phase seen. */
-export type SaltRow = { factory: string; salt: string; phase: SaltPhase; ledger: number }
+/**
+ * One `market_salts` row: a market the factory started, by salt (lower-case hex), at the furthest
+ * phase seen, on `underlying` (the asset contract its SY wrapper wraps, read on chain).
+ */
+export type SaltRow = { factory: string; salt: string; underlying: string; phase: SaltPhase; ledger: number }
+
+/** A salt an event names, before the chain has confirmed what it is (`verifySalts`). */
+type SaltEvent = Omit<SaltRow, "underlying">
 
 export type RegistryStore = {
   rows(): Promise<RegistryRow[]>
@@ -529,11 +535,11 @@ function saltOf(data: unknown): string | null {
  * One page's events as steps: the last event per pool wins, in the order of those last events. The
  * factory's events also name the salts it started, each at the furthest phase seen (spec 0002 §5).
  */
-function stepsOf(manifest: Manifest, events: RawEvent[]): { steps: Step[]; salts: SaltRow[] } {
+function stepsOf(manifest: Manifest, events: RawEvent[]): { steps: Step[]; salts: SaltEvent[] } {
   const router = manifest.shared.router
   const factory = manifest.shared.factory
   const steps = new Map<string, Step>()
-  const salts = new Map<string, SaltRow>()
+  const salts = new Map<string, SaltEvent>()
   for (const e of [...events].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))) {
     if (e.inSuccessfulContractCall === false) continue
     const from = idOf(e.contractId)
@@ -566,9 +572,73 @@ function stepsOf(manifest: Manifest, events: RawEvent[]): { steps: Step[]; salts
 }
 
 /**
- * Indexes the salts of one page. Best effort: the salt index only lists markets to resume (each one's
- * progress is read from the chain), so a failed write is logged by its code and never stops the
- * discovery of markets, whose cursor moves on.
+ * The assets whose half-finished markets the app lists: the test asset's, and those of the markets it
+ * lists (the seeds and the stored registry markets). Only an asset's issuer can create a market on it
+ * that runs the pinned code (each child contract's `initialize` checks the SAC's live admin, R5-10).
+ */
+function listedAssets(manifest: Manifest, rows: RegistryRow[]): Set<string> {
+  return new Set([...(manifest.testAsset ? [manifest.testAsset.sac] : []), ...knownMarkets(manifest, rows).map((m) => m.underlying.sac)])
+}
+
+/** How many SY wrappers `verifySalts` reads at once. */
+const SALT_READS_AT_ONCE = 8
+
+/**
+ * What the chain confirms of the salts one page names (security review, Task 8): an event's own
+ * addresses are never used. Anyone who issues an asset can call `create_tokens` on it, with Wasm of
+ * their own choosing, so a salt is kept only when the SY wrapper at the address the salt gives runs
+ * the code the manifest pins (one `getLedgerEntries` call for the page, before any call into it) and
+ * that code says it wraps an asset this network lists (one read each). Spam on another asset, unpinned
+ * code that claims this network's asset, or no SY at all is dropped here and never stored. A salt that
+ * cannot be checked (the RPC failed) is dropped and logged: its next phase's event is checked again,
+ * and the wizard's link still resumes it.
+ */
+async function verifySalts(deps: RegistryDeps, events: SaltEvent[], assets: ReadonlySet<string>): Promise<SaltRow[]> {
+  const { reader, rpc, manifest } = deps
+  const pin = pinOf(manifest, "sy")
+  if (events.length === 0 || !pin) return []
+  const sys = events.map((e) => {
+    try {
+      return deriveMarketContracts(manifest, e.salt).sy
+    } catch {
+      return null
+    }
+  })
+  let hashes: (string | WasmReadError)[]
+  try {
+    hashes = await contractWasmHashesSettled(rpc, sys.filter((sy): sy is string => sy !== null))
+  } catch (error) {
+    console.error(`registry: ${events.length} salt(s) could not be checked (${error instanceof Error ? error.name : "unknown"}); not indexed`)
+    return []
+  }
+  let n = 0
+  const pinned = sys.map((sy) => (sy !== null && hashes[n++] === pin ? sy : null))
+  // A few reads at a time: a flood of pinned-code markets on someone's own asset must not burst the RPC.
+  const underlyings: (Read<string> | null)[] = []
+  for (let i = 0; i < pinned.length; i += SALT_READS_AT_ONCE) {
+    underlyings.push(
+      ...(await Promise.all(pinned.slice(i, i + SALT_READS_AT_ONCE).map((sy) => (sy ? read(reader, sy, "underlying_address", address) : null)))),
+    )
+  }
+  const out: SaltRow[] = []
+  let unread = 0
+  events.forEach((e, i) => {
+    const u = underlyings[i]
+    if (!u) return
+    if (!u.ok) {
+      if (u.unreadable) unread++
+      return
+    }
+    if (assets.has(u.value)) out.push({ ...e, underlying: u.value })
+  })
+  if (unread > 0) console.error(`registry: ${unread} salt(s) could not be checked (the RPC failed); not indexed`)
+  return out
+}
+
+/**
+ * Indexes the verified salts of one page. Best effort: the salt index only lists markets to resume
+ * (each one's progress is read from the chain), so a failed write is logged by its code and never
+ * stops the discovery of markets, whose cursor moves on.
  */
 async function indexSalts(store: RegistryStore, salts: SaltRow[]): Promise<void> {
   for (const row of salts) {
@@ -584,7 +654,7 @@ async function indexSalts(store: RegistryStore, salts: SaltRow[]): Promise<void>
  * Scans the Router's and the factory's events since the stored cursor (`ingest_cursor`) and checks
  * every pool they name: `mkt_reg` and the factory's `mkt_new` (pool, escrow) are checked;
  * `mkt_unreg` marks the pool invalid. The factory's `mkt_tok`, `mkt_eng` and `mkt_new` index their
- * salt (`indexSalts`), with no read. Events are applied page by page in id order, so the last one
+ * salt once the chain confirms it is a market on an asset this network lists (`verifySalts`). Events are applied page by page in id order, so the last one
  * wins. If the cursor is older than the RPC's oldest ledger the scan restarts there and the gap is
  * logged and reported; markets are never invented to fill it.
  *
@@ -636,7 +706,13 @@ export async function discover(deps: RegistryDeps, opts: { deadline?: number } =
     }
 
     const found = stepsOf(manifest, res.events)
-    await indexSalts(store, found.salts)
+    if (found.salts.length > 0) {
+      if (!rows) {
+        rows = await store.rows()
+        known = knownMarkets(manifest, rows)
+      }
+      await indexSalts(store, await verifySalts(deps, found.salts, listedAssets(manifest, rows)))
+    }
     for (const step of found.steps) {
       if (late(deps, opts.deadline)) return { checked, gap, complete: false }
       if (!rows) {
@@ -834,16 +910,18 @@ export async function invalidMarkets(deps: {
   }
 }
 
-/** The most half-finished markets the manager view lists from the registry (each costs a progress read). */
+/** The most half-finished markets the manager view lists per asset (each costs a progress read). */
 export const MAX_RESUMABLE = 20
 
 /**
  * The salts of markets this network's factory started and that are not listed yet (spec 0002 §5
- * "Resuming"): newest first, at most `MAX_RESUMABLE`, leaving out each one whose pool is a listed
- * market (a seed not hidden, or a registry row with `valid = true`): it has nothing left to resume.
- * The manager view reads each one's progress from the chain and shows it to the asset's issuer and
- * the protocol admin. When the registry cannot be read, or is slower than `timeoutMs`, the answer is
- * `unavailable`, never an empty list.
+ * "Resuming"): newest first, on an asset this network lists (the index holds only those, and a
+ * manifest change may drop one), leaving out each one whose pool is a listed market (a seed not
+ * hidden, or a registry row with `valid = true`): it has nothing left to resume. Capped at
+ * `MAX_RESUMABLE` per asset, never overall, so one asset's issuer cannot push another's markets out
+ * (security review, Task 8). The manager view reads each one's progress from the chain and shows it
+ * to the asset's issuer and the protocol admin. When the registry cannot be read, or is slower than
+ * `timeoutMs`, the answer is `unavailable`, never an empty list.
  */
 export async function resumableSalts(deps: {
   store: RegistryStore
@@ -868,14 +946,20 @@ export async function resumableSalts(deps: {
     ...manifest.markets.map((m) => m.contracts.pool).filter((pool) => !hidden.has(pool)),
     ...rows.filter((r) => r.valid === true).map((r) => r.pool),
   ])
+  const assets = listedAssets(manifest, rows)
+  const perAsset = new Map<string, number>()
   const open = salts.filter((row) => {
+    if (!assets.has(row.underlying)) return false
     try {
-      return !listed.has(deriveMarketContracts(manifest, row.salt).pool)
+      if (listed.has(deriveMarketContracts(manifest, row.salt).pool)) return false
     } catch {
       return false
     }
+    const n = perAsset.get(row.underlying) ?? 0
+    perAsset.set(row.underlying, n + 1)
+    return n < MAX_RESUMABLE
   })
-  return { status: "ok", salts: open.slice(0, MAX_RESUMABLE).map((row) => row.salt) }
+  return { status: "ok", salts: open.map((row) => row.salt) }
 }
 
 /** A database failure by its code only: its message can carry the host or the connection string. */
@@ -951,15 +1035,16 @@ export function sqlRegistryStore(sql: Sql): RegistryStore {
           updated_at = excluded.updated_at`
     },
     async salts(factory) {
-      const rows = await sql<{ factory: string; salt: string; phase: SaltPhase; ledger: string | number }>`
-        select factory, salt, phase, ledger from market_salts where factory = ${factory} order by ledger desc, salt`
-      return rows.map((r) => ({ factory: r.factory, salt: r.salt, phase: r.phase, ledger: Number(r.ledger) }))
+      const rows = await sql<{ factory: string; salt: string; underlying: string; phase: SaltPhase; ledger: string | number }>`
+        select factory, salt, underlying, phase, ledger from market_salts where factory = ${factory} order by ledger desc, salt`
+      return rows.map((r) => ({ factory: r.factory, salt: r.salt, underlying: r.underlying, phase: r.phase, ledger: Number(r.ledger) }))
     },
     async recordSalt(row) {
       await sql`
-        insert into market_salts (factory, salt, phase, ledger, updated_at)
-        values (${row.factory}, ${row.salt}, ${row.phase}, ${row.ledger}, now())
+        insert into market_salts (factory, salt, underlying, phase, ledger, updated_at)
+        values (${row.factory}, ${row.salt}, ${row.underlying}, ${row.phase}, ${row.ledger}, now())
         on conflict (factory, salt) do update set
+          underlying = excluded.underlying,
           phase = case
             when market_salts.phase = 'pool' or excluded.phase = 'pool' then 'pool'
             when market_salts.phase = 'engine' or excluded.phase = 'engine' then 'engine'

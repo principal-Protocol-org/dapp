@@ -210,6 +210,7 @@ import {
   resolvedMarkets,
   revalidate,
   validateMarket,
+  MAX_RESUMABLE,
   resumableSalts,
   type RegistryRow,
   type RegistryStore,
@@ -698,43 +699,81 @@ describe("discover and resolvedMarkets", () => {
 // ---------------------------------------------------------------- publish (POST /api/markets)
 
 describe("half-finished markets by salt (spec 0002 §5 \"Resuming\"): the factory's mkt_tok, mkt_eng and mkt_new", () => {
-  it("indexes each salt the factory names, at the furthest phase seen, without a single read", async () => {
+  const OTHER_ISSUER = Keypair.fromRawEd25519Seed(Buffer.alloc(32, 8)).publicKey()
+  const FOREIGN_SAC = new Asset("SPAM", OTHER_ISSUER).contractId(PASSPHRASES.local)
+  /**
+   * What `create_tokens` leaves at the salt's predicted SY address: a contract running `wasm` (the
+   * factory deploys whatever hashes its caller passes) whose `underlying_address` answers `underlying`.
+   */
+  function tokensAt(manifest: Manifest, salt: Buffer, opts: { underlying?: string; wasm?: string } = {}) {
+    const sy = deriveMarketContracts(manifest, hex(salt)).sy
+    chain.wasm.set(sy, opts.wasm ?? PINS.sy)
+    chain.views.set(`${sy}.underlying_address`, opts.underlying ?? SAC)
+    return sy
+  }
+
+  it("indexes each salt the factory names, at the furthest phase seen, once its SY runs the pinned code on this network's asset", async () => {
     const manifest = manifestWith([])
-    chain.events = [mktTok(saltOf(1), cid(60), 300), mktEng(saltOf(1), cid(64), 301), mktTok(saltOf(2), cid(70), 302), mktTok(saltOf(1), cid(60), 299, 1)]
+    const sy1 = tokensAt(manifest, saltOf(1))
+    const sy2 = tokensAt(manifest, saltOf(2))
+    chain.events = [mktTok(saltOf(1), sy1, 300), mktEng(saltOf(1), cid(64), 301), mktTok(saltOf(2), sy2, 302), mktTok(saltOf(1), sy1, 299, 1)]
     const result = await discover(depsFor(manifest))
     expect(result.checked).toEqual([])
-    expect(chain.reads).toEqual([])
+    // One read per salt, on the SY the salt gives: the event's own addresses are not trusted.
+    expect(chain.reads.sort()).toEqual([`${sy1}.underlying_address`, `${sy2}.underlying_address`].sort())
     expect([...store.saltsMap.values()]).toEqual([
-      { factory: SHARED.factory, salt: hex(saltOf(1)), phase: "engine", ledger: 301 },
-      { factory: SHARED.factory, salt: hex(saltOf(2)), phase: "tokens", ledger: 302 },
+      { factory: SHARED.factory, salt: hex(saltOf(1)), underlying: SAC, phase: "engine", ledger: 301 },
+      { factory: SHARED.factory, salt: hex(saltOf(2)), underlying: SAC, phase: "tokens", ledger: 302 },
     ])
   })
 
   it("mkt_new indexes its salt too, and its pool is still checked", async () => {
     const c = chain.deploy(20)
     const manifest = manifestWith([])
+    tokensAt(manifest, saltOf(3))
     chain.events = [mktNew(c.pool, c.recoveryEscrow, 300, saltOf(3))]
     const result = await discover(depsFor(manifest))
     expect(result.checked).toEqual([c.pool])
-    expect(store.saltsMap.get(`${SHARED.factory}:${hex(saltOf(3))}`)).toMatchObject({ phase: "pool", ledger: 300 })
+    expect(store.saltsMap.get(`${SHARED.factory}:${hex(saltOf(3))}`)).toMatchObject({ phase: "pool", ledger: 300, underlying: SAC })
   })
 
-  it("an event from another contract, or of another shape, indexes nothing", async () => {
+  it("never trusts an event beyond what the chain confirms: another asset, unpinned SY code, no SY at all, another contract or another shape index nothing", async () => {
     const manifest = manifestWith([])
+    // Anyone who issues an asset can call create_tokens on it, with Wasm of their own choosing.
+    const foreign = tokensAt(manifest, saltOf(10), { underlying: FOREIGN_SAC })
+    const lying = tokensAt(manifest, saltOf(11), { wasm: hash(99) }) // claims this network's asset, runs other code
     chain.events = [
-      mktTok(saltOf(4), cid(60), 300, 0, cid(99)),
-      ev(SHARED.factory, "mkt_tok", xdr.ScVal.scvVec([xdr.ScVal.scvBytes(Buffer.alloc(31, 1)), addr(cid(60))]), 301),
-      ev(SHARED.factory, "mkt_eng", addr(cid(60)), 302),
+      mktTok(saltOf(10), foreign, 300),
+      mktTok(saltOf(11), lying, 301),
+      mktTok(saltOf(12), cid(60), 302), // nothing deployed at the salt's SY address
+      mktTok(saltOf(4), cid(60), 303, 0, cid(99)),
+      ev(SHARED.factory, "mkt_tok", xdr.ScVal.scvVec([xdr.ScVal.scvBytes(Buffer.alloc(31, 1)), addr(cid(60))]), 304),
+      ev(SHARED.factory, "mkt_eng", addr(cid(60)), 305),
     ]
-    await discover(depsFor({ ...manifest }))
+    await discover(depsFor(manifest))
+    expect(store.saltsMap.size).toBe(0)
+    // Unpinned code is refused from its ledger entry, before any call into it.
+    expect(chain.reads).not.toContain(`${lying}.underlying_address`)
+  })
+
+  it("an SY that cannot be read is not indexed, and discovery goes on", async () => {
+    const c = chain.deploy(20)
+    const manifest = manifestWith([])
+    const sy = tokensAt(manifest, saltOf(13))
+    chain.views.set(`${sy}.underlying_address`, () => {
+      throw new Error("fetch failed: ECONNRESET")
+    })
+    chain.events = [mktTok(saltOf(13), sy, 290), reg(c.pool, 300)]
+    expect(await discover(depsFor(manifest))).toMatchObject({ checked: [c.pool], complete: true })
     expect(store.saltsMap.size).toBe(0)
   })
 
   it("a salt that cannot be written never stops discovery: the market is still checked and the cursor moves on", async () => {
     const c = chain.deploy(20)
     const manifest = manifestWith([])
+    const sy = tokensAt(manifest, saltOf(5))
     store.failSalts = Object.assign(new Error('relation "market_salts" does not exist'), { code: "42P01" })
-    chain.events = [mktTok(saltOf(5), cid(60), 290), reg(c.pool, 300)]
+    chain.events = [mktTok(saltOf(5), sy, 290), reg(c.pool, 300)]
     const result = await discover(depsFor(manifest))
     expect(result).toMatchObject({ checked: [c.pool], complete: true })
     expect(store.rowsMap.get(c.pool)).toMatchObject({ valid: true })
@@ -742,16 +781,48 @@ describe("half-finished markets by salt (spec 0002 §5 \"Resuming\"): the factor
     expect(JSON.stringify(error.mock.calls)).not.toMatch(/does not exist/)
   })
 
-  it("resumableSalts lists this factory's salts, newest first, leaving out those whose pool is listed", async () => {
+  it("many salts on a foreign asset never push this network's market out of the list (the DoS the cap allowed)", async () => {
     const manifest = manifestWith([])
+    const legit = saltOf(20)
+    chain.events = [mktTok(legit, tokensAt(manifest, legit), 300)]
+    for (let i = 0; i < 60; i++) {
+      const spam = Buffer.alloc(32, 0)
+      spam.writeUInt32BE(i + 1, 0)
+      spam[31] = 0xee
+      chain.events.push(mktTok(spam, tokensAt(manifest, spam, { underlying: FOREIGN_SAC }), 400 + i))
+    }
+    await discover(depsFor(manifest))
+    expect([...store.saltsMap.values()].map((r) => r.salt)).toEqual([hex(legit)])
+    expect(await resumableSalts({ store, manifest })).toEqual({ status: "ok", salts: [hex(legit)] })
+  })
+
+  it("resumableSalts lists this factory's salts newest first, capped per asset, leaving out listed pools and assets this network does not list", async () => {
+    const B_ISSUER = Keypair.fromRawEd25519Seed(Buffer.alloc(32, 9)).publicKey()
+    const SAC_B = new Asset("EURB", B_ISSUER).contractId(PASSPHRASES.local)
+    const onB: Market = { ...seedMarket(contractsOf(90)), marketId: "local-eurb", underlying: { code: "EURB", issuer: B_ISSUER, sac: SAC_B, decimals: 7 } }
+    const manifest = manifestWith([onB])
     const done = saltOf(6)
     const donePool = deriveMarketContracts(manifest, hex(done)).pool
-    await store.recordSalt({ factory: SHARED.factory, salt: hex(saltOf(7)), phase: "tokens", ledger: 300 })
-    await store.recordSalt({ factory: SHARED.factory, salt: hex(done), phase: "pool", ledger: 310 })
-    await store.recordSalt({ factory: SHARED.factory, salt: hex(saltOf(8)), phase: "engine", ledger: 320 })
-    await store.recordSalt({ factory: cid(77), salt: hex(saltOf(9)), phase: "tokens", ledger: 330 })
+    const row = (salt: string, underlying: string, ledger: number, factory = SHARED.factory) => store.recordSalt({ factory, salt, underlying, phase: "tokens", ledger })
+    await row(hex(saltOf(7)), SAC, 300)
+    await row(hex(done), SAC, 310)
+    await row(hex(saltOf(8)), SAC_B, 320)
+    await row(hex(saltOf(9)), SAC, 330, cid(77))
+    // Rows from before a manifest change: an asset this network no longer lists is not shown.
+    await row(hex(saltOf(14)), FOREIGN_SAC, 340)
+    // One asset's issuer filling the list caps only its own share.
+    for (let i = 0; i < 25; i++) await row(`${(i + 1).toString(16).padStart(2, "0")}${"ab".repeat(31)}`, SAC, 500 + i)
     await store.record({ pool: donePool, source: "published", valid: true, reason: null, market: { ...seedMarket(contractsOf(80)), contracts: { ...seedMarket(contractsOf(80)).contracts, pool: donePool } } })
-    expect(await resumableSalts({ store, manifest })).toEqual({ status: "ok", salts: [hex(saltOf(8)), hex(saltOf(7))] })
+
+    const r = await resumableSalts({ store, manifest })
+    if (r.status !== "ok") throw new Error("unavailable")
+    const onSac = r.salts.filter((s) => s.endsWith("ab".repeat(31)) || s === hex(saltOf(7)))
+    expect(onSac).toHaveLength(MAX_RESUMABLE)
+    expect(r.salts).toContain(hex(saltOf(8)))
+    expect(r.salts).not.toContain(hex(done))
+    expect(r.salts).not.toContain(hex(saltOf(9)))
+    expect(r.salts).not.toContain(hex(saltOf(14)))
+    expect(r.salts[0]).toBe(`19${"ab".repeat(31)}`)
   })
 
   it("resumableSalts says it is unavailable when the registry cannot be read, and lists nothing without a factory", async () => {
