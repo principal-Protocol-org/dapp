@@ -10,8 +10,10 @@ import {
   decodeEngineParams,
   decodePoolEscrowParams,
   decodeTokenParams,
+  defaultMaturity,
   deriveMarketContracts,
   draftFromParams,
+  engineAuthTree,
   engineParams,
   engineWasmHashes,
   marketEngine,
@@ -19,6 +21,7 @@ import {
   paramErrors,
   paramsFromDraft,
   parseSalt,
+  poolAuthTree,
   poolEscrowParams,
   poolEscrowWasmHashes,
   predictMarket,
@@ -28,6 +31,7 @@ import {
   readFixedParams,
   tokenParams,
   tokenWasmHashes,
+  tokensAuthTree,
   type MarketParams,
 } from "../factory"
 import { parseManifest } from "../manifest"
@@ -334,6 +338,87 @@ describe("create_* invocations: one salt, the factory's own argument order", () 
   })
 })
 
+describe("the issuer's authorization tree: exactly the calls the factory makes under it (R29, R5-10)", () => {
+  const predicted = deriveMarketContracts(manifest, SALT)
+  const issuer: ScArg = { type: "address", value: ISSUER }
+  const addr = (value: string): ScArg => ({ type: "address", value })
+  const c = { issuer: ISSUER, salt: SALT, params: PARAMS }
+
+  it("create_tokens: SYWrapper, PTToken and YTToken initialize, each with the arguments the factory passes", () => {
+    expect(tokensAuthTree(manifest, c)).toEqual([
+      { contractId: predicted.sy, functionName: "initialize", args: [issuer, addr(SAC), addr(permissioning)] },
+      {
+        contractId: predicted.pt,
+        functionName: "initialize",
+        args: [
+          issuer,
+          addr(permissioning),
+          addr(SAC),
+          { type: "u64", value: PARAMS.maturity },
+          { type: "string", value: PARAMS.ptName },
+          { type: "string", value: PARAMS.ptSymbol },
+          { type: "u32", value: 7 },
+        ],
+      },
+      {
+        contractId: predicted.yt,
+        functionName: "initialize",
+        args: [
+          issuer,
+          addr(permissioning),
+          addr(SAC),
+          addr(oracle),
+          { type: "u64", value: PARAMS.maturity },
+          { type: "string", value: PARAMS.ytName },
+          { type: "string", value: PARAMS.ytSymbol },
+          { type: "u32", value: 7 },
+        ],
+      },
+    ])
+  })
+
+  it("create_engine: MarketConfig and PrincipalManager initialize, then the minter and risk-control wiring", () => {
+    const u32 = (value: number): ScArg => ({ type: "u32", value })
+    expect(engineAuthTree(manifest, c)).toEqual([
+      {
+        contractId: predicted.config,
+        functionName: "initialize",
+        args: [issuer, addr(SAC), { type: "u64", value: PARAMS.maturity }, addr(ADMIN), addr(TREASURY), u32(5), u32(1000), u32(10), u32(2000)],
+      },
+      {
+        contractId: predicted.manager,
+        functionName: "initialize",
+        args: [
+          issuer,
+          addr(predicted.sy),
+          addr(predicted.pt),
+          addr(predicted.yt),
+          addr(oracle),
+          addr(permissioning),
+          addr(SAC),
+          { type: "u64", value: PARAMS.maturity },
+          addr(predicted.config),
+        ],
+      },
+      { contractId: predicted.pt, functionName: "set_minter", args: [issuer, addr(predicted.manager)] },
+      { contractId: predicted.yt, functionName: "set_minter", args: [issuer, addr(predicted.manager)] },
+      { contractId: predicted.sy, functionName: "set_risk_control", args: [issuer, addr(riskControl)] },
+      { contractId: predicted.manager, functionName: "set_risk_control", args: [issuer, addr(riskControl)] },
+    ])
+  })
+
+  it("create_pool_and_escrow: MarketPool initialize, then the recovery escrow on SY, PT, YT and the pool (RecoveryEscrow.initialize asks no authorization)", () => {
+    const escrow = addr(predicted.recoveryEscrow)
+    expect(poolAuthTree(manifest, c)).toEqual([
+      { contractId: predicted.pool, functionName: "initialize", args: [issuer, addr(predicted.manager), { type: "u32", value: 4 }] },
+      { contractId: predicted.sy, functionName: "set_recovery_escrow", args: [issuer, escrow] },
+      { contractId: predicted.pt, functionName: "set_recovery_escrow", args: [issuer, escrow] },
+      { contractId: predicted.yt, functionName: "set_recovery_escrow", args: [issuer, escrow] },
+      { contractId: predicted.pool, functionName: "set_recovery_escrow", args: [issuer, escrow] },
+    ])
+  })
+})
+
 describe("parameters: the draft the form edits, checked as the contracts check them", () => {
   const draft = draftFromParams(PARAMS)
 
@@ -362,6 +447,14 @@ describe("parameters: the draft the form edits, checked as the contracts check t
       /^With a time stretch of 1 year, the maturity must be on or before /,
     )
     expect(paramErrors(manifest, PARAMS, null).maturity).toBe("Waiting for the ledger time to check the maturity.")
+  })
+})
+
+describe("defaultMaturity", () => {
+  it("is the first 00:00 UTC at least 90 days after the ledger time", () => {
+    // 2027-01-15 08:00 UTC + 90 days = 2027-04-15 08:00 UTC, so 2027-04-16 00:00 UTC.
+    expect(defaultMaturity(LEDGER)).toBe(BigInt(Date.UTC(2027, 3, 16) / 1000))
+    expect(paramErrors(manifest, { ...PARAMS, maturity: defaultMaturity(LEDGER) }, LEDGER).maturity).toBeUndefined()
   })
 })
 

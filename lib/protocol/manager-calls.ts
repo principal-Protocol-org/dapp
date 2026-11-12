@@ -25,8 +25,12 @@ import {
   decodePoolEscrowParams,
   decodeSalt,
   decodeTokenParams,
+  deriveMarketContracts,
+  engineAuthTree,
   knownUnderlyings,
   maturityText,
+  poolAuthTree,
+  tokensAuthTree,
   type EngineParamsInput,
   type PoolParamsInput,
   type TokenParamsInput,
@@ -292,7 +296,9 @@ export function createEngineCall(manifest: Manifest, p: FactoryCallParams<Engine
     invocation: createEngineInvocation(manifest, { issuer: source, salt: p.salt, params: q }),
     label:
       `Deploy the market config and PrincipalManager of the new ${codeOf(manifest, q.underlying)} market maturing ${maturityText(q.maturity)}: ` +
-      `fees ${q.tokenizationFeeBps}, ${q.ytFeeBps} and ${q.swapFeeTierBps} bps (tokenization, YT, swap tier), protocol share ${q.protocolShareBps} bps, treasury ${nameOf(manifest, q.treasury)}`,
+      // The two addresses the issuer signs into the market, in full: their defaults come from an RPC read.
+      `fees ${q.tokenizationFeeBps}, ${q.ytFeeBps} and ${q.swapFeeTierBps} bps (tokenization, YT, swap tier), protocol share ${q.protocolShareBps} bps, ` +
+      `protocol admin ${q.protocolAdmin}, treasury ${q.treasury}`,
   }
 }
 
@@ -317,6 +323,51 @@ export function factoryCallUnderlying(call: ManagerCall): string | undefined {
   if (params?.type !== "struct") return undefined
   const underlying = params.value.underlying
   return underlying?.type === "address" && typeof underlying.value === "string" ? underlying.value : undefined
+}
+
+/**
+ * What the signer of `call` authorizes beneath it (R29): for a factory call, exactly the calls the
+ * factory makes into the contracts it deploys under the issuer's authorization, in order, with their
+ * arguments (`factory.ts`, R5-10); nothing for any other call.
+ */
+export function managerCallAuthTree(manifest: Manifest, call: ManagerCall): ContractInvocation[] {
+  const { kind, source } = call
+  const { args } = call.invocation
+  switch (kind) {
+    case "create_tokens": {
+      const [salt, params] = factoryArgs(kind, args, 4)
+      return tokensAuthTree(manifest, { issuer: source, salt, params: decodeTokenParams(params) })
+    }
+    case "create_engine": {
+      const [salt, params] = factoryArgs(kind, args, 5)
+      return engineAuthTree(manifest, { issuer: source, salt, params: decodeEngineParams(params) })
+    }
+    case "create_pool_and_escrow": {
+      const [salt, params] = factoryArgs(kind, args, 6)
+      return poolAuthTree(manifest, { issuer: source, salt, params: decodePoolEscrowParams(params) })
+    }
+    default:
+      return []
+  }
+}
+
+/** How call trees name the contracts a factory call deploys. */
+const DEPLOYED_TYPE: Record<MarketContractName, string> = {
+  sy: "SYWrapper",
+  pt: "PTToken",
+  yt: "YTToken",
+  config: "MarketConfig",
+  manager: "PrincipalManager",
+  pool: "MarketPool",
+  recoveryEscrow: "RecoveryEscrow",
+}
+
+/** A factory call's tree: the factory call, then exactly the calls its issuer authorizes beneath it. */
+function factoryCallTree(manifest: Manifest, call: ManagerCall): string[] {
+  const salt = decodeSalt(call.invocation.args[1], `argument 2 of ${call.kind}`)
+  const predicted = deriveMarketContracts(manifest, salt)
+  const typeOf = (id: string) => DEPLOYED_TYPE[MARKET_CONTRACTS.find((k) => predicted[k] === id) as MarketContractName] ?? shorten(id)
+  return [`MarketFactory.${call.invocation.functionName}`, ...managerCallAuthTree(manifest, call).map((i) => `${typeOf(i.contractId)}.${i.functionName}`)]
 }
 
 /** The market and contract name of `contractId`, among `which` of every market; refuses any other contract. */
@@ -448,29 +499,11 @@ export function managerCallTree(manifest: Manifest, call: ManagerCall): string[]
       return [`Router.${functionName}`]
     case "add_consumer":
       return [`RiskControl.${functionName}`]
-    // The factory's own calls into the contracts it deploys, in the order it makes them (market_factory).
+    // The factory call, then exactly the calls the review checks its issuer authorizes beneath it.
     case "create_tokens":
-      return ["MarketFactory.create_tokens", "SYWrapper.initialize", "PTToken.initialize", "YTToken.initialize"]
     case "create_engine":
-      return [
-        "MarketFactory.create_engine",
-        "MarketConfig.initialize",
-        "PrincipalManager.initialize",
-        "PTToken.set_minter",
-        "YTToken.set_minter",
-        "SYWrapper.set_risk_control",
-        "PrincipalManager.set_risk_control",
-      ]
     case "create_pool_and_escrow":
-      return [
-        "MarketFactory.create_pool_and_escrow",
-        "MarketPool.initialize",
-        "RecoveryEscrow.initialize",
-        "SYWrapper.set_recovery_escrow",
-        "PTToken.set_recovery_escrow",
-        "YTToken.set_recovery_escrow",
-        "MarketPool.set_recovery_escrow",
-      ]
+      return factoryCallTree(manifest, call)
     case "set_paused":
       return [`${CONTRACT_TYPE[marketContractOf(manifest, contractId, PAUSABLE).contract]}.${functionName}`]
     case "claim_protocol_fees":

@@ -19,7 +19,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import testnetJson from "@/lib/protocol/__tests__/fixtures/testnet-interim.json"
 import { ACTION_META, invocationFor, type ActionId, type ActionInput, type GuardValues } from "../actions"
 import { hashLike } from "../hash"
-import { deriveMarketContracts, type MarketParams } from "../factory"
+import { engineAuthTree, tokensAuthTree, type MarketParams } from "../factory"
 import {
   addConsumerCall,
   claimCreatorFeesCall,
@@ -36,7 +36,7 @@ import {
 import { evaluateManagerGates } from "../manager-gates"
 import type { Role } from "../roles"
 import { parseManifest } from "../manifest"
-import { AMOUNTS_MOVED_REASON, SubmissionRejectedError, createRpcServer, scArgToVal, transactionEnvelopeHash } from "../stellar"
+import { AMOUNTS_MOVED_REASON, SubmissionRejectedError, createRpcServer, scArgToVal, transactionEnvelopeHash, type ContractInvocation } from "../stellar"
 import {
   MAX_TX_FEE_STROOPS,
   REVIEW_TTL_MS,
@@ -1458,11 +1458,11 @@ describe("manager reviews (0002 §5): the same review → sign pipeline as an ac
       protocolShareBps: 2000,
       timeStretchYears: 4,
     }
-    const predicted = deriveMarketContracts(factoryManifest, SALT)
     const tokens = () => createTokensCall(factoryManifest, { source: SOURCE, salt: SALT, params })
-    const initialize = (contractId: string) =>
-      new xdr.InvokeContractArgs({ contractAddress: new Address(contractId).toScAddress(), functionName: "initialize", args: [] })
-    const childInits = () => [initialize(predicted.sy), initialize(predicted.pt), initialize(predicted.yt)]
+    const argsOfInvocation = (i: ContractInvocation) =>
+      new xdr.InvokeContractArgs({ contractAddress: new Address(i.contractId).toScAddress(), functionName: i.functionName, args: i.args.map(scArgToVal) })
+    /** The genuine tree: the child calls the factory makes under the issuer's authorization, as simulation records them. */
+    const childInits = () => tokensAuthTree(factoryManifest, { issuer: SOURCE, salt: SALT, params }).map(argsOfInvocation)
     const preparedBy = (prepare: (tx: Transaction) => Transaction, call = tokens()) =>
       prepareManagerReview({ manifest: factoryManifest, call, rpc: fakeRpc({ prepareTransaction: async (tx) => prepare(tx) }) })
     const foreignAuth = "RPC added an authorization for something other than this call. Refusing to review it; try again or use another RPC."
@@ -1476,9 +1476,68 @@ describe("manager reviews (0002 §5): the same review → sign pipeline as an ac
       const result = await executeReview({ review: r, manifest: factoryManifest, sign, rpc: server, nowMs: r.preparedAtMs + 1_000 })
       expect(result.status).toBe("SUCCESS")
       expect(sign.seen).toHaveLength(1)
-      // create_engine carries more calls beneath it; their number is the factory's, not pinned here.
+      // create_engine carries its own tree: the config and manager initialize, then the wiring.
       const engine = createEngineCall(factoryManifest, { source: SOURCE, salt: SALT, params })
-      await expect(preparedBy((tx) => assemble(tx, { auth: [authWith(callOf(tx), [...childInits(), ...childInits()])] }), engine)).resolves.toBeTruthy()
+      const engineTree = engineAuthTree(factoryManifest, { issuer: SOURCE, salt: SALT, params }).map(argsOfInvocation)
+      await expect(preparedBy((tx) => assemble(tx, { auth: [authWith(callOf(tx), engineTree)] }), engine)).resolves.toBeTruthy()
+      // create_tokens' tree under create_engine is not create_engine's.
+      await expect(preparedBy((tx) => assemble(tx, { auth: [authWith(callOf(tx), childInits())] }), engine)).rejects.toThrow(foreignAuth)
+    })
+
+    it("refuses any call beneath the root that the factory does not make: RPC may not slip one into what the issuer signs", async () => {
+      const sacTransfer = argsOfInvocation({
+        contractId: market.underlying.sac,
+        functionName: "transfer",
+        args: [
+          { type: "address", value: SOURCE },
+          { type: "address", value: GRANTEE },
+          { type: "i128", value: 1_000_000_000n },
+        ],
+      })
+      const onForeign = argsOfInvocation({ contractId: FOREIGN, functionName: "initialize", args: [{ type: "address", value: SOURCE }] })
+      const genuine = childInits()
+      const withExtra = (extra: xdr.InvokeContractArgs) => (tx: Transaction) => assemble(tx, { auth: [authWith(callOf(tx), [...genuine, extra])] })
+      await expect(preparedBy(withExtra(sacTransfer))).rejects.toThrow(foreignAuth)
+      await expect(preparedBy(withExtra(onForeign))).rejects.toThrow(foreignAuth)
+      // The right contracts and functions with other arguments (another symbol), out of order, or one missing.
+      const changed = tokensAuthTree(factoryManifest, { issuer: SOURCE, salt: SALT, params: { ...params, ptSymbol: "PT-EVIL" } }).map(argsOfInvocation)
+      await expect(preparedBy((tx) => assemble(tx, { auth: [authWith(callOf(tx), changed)] }))).rejects.toThrow(foreignAuth)
+      await expect(preparedBy((tx) => assemble(tx, { auth: [authWith(callOf(tx), [...genuine].reverse())] }))).rejects.toThrow(foreignAuth)
+      await expect(preparedBy((tx) => assemble(tx, { auth: [authWith(callOf(tx), genuine.slice(1))] }))).rejects.toThrow(foreignAuth)
+      // A call nested beneath a genuine child.
+      await expect(
+        preparedBy((tx) => {
+          const entry = authWith(callOf(tx), genuine)
+          entry.rootInvocation.subInvocations[0].subInvocations.push(
+            new xdr.SorobanAuthorizedInvocation({
+              function: xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeContractFn(sacTransfer),
+              subInvocations: [],
+            }),
+          )
+          return assemble(tx, { auth: [entry] })
+        }),
+      ).rejects.toThrow(foreignAuth)
+    })
+
+    it("re-checks the tree right before signing (R31): a review whose authorization was swapped is refused", async () => {
+      const server = fakeRpc({ prepareTransaction: async (tx) => assemble(tx, { auth: [authWith(callOf(tx), childInits())] }) })
+      const r = await prepareManagerReview({ manifest: factoryManifest, call: tokens(), rpc: server })
+      const tx = new Transaction(r.unsignedXdr, passphrase)
+      const op = tx.operations[0]
+      if (op.type !== "invokeHostFunction") throw new Error("not an invocation")
+      const extra = argsOfInvocation({ contractId: FOREIGN, functionName: "initialize", args: [] })
+      const swapped = TransactionBuilder.cloneFrom(tx, { fee: (BigInt(tx.fee) - RESOURCE_FEE).toString() })
+        .clearOperations()
+        .addOperation(Operation.invokeHostFunction({ func: op.func, auth: [authWith(callOf(tx), [...childInits(), extra])] }))
+        .build()
+      r.unsignedXdr = swapped.toXDR()
+      r.unsignedXdrHash = hashLike(r.unsignedXdr)
+      r.fee = swapped.fee
+      const sign = signWith()
+      await expect(executeReview({ review: r, manifest: factoryManifest, sign, rpc: server })).rejects.toThrow(
+        "This review was changed after it was prepared (its transaction authorizes another call).",
+      )
+      expect(sign.seen).toEqual([])
     })
 
     it("refuses a create-contract authorization beneath the call: the issuer authorizes only contract calls under it", async () => {
@@ -1506,9 +1565,16 @@ describe("manager reviews (0002 §5): the same review → sign pipeline as an ac
       await expect(preparedBy((tx) => assemble(tx, { auth: [authWith(argsOf(grant()), childInits())] }))).rejects.toThrow(foreignAuth)
       await expect(preparedBy((tx) => assemble(tx, { auth: [authWith(callOf(tx), childInits()), authFor(callOf(tx))] }))).rejects.toThrow(foreignAuth)
       const issuer = Keypair.random().publicKey()
-      await expect(preparedBy((tx) => assemble(tx, { auth: [authBy(issuer, callOf(tx))] }))).rejects.toThrow(
-        `This call needs an authorization from another account (${short(issuer)})`,
-      )
+      const byIssuer = (tx: Transaction) => {
+        const entry = authBy(issuer, callOf(tx))
+        for (const sub of childInits()) {
+          entry.rootInvocation.subInvocations.push(
+            new xdr.SorobanAuthorizedInvocation({ function: xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeContractFn(sub), subInvocations: [] }),
+          )
+        }
+        return assemble(tx, { auth: [entry] })
+      }
+      await expect(preparedBy(byIssuer)).rejects.toThrow(`This call needs an authorization from another account (${short(issuer)})`)
       await expect(preparedBy((tx) => rpc.assembleTransaction(tx, simulationSuccess({ auth: [] })).build())).rejects.toThrow(
         "RPC left out the authorization this call needs.",
       )

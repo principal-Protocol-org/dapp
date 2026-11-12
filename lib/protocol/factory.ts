@@ -600,6 +600,92 @@ export function createPoolAndEscrowInvocation(manifest: Manifest, c: Create<Pool
   }
 }
 
+// ---------------------------------------------------------------- the issuer's authorization tree (R29, R5-10)
+
+/**
+ * What the issuer's single authorization of a `create_*` call carries beneath it: exactly the calls
+ * the factory makes into the contracts it deploys that call `admin.require_auth()` (each child's
+ * `initialize`, then its wiring through `assert_admin`), in the order it makes them, each with the
+ * arguments it passes (market_factory `create_tokens`, `create_engine`, `create_pool_and_escrow`).
+ * `RecoveryEscrow.initialize` takes no admin and asks no authorization. RPC prepares the
+ * authorization entries and is untrusted: the review refuses any tree but this one.
+ */
+export function tokensAuthTree(manifest: Manifest, c: Create<TokenParamsInput>): ContractInvocation[] {
+  const p = deriveMarketContracts(manifest, c.salt)
+  const { permissioning, oracle } = manifest.shared
+  const { decimals } = underlyingOf(manifest, c.params.underlying)
+  const issuer = address(issuerOf(c.issuer))
+  const underlying = address(c.params.underlying)
+  const maturity = u64(c.params.maturity)
+  return [
+    { contractId: p.sy, functionName: "initialize", args: [issuer, underlying, address(permissioning)] },
+    {
+      contractId: p.pt,
+      functionName: "initialize",
+      args: [issuer, address(permissioning), underlying, maturity, text(c.params.ptName), text(c.params.ptSymbol), u32(decimals)],
+    },
+    {
+      contractId: p.yt,
+      functionName: "initialize",
+      args: [issuer, address(permissioning), underlying, address(oracle), maturity, text(c.params.ytName), text(c.params.ytSymbol), u32(decimals)],
+    },
+  ]
+}
+
+export function engineAuthTree(manifest: Manifest, c: Create<EngineParamsInput>): ContractInvocation[] {
+  const p = deriveMarketContracts(manifest, c.salt)
+  const { permissioning, oracle, riskControl } = manifest.shared
+  const q = c.params
+  const issuer = address(issuerOf(c.issuer))
+  const maturity = u64(q.maturity)
+  return [
+    {
+      contractId: p.config,
+      functionName: "initialize",
+      args: [
+        issuer,
+        address(q.underlying),
+        maturity,
+        address(q.protocolAdmin),
+        address(q.treasury),
+        u32(q.tokenizationFeeBps),
+        u32(q.ytFeeBps),
+        u32(q.swapFeeTierBps),
+        u32(q.protocolShareBps),
+      ],
+    },
+    {
+      contractId: p.manager,
+      functionName: "initialize",
+      args: [issuer, address(p.sy), address(p.pt), address(p.yt), address(oracle), address(permissioning), address(q.underlying), maturity, address(p.config)],
+    },
+    { contractId: p.pt, functionName: "set_minter", args: [issuer, address(p.manager)] },
+    { contractId: p.yt, functionName: "set_minter", args: [issuer, address(p.manager)] },
+    { contractId: p.sy, functionName: "set_risk_control", args: [issuer, address(riskControl)] },
+    { contractId: p.manager, functionName: "set_risk_control", args: [issuer, address(riskControl)] },
+  ]
+}
+
+export function poolAuthTree(manifest: Manifest, c: Create<PoolParamsInput>): ContractInvocation[] {
+  const p = deriveMarketContracts(manifest, c.salt)
+  const issuer = address(issuerOf(c.issuer))
+  const escrow = address(p.recoveryEscrow)
+  return [
+    { contractId: p.pool, functionName: "initialize", args: [issuer, address(p.manager), u32(c.params.timeStretchYears)] },
+    { contractId: p.sy, functionName: "set_recovery_escrow", args: [issuer, escrow] },
+    { contractId: p.pt, functionName: "set_recovery_escrow", args: [issuer, escrow] },
+    { contractId: p.yt, functionName: "set_recovery_escrow", args: [issuer, escrow] },
+    { contractId: p.pool, functionName: "set_recovery_escrow", args: [issuer, escrow] },
+  ]
+}
+
+/** The maturity the form starts from: the first 00:00 UTC at least 90 days after `ledgerTime` (deploy.sh's testnet term). */
+export function defaultMaturity(ledgerTime: number): bigint {
+  const day = 86_400
+  const at = Math.floor(ledgerTime) + 90 * day
+  return BigInt(Math.ceil(at / day) * day)
+}
+
 /** A maturity as copy shows it: `2027-02-10 00:00 UTC`. */
 export function maturityText(maturity: bigint): string {
   return `${utcMinute(maturity).replace("T", " ")} UTC`

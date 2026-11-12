@@ -36,7 +36,7 @@ import { bytesToHex } from "./bytes"
 import { formatAmount, shorten } from "./format"
 import { parseOutput, type ActionOutput } from "./guards"
 import { hashLike } from "./hash"
-import { MANAGER_CALL_AUTH, managerCallTree, rebuildManagerCall, type ManagerCall } from "./manager-calls"
+import { MANAGER_CALL_AUTH, managerCallAuthTree, managerCallTree, rebuildManagerCall, type ManagerCall } from "./manager-calls"
 import { getMarket } from "./manifest"
 import {
   assertSignedTransactionMatchesReview,
@@ -266,9 +266,10 @@ function assertFeeCapped(fee: bigint, what: string): void {
  * exactly this call, with the call's own nested transfers beneath it. `caller`, for a manager call
  * its signer authorizes: exactly one entry, the source account's own, for exactly this call and
  * nothing beneath it. `caller_tree`, for a MarketFactory call its issuer signs (R5-10): the same
- * single entry, with contract calls beneath it (the factory's calls into the contracts it deploys,
- * each re-checking the issuer) and no other kind of authorization. `none`, for a permissionless
- * manager call: no entry at all.
+ * single entry, with exactly the calls the factory makes under it beneath, in order, each with its
+ * own arguments and nothing beneath it (`managerCallAuthTree`: each child contract's `initialize` and
+ * wiring re-check the issuer); anything else beneath the root, such as a transfer RPC slipped in, is
+ * refused. `none`, for a permissionless manager call: no entry at all.
  */
 export type AuthRule = "rooted" | "caller" | "caller_tree" | "none"
 
@@ -278,9 +279,10 @@ type AuthFault = { kind: "foreign" } | { kind: "missing" } | { kind: "other_sign
  * RPC is untrusted (R29). It may add footprint, resources, auth and the resource fee; it must not
  * change who calls what, at which sequence and in which time window, add an authorization `auth`
  * does not allow, or charge a fee it does not explain. Also applied by the server faucet to the
- * transactions it signs with its own keys (`lib/server/faucet.ts`).
+ * transactions it signs with its own keys (`lib/server/faucet.ts`). `beneath`, for `caller_tree`:
+ * the `InvokeContractArgs` XDR of each call expected beneath the root, in order.
  */
-export function assertPreparedMatches(built: Transaction, prepared: Transaction, auth: AuthRule = "rooted"): void {
+export function assertPreparedMatches(built: Transaction, prepared: Transaction, auth: AuthRule = "rooted", beneath?: readonly string[]): void {
   const expected = invokedContractArgs(built)
   const call = invokedContractArgs(prepared)
   const same =
@@ -313,7 +315,7 @@ export function assertPreparedMatches(built: Transaction, prepared: Transaction,
     )
   }
 
-  const fault = authFault(prepared, expected.toXdr("base64"), auth)
+  const fault = authFault(prepared, expected.toXdr("base64"), auth, beneath)
   if (fault) throw authRefusal(fault)
 }
 
@@ -335,21 +337,25 @@ function isCall(fn: xdr.SorobanAuthorizedFunction, callXdr: string): boolean {
   return fn.type === "sorobanAuthorizedFunctionTypeContractFn" && fn.contractFn.toXdr("base64") === callXdr
 }
 
-/** Every invocation, at every depth, is a contract function call: no contract creation is authorized. */
-function onlyContractCalls(invocations: readonly xdr.SorobanAuthorizedInvocation[]): boolean {
-  return invocations.every((i) => i.function.type === "sorobanAuthorizedFunctionTypeContractFn" && onlyContractCalls(i.subInvocations))
+/** `invocations` are exactly the calls `expected` lists (their XDR), in order, with nothing beneath any of them. */
+function isExactTree(invocations: readonly xdr.SorobanAuthorizedInvocation[], expected: readonly string[] | undefined): boolean {
+  return (
+    expected !== undefined &&
+    invocations.length === expected.length &&
+    invocations.every((i, n) => i.subInvocations.length === 0 && isCall(i.function, expected[n]))
+  )
 }
 
 /** Why the transaction's authorizations break `rule` for the call `callXdr`; undefined when they keep it. */
-function authFault(transaction: Transaction, callXdr: string, rule: AuthRule): AuthFault | undefined {
+function authFault(transaction: Transaction, callXdr: string, rule: AuthRule, beneath?: readonly string[]): AuthFault | undefined {
   const [operation] = transaction.operations
   const auth = operation?.type === "invokeHostFunction" ? (operation.auth ?? []) : []
   if (rule === "rooted") return auth.every((entry) => isCall(entry.rootInvocation.function, callXdr)) ? undefined : { kind: "foreign" }
   if (rule === "none") return auth.length === 0 ? undefined : { kind: "foreign" }
   if (auth.length === 0) return { kind: "missing" }
   const [entry] = auth
-  const beneath = entry.rootInvocation.subInvocations
-  const beneathAllowed = rule === "caller_tree" ? onlyContractCalls(beneath) : beneath.length === 0
+  const subs = entry.rootInvocation.subInvocations
+  const beneathAllowed = rule === "caller_tree" ? isExactTree(subs, beneath) : subs.length === 0
   if (auth.length > 1 || !isCall(entry.rootInvocation.function, callXdr) || !beneathAllowed) {
     return { kind: "foreign" }
   }
@@ -397,8 +403,22 @@ function currentTime(nowMs: number | undefined): number {
   return Math.max(nowMs ?? Number.NEGATIVE_INFINITY, Date.now())
 }
 
-/** The call a review must make, re-derived from its origin, and who signs and authorizes it. */
-type ReviewedCall = { source: string; invocation: ContractInvocation; auth: AuthRule; action?: ActionId }
+/** The call a review must make, re-derived from its origin, and who signs and authorizes it (and, for `caller_tree`, what beneath it). */
+type ReviewedCall = { source: string; invocation: ContractInvocation; auth: AuthRule; beneath?: string[]; action?: ActionId }
+
+/**
+ * The `InvokeContractArgs` XDR of each call a manager call's signer authorizes beneath it
+ * (`managerCallAuthTree`, R5-10), as the authorization entry carries it; undefined when one cannot
+ * be built, which a `caller_tree` call then refuses.
+ */
+function beneathOf(manifest: Manifest, call: ManagerCall): string[] | undefined {
+  try {
+    const tree = managerCallAuthTree(manifest, call).map((sub) => callXdrOf(manifest, call.source, sub))
+    return tree.every((x) => x !== undefined) ? (tree as string[]) : undefined
+  } catch {
+    return undefined
+  }
+}
 
 /**
  * R31: the call `review` was prepared for, derived again from its origin. An action: no zero floor (R5), the call `input` maps to. A manager call: the call its builder makes
@@ -419,7 +439,7 @@ function reviewedCall(review: AnyReview, manifest: Manifest): ReviewedCall {
   } catch {
     throw changedSince("review", "the call it describes")
   }
-  return { source: call.source, invocation: call.invocation, auth: MANAGER_CALL_AUTH[call.kind] }
+  return { source: call.source, invocation: call.invocation, auth: MANAGER_CALL_AUTH[call.kind], beneath: beneathOf(manifest, call) }
 }
 
 /**
@@ -443,7 +463,7 @@ function assertReviewIntact(review: AnyReview, manifest: Manifest, record: Issue
   if (tx.source !== call.source) throw changedSince("review", "its transaction has another source account")
   assertFeeCapped(BigInt(tx.fee), "The transaction to sign")
   if (tx.fee !== review.fee) throw changedSince("review", "its fee")
-  const fault = authFault(tx, expected, call.auth)
+  const fault = authFault(tx, expected, call.auth, call.beneath)
   if (fault) {
     throw changedSince(
       "review",
@@ -690,7 +710,7 @@ export async function prepareManagerReview(p: { manifest: Manifest; call: Manage
 
   const server = p.rpc ?? createRpcServer(manifest.rpcUrl)
   const { built, prepared } = await buildAndPrepare(server, manifest, call.source, call.invocation)
-  assertPreparedMatches(built, prepared, MANAGER_CALL_AUTH[call.kind])
+  assertPreparedMatches(built, prepared, MANAGER_CALL_AUTH[call.kind], beneathOf(manifest, call))
 
   const unsignedXdr = prepared.toXDR()
   const preparedAtMs = Date.now()

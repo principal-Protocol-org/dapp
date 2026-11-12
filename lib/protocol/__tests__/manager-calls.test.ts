@@ -247,10 +247,10 @@ describe("manager call builders encode each call as the contract declares it", (
         "SYWrapper.set_risk_control",
         "PrincipalManager.set_risk_control",
       ],
+      // RecoveryEscrow.initialize takes no admin, so it is not beneath the issuer's authorization.
       [
         "MarketFactory.create_pool_and_escrow",
         "MarketPool.initialize",
-        "RecoveryEscrow.initialize",
         "SYWrapper.set_recovery_escrow",
         "PTToken.set_recovery_escrow",
         "YTToken.set_recovery_escrow",
@@ -276,12 +276,13 @@ describe("MarketFactory create_* calls (spec 0002 §5 step 3, R5-10): the issuer
     expect(encodedTypes(call)).toEqual(["scvAddress", "scvBytes", "scvMap", "scvMap"])
   })
 
-  it("create_engine: the fees, the protocol share and the treasury in the label", () => {
+  it("create_engine: the fees, the protocol share, the protocol admin and the treasury in the label", () => {
     const call = createEngineCall(manifest, { source: SIGNER, salt: SALT, params: PARAMS })
     expect(call.kind).toBe("create_engine")
     expect(call.invocation).toEqual(createEngineInvocation(manifest, { issuer: SIGNER, salt: SALT, params: PARAMS }))
+    // The protocol admin and the treasury are addresses the issuer signs into the market: named in full.
     expect(call.label).toBe(
-      `Deploy the market config and PrincipalManager of the new USDY market maturing 2027-04-15 08:00 UTC: fees 5, 1000 and 10 bps (tokenization, YT, swap tier), protocol share 2000 bps, treasury ${short(TREASURY)}`,
+      `Deploy the market config and PrincipalManager of the new USDY market maturing 2027-04-15 08:00 UTC: fees 5, 1000 and 10 bps (tokenization, YT, swap tier), protocol share 2000 bps, protocol admin ${ACCOUNT}, treasury ${TREASURY}`,
     )
     expect(encodedTypes(call)).toEqual(["scvAddress", "scvBytes", "scvMap", "scvMap", "scvMap"])
   })
