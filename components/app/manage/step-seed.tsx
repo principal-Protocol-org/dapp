@@ -317,12 +317,14 @@ export function StepSeed({ salt, progress, account, ledgerTime }: ChainStepProps
             {formatRate(ready.amounts.ptPrice)} of its value at maturity.
           </Row>
           <Row label="Your liquidity">About {tok(ready.amounts.lp)} LP; the pool keeps 1,000 raw units of LP forever.</Row>
-          <p className="text-xs/5 text-ink-muted">
-            Each amount is final only in its review: the floors come from each call&apos;s simulation, and the pool&apos;s first deposit
-            is worked out again from what your wallet holds once the mint and deposit have landed. A few raw units of PT or SY may stay in
-            your wallet.
-          </p>
         </dl>
+      ) : null}
+      {ready ? (
+        <p className="text-xs/5 text-ink-muted">
+          Each amount is final only in its review: the floors come from each call&apos;s simulation, and the pool&apos;s first deposit is
+          worked out again from what your wallet holds once the mint and deposit have landed. A few raw units of PT or SY may stay in your
+          wallet.
+        </p>
       ) : null}
 
       <div className="flex flex-wrap gap-2">
