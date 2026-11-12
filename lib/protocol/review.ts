@@ -583,7 +583,7 @@ function summarize(market: Market, input: ActionInput, fee: string, validUntil: 
     }
     case "add_liquidity_underlying":
       // R5-5: the deposit and the pool's one-sided add in one signature; what the pool does not use is sent back.
-      give = [`up to ${amount(a, underlying)}, deposited as ${amount(b, "SY")} (the part the pool does not use is sent back to you)`]
+      give = [`${amount(a, underlying)}, deposited as SY; ${amount(b, "SY")} of it goes to the pool, and any SY it does not use is sent back to you as SY`]
       getAtLeast = [floor(g.minOut, "LP")]
       protocolFees = [swapFee]
       break

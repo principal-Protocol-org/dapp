@@ -527,7 +527,7 @@ describe("prepareReview", () => {
         return { give, getAtLeast }
       }
       expect(await lines("add_liquidity_underlying", { secondaryAmount: 9_5000000n })).toEqual({
-        give: ["up to 10 STA, deposited as 9.5 SY (the part the pool does not use is sent back to you)"],
+        give: ["10 STA, deposited as SY; 9.5 SY of it goes to the pool, and any SY it does not use is sent back to you as SY"],
         getAtLeast: ["1.2345678 LP"],
       })
       expect(await lines("remove_liquidity_underlying")).toEqual({ give: ["10 LP"], getAtLeast: ["1.2345678 STA"] })

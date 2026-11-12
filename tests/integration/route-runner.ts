@@ -202,6 +202,7 @@ export function createRunner(p: {
       source: account,
       amount: amounts.amount,
       ...(amounts.secondaryAmount !== undefined ? { secondaryAmount: amounts.secondaryAmount } : {}),
+      ...(amounts.desired ? { desired: amounts.desired } : {}),
       guards: openGuards(plan.action, amounts.amount),
       deadline: BigInt(ledgerAt + DEADLINE_SECONDS),
     }
