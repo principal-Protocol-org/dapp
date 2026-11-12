@@ -220,9 +220,10 @@ FACTORY="$LAST_ID"
 for k in sy pt yt config manager pool recoveryEscrow; do
   jq -e --arg k "$k" 'has($k)' <<<"$HASHES_JSON" >/dev/null || die "wasm hash for $k was not recorded"
 done
-# Router functions the deployed wasm exposes (user flows only), read from its interface.
+# Router functions the deployed wasm exposes (user flows only), read from its interface. The `quote_*`
+# views are reads, not flows, so they are left out.
 ROUTER_FUNCTIONS="$(stellar contract info interface --wasm "$WASM_DIR/principal_router.wasm" --output json 2>/dev/null |
-  jq -c '[.[] | select(has("function_v0")) | .function_v0.name] - ["bump","initialize","register_market","unregister_market","is_registered","market","get_admin","transfer_admin"]')" ||
+  jq -c '[.[] | select(has("function_v0")) | .function_v0.name | select(startswith("quote_") | not)] - ["bump","initialize","register_market","unregister_market","is_registered","market","get_admin","transfer_admin"]')" ||
   die "could not read the router interface"
 [ "$(jq 'length' <<<"$ROUTER_FUNCTIONS")" -gt 0 ] || die "router interface listed no user functions"
 
