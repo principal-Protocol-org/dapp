@@ -146,7 +146,6 @@ function expectRawShape(action: ActionId, retval: unknown): void {
     case "redeem":
       return struct(retval, ["underlying_from_pt", "underlying_from_yt"])
     case "buy_yt":
-    case "buy_yt_underlying":
     case "remove_liquidity":
       return bigints(retval, 2)
     case "add_liquidity":

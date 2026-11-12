@@ -81,8 +81,8 @@ const SIMULATED: Partial<Record<ActionInput["action"], unknown>> = {
   withdraw: 997n * S,
   sell_pt: 9n * S,
   remove_liquidity: [10n * S, 5n * S],
-  // swap_underlying_for_yt -> (yt_minted, underlying_back)
-  buy_yt_underlying: [40n * S, 85n * S],
+  // flash_mint_yt_from_underlying -> (yt_out, net_cost, underlying_back)
+  buy_yt_flash_underlying: [40n * S, 15n * S, 85n * S],
 }
 
 let xdrSeq = 0
@@ -169,7 +169,7 @@ beforeEach(() => {
       unwrap: "withdraw",
       swap_pt_for_sy: "sell_pt",
       remove_liquidity: "remove_liquidity",
-      swap_underlying_for_yt: "buy_yt_underlying",
+      flash_mint_yt_from_underlying: "buy_yt_flash_underlying",
     }
     const action = byFn[p.invocation.functionName]
     return { ok: true, retval: SIMULATED[action], latestLedger: 1, minResourceFee: "1" }
@@ -801,30 +801,29 @@ describe("useRoute", () => {
     ...over,
   })
 
-  describe("a one-step Buy YT takes its SY cost bound from the market's exchange rate (R4-6)", () => {
+  describe("a USDY flash Buy YT takes its SY cost bound from the market's exchange rate (R5-3)", () => {
     const YT_KINDS: readonly RouteKind[] = ["buy_yt", "sell_yt"]
     const req: RouteRequest = { ...buyPt, kind: "buy_yt", amount: 100n * S }
-    const oneStep = () => {
-      // R4-5: the one step signs the solver's deposit; here it is the 100 USDY of the request.
-      const p = planRoute(req, { routerFunctions: ["swap_underlying_for_yt"], buyYt: { syIn: 100n * S, depositUnderlying: 100n * S } })
-      if ("disabled" in p) throw new Error(p.disabled)
-      return p
-    }
+    // The planner routes the flash in Task 3; here the one step is written out: the 100 USDY budget, and `sy_in`.
+    const oneStep = (): StepPlan[] => [
+      { action: "buy_yt_flash_underlying", amount: { from: "input" }, secondaryAmount: { from: "value", value: 90n * S }, gives: "USDY", takes: "YT" },
+    ]
     async function marketLoaded() {
       await waitFor(() => expect(client.getQueryData(["market", "testnet", "m1"])).toBeDefined())
       await act(async () => {})
     }
 
-    it("prepares the step with max_net_cost and syIn worked out at the live exchange rate", async () => {
+    it("prepares the step with max_net_cost and min_underlying_back worked out at the live exchange rate", async () => {
       mocks.fetchMarketState.mockResolvedValue(marketState({ exchangeRate: live(S) }))
       const { result } = setup(() => [], { kinds: YT_KINDS })
       await marketLoaded()
       act(() => result.current.start(req, oneStep()))
       await untilReview(result, 1)
       const step: ActionInput = mocks.exec.prepare.mock.calls[0][0]
-      expect(step.action).toBe("buy_yt_underlying")
-      // sy_in 100 SY, at least 85 SY back: net 15 SY · 1.005.
-      expect(step.guards).toEqual({ minOut: (40n * S * 9_950n) / 10_000n, maxNetCost: 150_750_000n, syIn: 100n * S })
+      expect(step.action).toBe("buy_yt_flash_underlying")
+      expect(step.secondaryAmount).toBe(90n * S)
+      // budget 100 SY, net cost 15 SY · 1.005; the rest (84.925 SY) is what must come back.
+      expect(step.guards).toEqual({ minOut: (40n * S * 9_950n) / 10_000n, maxNetCost: 150_750_000n, minOut2: 849_250_000n })
     })
 
     it("does not prepare it without a live exchange rate, and says why", async () => {

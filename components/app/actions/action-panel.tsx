@@ -26,8 +26,8 @@ import type { MarketState } from "@/lib/protocol/market-state"
 /** Every Principal token has 7 decimals; the underlying's are read from the manifest. */
 const TOKEN_DECIMALS = 7
 
-/** The guard values a call signs; `syIn` (R4-6) only states one-step Buy YT's bound in its review. */
-type SignedGuard = Exclude<keyof GuardValues, "syIn">
+/** The guard values a call signs. */
+type SignedGuard = keyof GuardValues
 const FLOOR_ORDER: SignedGuard[] = ["minOut", "minOut2", "maxNetCost"]
 const DEFAULT_FLOORS: Record<SignedGuard, FloorSpec> = {
   minOut: { label: "Minimum received", unit: "" },

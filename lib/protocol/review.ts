@@ -174,41 +174,55 @@ const CALL_TREES: Record<ActionId, string[]> = {
   claim_yield: ["Router.claim_yield", "PrincipalManager.claim_yield"],
   redeem: ["Router.redeem_at_maturity", "PrincipalManager.redeem"],
   // The one-transaction Router functions: the Router function, then each downstream call in the
-  // order it makes them (router/src/lib.rs). The three that sweep end with `SYWrapper.withdraw_all`.
+  // order it makes them (router/src/lib.rs). The ones that end in the underlying withdraw only the gain
+  // the call produced (`SYWrapper.withdraw_gained`, R5-4).
   buy_pt_underlying: ["Router.swap_underlying_for_pt", "SYWrapper.deposit", "MarketPool.swap_sy_for_pt"],
-  sell_pt_underlying: ["Router.swap_pt_for_underlying", "MarketPool.swap_pt_for_sy", "SYWrapper.withdraw_all"],
-  buy_yt_underlying: [
-    "Router.swap_underlying_for_yt",
-    "SYWrapper.deposit",
-    "PrincipalManager.mint",
-    "MarketPool.swap_pt_for_sy",
-    "SYWrapper.withdraw_all",
-  ],
-  sell_yt_underlying: ["Router.swap_yt_for_underlying", "MarketPool.swap_yt_for_sy", "SYWrapper.withdraw_all"],
+  sell_pt_underlying: ["Router.swap_pt_for_underlying", "MarketPool.swap_pt_for_sy", "SYWrapper.withdraw_gained"],
+  sell_yt_underlying: ["Router.swap_yt_for_underlying", "MarketPool.swap_yt_for_sy", "SYWrapper.withdraw_gained"],
   add_liquidity_keep_yt: ["Router.add_liquidity_keep_yt", "SYWrapper.deposit", "PrincipalManager.mint", "MarketPool.add_liquidity"],
+  // R5-2: the pool mints PT + YT from its own reserve (the manager's `mint` names the pool as `from`).
+  buy_yt_flash: ["Router.flash_mint_yt", "MarketPool.flash_mint_yt", "PrincipalManager.mint"],
+  buy_yt_flash_underlying: [
+    "Router.flash_mint_yt_from_underlying",
+    "SYWrapper.deposit",
+    "MarketPool.flash_mint_yt",
+    "PrincipalManager.mint",
+    "SYWrapper.withdraw_gained",
+  ],
+  add_liquidity_underlying: ["Router.add_liquidity_single_underlying", "SYWrapper.deposit", "MarketPool.add_liquidity_single_sy"],
+  remove_liquidity_underlying: [
+    "Router.remove_liquidity_to_underlying",
+    "MarketPool.remove_liquidity",
+    "MarketPool.swap_gained_pt_for_sy",
+    "SYWrapper.withdraw_gained",
+  ],
 }
 
 /**
- * The guard fields each slippage-sensitive call signs (R4 mapping). One-step Buy YT's `syIn` is not
- * one of them: it only states the bound in the review (R4-6).
+ * The guard fields each slippage-sensitive call signs (R4 mapping). The flash signs `max_net_cost`
+ * with `min_yt_out`, and the USDY flash also `min_underlying_back` (R5-3): that one may be 0, because
+ * it follows from the signed `max_net_cost` and is not a separate bound.
  */
 function signedFloors(action: ActionId): (keyof GuardValues)[] {
   if (!ACTION_META[action].slippageSensitive) return []
   if (action === "remove_liquidity") return ["minOut", "minOut2"]
-  if (action === "buy_yt" || action === "buy_yt_underlying") return ["minOut", "maxNetCost"]
+  if (action === "buy_yt" || action === "buy_yt_flash") return ["minOut", "maxNetCost"]
+  if (action === "buy_yt_flash_underlying") return ["minOut", "maxNetCost", "minOut2"]
   return ["minOut"]
 }
 
 /**
  * R5: no slippage-sensitive call is prepared with a zero, negative or missing floor (for buy_yt,
- * `max_net_cost` too). The last gate before signing, whatever the caller passed.
+ * `max_net_cost` too). The one exception is the USDY flash's `min_underlying_back` (R5-3), which may be 0. The last gate before signing, whatever the caller passed.
  */
 function assertNoZeroFloor(input: ActionInput): void {
   const floors = signedFloors(input.action)
   if (floors.length === 0) return
   const zero =
     floors.some((field) => input.guards[field] === undefined) ||
-    Object.values(input.guards).some((value) => value !== undefined && value <= 0n)
+    Object.entries(input.guards).some(
+      ([field, value]) => value !== undefined && value <= 0n && !(field === "minOut2" && value === 0n && input.action === "buy_yt_flash_underlying"),
+    )
   if (zero) {
     throw new Error(
       `zero floor: ${ACTION_META[input.action].label} would be signed without a minimum above 0, so it is not prepared. Wait for the exact quote, then review again.`,
@@ -464,9 +478,6 @@ function summarize(market: Market, input: ActionInput, fee: string, validUntil: 
   const swapFee = "Swap fee: charged by the pool in SY, already counted in the amounts above."
   const tokenizationFee = "Tokenization fee: withheld from the SY before PT and YT are minted, already counted in the amounts above."
   const ytFee = "YT fee: deducted from the yield before it is paid."
-  // R4-3: Router.swap_pt_for_underlying, swap_yt_for_underlying and swap_underlying_for_yt end with
-  // SYWrapper.withdraw_all, and revert PreexistingSyBalance if the wallet holds SY when they start.
-  const sweep = `All the SY in your wallet, which this call withdraws as ${underlying}: it is refused if you hold any SY before it runs, so only the SY this trade produces is withdrawn.`
 
   let give: string[]
   let getAtLeast: string[]
@@ -520,8 +531,9 @@ function summarize(market: Market, input: ActionInput, fee: string, validUntil: 
       getAtLeast = [floor(g.minOut, "LP")]
       break
     case "add_liquidity_sy":
-      // R4-7: the pool takes the whole amount, then sends back the SY and PT it does not use.
-      give = [`up to ${amount(a, "SY")} (the part the pool does not use is sent back to you, with any PT it bought and did not need)`]
+      // R4-7: the pool takes the whole amount, then sends back the SY it does not use. R5-5: the PT dust
+      // stays in the pool's reserve and is never sent to the wallet.
+      give = [`up to ${amount(a, "SY")} (the part the pool does not use is sent back to you)`]
       getAtLeast = [floor(g.minOut, "LP")]
       protocolFees = [swapFee]
       break
@@ -544,32 +556,40 @@ function summarize(market: Market, input: ActionInput, fee: string, validUntil: 
       protocolFees = [swapFee]
       break
     case "sell_pt_underlying":
-      give = [amount(a, "PT"), sweep]
+      give = [amount(a, "PT")]
       getAtLeast = [floor(g.minOut, underlying)]
       protocolFees = [swapFee]
       break
-    case "buy_yt_underlying": {
-      // As buy_yt, but paid in the underlying: max_net_cost (SY) bounds what is spent of the SY
-      // the deposit produces (`syIn`, R4-6). The PT sale must return at least syIn − max_net_cost
-      // SY (Router.swap_underlying_for_yt), which is paid back as the underlying. Without `syIn`
-      // the bound cannot be stated, so nothing is promised back.
+    case "sell_yt_underlying":
+      give = [amount(a, "YT")]
+      getAtLeast = [floor(g.minOut, underlying)]
+      protocolFees = [swapFee]
+      break
+    case "buy_yt_flash":
+    case "buy_yt_flash_underlying": {
+      // R5-2, R5-3: `a` is the budget, in the token paid. The pool pulls max_net_cost SY up front and
+      // refunds what the trade does not cost, in the same transaction; max_net_cost is capped at the
+      // budget, so it never takes SY held before. The bound is stated as signed (P4), in SY.
       const maxNetCost = g.maxNetCost ?? 0n
-      const syIn = g.syIn
-      const allSpent = `all of which may be spent: no ${underlying} is guaranteed back`
+      const paid = input.action === "buy_yt_flash" ? "SY" : underlying
       give = [
-        syIn === undefined
-          ? `${amount(a, underlying)}, ${allSpent}`
-          : maxNetCost >= syIn
-            ? `${amount(a, underlying)}, deposited as ${amount(syIn, "SY")}, ${allSpent}`
-            : `${amount(a, underlying)}, deposited as ${amount(syIn, "SY")}, of which at most ${amount(maxNetCost, "SY")} is spent: the PT sale must return at least ${amount(syIn - maxNetCost, "SY")}, paid back to you as ${underlying} in the same transaction`,
-        sweep,
+        input.action === "buy_yt_flash"
+          ? `${amount(a, paid)} budget: you pay at most ${amount(maxNetCost, "SY")}, the rest of the ${amount(a, paid)} comes back in the same transaction`
+          : `${amount(a, paid)} budget: at most ${amount(maxNetCost, "SY")} of it is spent, the rest comes back as ${underlying} in the same transaction`,
       ]
       getAtLeast = [floor(g.minOut, "YT")]
       protocolFees = [tokenizationFee, swapFee]
       break
     }
-    case "sell_yt_underlying":
-      give = [amount(a, "YT"), sweep]
+    case "add_liquidity_underlying":
+      // R5-5: the deposit and the pool's one-sided add in one signature; what the pool does not use is sent back.
+      give = [`up to ${amount(a, underlying)}, deposited as ${amount(b, "SY")} (the part the pool does not use is sent back to you)`]
+      getAtLeast = [floor(g.minOut, "LP")]
+      protocolFees = [swapFee]
+      break
+    case "remove_liquidity_underlying":
+      // R5-6: the exit's PT is sold into the pool and everything is paid out as the underlying.
+      give = [amount(a, "LP")]
       getAtLeast = [floor(g.minOut, underlying)]
       protocolFees = [swapFee]
       break

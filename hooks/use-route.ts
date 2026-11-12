@@ -326,7 +326,7 @@ export function useRoute(opts: UseRouteOptions): RouteControls {
   const queryClient = useQueryClient()
   const { ledgerTime } = useLedgerClock()
   const { slippageBps, deadlineSeconds } = useSettings()
-  // R4-6: one-step Buy YT's floors need the live SY exchange rate, refetched with the market reads.
+  // R5-3: the USDY flash's open guards and floors need the live SY exchange rate, refetched with the market reads.
   const rates = ratesFrom(useMarketState(marketId))
 
   const [view, setView] = useState<View>(IDLE)
@@ -417,7 +417,7 @@ export function useRoute(opts: UseRouteOptions): RouteControls {
         const elsewhere = movedOnFrom(r)
         if (elsewhere) return movedOn(g, elsewhere)
         const plan = r.plans[i]
-        let amounts: { amount: bigint; secondaryAmount?: bigint }
+        let amounts: { amount: bigint; secondaryAmount?: bigint; desired?: { pt: bigint; sy: bigint } }
         try {
           amounts = resolveStep(plan, r.request, r.outputs.map((o) => o ?? undefined) as ActionOutput[])
         } catch (error) {
@@ -433,7 +433,8 @@ export function useRoute(opts: UseRouteOptions): RouteControls {
           source: r.account,
           amount: amounts.amount,
           ...(amounts.secondaryAmount !== undefined ? { secondaryAmount: amounts.secondaryAmount } : {}),
-          guards: openGuards(plan.action, amounts.amount),
+          ...(amounts.desired ? { desired: amounts.desired } : {}),
+          guards: openGuards(plan.action, amounts.amount, latest.current.rates),
           deadline: BigInt(ledgerAt + latest.current.deadlineSeconds),
         }
         const outcome = await simulate(latest.current.manifest, draft)

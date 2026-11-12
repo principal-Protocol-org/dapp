@@ -76,7 +76,7 @@ export type PreStartDraft = { input: ActionInput; known: boolean }
  * what it deposits or reports is then unknown to the steps after it.
  */
 export function preStartDraft(plan: StepPlan, request: RouteRequest): PreStartDraft {
-  let amounts: { amount: bigint; secondaryAmount?: bigint }
+  let amounts: { amount: bigint; secondaryAmount?: bigint; desired?: { pt: bigint; sy: bigint } }
   let known = true
   try {
     amounts = resolveStep({ ...plan, requires: [] }, request, [])
@@ -90,6 +90,7 @@ export function preStartDraft(plan: StepPlan, request: RouteRequest): PreStartDr
     source: request.source,
     amount: amounts.amount,
     ...(amounts.secondaryAmount !== undefined ? { secondaryAmount: amounts.secondaryAmount } : {}),
+    ...(amounts.desired ? { desired: amounts.desired } : {}),
     guards: {},
     deadline: 0n,
   }

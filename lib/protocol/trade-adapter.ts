@@ -29,8 +29,7 @@
  * Buy YT (Task 17) is sized here, in `plan` and `quote` alike: `swap_sy_for_yt` mints PT + YT from
  * `sy_in` SY the user must hold and sells the PT back, so the solver (`yt-solver.ts`) finds the
  * `sy_in` whose net cost is the spend, and the quote discloses that capital (`capital`, R2-59). The
- * one-step `swap_underlying_for_yt` is no flash swap either: it tokenizes the whole deposit the solver
- * sized, so its capital is disclosed the same way, coming back in its one step (R4-5).
+ * flash swap (R5-2) is routed here in Task 3.
  *
  * The LP tab (Task 18) is sized here too. Keep YT splits the USDY paid between `wrap_and_mint` (PT +
  * YT) and a deposit (SY) so that the PT and SY match the pool's ratio, and adds them (`sizeKeepYt`);
@@ -395,30 +394,16 @@ function sizeBuyYt(req: TradeRequest, m: MarketReads, ms: MarketState): BuyYtSiz
 }
 
 /**
- * What a simulated buy tells the quote, when the route's first step is the buy:
- * - `swap_sy_for_yt` (an SY payer): the exact YT and SY back;
- * - `swap_underlying_for_yt` (one step, R4-5): the exact YT and USDY back (`back`), with the SY of
- *   its deposit (`syIn`, the wrapper's own math on the amount signed) and the least SY the PT sale
- *   returned to pay that USDY, rounded up, as guards.ts works out its bound (R4-6).
+ * What a simulated buy tells the quote, when the route's first step is the buy: `swap_sy_for_yt`'s
+ * exact YT and SY back. (The flash swap's simulation is read in Task 3, R5-2.)
  */
-function buyYtSimulation(state: TradeState, exchangeRate: bigint): { yt_out: bigint; sy_back: bigint; syIn?: bigint; back?: bigint } | undefined {
+function buyYtSimulation(state: TradeState): { yt_out: bigint; sy_back: bigint } | undefined {
   const step = state.firstStep
   const first = state.plans[0]
   if (!step || !first || step.action !== first.action) return undefined
-  const noYt = "The simulation returned no YT for this trade, so it is not offered."
-  if (first.action === "buy_yt" && step.output.kind === "buy_yt") {
-    if (step.output.yt_out <= 0n) throw new Error(noYt)
-    return step.output
-  }
-  if (first.action !== "buy_yt_underlying" || step.output.kind !== "buy_yt_underlying") return undefined
-  if (step.output.yt_out <= 0n) throw new Error(noYt)
-  if (first.amount.from !== "value") throw new Error("This app could not read the USDY this purchase deposits, so it is not offered.")
-  return {
-    yt_out: step.output.yt_out,
-    sy_back: ceilDiv(step.output.underlying_back * SCALE, exchangeRate),
-    syIn: previewDeposit(first.amount.value, exchangeRate),
-    back: step.output.underlying_back,
-  }
+  if (first.action !== "buy_yt" || step.output.kind !== "buy_yt") return undefined
+  if (step.output.yt_out <= 0n) throw new Error("The simulation returned no YT for this trade, so it is not offered.")
+  return step.output
 }
 
 /**
@@ -431,9 +416,8 @@ function quoteBuyYt(req: TradeRequest, r: Reads, state: TradeState): TradeQuote 
   const { s, oracleRate, exchangeRate, slippageBps } = r
   const payUnderlying = req.pay === "underlying"
   const { feeBps, solution, depositUnderlying } = sizeBuyYt(req, r, state.ms)
-  const sim = buyYtSimulation(state, exchangeRate)
-  // One-step Buy YT (R4-5) mints from all its deposit's SY: simulated, that is the SY netted below.
-  const syIn = sim?.syIn ?? solution.syIn
+  const sim = buyYtSimulation(state)
+  const syIn = solution.syIn
   const ytOut = sim?.yt_out ?? solution.ytOut
   const syBack = sim?.sy_back ?? solution.syBack
   const netCost = syIn - syBack
@@ -445,14 +429,11 @@ function quoteBuyYt(req: TradeRequest, r: Reads, state: TradeState): TradeQuote 
 
   const toPaid = (sy: bigint) => (payUnderlying ? previewWithdraw(sy, exchangeRate) : sy)
   const moved = payUnderlying && depositUnderlying !== undefined ? depositUnderlying : syIn
-  // A simulated one step returns the USDY itself (R4-5): verbatim, never through the SY rate again.
-  const back = sim?.back ?? toPaid(syBack)
-  // The step that hands the sale's SY back in the token paid: the withdraw of `sy_back`, or the buy,
-  // or the one step that does both (R4-5: so Max keeps treating it as a capital trade).
+  const back = toPaid(syBack)
+  // The step that hands the sale's SY back in the token paid: the withdraw of `sy_back`, or the buy.
   const backStep =
     state.plans.findIndex((p) =>
-      p.action === "buy_yt_underlying" ||
-      (payUnderlying ? p.action === "withdraw" && p.amount.from === "step" && p.amount.field === "sy_back" : p.action === "buy_yt"),
+      payUnderlying ? p.action === "withdraw" && p.amount.from === "step" && p.amount.field === "sy_back" : p.action === "buy_yt",
     ) + 1
   // guards.ts signs max_net_cost = ceil(net cost × (1 + slippage)): the sale returns at least the rest.
   const maxNetCost = ceilDiv(netCost * (BPS + slippageBps), BPS)
@@ -906,7 +887,7 @@ function quote(req: TradeRequest, state: TradeState): Live<TradeQuote> {
  * the wallet holds SY it would sweep (R4-3), else the existing actions. Buy YT's steps are sized here,
  * from the market's reads: the deposit moves about leverage × the spend and the buy uses the solver's
  * `sy_in`, both as `value` amounts, so the gates checked before the route starts see what each step
- * moves (R2-57); the one step signs that same deposit (R4-5).
+ * moves (R2-57).
  */
 function plan(req: TradeRequest, ctx: PlanContext): StepPlan[] | RouteDisabled {
   const route = toRouteRequest(req, ctx)
@@ -943,12 +924,17 @@ function plan(req: TradeRequest, ctx: PlanContext): StepPlan[] | RouteDisabled {
  */
 function planKeepYt(req: TradeRequest, ctx: PlanContext, route: RouteRequest, base: RouteContext): StepPlan[] | RouteDisabled {
   const oneStep = singleStepFor(route, base) !== undefined
-  if (req.amount <= 0n) return planRoute(route, { ...base, keepYtSplit: { mintUnderlying: 0n, depositUnderlying: 0n }, keepYtMintSy: 0n })
+  if (req.amount <= 0n) return planRoute(route, { ...base, keepYtSplit: { mintUnderlying: 0n, depositUnderlying: 0n }, keepYtMintSy: 0n, keepYtDesired: { pt: 0n, sy: 0n } })
   if (!ctx.ms) return { disabled: "Keep YT is sized from this market's data, which has not loaded yet. Try again in a moment." }
   const m = readsOf(ctx.ms)
   if (typeof m === "string") return { disabled: `Keep YT cannot be sized now. ${m}` }
   try {
-    if (oneStep) return planRoute(route, { ...base, keepYtMintSy: sizeKeepYtOneStep(req, m, ctx.ms).mint })
+    if (oneStep) {
+      // R5-7: the PT and SY offered to the pool are signed as literals: the PT the mint gives, and the rest of the shares.
+      const { shares, mint, feeBps } = sizeKeepYtOneStep(req, m, ctx.ms)
+      const desired = { pt: previewMint(mint, m.oracleRate, feeBps).pt, sy: shares - mint }
+      return planRoute(route, { ...base, keepYtMintSy: mint, keepYtDesired: desired })
+    }
     const { mintUnderlying, depositUnderlying } = sizeKeepYt(req, m, ctx.ms)
     return planRoute(route, { ...base, keepYtSplit: { mintUnderlying, depositUnderlying } })
   } catch (error) {

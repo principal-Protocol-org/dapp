@@ -334,9 +334,9 @@ function authInvalidAction(events: readonly xdr.DiagnosticEvent[] | undefined): 
   }
 }
 
-/** What a FAILED transaction says when it touched ledger data its footprint did not list (final review 3). */
+/** What a FAILED transaction says when it touched ledger data its footprint did not list (final review 3; R5-5: the LP only PT refund that once caused it is gone, the message stays generic). */
 export const FOOTPRINT_MOVED_REASON =
-  "The pool's refund rounding moved between the quote and inclusion, so the transaction touched data it had not planned for. Nothing was taken except the network fee; prepare it again.";
+  "The pool moved between the quote and inclusion, so the transaction touched data it had not planned for. Nothing was taken except the network fee; prepare it again.";
 
 /** The text of a diagnostic event's data: the host's message alone, or the strings of `[message, ...args]`. */
 function eventText(data: xdr.ScVal): string {
@@ -376,7 +376,7 @@ function footprintExceeded(events: readonly xdr.DiagnosticEvent[] | undefined): 
 
 /**
  * Why a transaction included in a ledger FAILED, in plain words (R49): an authorization refused
- * because an amount moved, or a footprint the pool's refund rounding outgrew (from the diagnostic
+ * because an amount moved, or a footprint the pool's state outgrew (from the diagnostic
  * events, when RPC returns them), else the result code. A failed transaction changes nothing
  * on-chain but its fee and sequence number.
  */

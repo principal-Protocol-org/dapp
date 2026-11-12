@@ -515,56 +515,18 @@ describe("YT tab — Sell", () => {
 })
 
 describe("YT tab — one-step Router functions (0004 Task 5)", () => {
-  const listed = { ...usdyManifest, routerFunctions: ["swap_underlying_for_yt", "swap_yt_for_underlying"] }
+  const listed = { ...usdyManifest, routerFunctions: ["swap_yt_for_underlying"] }
   const noSy = () =>
     (mocks.accounts[A] = accountState({ underlying: live(100_000n * UNIT), sy: live(0n), yt: live(1_000n * UNIT), permYt: live(true), depositCap: live(0n) }))
 
-  it("Buy YT in USDY is one signature that still moves the solver's deposit, back in step 1 (R4-5)", async () => {
-    mocks.manifest = listed as typeof mocks.manifest
-    noSy()
-    const r = solved(100n * UNIT)
-    const dep = depositFor(r.syIn)
-    const out = { yt: r.ytOut - 5n, back: previewWithdraw(r.syBack, SCALE) - 7n }
-    simulateReturns(mocks, [out.yt, out.back])
-    await renderUi(<YtTab marketId="m1" side="buy" />)
-    await enter("You pay", "100")
-    expect(detail("Signatures")).toBe("1")
-    expect(await tipOf("Signatures")).toMatch(/This is one step, one signature: Buy YT \(you give USDY, you get YT\)\./)
-    expect(screen.getByText("Exact (simulated)")).toBeTruthy()
-    expect(received()).toBe(`${amount(out.yt)} YT`)
-    expect(detail("Moves")).toBe(`${amount(dep)} USDY`)
-    expect(detail("Spends")).toBe(`${amount(dep - out.back)} USDY`)
-    expect(detail("Comes back (step 1)")).toBe(`${amount(out.back)} USDY`)
-    expect(await tipOf("Spends at most")).toBe(
-      "At your 0.50% slippage tolerance, on this preview. The transaction is signed with its own bound, from its own simulation, and fails rather than cost more.",
-    )
-    expect(screen.queryByText(/so this takes \d signatures/)).toBeNull()
-
-    await user().click(reviewButton("Buy YT"))
-    await settle()
-    const dialog = await screen.findByRole("dialog", { name: "Review route: Buy YT" })
-    expect(within(within(dialog).getByRole("list", { name: "Route steps" })).getAllByRole("listitem")).toHaveLength(1)
-    const input = mocks.prepareReview.mock.calls[0][0].input
-    expect(input).toMatchObject({ action: "buy_yt_underlying", amount: dep, source: A })
-    // R4-6: the bound in SY, from the simulated USDY back at the SY rate.
-    const syIn = previewDeposit(dep, SCALE)
-    const net = syIn - ceilDiv(out.back * SCALE, SCALE)
-    expect(input.guards).toEqual({ minOut: minAfterSlippage(out.yt, 50n), maxNetCost: ceilDiv(net * (BPS + 50n), BPS), syIn })
-    expect(mocks.executeReview).not.toHaveBeenCalled()
-  })
-
-  it("holding SY, Buy YT keeps its three steps and says why, in plain sight (R4-3)", async () => {
+  it("Buy YT in USDY keeps its three steps until the flash is routed (R5-2, Task 3), with no one-signature note", async () => {
     mocks.manifest = listed as typeof mocks.manifest
     const r = solved(100n * UNIT)
     simulateReturns(mocks, depositFor(r.syIn))
     await renderUi(<YtTab marketId="m1" side="buy" />)
     await enter("You pay", "100")
     expect(detail("Signatures")).toBe("3")
-    expect(
-      screen.getByText(
-        "You hold 100,000 SY, so this takes 3 signatures: the one-signature trade would withdraw all your SY. Withdraw it first (Quick actions → Withdraw) to trade in one signature.",
-      ),
-    ).toBeTruthy()
+    expect(screen.queryByText(/so this takes \d signatures/)).toBeNull()
     expect(detail("Comes back (step 3)")).toBe(`${amount(previewWithdraw(r.syBack, SCALE))} USDY`)
     await user().click(reviewButton("Buy YT"))
     await settle()

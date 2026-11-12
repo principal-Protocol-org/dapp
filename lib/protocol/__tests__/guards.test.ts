@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest"
-import { MAX_I128, type ActionId, type ActionInput } from "../actions"
+import { type ActionId, type ActionInput } from "../actions"
 import { guardsFrom, minAfterSlippage, openGuards, parseOutput, type ActionOutput } from "../guards"
 import { SCALE } from "../math"
 
@@ -33,9 +33,22 @@ describe("openGuards", () => {
     expect(openGuards("claim_yield", 5n)).toEqual({})
     expect(openGuards("redeem", 5n)).toEqual({})
   })
-  it("one-step Buy YT simulates with no cost bound at all (MAX_I128: the Router then asks for no SY back)", () => {
-    expect(openGuards("buy_yt_underlying", 5n)).toEqual({ minOut: 0n, maxNetCost: MAX_I128 })
-    for (const action of ["buy_pt_underlying", "sell_pt_underlying", "sell_yt_underlying", "add_liquidity_keep_yt"] as const) {
+  it("the flash simulates with the whole budget as its cost bound, in SY (R5-3)", () => {
+    expect(openGuards("buy_yt_flash", 5n)).toEqual({ minOut: 0n, maxNetCost: 5n })
+    // USDY payer: the budget is the SY its deposit produces, so it needs the exchange rate.
+    expect(openGuards("buy_yt_flash_underlying", 1_000_000_000n, { exchangeRate: SCALE })).toEqual({ minOut: 0n, maxNetCost: 1_000_000_000n, minOut2: 0n })
+    expect(openGuards("buy_yt_flash_underlying", 1_000_000_000n, { exchangeRate: 10_500_000n })).toEqual({
+      minOut: 0n,
+      maxNetCost: 952_380_952n,
+      minOut2: 0n,
+    })
+  })
+  it("the USDY flash is refused without the exchange rate", () => {
+    expect(() => openGuards("buy_yt_flash_underlying", 5n)).toThrow(/exchange rate/)
+    expect(() => openGuards("buy_yt_flash_underlying", 5n, { exchangeRate: 0n })).toThrow(/exchange rate/)
+  })
+  it("the new one-step actions simulate with one zero floor", () => {
+    for (const action of ["buy_pt_underlying", "sell_pt_underlying", "sell_yt_underlying", "add_liquidity_keep_yt", "add_liquidity_underlying", "remove_liquidity_underlying"] as const) {
       expect(openGuards(action, 5n)).toEqual({ minOut: 0n })
     }
   })
@@ -64,8 +77,12 @@ describe("parseOutput", () => {
     expect(parseOutput("buy_pt_underlying", 5n)).toEqual({ kind: "amount", value: 5n })
     expect(parseOutput("sell_pt_underlying", 6n)).toEqual({ kind: "amount", value: 6n })
     expect(parseOutput("sell_yt_underlying", 7n)).toEqual({ kind: "amount", value: 7n })
-    // swap_underlying_for_yt -> (yt_minted, underlying_back)
-    expect(parseOutput("buy_yt_underlying", [9n, 4n])).toEqual({ kind: "buy_yt_underlying", yt_out: 9n, underlying_back: 4n })
+    // flash_mint_yt -> (yt_out, net_cost); flash_mint_yt_from_underlying -> (yt_out, net_cost, underlying_back)
+    expect(parseOutput("buy_yt_flash", [9n, 4n])).toEqual({ kind: "flash_yt", yt_out: 9n, net_cost: 4n })
+    expect(parseOutput("buy_yt_flash_underlying", [9n, 4n, 7n])).toEqual({ kind: "flash_yt_underlying", yt_out: 9n, net_cost: 4n, underlying_back: 7n })
+    // add_liquidity_single_underlying -> (pt_used, sy_used, lp); remove_liquidity_to_underlying -> i128
+    expect(parseOutput("add_liquidity_underlying", [1n, 2n, 3n])).toEqual({ kind: "add_liquidity", pt_used: 1n, sy_used: 2n, lp: 3n })
+    expect(parseOutput("remove_liquidity_underlying", 8n)).toEqual({ kind: "amount", value: 8n })
     // add_liquidity_keep_yt -> KeepYtResult { pt_used, sy_used, lp_minted, yt_minted }
     expect(parseOutput("add_liquidity_keep_yt", { pt_used: 1n, sy_used: 2n, lp_minted: 3n, yt_minted: 4n })).toEqual({
       kind: "keep_yt",
@@ -78,11 +95,16 @@ describe("parseOutput", () => {
   it("refuses any other shape for the five one-transaction Router actions", () => {
     expect(() => parseOutput("buy_pt_underlying", [5n])).toThrow()
     expect(() => parseOutput("sell_yt_underlying", 5)).toThrow()
-    expect(() => parseOutput("buy_yt_underlying", 5n)).toThrow()
-    expect(() => parseOutput("buy_yt_underlying", [1n])).toThrow()
-    expect(() => parseOutput("buy_yt_underlying", [1n, 2n, 3n])).toThrow()
-    expect(() => parseOutput("buy_yt_underlying", [1n, 2])).toThrow()
-    expect(() => parseOutput("buy_yt_underlying", { yt_out: 1n, underlying_back: 2n })).toThrow()
+    expect(() => parseOutput("buy_yt_flash", 5n)).toThrow()
+    expect(() => parseOutput("buy_yt_flash", [1n])).toThrow()
+    expect(() => parseOutput("buy_yt_flash", [1n, 2n, 3n])).toThrow()
+    expect(() => parseOutput("buy_yt_flash", [1n, 2])).toThrow()
+    expect(() => parseOutput("buy_yt_flash", { yt_out: 1n, net_cost: 2n })).toThrow()
+    expect(() => parseOutput("buy_yt_flash_underlying", [1n, 2n])).toThrow()
+    expect(() => parseOutput("buy_yt_flash_underlying", [1n, 2n, 3n, 4n])).toThrow()
+    expect(() => parseOutput("buy_yt_flash_underlying", [1n, 2n, "3"])).toThrow()
+    expect(() => parseOutput("buy_yt_flash_underlying", 5n)).toThrow()
+    expect(() => parseOutput("remove_liquidity_underlying", [1n])).toThrow()
     expect(() => parseOutput("add_liquidity_keep_yt", [1n, 2n, 3n, 4n])).toThrow()
     expect(() => parseOutput("add_liquidity_keep_yt", [1n, 2n, 3n])).toThrow()
     expect(() => parseOutput("add_liquidity_keep_yt", { pt_used: 1n, sy_used: 2n, lp_minted: 3n })).toThrow()
@@ -180,47 +202,80 @@ describe("guardsFrom", () => {
     expect(guardsFrom("add_liquidity_keep_yt", input("add_liquidity_keep_yt"), tuple, 100n).ok).toBe(false)
   })
 
-  describe("one-step Buy YT: max_net_cost in SY from the simulation and the exchange rate (R4-6)", () => {
-    const buy = (amount: bigint) => input("buy_yt_underlying", amount)
-    it("at an exchange rate of 1, sy_in is the amount and the bound is the SY not paid back", () => {
-      const out: ActionOutput = { kind: "buy_yt_underlying", yt_out: 99_0000000n, underlying_back: 95_0000000n }
-      const r = guardsFrom("buy_yt_underlying", buy(100_0000000n), out, 50n, { exchangeRate: SCALE })
-      // net 5 SY · 1.005 = 5.025 SY
-      expect(r).toEqual({ ok: true, guards: { minOut: (99_0000000n * 9950n) / 10000n, maxNetCost: 50_250_000n, syIn: 100_0000000n } })
+  describe("flash Buy YT: max_net_cost from the simulated net cost, capped at the budget (R5-3)", () => {
+    const flash = (amount: bigint) => input("buy_yt_flash", amount)
+    const flashUsdy = (amount: bigint) => input("buy_yt_flash_underlying", amount)
+    it("SY payer: net cost plus the slippage margin, and the YT floor", () => {
+      const out: ActionOutput = { kind: "flash_yt", yt_out: 99_0000000n, net_cost: 5_0000000n }
+      // 5 SY · 1.005 = 5.025 SY, well inside the 100 SY budget
+      expect(guardsFrom("buy_yt_flash", flash(100_0000000n), out, 50n)).toEqual({
+        ok: true,
+        guards: { minOut: (99_0000000n * 9950n) / 10000n, maxNetCost: 50_250_000n },
+      })
     })
-    it("at another rate: sy_in floors like the deposit, the SY back is rounded up, the bound is rounded up", () => {
-      const out: ActionOutput = { kind: "buy_yt_underlying", yt_out: 123_456_789n, underlying_back: 900_000_001n }
-      const r = guardsFrom("buy_yt_underlying", buy(1_000_000_000n), out, 50n, { exchangeRate: 10_500_000n })
-      // sy_in = floor(1e9 · 1e7 / 1.05e7) = 952380952; sy_back_min = ceil(900000001 · 1e7 / 1.05e7) = 857142859;
-      // net = 95238093; max_net_cost = ceil(95238093 · 10050 / 10000) = 95714284.
-      expect(r).toEqual({ ok: true, guards: { minOut: 122_839_505n, maxNetCost: 95_714_284n, syIn: 952_380_952n } })
+    it("never exceeds the budget, so the pool cannot take SY the wallet held before", () => {
+      const out: ActionOutput = { kind: "flash_yt", yt_out: 99_0000000n, net_cost: 99_8000000n }
+      // 99.8 · 1.005 = 100.299 SY: capped at the 100 SY budget
+      const r = guardsFrom("buy_yt_flash", flash(100_0000000n), out, 50n)
+      expect(r).toMatchObject({ ok: true, guards: { maxNetCost: 100_0000000n } })
     })
-    it("is refused, with the reason, without the exchange rate", () => {
-      const out: ActionOutput = { kind: "buy_yt_underlying", yt_out: 99_0000000n, underlying_back: 95_0000000n }
-      const r = guardsFrom("buy_yt_underlying", buy(100_0000000n), out, 50n)
+    it("USDY payer at an exchange rate of 1: budget SY is the amount, minOut2 is what the unspent SY unwraps to", () => {
+      const out: ActionOutput = { kind: "flash_yt_underlying", yt_out: 99_0000000n, net_cost: 5_0000000n, underlying_back: 95_0000000n }
+      const r = guardsFrom("buy_yt_flash_underlying", flashUsdy(100_0000000n), out, 50n, { exchangeRate: SCALE })
+      // maxNetCost 5.025 SY; minOut2 = previewWithdraw(100 − 5.025 SY) = 94.975
+      expect(r).toEqual({ ok: true, guards: { minOut: (99_0000000n * 9950n) / 10000n, maxNetCost: 50_250_000n, minOut2: 949_750_000n } })
+    })
+    it("USDY payer at another rate: the budget floors like the deposit, minOut2 floors like the withdraw", () => {
+      const out: ActionOutput = { kind: "flash_yt_underlying", yt_out: 123_456_789n, net_cost: 95_238_093n, underlying_back: 900_000_001n }
+      const r = guardsFrom("buy_yt_flash_underlying", flashUsdy(1_000_000_000n), out, 50n, { exchangeRate: 10_500_000n })
+      // budget = floor(1e9 · 1e7 / 1.05e7) = 952380952; max_net_cost = ceil(95238093 · 10050 / 10000) = 95714284;
+      // minOut2 = floor((952380952 − 95714284) · 1.05) = 899500001.
+      expect(r).toEqual({ ok: true, guards: { minOut: 122_839_505n, maxNetCost: 95_714_284n, minOut2: 899_500_001n } })
+    })
+    it("USDY payer: the cap leaves nothing to come back, and then min_underlying_back is 0 (the one zero floor)", () => {
+      const out: ActionOutput = { kind: "flash_yt_underlying", yt_out: 99_0000000n, net_cost: 99_9000000n, underlying_back: 1n }
+      expect(guardsFrom("buy_yt_flash_underlying", flashUsdy(100_0000000n), out, 50n, { exchangeRate: SCALE })).toMatchObject({
+        ok: true,
+        guards: { maxNetCost: 100_0000000n, minOut2: 0n },
+      })
+    })
+    it("the USDY flash is refused, with the reason, without the exchange rate", () => {
+      const out: ActionOutput = { kind: "flash_yt_underlying", yt_out: 99_0000000n, net_cost: 5_0000000n, underlying_back: 95_0000000n }
+      const r = guardsFrom("buy_yt_flash_underlying", flashUsdy(100_0000000n), out, 50n)
       expect(r.ok).toBe(false)
       if (!r.ok) expect(r.reason).toMatch(/exchange rate/)
       for (const exchangeRate of [0n, -1n]) {
-        const bad = guardsFrom("buy_yt_underlying", buy(100_0000000n), out, 50n, { exchangeRate })
+        const bad = guardsFrom("buy_yt_flash_underlying", flashUsdy(100_0000000n), out, 50n, { exchangeRate })
         expect(bad.ok).toBe(false)
         if (!bad.ok) expect(bad.reason).toMatch(/exchange rate/)
       }
     })
-    it("is refused when the YT costs nothing or less", () => {
-      for (const back of [100_0000000n, 150_0000000n]) {
-        const out: ActionOutput = { kind: "buy_yt_underlying", yt_out: 10_0000000n, underlying_back: back }
-        const r = guardsFrom("buy_yt_underlying", buy(100_0000000n), out, 50n, { exchangeRate: SCALE })
-        expect(r).toEqual({ ok: false, reason: "The YT price is not positive, so buying YT is not offered." })
+    it("is refused when the YT is free or paid for (net_cost <= 0: PT at or above par)", () => {
+      for (const net_cost of [0n, -1n, -5_0000000n]) {
+        const sy: ActionOutput = { kind: "flash_yt", yt_out: 10_0000000n, net_cost }
+        expect(guardsFrom("buy_yt_flash", flash(100_0000000n), sy, 50n)).toEqual({ ok: false, reason: "The YT price is not positive, so buying YT is not offered." })
+        const usdy: ActionOutput = { kind: "flash_yt_underlying", yt_out: 10_0000000n, net_cost, underlying_back: 1n }
+        expect(guardsFrom("buy_yt_flash_underlying", flashUsdy(100_0000000n), usdy, 50n, { exchangeRate: SCALE })).toEqual({
+          ok: false,
+          reason: "The YT price is not positive, so buying YT is not offered.",
+        })
       }
     })
     it("is refused when the YT floor rounds to zero", () => {
-      const out: ActionOutput = { kind: "buy_yt_underlying", yt_out: 1n, underlying_back: 95_0000000n }
-      expect(guardsFrom("buy_yt_underlying", buy(100_0000000n), out, 50n, { exchangeRate: SCALE }).ok).toBe(false)
+      const out: ActionOutput = { kind: "flash_yt", yt_out: 1n, net_cost: 5_0000000n }
+      expect(guardsFrom("buy_yt_flash", flash(100_0000000n), out, 50n).ok).toBe(false)
     })
-    it("refuses the two-step Buy YT's result shape", () => {
-      const out: ActionOutput = { kind: "buy_yt", yt_out: 99n, sy_back: 95n }
-      expect(guardsFrom("buy_yt_underlying", buy(100n), out, 50n, { exchangeRate: SCALE }).ok).toBe(false)
+    it("refuses the other result shapes", () => {
+      expect(guardsFrom("buy_yt_flash", flash(100n), { kind: "buy_yt", yt_out: 99n, sy_back: 95n }, 50n).ok).toBe(false)
+      const usdy: ActionOutput = { kind: "flash_yt_underlying", yt_out: 99n, net_cost: 5n, underlying_back: 1n }
+      expect(guardsFrom("buy_yt_flash", flash(100n), usdy, 50n).ok).toBe(false)
     })
+  })
+  it("LP only from USDY and the exit to USDY floor their one output", () => {
+    const add: ActionOutput = { kind: "add_liquidity", pt_used: 1n, sy_used: 2n, lp: 1_000_000n }
+    expect(guardsFrom("add_liquidity_underlying", input("add_liquidity_underlying"), add, 50n)).toEqual({ ok: true, guards: { minOut: 995_000n } })
+    const exit: ActionOutput = { kind: "amount", value: 1_000_000n }
+    expect(guardsFrom("remove_liquidity_underlying", input("remove_liquidity_underlying"), exit, 50n)).toEqual({ ok: true, guards: { minOut: 995_000n } })
   })
   it("the exchange rate changes no other action's floors", () => {
     const out: ActionOutput = { kind: "buy_yt", yt_out: 99_0000000n, sy_back: 95_0000000n }

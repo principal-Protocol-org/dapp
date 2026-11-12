@@ -116,7 +116,11 @@ describe("spendBalance (R24)", () => {
     ["recombine", "amount", 3n],
     // The one-transaction Router actions (0004 Task 3): the buys and Keep YT spend the underlying.
     ["buy_pt_underlying", "amount", 1n],
-    ["buy_yt_underlying", "amount", 1n],
+    // R5-2, R5-5, R5-6: the flash and LP-in-USDY calls spend the token paid; the exit spends LP.
+    ["buy_yt_flash", "amount", 2n],
+    ["buy_yt_flash_underlying", "amount", 1n],
+    ["add_liquidity_underlying", "amount", 1n],
+    ["remove_liquidity_underlying", "amount", 5n],
     ["add_liquidity_keep_yt", "amount", 1n],
     ["sell_pt_underlying", "amount", 3n],
     ["sell_yt_underlying", "amount", 4n],
@@ -152,9 +156,16 @@ describe("amountsComplete", () => {
     expect(amountsComplete("add_liquidity_keep_yt", 1n, 0n)).toBe(false)
     expect(amountsComplete("add_liquidity_keep_yt", 1n, undefined)).toBe(false)
     expect(amountsComplete("add_liquidity_keep_yt", 0n, 1n)).toBe(false)
-    for (const action of ["buy_pt_underlying", "sell_pt_underlying", "buy_yt_underlying", "sell_yt_underlying"] as const) {
+    for (const action of ["buy_pt_underlying", "sell_pt_underlying", "sell_yt_underlying", "remove_liquidity_underlying"] as const) {
       expect(amountsComplete(action, 1n, undefined)).toBe(true)
       expect(amountsComplete(action, 0n, undefined)).toBe(false)
+    }
+    // The flash and LP from USDY carry their SY literal (`sy_in`) as the second amount.
+    for (const action of ["buy_yt_flash", "buy_yt_flash_underlying", "add_liquidity_underlying"] as const) {
+      expect(amountsComplete(action, 1n, 1n)).toBe(true)
+      expect(amountsComplete(action, 1n, 0n)).toBe(false)
+      expect(amountsComplete(action, 1n, undefined)).toBe(false)
+      expect(amountsComplete(action, 0n, 1n)).toBe(false)
     }
   })
 })

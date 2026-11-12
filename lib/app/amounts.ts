@@ -73,12 +73,14 @@ export function spendBalance(action: ActionId, field: FieldKey, acc: AccountStat
     case "deposit":
     case "mint":
     case "buy_pt_underlying":
-    case "buy_yt_underlying":
+    case "buy_yt_flash_underlying":
+    case "add_liquidity_underlying":
     case "add_liquidity_keep_yt":
       return acc.underlying
     case "withdraw":
     case "buy_pt":
     case "buy_yt":
+    case "buy_yt_flash":
     case "add_liquidity_sy":
       return acc.sy
     case "sell_pt":
@@ -90,6 +92,7 @@ export function spendBalance(action: ActionId, field: FieldKey, acc: AccountStat
     case "sell_yt_underlying":
       return acc.yt
     case "remove_liquidity":
+    case "remove_liquidity_underlying":
       return acc.lp
     case "recombine":
       return smaller(acc.pt, acc.yt)
@@ -108,6 +111,10 @@ export function amountsComplete(action: ActionId, amount: bigint, secondaryAmoun
       return amount >= 0n && second >= 0n && amount + second > 0n
     case "add_liquidity":
     case "add_liquidity_keep_yt":
+    // The flash and LP-from-USDY calls carry their SY literal (`sy_in`) as the second amount (R5-2, R5-5).
+    case "buy_yt_flash":
+    case "buy_yt_flash_underlying":
+    case "add_liquidity_underlying":
       return amount > 0n && second > 0n
     default:
       return amount > 0n

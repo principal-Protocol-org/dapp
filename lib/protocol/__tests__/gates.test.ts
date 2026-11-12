@@ -39,18 +39,18 @@ const BIG = 1_000_000n * UNIT
 
 const ALL = Object.keys(ACTION_META) as ActionId[]
 /** R4-3: each one-transaction Router action is in every gate set any of its components is in. */
-const TRADES: ActionId[] = ["buy_pt", "sell_pt", "buy_yt", "sell_yt", "buy_pt_underlying", "sell_pt_underlying", "buy_yt_underlying", "sell_yt_underlying"]
+const TRADES: ActionId[] = ["buy_pt", "sell_pt", "buy_yt", "sell_yt", "buy_pt_underlying", "sell_pt_underlying", "sell_yt_underlying"]
 const ADDS: ActionId[] = ["add_liquidity", "add_liquidity_sy", "add_liquidity_keep_yt"]
-/** The three that end with SYWrapper.withdraw_all and revert on any SY in the wallet (Router error 9). */
-const SWEEPS: ActionId[] = ["sell_pt_underlying", "sell_yt_underlying", "buy_yt_underlying"]
+/** The two that end with SYWrapper.withdraw_all and revert on any SY in the wallet (Router error 9). */
+const SWEEPS: ActionId[] = ["sell_pt_underlying", "sell_yt_underlying"]
 /** Deposit (+ mint) first: charged against the deposit cap and RiskControl. */
-const DEPOSITS: ActionId[] = ["buy_pt_underlying", "buy_yt_underlying", "add_liquidity_keep_yt"]
+const DEPOSITS: ActionId[] = ["buy_pt_underlying", "add_liquidity_keep_yt"]
 /** R22b: actions that move PT / YT to or from the account need its per-asset grant. */
 const NEEDS_PT: ActionId[] = [
   "mint", "buy_pt", "buy_yt", "sell_pt", "add_liquidity", "add_liquidity_sy", "remove_liquidity",
-  "buy_pt_underlying", "sell_pt_underlying", "buy_yt_underlying", "add_liquidity_keep_yt",
+  "buy_pt_underlying", "sell_pt_underlying", "add_liquidity_keep_yt",
 ]
-const NEEDS_YT: ActionId[] = ["mint", "buy_yt", "sell_yt", "buy_yt_underlying", "sell_yt_underlying", "add_liquidity_keep_yt"]
+const NEEDS_YT: ActionId[] = ["mint", "buy_yt", "sell_yt", "sell_yt_underlying", "add_liquidity_keep_yt"]
 const except = (...out: ActionId[]) => ALL.filter((a) => !out.includes(a))
 
 const live = <T,>(value: T): Live<T> => ({ status: "live", value, ledger: 500 })
@@ -480,7 +480,7 @@ const MATRIX: Row[] = [
     },
     code: "pause",
     message: /PrincipalManager is paused/,
-    blocks: ["mint", "buy_yt", "sell_yt", "buy_yt_underlying", "sell_yt_underlying", "add_liquidity_keep_yt", "recombine", "claim_yield", "redeem"],
+    blocks: ["mint", "buy_yt", "sell_yt", "sell_yt_underlying", "add_liquidity_keep_yt", "recombine", "claim_yield", "redeem"],
   },
   {
     rule: "a manager contract_error #9 on an action the manager pause does not cover is a failed quote",
@@ -632,8 +632,8 @@ const MATRIX: Row[] = [
     },
     code: "risk",
     message: /counts twice/i,
-    blocks: ["mint", "buy_yt_underlying"],
-    allows: except("mint", "buy_yt_underlying"),
+    blocks: ["mint"],
+    allows: except("mint"),
   },
   {
     rule: "cb volume + amount > limit blocks deposit and buy_yt",
@@ -653,8 +653,8 @@ const MATRIX: Row[] = [
       c.market.cb.volume = live(90n * UNIT)
     },
     code: "risk",
-    // Buy YT with the underlying reports 2x, Keep YT its deposit plus the mint (10 + 5): both exceed 10.
-    blocks: ["mint", "buy_yt_underlying", "add_liquidity_keep_yt"],
+    // Keep YT reports its deposit plus the mint (10 + 5), which exceeds 10.
+    blocks: ["mint", "add_liquidity_keep_yt"],
     allows: ["deposit", "buy_yt", "buy_pt_underlying"],
   },
   {
@@ -685,7 +685,7 @@ const MATRIX: Row[] = [
       c.market.cb.assetVolume = live(85n * UNIT)
     },
     code: "risk",
-    blocks: ["mint", "buy_yt_underlying"],
+    blocks: ["mint"],
     allows: ["deposit", "buy_yt", "buy_pt_underlying", "add_liquidity_keep_yt"],
   },
   {
@@ -698,7 +698,7 @@ const MATRIX: Row[] = [
     },
     code: "risk",
     // Keep YT: its 10 deposit plus a 5 SY mint worth 10 at this rate.
-    blocks: ["buy_yt", "mint", "buy_yt_underlying", "add_liquidity_keep_yt"],
+    blocks: ["buy_yt", "mint", "add_liquidity_keep_yt"],
     allows: ["deposit", "buy_pt_underlying"],
   },
 
@@ -1131,13 +1131,13 @@ describe("unavailable read blocks", () => {
       field: "account.underlying",
       set: a((x) => (x.underlying = down())),
       label: /underlying balance/i,
-      needs: ["deposit", "mint", "buy_pt_underlying", "buy_yt_underlying", "add_liquidity_keep_yt"],
+      needs: ["deposit", "mint", "buy_pt_underlying", "add_liquidity_keep_yt", "buy_yt_flash_underlying", "add_liquidity_underlying"],
     },
     {
       field: "account.sy",
       set: a((x) => (x.sy = down())),
       label: /SY balance/,
-      needs: ["withdraw", "buy_pt", "buy_yt", "add_liquidity", "add_liquidity_sy", ...SWEEPS],
+      needs: ["withdraw", "buy_pt", "buy_yt", "add_liquidity", "add_liquidity_sy", "buy_yt_flash", ...SWEEPS],
     },
     {
       field: "account.pt",
@@ -1151,7 +1151,7 @@ describe("unavailable read blocks", () => {
       label: /YT balance/,
       needs: ["sell_yt", "sell_yt_underlying", "recombine", "redeem", "claim_yield"],
     },
-    { field: "account.lp", set: a((x) => (x.lp = down())), label: /LP balance/, needs: ["remove_liquidity"] },
+    { field: "account.lp", set: a((x) => (x.lp = down())), label: /LP balance/, needs: ["remove_liquidity", "remove_liquidity_underlying"] },
     { field: "account.ytLastClaimedIndex", set: a((x) => (x.ytLastClaimedIndex = down())), label: /last claim/i, needs: ["claim_yield"] },
     { field: "account.ytPendingClaim", set: a((x) => (x.ytPendingClaim = down())), label: /settled.*yield/i, needs: ["claim_yield"] },
     { field: "account.depositCap", set: a((x) => (x.depositCap = down())), label: /deposit cap/i, needs: ["deposit", "mint", ...DEPOSITS] },
@@ -1470,7 +1470,7 @@ describe("sy_balance — the sweeping Router actions refuse any SY in the wallet
     expect(blockers).toEqual([{ code: "sy_balance", message: expect.stringMatching(/^You hold 3 SY\. .*Quick actions → Withdraw/) }])
   })
 
-  it("refuses SY for exactly the actions the planner marks sweepsSy, the three that end with withdraw_all (final review 4)", () => {
+  it("refuses SY for exactly the actions the planner marks sweepsSy, the two that end with withdraw_all (final review 4)", () => {
     const planner = Object.values(SINGLE_STEP).flatMap((x) => (x?.sweepsSy ? [x.action] : []))
     expect([...planner].sort()).toEqual([...SWEEPS].sort())
     const refused = ALL.filter((action) => codes(gates(action, withSy(3n * UNIT))).includes("sy_balance"))
@@ -1488,7 +1488,6 @@ describe("one-transaction Router actions: amounts and balances (0004 Task 4)", (
 
   it.each([
     ["buy_pt_underlying", short((a) => (a.underlying = live(UNIT))), /underlying/],
-    ["buy_yt_underlying", short((a) => (a.underlying = live(UNIT))), /underlying/],
     ["add_liquidity_keep_yt", short((a) => (a.underlying = live(UNIT))), /underlying/],
     ["sell_pt_underlying", short((a) => (a.pt = live(UNIT))), /PT/],
     ["sell_yt_underlying", short((a) => (a.yt = live(UNIT))), /YT/],
@@ -1523,11 +1522,6 @@ describe("breakerReport and capCharge for the one-transaction Router actions (R2
   it("Buy PT with the underlying reports and charges its deposit", () => {
     expect(breakerReport(at("buy_pt_underlying"), { market })).toBe(10n * UNIT)
     expect(capCharge(at("buy_pt_underlying"))).toBe(10n * UNIT)
-  })
-
-  it("Buy YT with the underlying reports twice (deposit and mint), charges the deposit once", () => {
-    expect(breakerReport(at("buy_yt_underlying"), { market })).toBe(20n * UNIT)
-    expect(capCharge(at("buy_yt_underlying"))).toBe(10n * UNIT)
   })
 
   it("Keep YT reports its deposit plus the mint's SY at the SY rate, and charges the deposit only", () => {

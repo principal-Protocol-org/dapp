@@ -138,7 +138,11 @@ export const HISTORY_KIND: Record<ActionId, HistoryKind> = {
   // withdraw, deposit + mint + add_liq, each in one transaction.
   buy_pt_underlying: "buy_pt",
   sell_pt_underlying: "sell_pt",
-  buy_yt_underlying: "buy_yt",
+  // R5: the flash is a Buy YT; LP in and out of USDY are one transaction each.
+  buy_yt_flash: "buy_yt",
+  buy_yt_flash_underlying: "buy_yt",
+  add_liquidity_underlying: "add_liquidity",
+  remove_liquidity_underlying: "remove_liquidity",
   sell_yt_underlying: "sell_yt",
   add_liquidity_keep_yt: "add_liquidity",
 }

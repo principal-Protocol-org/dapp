@@ -94,10 +94,11 @@ export function expectFloors(input: ActionInput, out: ActionOutput, g: GuardValu
       expect(input.amount - out.sy_back <= max, `${label}: net cost ${input.amount - out.sy_back} vs max_net_cost ${max}`).toBe(true)
       return
     }
-    case "buy_yt_underlying": {
+    case "flash_yt":
+    case "flash_yt_underlying": {
       atLeast(out.yt_out, positive(g.minOut, "min_yt_out"), "yt_out")
       const max = positive(g.maxNetCost, "max_net_cost")
-      expect(g.syIn !== undefined && max < g.syIn, `${label}: max_net_cost ${max} vs the deposit's SY ${String(g.syIn)}`).toBe(true)
+      expect(out.net_cost <= max, `${label}: net cost ${out.net_cost} vs max_net_cost ${max}`).toBe(true)
       return
     }
     case "redeem":

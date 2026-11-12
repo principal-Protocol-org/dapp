@@ -84,7 +84,7 @@ const ROUTER_PREEXISTING_SY_CODE = 9
 /**
  * 0004 Task 4 (R4-3): each one-transaction Router action is in every gate set any of its components
  * is in. buy_pt_underlying = deposit + buy_pt; sell_pt_underlying = sell_pt + withdraw;
- * buy_yt_underlying = deposit + buy_yt + withdraw; sell_yt_underlying = sell_yt + withdraw;
+ * sell_yt_underlying = sell_yt + withdraw;
  * add_liquidity_keep_yt = deposit + mint + add_liquidity.
  */
 const TRADES: readonly ActionId[] = [
@@ -94,13 +94,12 @@ const TRADES: readonly ActionId[] = [
   "sell_yt",
   "buy_pt_underlying",
   "sell_pt_underlying",
-  "buy_yt_underlying",
   "sell_yt_underlying",
 ]
 const ADDS: readonly ActionId[] = ["add_liquidity", "add_liquidity_sy", "add_liquidity_keep_yt"]
 /**
  * R4-3: these end with `SYWrapper.withdraw_all`, which reverts `PreexistingSyBalance` (Router error 9)
- * if the wallet holds SY: sell_pt_underlying, sell_yt_underlying and buy_yt_underlying. Read from the
+ * if the wallet holds SY: sell_pt_underlying and sell_yt_underlying. Read from the
  * planner's `SINGLE_STEP` (`sweepsSy`), so the gate and the fallback never disagree.
  */
 const SWEEPS_SY: ReadonlySet<ActionId> = new Set(Object.values(SINGLE_STEP).flatMap((s) => (s?.sweepsSy ? [s.action] : [])))
@@ -112,13 +111,12 @@ const NEEDS_FRESH_ORACLE = new Set<ActionId>(["mint", ...TRADES, "add_liquidity_
 /** Go through the pool's reserves: `assert_seeded` panics on an empty pool (`market_pool:930-935`). */
 const USES_POOL = new Set<ActionId>([...TRADES, ...ADDS])
 /** Call `RiskControl.check_deposit`, which refuses while RiskControl is paused. */
-const RISK_CHECKED = new Set<ActionId>(["deposit", "mint", "buy_yt", "buy_pt_underlying", "buy_yt_underlying", "add_liquidity_keep_yt"])
+const RISK_CHECKED = new Set<ActionId>(["deposit", "mint", "buy_yt", "buy_pt_underlying", "add_liquidity_keep_yt"])
 /** Call `PrincipalManager` entry points that `assert_not_paused`: mint, recombine, redeem, claim. */
 const MANAGER_PAUSABLE = new Set<ActionId>([
   "mint",
   "buy_yt",
   "sell_yt",
-  "buy_yt_underlying",
   "sell_yt_underlying",
   "add_liquidity_keep_yt",
   "recombine",
@@ -126,7 +124,7 @@ const MANAGER_PAUSABLE = new Set<ActionId>([
   "redeem",
 ])
 /** Charge `SYWrapper.deposit`'s per-address cap (wrap_and_mint deposits first). */
-const DEPOSIT_CAPPED = new Set<ActionId>(["deposit", "mint", "buy_pt_underlying", "buy_yt_underlying", "add_liquidity_keep_yt"])
+const DEPOSIT_CAPPED = new Set<ActionId>(["deposit", "mint", "buy_pt_underlying", "add_liquidity_keep_yt"])
 /** R22: compliance items every write needs (all protocol writes are SAC- and Permissioning-gated). */
 const EVERY_WRITE_ITEMS: readonly ComplianceItem["id"][] = ["account", "trustline", "authorized", "permissioning"]
 /**
@@ -146,10 +144,9 @@ const NEEDS_PT_GRANT = new Set<ActionId>([
   "remove_liquidity",
   "buy_pt_underlying",
   "sell_pt_underlying",
-  "buy_yt_underlying",
   "add_liquidity_keep_yt",
 ])
-const NEEDS_YT_GRANT = new Set<ActionId>(["mint", "buy_yt", "sell_yt", "buy_yt_underlying", "sell_yt_underlying", "add_liquidity_keep_yt"])
+const NEEDS_YT_GRANT = new Set<ActionId>(["mint", "buy_yt", "sell_yt", "sell_yt_underlying", "add_liquidity_keep_yt"])
 
 const ITEM_LABEL: Record<ComplianceItem["id"], string> = {
   account: "account",
@@ -370,9 +367,14 @@ function holdings(input: ActionInput, acc: AccountState): Holding[] {
     // 0004: each one-transaction action spends what its composition takes from the wallet (the SY in
     // between is its own).
     case "buy_pt_underlying":
-    case "buy_yt_underlying":
     case "add_liquidity_keep_yt":
+    case "buy_yt_flash_underlying":
+    case "add_liquidity_underlying":
       return [underlying(amount)]
+    case "buy_yt_flash":
+      return [sy(amount)]
+    case "remove_liquidity_underlying":
+      return [lp(amount)]
     case "sell_pt_underlying":
       return [pt(amount)]
     case "sell_yt_underlying":
@@ -554,7 +556,7 @@ export function breakerReport(input: ActionInput, ctx: Pick<GateContext, "market
   const amount = input.amount
   if (!RISK_CHECKED.has(a) || amount <= 0n) return 0n
   if (a === "deposit") return amount
-  if (a === "mint" || a === "buy_yt_underlying") return 2n * amount
+  if (a === "mint") return 2n * amount
   if (a === "buy_pt_underlying") return amount
   const rate = ctx.market.exchangeRate
   if (rate.status !== "live") return undefined
@@ -660,11 +662,9 @@ function breakerGate(input: ActionInput, ctx: GateContext, g: Gates): void {
     const twice =
       a === "mint"
         ? " Minting from the underlying counts twice against it (the deposit and the mint)."
-        : a === "buy_yt_underlying"
-          ? " Buying YT with the underlying counts twice against it (the deposit and the mint)."
-          : a === "add_liquidity_keep_yt"
-            ? " Keeping YT counts the deposit and the mint against it."
-            : ""
+        : a === "add_liquidity_keep_yt"
+          ? " Keeping YT counts the deposit and the mint against it."
+          : ""
     g.block(
       "risk",
       `This would trip the ${scope} circuit breaker: ${fmt(volume)} of its ${fmt(limit)} limit is already used in the current window and this adds ${fmt(adds)}.${twice} Room left: ${fmt(max0(limit - volume))}. Lower the amount or wait for the window to reset.`,

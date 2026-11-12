@@ -49,6 +49,8 @@ export type StepPlan = {
   action: ActionId
   amount: AmountSource
   secondaryAmount?: AmountSource
+  /** One-step Keep YT only (R5-7): the PT and SY offered to the pool, signed as literals. */
+  desired?: { pt: bigint; sy: bigint }
   /** What the user hands over / receives, in plain English, for the route preview. */
   gives: string
   takes: string
@@ -79,7 +81,6 @@ export type SingleStep = { fn: string; action: ActionId; sweepsSy?: true }
 export const SINGLE_STEP: Partial<Record<RouteKind, SingleStep>> = {
   buy_pt: { fn: "swap_underlying_for_pt", action: "buy_pt_underlying" },
   sell_pt: { fn: "swap_pt_for_underlying", action: "sell_pt_underlying", sweepsSy: true },
-  buy_yt: { fn: "swap_underlying_for_yt", action: "buy_yt_underlying", sweepsSy: true },
   sell_yt: { fn: "swap_yt_for_underlying", action: "sell_yt_underlying", sweepsSy: true },
   lp_keep_yt: { fn: "add_liquidity_keep_yt", action: "add_liquidity_keep_yt" },
 }
@@ -99,6 +100,11 @@ export type RouteContext = {
    * sized by the caller with `1 ≤ mint < shares` (the Router adds `shares − mint` SY).
    */
   keepYtMintSy?: bigint
+  /**
+   * One-step Keep YT (R5-7): the PT and SY it offers the pool, signed as literals alongside `keepYtMintSy`:
+   * `pt = previewMint(mint, oracleRate, feeBps).pt` and `sy = shares − mint`, sized by the caller.
+   */
+  keepYtDesired?: { pt: bigint; sy: bigint }
   /**
    * The connected account's live SY balance; absent when it is not known. Above zero, the routes whose
    * one-step function sweeps SY are planned the old way, with the reason (R4-3).
@@ -187,21 +193,17 @@ function sweepFallback(sy: bigint, signatures: number, exchangeRate: bigint | un
 }
 
 /**
- * The one step, with the amounts it signs: the input, except Buy YT, which tokenizes the solver's
- * deposit (R4-5), and Keep YT, which also mints the SY shares the caller sized (R4-4).
+ * The one step, with the amounts it signs: the input, except Keep YT, which also mints the SY shares
+ * the caller sized (R4-4) and offers the pool the PT and SY it sized (R5-7).
  */
 function oneStep(req: RouteRequest, ctx: RouteContext, single: SingleStep): StepPlan[] | RouteDisabled {
   const isBuy = BUY_KINDS.includes(req.kind)
   const shape = { action: single.action, gives: isBuy ? "USDY" : GIVES[req.kind], takes: isBuy ? TAKES[req.kind] : "USDY" }
-  if (req.kind === "buy_yt") {
-    const dep = ctx.buyYt?.depositUnderlying
-    if (dep === undefined) return disabledIf("Buy YT with USDY needs the amount of USDY to deposit first.")
-    return [{ ...shape, amount: { from: "value", value: dep } }]
-  }
   if (req.kind === "lp_keep_yt") {
     const mint = ctx.keepYtMintSy
-    if (mint === undefined) return disabledIf("Adding liquidity and keeping YT needs the SY to mint first.")
-    return [{ ...shape, amount: input, secondaryAmount: { from: "value", value: mint } }]
+    const desired = ctx.keepYtDesired
+    if (mint === undefined || desired === undefined) return disabledIf("Adding liquidity and keeping YT needs the SY to mint first.")
+    return [{ ...shape, amount: input, secondaryAmount: { from: "value", value: mint }, desired }]
   }
   return [{ ...shape, amount: input }]
 }
@@ -346,7 +348,7 @@ export function resolveStep(
   plan: StepPlan,
   input: RouteRequest,
   outputs: ActionOutput[],
-): { amount: bigint; secondaryAmount?: bigint } {
+): { amount: bigint; secondaryAmount?: bigint; desired?: { pt: bigint; sy: bigint } } {
   for (const r of plan.requires ?? []) {
     if (resolveSource(r.value, input, outputs) < resolveSource(r.atLeast, input, outputs)) {
       throw new Error(r.reason)
@@ -354,7 +356,11 @@ export function resolveStep(
   }
   const amount = resolveSource(plan.amount, input, outputs)
   if (!plan.secondaryAmount) return { amount }
-  return { amount, secondaryAmount: resolveSource(plan.secondaryAmount, input, outputs) }
+  return {
+    amount,
+    secondaryAmount: resolveSource(plan.secondaryAmount, input, outputs),
+    ...(plan.desired ? { desired: plan.desired } : {}),
+  }
 }
 
 // --- What an interrupted route leaves with the user (spec §4 "Interruption") ---
@@ -416,9 +422,16 @@ function moved(action: ActionId, a: { amount: bigint; secondaryAmount?: bigint }
       return value === undefined ? undefined : [["pt", -a.amount], ["underlying", value]]
     case "sell_yt_underlying":
       return value === undefined ? undefined : [["yt", -a.amount], ["underlying", value]]
-    case "buy_yt_underlying":
-      // R4-5: the whole amount is tokenized; underlying_back comes back in the same transaction.
-      return out.kind !== "buy_yt_underlying" ? undefined : [["underlying", out.underlying_back - a.amount], ["yt", out.yt_out]]
+    case "buy_yt_flash":
+      // R5-2: `amount` is the budget; only the net cost is spent, and the rest never leaves the wallet.
+      return out.kind !== "flash_yt" ? undefined : [["sy", -out.net_cost], ["yt", out.yt_out]]
+    case "buy_yt_flash_underlying":
+      return out.kind !== "flash_yt_underlying" ? undefined : [["underlying", out.underlying_back - a.amount], ["yt", out.yt_out]]
+    case "add_liquidity_underlying":
+      // R5-5: the SY the pool does not use is refunded, and is not counted here (as add_liquidity_sy).
+      return out.kind !== "add_liquidity" ? undefined : [["underlying", -a.amount], ["lp", out.lp]]
+    case "remove_liquidity_underlying":
+      return value === undefined ? undefined : [["lp", -a.amount], ["underlying", value]]
     case "add_liquidity_keep_yt":
       // PrincipalManager.mint mints PT 1:1 with YT, so the PT the pool did not take is
       // yt_minted − pt_used. The SY left over (deposit shares − mint_amount − sy_used) needs the

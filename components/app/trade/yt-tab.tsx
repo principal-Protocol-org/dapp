@@ -181,9 +181,8 @@ function YtTrade({ marketId, side, routeId, onRouteOpened }: { marketId: string;
         { label: `Comes back (step ${q.capital.backStep})`, value: spentText(q.capital.back) },
       )
     }
-    // The step that signs the Buy YT bound, from the plan (R2-55: never a literal step number): the
-    // buy, or the one Router call that deposits, buys and returns the USDY (R4-5).
-    const buyStep = route.plans.findIndex((p) => p.action === "buy_yt" || p.action === "buy_yt_underlying") + 1
+    // The step that signs the Buy YT bound, from the plan (R2-55: never a literal step number).
+    const buyStep = route.plans.findIndex((p) => p.action === "buy_yt") + 1
     details.push(...detailLines(q, side, code, slippageBps, steps, buyStep, amountText, unitOf, side === "buy" && q.yieldOn !== undefined ? breakEven(q, code, spentText(q.capital?.spent ?? trade.amount), amountText(q.yieldOn, "underlying")) : undefined))
     if (side === "buy" && q.yieldOn !== undefined) {
       details.push({

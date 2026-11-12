@@ -1,13 +1,15 @@
-import { MAX_I128, type ActionId, type ActionInput, type GuardValues } from "./actions"
-import { BPS, SCALE, ceilDiv } from "./math"
-import { previewDeposit } from "./previews"
+import { type ActionId, type ActionInput, type GuardValues } from "./actions"
+import { BPS, ceilDiv } from "./math"
+import { previewDeposit, previewWithdraw } from "./previews"
 
 export type ActionOutput =
   | { kind: "amount"; value: bigint }
   | { kind: "mint"; pt_minted: bigint; yt_minted: bigint; fee_shares: bigint }
   | { kind: "buy_yt"; yt_out: bigint; sy_back: bigint }
-  /** Router.swap_underlying_for_yt: `(yt_minted, underlying_back)`. */
-  | { kind: "buy_yt_underlying"; yt_out: bigint; underlying_back: bigint }
+  /** Router.flash_mint_yt: `(yt_out, net_cost)`, the net cost in SY (R5-2). */
+  | { kind: "flash_yt"; yt_out: bigint; net_cost: bigint }
+  /** Router.flash_mint_yt_from_underlying: `(yt_out, net_cost, underlying_back)`. */
+  | { kind: "flash_yt_underlying"; yt_out: bigint; net_cost: bigint; underlying_back: bigint }
   | { kind: "add_liquidity"; pt_used: bigint; sy_used: bigint; lp: bigint }
   /** Router.add_liquidity_keep_yt: `KeepYtResult { pt_used, sy_used, lp_minted, yt_minted }`. */
   | { kind: "keep_yt"; pt_used: bigint; sy_used: bigint; lp: bigint; yt_minted: bigint }
@@ -16,11 +18,11 @@ export type ActionOutput =
 
 export type GuardResult = { ok: true; guards: GuardValues } | { ok: false; reason: string }
 
-/** What the floors may need besides the simulation: the SY exchange rate (R4-6), when it is live. */
+/** What the floors may need besides the simulation: the SY exchange rate (R5-3), when it is live. */
 export type GuardRates = { exchangeRate: bigint }
 
 const YT_PRICE_REASON = "The YT price is not positive, so buying YT is not offered."
-/** R4-6: without the exchange rate, one-step Buy YT's bound in SY cannot be worked out. */
+/** R5-3: without the exchange rate, the USDY flash's budget in SY cannot be worked out. */
 const NO_EXCHANGE_RATE_REASON =
   "The SY exchange rate is not available, so the most this Buy YT may spend cannot be worked out in SY. It is not offered until the market data loads."
 
@@ -41,9 +43,12 @@ const OUTPUT_KIND: Record<ActionId, ActionOutput["kind"]> = {
   redeem: "redeem",
   buy_pt_underlying: "amount",
   sell_pt_underlying: "amount",
-  buy_yt_underlying: "buy_yt_underlying",
   sell_yt_underlying: "amount",
   add_liquidity_keep_yt: "keep_yt",
+  buy_yt_flash: "flash_yt",
+  buy_yt_flash_underlying: "flash_yt_underlying",
+  add_liquidity_underlying: "add_liquidity",
+  remove_liquidity_underlying: "amount",
 }
 
 /** Floor of out * (1 - bps/10000). Throws on non-positive output or bps outside [0, 10000). */
@@ -53,12 +58,20 @@ export function minAfterSlippage(out: bigint, bps: bigint): bigint {
   return (out * (BPS - bps)) / BPS
 }
 
+/** The SY a flash budget stands for (R5-3): the amount itself for an SY payer, its deposit for a USDY payer. */
+function budgetSy(action: ActionId, amount: bigint, rates?: GuardRates): bigint {
+  if (action === "buy_yt_flash") return amount
+  const xr = rates?.exchangeRate
+  if (xr === undefined || xr <= 0n) throw new Error(NO_EXCHANGE_RATE_REASON)
+  return previewDeposit(amount, xr)
+}
+
 /**
- * Guards used only to simulate: zero floors; buy_yt max_net_cost is the full amount. One-step Buy
- * YT's max_net_cost is in SY, which the amount (underlying) is not: MAX_I128 makes the Router ask the
- * PT sale for no SY back at all (`max_net_cost >= sy_in`).
+ * Guards used only to simulate: zero floors; the flash's max_net_cost is the whole budget in SY (R5-3,
+ * which the pool pulls up front), and a USDY flash's min_underlying_back is 0. A USDY flash needs the
+ * exchange rate to state that budget in SY: without it this throws the plain-words reason.
  */
-export function openGuards(action: ActionId, amount: bigint): GuardValues {
+export function openGuards(action: ActionId, amount: bigint, rates?: GuardRates): GuardValues {
   switch (action) {
     case "claim_yield":
     case "redeem":
@@ -67,8 +80,10 @@ export function openGuards(action: ActionId, amount: bigint): GuardValues {
       return { minOut: 0n, minOut2: 0n }
     case "buy_yt":
       return { minOut: 0n, maxNetCost: amount }
-    case "buy_yt_underlying":
-      return { minOut: 0n, maxNetCost: MAX_I128 }
+    case "buy_yt_flash":
+      return { minOut: 0n, maxNetCost: amount }
+    case "buy_yt_flash_underlying":
+      return { minOut: 0n, maxNetCost: budgetSy(action, amount, rates), minOut2: 0n }
     default:
       return { minOut: 0n }
   }
@@ -111,9 +126,13 @@ export function parseOutput(action: ActionId, retval: unknown): ActionOutput {
       const t = tuple(retval, 2, action)
       return { kind: "buy_yt", yt_out: int(t[0], action), sy_back: int(t[1], action) }
     }
-    case "buy_yt_underlying": {
+    case "flash_yt": {
       const t = tuple(retval, 2, action)
-      return { kind: "buy_yt_underlying", yt_out: int(t[0], action), underlying_back: int(t[1], action) }
+      return { kind: "flash_yt", yt_out: int(t[0], action), net_cost: int(t[1], action) }
+    }
+    case "flash_yt_underlying": {
+      const t = tuple(retval, 3, action)
+      return { kind: "flash_yt_underlying", yt_out: int(t[0], action), net_cost: int(t[1], action), underlying_back: int(t[2], action) }
     }
     case "add_liquidity": {
       const t = tuple(retval, 3, action)
@@ -152,8 +171,9 @@ function floorOf(out: bigint, slippageBps: bigint, what: string): { floor: bigin
 }
 
 /**
- * Slippage floors from the exact simulated output. Never produces a zero floor. `rates` is the live
- * SY exchange rate, which only one-step Buy YT needs (R4-6): without it that action is refused.
+ * Slippage floors from the exact simulated output. Never produces a zero floor, but the USDY flash's
+ * `min_underlying_back` (R5-3). `rates` is the live SY exchange rate, which only the USDY flash needs:
+ * without it that action is refused.
  */
 export function guardsFrom(
   action: ActionId,
@@ -195,20 +215,26 @@ export function guardsFrom(
       const maxNetCost = ceilDiv(net * (BPS + slippageBps), BPS)
       return { ok: true, guards: { minOut: yt.floor, maxNetCost } }
     }
-    case "buy_yt_underlying": {
-      // R4-6: max_net_cost is in SY. The deposit's SY is mirrored exactly (floored, as the
-      // contract does); the SY the PT sale returned is the least that pays `underlying_back`
-      // (rounded up), so `net` is never below the real net cost.
-      const xr = rates?.exchangeRate
-      if (xr === undefined || xr <= 0n) return { ok: false, reason: NO_EXCHANGE_RATE_REASON }
-      const syIn = previewDeposit(input.amount, xr)
-      const syBackMin = ceilDiv(out.underlying_back * SCALE, xr)
-      const net = syIn - syBackMin
-      if (net <= 0n) return { ok: false, reason: YT_PRICE_REASON }
+    case "flash_yt":
+    case "flash_yt_underlying": {
+      // R5-3: the pool pulls max_net_cost up front, so it is capped at the budget: it never takes SY
+      // the wallet held before. net_cost <= 0 is PT at or above par: YT is free or paid for.
+      if (out.net_cost <= 0n) return { ok: false, reason: YT_PRICE_REASON }
       const yt = floorOf(out.yt_out, slippageBps, "YT")
       if ("reason" in yt) return { ok: false, reason: yt.reason }
-      const maxNetCost = ceilDiv(net * (BPS + slippageBps), BPS)
-      return { ok: true, guards: { minOut: yt.floor, maxNetCost, syIn } }
+      let budget: bigint
+      try {
+        budget = budgetSy(action, input.amount, rates)
+      } catch (error) {
+        return { ok: false, reason: error instanceof Error ? error.message : String(error) }
+      }
+      const margin = ceilDiv(out.net_cost * (BPS + slippageBps), BPS)
+      const maxNetCost = margin < budget ? margin : budget
+      if (out.kind === "flash_yt") return { ok: true, guards: { minOut: yt.floor, maxNetCost } }
+      // The SY not spent comes back as the underlying: min_underlying_back follows from maxNetCost
+      // and may be 0, the one zero floor allowed (it is not a separate bound).
+      const xr = rates?.exchangeRate as bigint
+      return { ok: true, guards: { minOut: yt.floor, maxNetCost, minOut2: previewWithdraw(budget - maxNetCost, xr) } }
     }
     case "redeem":
       return { ok: true, guards: {} }

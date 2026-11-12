@@ -10,9 +10,9 @@
  *
  * The manifest lists the five one-transaction Router functions (principal 97ac23e), so:
  * - One step each, on a wallet with no SY: Buy PT paid in USDY (`swap_underlying_for_pt`), Sell PT
- *   and Sell YT to USDY (`swap_pt_for_underlying`, `swap_yt_for_underlying`), Buy YT paid in USDY
- *   (`swap_underlying_for_yt`, still moving the solver's deposit, R4-5, its bound in SY, R4-6), and
- *   Keep YT (`add_liquidity_keep_yt`, minting the SY the dApp sized, R4-4).
+ *   and Sell YT to USDY (`swap_pt_for_underlying`, `swap_yt_for_underlying`), and Keep YT
+ *   (`add_liquidity_keep_yt`, minting the SY the dApp sized, R4-4, with the desired PT and SY, R5-7).
+ *   Buy YT paid in USDY is the flash swap (R5-2): its steps are added to this file with Task 3.
  * - R4-3: with 1 raw SY in the wallet, the three that end with `withdraw_all` are planned the old
  *   way, say why, and complete; with the balance unknown, the one step is planned and the
  *   `sy_balance` gate refuses it, as the Router itself does (error 9).
@@ -53,7 +53,7 @@ import { openGuards, type ActionOutput } from "@/lib/protocol/guards"
 import { createHorizon } from "@/lib/protocol/horizon"
 import { validateManifest } from "@/lib/protocol/manifest"
 import { fetchMarketState, type MarketState, type PoolStateView } from "@/lib/protocol/market-state"
-import { BPS, SCALE, ceilDiv } from "@/lib/protocol/math"
+import { BPS, ceilDiv } from "@/lib/protocol/math"
 import { previewDeposit } from "@/lib/protocol/previews"
 import { createRpcReader, readLive, toBigint } from "@/lib/protocol/reader"
 import { describeHoldings, planRoute, routeHoldings, unwindFrom, type RouteRequest, type StepPlan } from "@/lib/protocol/routes"
@@ -329,7 +329,7 @@ describe.skipIf(skip !== null)("every route on the local USDY market (Task 24; 0
     const ms = await fetchMarketState(reader(), manifest, market.marketId)
     if (live(ms.oracleFresh, "oracle freshness") !== true) throw new Error("NEEDS_CONTEXT: the oracle is still stale after a tick")
     if (live(ms.poolSeeded, "pool seeded") !== true) throw new Error("NEEDS_CONTEXT: the pool is empty")
-    for (const fn of ["swap_underlying_for_pt", "swap_pt_for_underlying", "swap_underlying_for_yt", "swap_yt_for_underlying", "add_liquidity_keep_yt"]) {
+    for (const fn of ["swap_underlying_for_pt", "swap_pt_for_underlying", "swap_yt_for_underlying", "add_liquidity_keep_yt"]) {
       if (!(manifest.routerFunctions ?? []).includes(fn)) throw new Error(`NEEDS_CONTEXT: local.json does not list ${fn}; deploy the market from principal 97ac23e`)
     }
 
@@ -398,47 +398,6 @@ describe.skipIf(skip !== null)("every route on the local USDY market (Task 24; 0
     if ("error" in solution) throw new Error(solution.error)
     return { spendSy, exchangeRate, ...solution }
   }
-
-  it("Buy YT with USDY: one transaction (swap_underlying_for_yt) moving the solver's deposit (R4-5), its bound in SY (R4-6); the rate rises", async () => {
-    await holdSy(0n, "buy_yt one step")
-    const req: TradeRequest = { kind: "buy_yt", amount: 5_000_000n, pay: "underlying", receive: "underlying" }
-    let syIn = 0n
-    let deposit = 0n
-    let xr = 0n
-    const t = await trade(req, ["buy_yt_underlying"], (plans, s) => {
-      const sol = solved(s.ms, req)
-      syIn = sol.syIn
-      xr = sol.exchangeRate
-      // The deposit that yields at least the solver's sy_in (the adapter's sizing).
-      deposit = ceilDiv(sol.syIn * xr, SCALE)
-      expect(plans[0].amount).toEqual({ from: "value", value: deposit })
-    })
-    const [buy] = t.steps
-    if (buy.decoded.kind !== "buy_yt_underlying") throw new Error("not a buy_yt_underlying output")
-    expect(t.bal0.sy).toBe(0n)
-    expect(buy.amount).toBe(deposit)
-    expect(previewDeposit(deposit, xr) >= syIn).toBe(true)
-    // R4-5: the capital moved is still disclosed: the whole deposit leaves, underlying_back returns in step 1.
-    expect(deposit > req.amount).toBe(true)
-    expect(t.quote.capital).toMatchObject({ moved: deposit, backStep: 1 })
-    // R4-6: signed in SY, from the deposit's SY and the least SY that pays underlying_back.
-    expect(buy.guards.syIn).toBe(previewDeposit(deposit, xr))
-    const netSy = buy.guards.syIn! - ceilDiv(buy.decoded.underlying_back * SCALE, xr)
-    expect(netSy <= buy.guards.maxNetCost!, `net ${netSy} SY vs signed max ${buy.guards.maxNetCost}`).toBe(true)
-    // What left the wallet in USDY: the deposit less what came back, within what the quote disclosed
-    // and within the spend at slippage (a raw unit of rounding per conversion).
-    const spent = -delta(t, "underlying")
-    expect(spent).toBe(deposit - buy.decoded.underlying_back)
-    expect(spent <= t.quote.maxCost!, `spent ${spent} vs disclosed ${t.quote.maxCost}`).toBe(true)
-    expect(spent <= ceilDiv(req.amount * (BPS + SLIPPAGE_BPS), BPS) + 2n, `spent ${spent} vs spend ${req.amount}`).toBe(true)
-    expect(delta(t, "sy")).toBe(0n)
-    expect(delta(t, "yt")).toBe(buy.decoded.yt_out)
-    expect(t.rate.after > t.rate.before, `implied rate ${t.rate.before} -> ${t.rate.after}`).toBe(true)
-    log(
-      `buy_yt (one step): spend ${units(req.amount)} USDY, deposit ${units(deposit)} USDY (${units(buy.guards.syIn!)} SY), underlying_back ${units(buy.decoded.underlying_back)}; ` +
-        `spent ${units(spent)} USDY (quote "spends at most" ${units(t.quote.maxCost!)}), net ${units(netSy)} SY (signed max ${units(buy.guards.maxNetCost!)} SY), YT ${units(buy.decoded.yt_out)}`,
-    )
-  }, 3 * MINUTE)
 
   it("Sell YT for USDY: one transaction (swap_yt_for_underlying) on a wallet with no SY; the pool buys its PT back, so the rate falls", async () => {
     await holdSy(0n, "sell_yt one step")
@@ -629,7 +588,6 @@ describe.skipIf(skip !== null)("every route on the local USDY market (Task 24; 0
       one: "sell_yt_underlying",
       multi: ["sell_yt", "withdraw"],
     },
-    { req: async () => ({ kind: "buy_yt", amount: 5_000_000n, pay: "underlying", receive: "underlying" }), one: "buy_yt_underlying", multi: ["deposit", "buy_yt", "withdraw"] },
   ]
 
   it("1 raw SY held, balance not read: the one step is planned and the sy_balance gate refuses it, as the Router does (error 9)", async () => {

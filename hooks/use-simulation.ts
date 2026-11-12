@@ -29,11 +29,33 @@ export type Simulation = {
 
 /** What a simulation depends on. Guards are always open here and the deadline ticks, so neither is in it. */
 function keyParts(input: ActionInput): string[] {
-  return [input.action, input.marketId, input.source, input.amount.toString(), input.secondaryAmount?.toString() ?? ""]
+  return [
+    input.action,
+    input.marketId,
+    input.source,
+    input.amount.toString(),
+    input.secondaryAmount?.toString() ?? "",
+    input.desired ? `${input.desired.pt}/${input.desired.sy}` : "",
+  ]
 }
 
-/** The input with zero floors (and Buy YT's full max_net_cost): what is simulated. */
-export const withOpenGuards = (input: ActionInput): ActionInput => ({ ...input, guards: openGuards(input.action, input.amount) })
+/**
+ * The input with zero floors (and the Buy YT budget as its max_net_cost): what is simulated. The USDY
+ * flash needs the exchange rate for that budget (R5-3), and this throws the reason without it.
+ */
+export const withOpenGuards = (input: ActionInput, rates?: GuardRates): ActionInput => ({
+  ...input,
+  guards: openGuards(input.action, input.amount, rates),
+})
+
+/** `withOpenGuards`, or the refusal as the outcome the simulation would have given: nothing is simulated without it. */
+function openFor(input: ActionInput, rates?: GuardRates): { input: ActionInput } | { outcome: SimulationOutcome } {
+  try {
+    return { input: withOpenGuards(input, rates) }
+  } catch (error) {
+    return { outcome: { ok: false, kind: "rpc_error", message: error instanceof Error ? error.message : String(error) } }
+  }
+}
 
 /** One simulation of the real call as the user; a throw becomes an `rpc_error` outcome. Also used per route step. */
 export async function simulate(m: Manifest, input: ActionInput): Promise<SimulationOutcome> {
@@ -50,7 +72,7 @@ export async function simulate(m: Manifest, input: ActionInput): Promise<Simulat
 }
 
 /**
- * The rates the floors may need (R4-6: the SY exchange rate), from market state that is neither
+ * The rates the floors may need (R5-3: the SY exchange rate), from market state that is neither
  * stale nor unread (R35), and only while the exchange rate itself is live. Also used by the route runner.
  */
 export function ratesFrom(market: { data?: MarketState; stale: boolean }): GuardRates | undefined {
@@ -60,7 +82,7 @@ export function ratesFrom(market: { data?: MarketState; stale: boolean }): Guard
 
 /**
  * The validated output and the floors at `slippageBps`; an unreadable result is a refusal. Also used
- * per route step. `rates` is the live SY exchange rate, when there is one (R4-6).
+ * per route step. `rates` is the live SY exchange rate, when there is one (R5-3).
  */
 export function derive(
   input: ActionInput,
@@ -90,7 +112,7 @@ export function useSimulation(input: ActionInput | null): Simulation {
   const manifest = useManifest()
   const network = manifest.network
   const key = input ? keyParts(input).join("|") : null
-  // The panel's own market query (same key): the exchange rate one-step Buy YT's bound needs (R4-6).
+  // The panel's own market query (same key): the exchange rate the USDY flash's bound needs (R5-3).
   const rates = ratesFrom(useMarketState(input?.marketId ?? null))
 
   const [settled, setSettled] = useState<string | null>(null)
@@ -105,7 +127,11 @@ export function useSimulation(input: ActionInput | null): Simulation {
   const query = useQuery({
     queryKey,
     // The latest render's input: its deadline is current when the outcome is re-read.
-    queryFn: () => (live ? simulate(manifest, withOpenGuards(live)) : Promise.reject(new Error("Nothing to simulate."))),
+    queryFn: async () => {
+      if (!live) throw new Error("Nothing to simulate.")
+      const open = openFor(live, rates)
+      return "outcome" in open ? open.outcome : simulate(manifest, open.input)
+    },
     enabled: live !== null,
     gcTime: 0,
     retry: false,
@@ -116,7 +142,7 @@ export function useSimulation(input: ActionInput | null): Simulation {
   return {
     outcome,
     ...(live && outcome ? derive(live, outcome, slippageBps, rates) : {}),
-    simulated: live && outcome ? withOpenGuards(live) : undefined,
+    simulated: live && outcome ? (() => { const open = openFor(live, rates); return "input" in open ? open.input : undefined })() : undefined,
     pending: input !== null && outcome === undefined,
     // Reset, not refetch: the old outcome (e.g. "restore required") must not stand meanwhile.
     refresh: () => void queryClient.resetQueries({ queryKey, exact: true }),

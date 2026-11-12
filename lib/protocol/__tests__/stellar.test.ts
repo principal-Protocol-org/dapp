@@ -499,7 +499,7 @@ describe("failedTransactionReason (R49)", () => {
     );
   });
 
-  describe("the LP only footprint trap: a PT refund of 0 at simulation and 1 at inclusion (final review 3)", () => {
+  describe("the footprint trap (final review 3): a footprint that grew between simulation and inclusion", () => {
     const outside = xdr.ScError.sceStorage(xdr.ScErrorCode.scecExceededLimit);
     // As the host raised it in tx 4e86dce2…: the message, then the PT contract the access was in.
     const pt = xdr.ScVal.scvAddress(xdr.ScAddress.scAddressTypeContract(new xdr.ContractId(StrKey.decodeContract(testnetMarket.contracts.pt))));
@@ -508,10 +508,10 @@ describe("failedTransactionReason (R49)", () => {
     // Then echoed, with the same error, by every frame it unwinds through.
     const echo = () => diagnosticError(outside, "contract call failed");
 
-    it("says the pool's refund rounding moved, and to prepare it again", () => {
+    it("says the pool moved, and to prepare it again", () => {
       expect(failedTransactionReason({ result: txResult(trapped), diagnosticEvents: [raised(), echo(), echo()] })).toBe(FOOTPRINT_MOVED_REASON);
       expect(FOOTPRINT_MOVED_REASON).toBe(
-        "The pool's refund rounding moved between the quote and inclusion, so the transaction touched data it had not planned for. Nothing was taken except the network fee; prepare it again.",
+        "The pool moved between the quote and inclusion, so the transaction touched data it had not planned for. Nothing was taken except the network fee; prepare it again.",
       );
       // The message alone, with no arguments, is the same failure.
       const bare = diagnosticError(outside, "trying to access contract data key outside of the footprint");

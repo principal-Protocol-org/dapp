@@ -80,7 +80,7 @@ describe("single-step functions", () => {
 describe("one-step Router functions (0004 Task 5, R4-3)", () => {
   /** The five names a 97ac23e manifest lists; the planner's own table, with no test override. */
   const FIVE = ["swap_underlying_for_pt", "swap_pt_for_underlying", "swap_underlying_for_yt", "swap_yt_for_underlying", "add_liquidity_keep_yt"]
-  const listed: RouteContext = { ...ctx, routerFunctions: FIVE, keepYtMintSy: 62n }
+  const listed: RouteContext = { ...ctx, routerFunctions: FIVE, keepYtMintSy: 62n, keepYtDesired: { pt: 41n, sy: 38n } }
   const plan = (r: RouteRequest, c: RouteContext = listed) => {
     const p = planRoute(r, c)
     if ("disabled" in p) throw new Error(p.disabled)
@@ -91,11 +91,10 @@ describe("one-step Router functions (0004 Task 5, R4-3)", () => {
   const DUST = (sy: string, k: number) =>
     `You hold ${sy} SY, so this takes ${k} signatures: the one-signature trade would withdraw all your SY. An amount this small cannot be withdrawn, so this trade keeps its multi-step route.`
 
-  it("the table names the five functions, and the three that end with withdraw_all sweep SY", () => {
+  it("the table names the four functions (Buy YT is routed in Task 3, R5-2), and the two that end with withdraw_all sweep SY", () => {
     expect(SINGLE_STEP).toEqual({
       buy_pt: { fn: "swap_underlying_for_pt", action: "buy_pt_underlying" },
       sell_pt: { fn: "swap_pt_for_underlying", action: "sell_pt_underlying", sweepsSy: true },
-      buy_yt: { fn: "swap_underlying_for_yt", action: "buy_yt_underlying", sweepsSy: true },
       sell_yt: { fn: "swap_yt_for_underlying", action: "sell_yt_underlying", sweepsSy: true },
       lp_keep_yt: { fn: "add_liquidity_keep_yt", action: "add_liquidity_keep_yt" },
     })
@@ -105,14 +104,20 @@ describe("one-step Router functions (0004 Task 5, R4-3)", () => {
     expect(plan({ ...base, kind: "buy_pt" })).toEqual([{ action: "buy_pt_underlying", amount: { from: "input" }, gives: "USDY", takes: "PT" }])
     expect(plan({ ...base, kind: "sell_pt" })).toEqual([{ action: "sell_pt_underlying", amount: { from: "input" }, gives: "PT", takes: "USDY" }])
     expect(plan({ ...base, kind: "sell_yt" })).toEqual([{ action: "sell_yt_underlying", amount: { from: "input" }, gives: "YT", takes: "USDY" }])
-    // R4-5: Buy YT signs the solver's deposit, the whole amount tokenized, not the spend typed.
-    expect(plan({ ...base, kind: "buy_yt" })).toEqual([{ action: "buy_yt_underlying", amount: { from: "value", value: 95n }, gives: "USDY", takes: "YT" }])
-    // R4-4: Keep YT deposits the whole input and mints the SY shares the dApp sized.
+    // R4-4: Keep YT deposits the whole input and mints the SY shares the dApp sized; R5-7: it also
+    // signs the PT and SY offered to the pool.
     expect(plan({ ...base, kind: "lp_keep_yt" })).toEqual([
-      { action: "add_liquidity_keep_yt", amount: { from: "input" }, secondaryAmount: { from: "value", value: 62n }, gives: "USDY", takes: "LP + YT" },
+      {
+        action: "add_liquidity_keep_yt",
+        amount: { from: "input" },
+        secondaryAmount: { from: "value", value: 62n },
+        desired: { pt: 41n, sy: 38n },
+        gives: "USDY",
+        takes: "LP + YT",
+      },
     ])
     const r = { ...base, kind: "lp_keep_yt" as const }
-    expect(resolveStep(plan(r)[0], r, [])).toEqual({ amount: 100n, secondaryAmount: 62n })
+    expect(resolveStep(plan(r)[0], r, [])).toEqual({ amount: 100n, secondaryAmount: 62n, desired: { pt: 41n, sy: 38n } })
   })
 
   it("without the names, or paying / receiving SY, the old routes stand", () => {
@@ -134,15 +139,12 @@ describe("one-step Router functions (0004 Task 5, R4-3)", () => {
     expect(actions({ ...base, kind: "sell_pt" }, one)).toEqual(["sell_pt", "withdraw"])
   })
 
-  it("R4-3: a known SY balance above zero keeps the three sweeping routes, with the reason on their first step", () => {
+  it("R4-3: a known SY balance above zero keeps the two sweeping routes, with the reason on their first step", () => {
     const held = { ...listed, syBalance: 87n }
     const sellPt = plan({ ...base, kind: "sell_pt" }, held)
     expect(sellPt.map((p) => p.action)).toEqual(["sell_pt", "withdraw"])
     expect(sellPt[0].fallback).toBe(FALLBACK("0.0000087", 2))
     expect(sellPt[1].fallback).toBeUndefined()
-    const buyYt = plan({ ...base, kind: "buy_yt" }, held)
-    expect(buyYt.map((p) => p.action)).toEqual(["deposit", "buy_yt", "withdraw"])
-    expect(buyYt[0].fallback).toBe(FALLBACK("0.0000087", 3))
     const sellYt = plan({ ...base, kind: "sell_yt" }, { ...listed, syBalance: 1_000n * 10_000_000n })
     expect(sellYt.map((p) => p.action)).toEqual(["sell_yt", "withdraw"])
     expect(sellYt[0].fallback).toBe(FALLBACK("1,000", 2))
@@ -156,7 +158,6 @@ describe("one-step Router functions (0004 Task 5, R4-3)", () => {
     const reason = (syBalance: bigint, exchangeRate?: bigint) =>
       plan({ ...base, kind: "sell_pt" }, { ...listed, syBalance, ...(exchangeRate !== undefined ? { exchangeRate } : {}) })[0].fallback
     expect(reason(1n, SCALE)).toBe(DUST("0.0000001", 2))
-    expect(plan({ ...base, kind: "buy_yt" }, { ...listed, syBalance: 1n, exchangeRate: SCALE })[0].fallback).toBe(DUST("0.0000001", 3))
     // 2 raw SY at 0.9999999 USDY each withdraw to 1 raw USDY; at 1.0, to 2.
     expect(reason(2n, 9_999_999n)).toBe(DUST("0.0000002", 2))
     expect(reason(2n, SCALE)).toBe(FALLBACK("0.0000002", 2))
@@ -172,7 +173,7 @@ describe("one-step Router functions (0004 Task 5, R4-3)", () => {
 
   it("R4-3: a zero or unknown SY balance plans the one step (the sy_balance gate checks the live balance)", () => {
     for (const c of [{ ...listed, syBalance: 0n }, listed]) {
-      for (const kind of ["sell_pt", "buy_yt", "sell_yt"] as const) {
+      for (const kind of ["sell_pt", "sell_yt"] as const) {
         const p = plan({ ...base, kind }, c)
         expect(p).toHaveLength(1)
         expect(p[0].fallback).toBeUndefined()
@@ -180,14 +181,14 @@ describe("one-step Router functions (0004 Task 5, R4-3)", () => {
     }
   })
 
-  it("a one step whose amount is sized by the dApp is disabled until it is", () => {
-    expect(planRoute({ ...base, kind: "buy_yt" }, { routerFunctions: FIVE })).toEqual({ disabled: expect.stringMatching(/Buy YT with USDY needs the amount of USDY to deposit first/) })
+  it("a one step whose amount is sized by the dApp is disabled until it is, Keep YT's desired PT and SY too (R5-7)", () => {
+    expect(planRoute({ ...base, kind: "lp_keep_yt" }, { routerFunctions: FIVE, keepYtMintSy: 62n })).toEqual({ disabled: expect.stringMatching(/needs the SY to mint first/) })
     expect(planRoute({ ...base, kind: "lp_keep_yt" }, { routerFunctions: FIVE })).toEqual({ disabled: expect.stringMatching(/needs the SY to mint first/) })
   })
 
   it("a fallback route stays plain data", () => {
-    const p = plan({ ...base, kind: "buy_yt" }, { ...listed, syBalance: 5n })
-    expect(JSON.parse(JSON.stringify(p, (_, x) => (typeof x === "bigint" ? String(x) : x)))[0].fallback).toBe(FALLBACK("0.0000005", 3))
+    const p = plan({ ...base, kind: "sell_pt" }, { ...listed, syBalance: 5n })
+    expect(JSON.parse(JSON.stringify(p, (_, x) => (typeof x === "bigint" ? String(x) : x)))[0].fallback).toBe(FALLBACK("0.0000005", 2))
   })
 })
 
@@ -367,11 +368,10 @@ describe("route holdings (spec §4 interruption)", () => {
     const ONE_STEP: RouteContext["singleStep"] = {
       buy_pt: { fn: "swap_underlying_for_pt", action: "buy_pt_underlying" },
       sell_pt: { fn: "swap_pt_for_underlying", action: "sell_pt_underlying" },
-      buy_yt: { fn: "swap_underlying_for_yt", action: "buy_yt_underlying" },
       sell_yt: { fn: "swap_yt_for_underlying", action: "sell_yt_underlying" },
       lp_keep_yt: { fn: "add_liquidity_keep_yt", action: "add_liquidity_keep_yt" },
     }
-    const oneStep: RouteContext = { ...scaled, keepYtMintSy: 60n * S, routerFunctions: Object.values(ONE_STEP).map((x) => x!.fn), singleStep: ONE_STEP }
+    const oneStep: RouteContext = { ...scaled, keepYtMintSy: 60n * S, keepYtDesired: { pt: 41n * S, sy: 38n * S }, routerFunctions: Object.values(ONE_STEP).map((x) => x!.fn), singleStep: ONE_STEP }
     const held = (kind: RouteRequest["kind"], out: ActionOutput, amount = 100n * S) => {
       const r = { ...base, kind, amount }
       const plans = planRoute(r, oneStep) as StepPlan[]
@@ -397,11 +397,18 @@ describe("route holdings (spec §4 interruption)", () => {
       expect(afterUsdy("sell_yt_underlying", { kind: "amount", value: 3n * S })).toEqual({ underlying: 303n * S })
     })
 
-    it("Buy YT: the whole amount goes in and underlying_back comes back with the YT (R4-5)", () => {
-      const out: ActionOutput = { kind: "buy_yt_underlying", yt_out: 40n * S, underlying_back: 85n * S }
-      expect(held("buy_yt", out)).toEqual({ yt: 40n * S })
-      expect(afterUsdy("buy_yt_underlying", out)).toEqual({ yt: 40n * S, underlying: 285n * S })
-      expect(held("buy_yt", { kind: "buy_yt", yt_out: 40n * S, sy_back: 85n * S })).toBeUndefined()
+    it("flash Buy YT: the YT arrives, and only the net cost leaves (R5-2)", () => {
+      const sy: ActionOutput = { kind: "flash_yt", yt_out: 40n * S, net_cost: 10n * S }
+      expect(afterUsdy("buy_yt_flash", sy)).toEqual({ yt: 40n * S, underlying: 300n * S })
+      // The USDY payer's budget goes in and underlying_back comes back with the YT.
+      const usdy: ActionOutput = { kind: "flash_yt_underlying", yt_out: 40n * S, net_cost: 10n * S, underlying_back: 85n * S }
+      expect(afterUsdy("buy_yt_flash_underlying", usdy)).toEqual({ yt: 40n * S, underlying: 285n * S })
+      expect(afterUsdy("buy_yt_flash_underlying", sy)).toBeUndefined()
+    })
+
+    it("LP only from USDY and the exit to USDY", () => {
+      expect(afterUsdy("add_liquidity_underlying", { kind: "add_liquidity", pt_used: 1n * S, sy_used: 2n * S, lp: 50n * S })).toEqual({ lp: 50n * S, underlying: 200n * S })
+      expect(afterUsdy("remove_liquidity_underlying", { kind: "amount", value: 90n * S })).toEqual({ underlying: 390n * S })
     })
 
     it("Keep YT: LP and YT, and the PT the pool did not take (PT is minted 1:1 with YT)", () => {
