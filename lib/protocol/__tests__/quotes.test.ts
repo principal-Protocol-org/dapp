@@ -1,9 +1,10 @@
 // @vitest-environment node
 import { describe, expect, it, vi } from "vitest"
-import { quoteBuyExactPt, quotePtForSy, quoteSyForPt, quoteSyForYt, quoteYtForSy, zapSwapAmount } from "../quotes"
+import { quoteAddLiquidityUnderlying, quoteBuyExactPt, quoteLpToUnderlying, quotePtForSy, quoteSyForPt, quoteSyForYt, quoteYtForSy, zapSwapAmount } from "../quotes"
 import type { ContractReader } from "../reader"
 
 const POOL = "CPOOL"
+const ROUTER = "CROUTER"
 
 function reader(value: unknown) {
   return vi.fn(async () => ({ value, latestLedger: 777, minResourceFee: "100" })) as unknown as ContractReader & ReturnType<typeof vi.fn>
@@ -87,5 +88,46 @@ describe("YT quote views (0004 Task 8)", () => {
     expect(read).not.toHaveBeenCalled()
     await expect(quoteSyForYt(reader(null), POOL, 1n)).rejects.toThrow("quote_sy_for_yt did not return a quote.")
     await expect(quoteSyForYt(reader({ yt_out: 1n, sy_back: "2", mint_fee_shares: 0n, swap_fee_shares: 0n }), POOL, 1n)).rejects.toThrow(/expected an integer/)
+  })
+})
+
+describe("the Router's LP quotes in USDY (0005 Task 5)", () => {
+  const args = (amount: bigint) => [
+    { type: "address", value: POOL },
+    { type: "i128", value: amount },
+  ]
+
+  it("quote_add_liquidity_underlying: the SY the deposit gives and the zap's own return, read from the Router with the pool", async () => {
+    const read = reader({ sy_in: 1_000_000_000n, pt_used: 512_000_000n, sy_used: 998_000_000n, lp_minted: 497_000_000n })
+    await expect(quoteAddLiquidityUnderlying(read, ROUTER, POOL, 1_000_000_000n)).resolves.toEqual({
+      syIn: 1_000_000_000n,
+      ptUsed: 512_000_000n,
+      syUsed: 998_000_000n,
+      lpMinted: 497_000_000n,
+      ledger: 777,
+    })
+    expect(read).toHaveBeenCalledWith({ contractId: ROUTER, functionName: "quote_add_liquidity_underlying", args: args(1_000_000_000n) })
+  })
+
+  it("quote_lp_to_underlying: the removal's split, the sale's fee and the USDY out, read from the Router with the pool", async () => {
+    const read = reader({ pt_out: 10_260_000n, sy_out: 9_740_000n, swap_fee_shares: 56n, underlying_out: 19_990_000n })
+    await expect(quoteLpToUnderlying(read, ROUTER, POOL, 10_000_000n)).resolves.toEqual({
+      ptOut: 10_260_000n,
+      syOut: 9_740_000n,
+      swapFeeShares: 56n,
+      underlyingOut: 19_990_000n,
+      ledger: 777,
+    })
+    expect(read).toHaveBeenCalledWith({ contractId: ROUTER, functionName: "quote_lp_to_underlying", args: args(10_000_000n) })
+  })
+
+  it("rejects a non-positive amount before reading (the views panic ZeroAmount), and a malformed answer", async () => {
+    const read = reader({ sy_in: 1n, pt_used: 1n, sy_used: 1n, lp_minted: 1n })
+    await expect(quoteAddLiquidityUnderlying(read, ROUTER, POOL, 0n)).rejects.toThrow("A quote needs an amount greater than zero.")
+    await expect(quoteLpToUnderlying(read, ROUTER, POOL, -1n)).rejects.toThrow("A quote needs an amount greater than zero.")
+    expect(read).not.toHaveBeenCalled()
+    await expect(quoteAddLiquidityUnderlying(reader(null), ROUTER, POOL, 1n)).rejects.toThrow("quote_add_liquidity_underlying did not return a quote.")
+    await expect(quoteLpToUnderlying(reader([1n, 2n]), ROUTER, POOL, 1n)).rejects.toThrow("quote_lp_to_underlying did not return a quote.")
+    await expect(quoteLpToUnderlying(reader({ pt_out: 1n, sy_out: 1n, swap_fee_shares: 0n, underlying_out: "2" }), ROUTER, POOL, 1n)).rejects.toThrow(/expected an integer/)
   })
 })

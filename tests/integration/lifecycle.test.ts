@@ -21,6 +21,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
 // `server-only` throws outside a react-server bundle; the faucet is imported here as the route does.
 vi.mock("server-only", () => ({}))
 
+import { ratesFrom } from "@/hooks/use-simulation"
 import { fetchAccountState, type AccountState, type ComplianceKind } from "@/lib/protocol/account-state"
 import { invocationFor, type ActionId, type ActionInput } from "@/lib/protocol/actions"
 import { evaluateAccountCompliance, fetchMarketCompliance, type ComplianceItem } from "@/lib/protocol/compliance"
@@ -241,7 +242,7 @@ describe.skipIf(skip !== null)("protocol layer on the local network", () => {
       source: account,
       amount,
       ...(secondaryAmount === undefined ? {} : { secondaryAmount }),
-      guards: openGuards(action, amount),
+      guards: openGuards(action, amount, ratesFrom({ data: s.ms, stale: false })),
       deadline: BigInt(Math.floor(s.ledgerTime) + DEADLINE_SECONDS),
     }
   }
@@ -269,7 +270,8 @@ describe.skipIf(skip !== null)("protocol layer on the local network", () => {
 
     expectRawShape(action, simulation.retval)
     const simulated = parseOutput(action, simulation.retval)
-    const guards = guardsFrom(action, simInput, simulated, SLIPPAGE_BPS)
+    // The floors follow the exchange rate the step was simulated with, as the app passes it (R5-3).
+    const guards = guardsFrom(action, simInput, simulated, SLIPPAGE_BPS, ratesFrom({ data: before.ms, stale: false }))
     expect(guards.ok, `${action}: guardsFrom ${json(guards)}`).toBe(true)
     if (!guards.ok) throw new Error(guards.reason)
 

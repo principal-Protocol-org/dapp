@@ -8,8 +8,9 @@
  * confirmed steps really produced, a draft with open guards and a deadline from the ledger clock,
  * `simulate` (the hook's own, as the user), the gates with that simulation (expected empty),
  * `derive` (the floors at the slippage setting, from that simulation and the live SY exchange rate,
- * as the hook passes it: one-step Buy YT's bound is in SY, R4-6), `prepareReview`; then, as
- * `sign` does it, `executeReview` (R31 checks, sign, submit, poll, decode).
+ * as the hook passes it: the USDY flash's budget is capped in SY, R5-3), `prepareReview`; then, as
+ * `sign` does it, `executeReview` (R31 checks, sign, submit, poll, decode). The open guards take the
+ * same rate (R5-3: the USDY flash is simulated with its whole budget in SY as `max_net_cost`).
  */
 import { expect } from "vitest"
 import { derive, ratesFrom, simulate } from "@/hooks/use-simulation"
@@ -58,10 +59,11 @@ const abs = (v: bigint) => (v < 0n ? -v : v)
 /**
  * The floors an action is signed with, and a result against them (0001): every slippage-sensitive
  * call has a floor above zero; Buy YT's `max_net_cost` sits above zero and below what the buy
- * spends (in SY for the one step, R4-6); the result honours each floor. The route runner checks a
- * step's simulated output before it is signed and its decoded output once it lands; the lifecycle
- * suite checks every decoded output. One-step Buy YT's net cost in SY needs the exchange rate: the
- * routes suite checks it.
+ * spends; the flash's net cost is within its `max_net_cost` (R5-3); the result honors each floor.
+ * The route runner checks a step's simulated output before it is signed and its decoded output once
+ * it lands; the lifecycle suite checks every decoded output. The flash's cap at the budget, and the
+ * USDY flash's `min_underlying_back` (the one floor that may be 0, R5-3), need the exchange rate: the
+ * routes suite checks them.
  */
 export function expectFloors(input: ActionInput, out: ActionOutput, g: GuardValues, label: string = input.action): void {
   const positive = (floor: bigint | undefined, what: string): bigint => {
@@ -150,7 +152,7 @@ export function createRunner(p: {
     }
   }
 
-  /** The SY exchange rate the floors may need (R4-6), from reads that are fresh: `useRoute`'s `ratesFrom`. */
+  /** The SY exchange rate the open guards and the floors may need (R5-3), from reads that are fresh: `useRoute`'s `ratesFrom`. */
   const rates = (s: Snapshot) => ratesFrom({ data: s.ms, stale: false })
 
   /** `useGateContext`'s `base`: every gate input but the simulation. */
@@ -174,7 +176,8 @@ export function createRunner(p: {
   async function preStart(req: RouteRequest, plans: StepPlan[]): Promise<{ blockers: Blocker[]; firstOutput?: ActionOutput }> {
     const s = await snapshot()
     const first = preStartDraft(plans[0], req).input
-    const simInput: ActionInput = { ...first, guards: openGuards(first.action, first.amount), deadline: BigInt(Math.floor(s.ledgerTime) + DEADLINE_SECONDS) }
+    // The USDY flash's open max_net_cost is its budget in SY, which needs the exchange rate (R5-3).
+    const simInput: ActionInput = { ...first, guards: openGuards(first.action, first.amount, rates(s)), deadline: BigInt(Math.floor(s.ledgerTime) + DEADLINE_SECONDS) }
     const outcome = await simulate(manifest, simInput)
     const { output, guards } = derive(simInput, outcome, SLIPPAGE_BPS, rates(s))
     const blockers = routePreStartBlockers({
@@ -202,7 +205,7 @@ export function createRunner(p: {
       amount: amounts.amount,
       ...(amounts.secondaryAmount !== undefined ? { secondaryAmount: amounts.secondaryAmount } : {}),
       ...(amounts.desired ? { desired: amounts.desired } : {}),
-      guards: openGuards(plan.action, amounts.amount),
+      guards: openGuards(plan.action, amounts.amount, rates(s)),
       deadline: BigInt(ledgerAt + DEADLINE_SECONDS),
     }
     const outcome: SimulationOutcome = await simulate(manifest, draft)
