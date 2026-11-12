@@ -59,11 +59,17 @@ export function minAfterSlippage(out: bigint, bps: bigint): bigint {
 }
 
 /** The SY a flash budget stands for (R5-3): the amount itself for an SY payer, its deposit for a USDY payer. */
-function budgetSy(action: ActionId, amount: bigint, rates?: GuardRates): bigint {
-  if (action === "buy_yt_flash") return amount
+function budgetSy(action: ActionId, amount: bigint, rates?: GuardRates): { budget: bigint; xr?: bigint } | { reason: string } {
+  if (action === "buy_yt_flash") return { budget: amount }
   const xr = rates?.exchangeRate
-  if (xr === undefined || xr <= 0n) throw new Error(NO_EXCHANGE_RATE_REASON)
-  return previewDeposit(amount, xr)
+  if (xr === undefined || xr <= 0n) return { reason: NO_EXCHANGE_RATE_REASON }
+  return { budget: previewDeposit(amount, xr), xr }
+}
+
+function openBudget(action: ActionId, amount: bigint, rates?: GuardRates): bigint {
+  const b = budgetSy(action, amount, rates)
+  if ("reason" in b) throw new Error(b.reason)
+  return b.budget
 }
 
 /**
@@ -83,7 +89,7 @@ export function openGuards(action: ActionId, amount: bigint, rates?: GuardRates)
     case "buy_yt_flash":
       return { minOut: 0n, maxNetCost: amount }
     case "buy_yt_flash_underlying":
-      return { minOut: 0n, maxNetCost: budgetSy(action, amount, rates), minOut2: 0n }
+      return { minOut: 0n, maxNetCost: openBudget(action, amount, rates), minOut2: 0n }
     default:
       return { minOut: 0n }
   }
@@ -222,18 +228,15 @@ export function guardsFrom(
       if (out.net_cost <= 0n) return { ok: false, reason: YT_PRICE_REASON }
       const yt = floorOf(out.yt_out, slippageBps, "YT")
       if ("reason" in yt) return { ok: false, reason: yt.reason }
-      let budget: bigint
-      try {
-        budget = budgetSy(action, input.amount, rates)
-      } catch (error) {
-        return { ok: false, reason: error instanceof Error ? error.message : String(error) }
-      }
+      const b = budgetSy(action, input.amount, rates)
+      if ("reason" in b) return { ok: false, reason: b.reason }
+      const { budget, xr } = b
       const margin = ceilDiv(out.net_cost * (BPS + slippageBps), BPS)
       const maxNetCost = margin < budget ? margin : budget
       if (out.kind === "flash_yt") return { ok: true, guards: { minOut: yt.floor, maxNetCost } }
       // The SY not spent comes back as the underlying: min_underlying_back follows from maxNetCost
       // and may be 0, the one zero floor allowed (it is not a separate bound).
-      const xr = rates?.exchangeRate as bigint
+      if (xr === undefined) return { ok: false, reason: NO_EXCHANGE_RATE_REASON }
       return { ok: true, guards: { minOut: yt.floor, maxNetCost, minOut2: previewWithdraw(budget - maxNetCost, xr) } }
     }
     case "redeem":

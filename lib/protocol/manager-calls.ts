@@ -316,7 +316,7 @@ export function createTokensCall(manifest: Manifest, p: FactoryCallParams<TokenP
     kind: "create_tokens",
     source,
     invocation: createTokensInvocation(manifest, { issuer: source, salt: p.salt, params: p.params }),
-    label: `Deploy the SY wrapper, ${p.params.ptSymbol} and ${p.params.ytSymbol} of a new ${codeOf(manifest, p.params.underlying)} market maturing ${maturityText(p.params.maturity)}`,
+    label: `Deploy the SY wrapper, ${p.params.ptSymbol} ("${p.params.ptName}") and ${p.params.ytSymbol} ("${p.params.ytName}") of a new ${codeOf(manifest, p.params.underlying)} market maturing ${maturityText(p.params.maturity)}`,
   }
 }
 

@@ -276,7 +276,7 @@ describe("MarketFactory create_* calls (spec 0002 §5 step 3, R5-10): the issuer
       kind: "create_tokens",
       source: SIGNER,
       invocation: createTokensInvocation(manifest, { issuer: SIGNER, salt: SALT, params: PARAMS }),
-      label: "Deploy the SY wrapper, PT-USDY and YT-USDY of a new USDY market maturing 2027-04-15 08:00 UTC",
+      label: 'Deploy the SY wrapper, PT-USDY ("Principal Token USDY") and YT-USDY ("Yield Token USDY") of a new USDY market maturing 2027-04-15 08:00 UTC',
     })
     expect(call.invocation.contractId).toBe(FACTORY)
     expect(call.invocation.args[0]).toEqual(issuer)

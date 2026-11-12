@@ -189,6 +189,17 @@ describe("MarketHeader", () => {
     wrap(<MarketHeader marketId="m1" />)
     expect(badge()).toBe("Loading")
   })
+  it("says Loading, not Unavailable, in the countdown while the ledger clock loads", () => {
+    mocks.clock = { ledgerTime: null, isError: false }
+    wrap(<MarketHeader marketId="m1" />)
+    expect(screen.getByText("Loading", { selector: "p span" })).toBeTruthy()
+    expect(screen.queryByText("Unavailable", { selector: "p span" })).toBeNull()
+  })
+  it("says Unavailable in the countdown once the ledger clock has failed", () => {
+    mocks.clock = { ledgerTime: null, isError: true }
+    wrap(<MarketHeader marketId="m1" />)
+    expect(screen.getByText("Unavailable", { selector: "p span" })).toBeTruthy()
+  })
   it("says Unavailable once the ledger clock has failed", () => {
     mocks.clock = { ledgerTime: null, isError: true }
     wrap(<MarketHeader marketId="m1" />)

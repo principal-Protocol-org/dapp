@@ -293,18 +293,19 @@ contract team are in [`.rness/docs/requests-arthur-0002.md`](../../.rness/docs/r
   any other wallet is told which account must sign.
 - **Testnet needs migration 0003 applied** (`pnpm db:migrate --env-file .env.testnet`) for Resume to
   work across browsers. Until then Resume lists only the salts this browser saved.
-- **LP only in USDY signs `sy_in` at the current SY rate, with no headroom** (R5-5). If the rate
-  rose between simulation and inclusion, the call would revert, or take a few raw units of SY the
-  wallet already held. Harmless while every SYWrapper is at rate 1.0, as all deployed ones are.
-- **The countdown shows "Unavailable" for a moment while the clock loads.** Known, with a fix pending.
+- **LP only in USDY and the USDY flash Buy YT sign at the current SY rate, with no headroom** (R5-5).
+  LP only signs `sy_in` at that rate; the flash caps `max_net_cost` at `previewDeposit(amount, xr)`
+  from the simulation. If the rate rose between simulation and inclusion, the call would revert, or
+  (LP only) take a few raw units of SY the wallet already held, or (flash) leave the deposit a few
+  raw units short of the cap. Harmless while every SYWrapper is at rate 1.0, as all deployed ones are.
 - **OracleAdapter v2 is required.** The app reads `is_available()` and the oracle's policy (R4-2).
   On a v1 oracle (such as the earlier `be2a1a5` Testnet deployment), the oracle shows unavailable and
   every gated write is refused, and `/api/cron/oracle` answers 500 `failed`.
 - **Two-sided add and Keep YT can fail** if the pool or oracle moves between review and
-  inclusion. On the one-step Keep YT, an oracle tick that lands between review and
-  inclusion is enough: the Router passes the oracle-priced `pt_minted` into a call the user
-  authorized, so it no longer matches and the app says "Amounts moved…". The user loses only the
-  network fee. The panel names the cause. Prepare again.
+  inclusion. The one-step Keep YT signs the desired PT and SY as literals, so an
+  oracle rise between review and inclusion leaves a little extra PT in the wallet, and the oracle
+  rejects decreases. In the cases that do fail, the user loses only the network fee. The panel names
+  the cause. Prepare again.
 - **A later step can fail on rent.** Step 2 of a multi-step route, prepared in the ledger its
   previous step landed in, can fail with an insufficient refundable fee (reproduced twice locally).
   The app says "prepare it again" and the route stays continuable. The fix is the refundable-fee

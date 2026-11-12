@@ -511,7 +511,7 @@ function pauseGate(input: ActionInput, ctx: GateContext, g: Gates): void {
   }
 
   if (RISK_CHECKED.has(a) && g.need(m.riskPaused, "risk control's pause state") === true) {
-    g.block("pause", "Risk control is paused: depositing, minting and buying YT are stopped until it is unpaused.")
+    g.block("pause", "Risk control is paused: anything that deposits or mints is stopped (deposits, minting, buying PT or YT in USDY, and adding liquidity in USDY) until it is unpaused.")
   }
 
   // R5-8: `is_paused()` is read up front; the simulation's own `#9` stays as the fallback. One refusal either way.
