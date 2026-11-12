@@ -4,11 +4,12 @@ import { useEffect, useMemo, useSyncExternalStore } from "react"
 import { useQueries, useQuery } from "@tanstack/react-query"
 import { useManifest } from "@/components/app/manifest-provider"
 import { forgetWizardSalt, readWizardSalts, subscribeWizardSalts } from "@/lib/app/wizard-salts"
-import { predictMarket, readContractAdmin, readDefaults, readFixedParams, readSacAdmin } from "@/lib/protocol/factory"
+import { predictMarket, readContractAdmin, readCreatorRoles, readDefaults, readFixedParams, readSacAdmin } from "@/lib/protocol/factory"
 import { marketProgress, type MarketProgress } from "@/lib/protocol/market-progress"
 import { createRpcReader } from "@/lib/protocol/reader"
+import { readSeedState } from "@/lib/protocol/seed"
 import { createRpcServer } from "@/lib/protocol/stellar"
-import type { Manifest, Market } from "@/lib/protocol/types"
+import type { Manifest, Market, MarketContracts } from "@/lib/protocol/types"
 
 /**
  * The market-creation wizard's chain reads (spec 0002 §5, R5-10). Every key starts with
@@ -87,12 +88,37 @@ export function useContractAdmin(contractId: string) {
 }
 
 /**
- * The markets this browser started creating (`wizard-salts`), each with its progress read from the
- * chain: what the manager view lists as "Resume at step N". Each is read on mount (and on focus), not
- * polled: a full progress read is some thirty RPC calls. A salt whose pool is listed has nothing left
- * to resume, and one with nothing on chain (a reset network) never had: both are forgotten.
+ * What the seed (step 6) reads for the new market: the unseeded pool's state, the oracle's freshness,
+ * the SY exchange rate, the tokenization fee, and the signer's PT and SY of this market. Polled like
+ * the progress, and refreshed by every signed manager transaction.
  */
-export function useMarketsInProgress() {
+export function useSeedState(predicted: MarketContracts, account: string | null) {
+  const manifest = useManifest()
+  return useQuery({
+    queryKey: ["manage", manifest.network, "seed-state", predicted.pool, account],
+    queryFn: () => readSeedState(createRpcReader(manifest), manifest, predicted, account),
+    refetchInterval: PROGRESS_REFETCH_MS,
+  })
+}
+
+/** The Resume list is read on mount and on focus, not polled, and a read stays fresh this long (ms). */
+export const IN_PROGRESS_STALE_MS = 60_000
+
+/**
+ * The markets being created that the manager view lists as "Resume at step N" (spec 0002 §5
+ * "Resuming"), each with its progress read from the chain:
+ *
+ * - the salts this browser started (`wizard-salts`), whoever is connected. One whose pool is listed
+ *   has nothing left to resume, and one with nothing on chain (a reset network) never had: both are
+ *   forgotten;
+ * - the registry's salts (`registry`, the factory's events, so from any browser), deduplicated with
+ *   those, and listed only to `account` when it is the asset's issuer or the market's protocol admin
+ *   (`readCreatorRoles`), and only while the pool is not listed.
+ *
+ * Each is read on mount (and on focus), not polled: a full progress read is some thirty RPC calls; a
+ * read stays fresh for a minute (`IN_PROGRESS_STALE_MS`).
+ */
+export function useMarketsInProgress(registry: readonly string[] = [], account: string | null = null) {
   const manifest = useManifest()
   // Browser storage, as a string snapshot (stable by value); none on the server and during hydration.
   const raw = useSyncExternalStore(
@@ -101,11 +127,26 @@ export function useMarketsInProgress() {
     () => "",
   )
   const salts = useMemo(() => (raw === "" ? [] : raw.split(",")), [raw])
-  const queries = useQueries({ queries: salts.map((salt) => progressQuery(manifest, salt)) })
+  const fromRegistry = registry.filter((salt) => !salts.includes(salt))
+  const all = [...salts, ...fromRegistry]
+  const queries = useQueries({ queries: all.map((salt) => ({ ...progressQuery(manifest, salt), staleTime: IN_PROGRESS_STALE_MS })) })
+  const progressOf = (salt: string) => queries[all.indexOf(salt)]?.data as MarketProgress | undefined
+  // Who may resume each registry salt, once its progress says which phases exist; only for a wallet.
+  const creators = useQueries({
+    queries: fromRegistry.map((salt) => {
+      const p = progressOf(salt)
+      return {
+        queryKey: ["manage", manifest.network, "wizard-creators", salt, p?.phases.tokens, p?.phases.engine],
+        queryFn: () => readCreatorRoles(createRpcReader(manifest), (p as MarketProgress).predicted, (p as MarketProgress).phases),
+        enabled: account !== null && p !== undefined && p.phases.tokens,
+        staleTime: IN_PROGRESS_STALE_MS,
+      }
+    }),
+  })
 
   const listed = useMemo(() => new Set(manifest.markets.map((m) => m.contracts.pool)), [manifest])
-  const done = salts.filter((salt, i) => {
-    const p = queries[i]?.data
+  const done = salts.filter((salt) => {
+    const p = progressOf(salt)
     return p !== undefined && (p.step === 1 || listed.has(p.predicted.pool))
   })
   const doneKey = done.join(",")
@@ -113,5 +154,11 @@ export function useMarketsInProgress() {
     for (const salt of doneKey === "" ? [] : doneKey.split(",")) forgetWizardSalt(manifest.network, salt)
   }, [doneKey, manifest.network])
 
-  return salts.filter((salt) => !done.includes(salt)).map((salt) => ({ salt, progress: queries[salts.indexOf(salt)] }))
+  const mine = fromRegistry.filter((salt, i) => {
+    const p = progressOf(salt)
+    const who = creators[i]?.data
+    if (account === null || p === undefined || p.step === 1 || listed.has(p.predicted.pool) || who === undefined) return false
+    return [who.sacAdmin, who.protocolAdmin].some((r) => r?.status === "live" && r.value === account)
+  })
+  return [...salts.filter((salt) => !done.includes(salt)), ...mine].map((salt) => ({ salt, progress: queries[all.indexOf(salt)] }))
 }

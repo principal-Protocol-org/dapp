@@ -1,12 +1,16 @@
 import { Suspense } from "react"
 import { MyMarkets } from "@/components/app/manage/my-markets"
-import { invalidRegistryMarkets } from "@/lib/server/manage"
+import { invalidRegistryMarkets, resumableRegistrySalts } from "@/lib/server/manage"
 
 export const metadata = { title: "Manage · Principal App" }
 
-/** The registry's unlisted rows are request-time data: read on the server, inside `<Suspense>`. */
+/**
+ * The registry's unlisted rows and the half-finished markets it indexed are request-time data: read
+ * on the server, inside `<Suspense>`.
+ */
 async function Manager() {
-  return <MyMarkets invalid={await invalidRegistryMarkets()} />
+  const [invalid, salts] = await Promise.all([invalidRegistryMarkets(), resumableRegistrySalts()])
+  return <MyMarkets invalid={invalid} salts={salts} />
 }
 
 export default function ManagePage() {

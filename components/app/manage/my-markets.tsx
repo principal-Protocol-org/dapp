@@ -44,6 +44,11 @@ import type { Live, Market } from "@/lib/protocol/types"
 /** Passed from the server page: the registry rows the app does not list (R2-38). */
 export type InvalidMarkets = { status: "ok"; rows: InvalidMarket[] } | { status: "unavailable" }
 
+/** Passed from the server page: the salts of markets the factory started and that are not listed (spec 0002 §5 "Resuming"). */
+export type RegistrySalts = { status: "ok"; salts: string[] } | { status: "unavailable" }
+
+const NO_SALTS: string[] = []
+
 const ROLE_NAME: Record<Role, string> = {
   issuer: "Issuer",
   creator: "Creator",
@@ -236,22 +241,29 @@ function issuesAnAsset(roles: AccountRoles): boolean {
 type InProgress = ReturnType<typeof useMarketsInProgress>[number]
 
 /**
- * The markets this browser started creating and has not finished (spec 0002 §5 "Resuming"): each
- * with the step the chain says it has reached. Nothing deployed yet is not a market in progress; a
- * pool already in the list has nothing left to resume.
+ * The markets being created and not finished (spec 0002 §5 "Resuming"): those this browser started,
+ * and those the registry indexed from the factory's events for the asset's issuer or the protocol
+ * admin connected (`useMarketsInProgress`), each with the step the chain says it has reached. Nothing
+ * deployed yet is not a market in progress; a pool already in the list has nothing left to resume.
+ * When the registry could not be read, an issuer is told the list may be short.
  */
-function MarketsInProgress({ markets, listedPools }: { markets: InProgress[]; listedPools: ReadonlySet<string> }) {
+function MarketsInProgress({ markets, listedPools, registryDown }: { markets: InProgress[]; listedPools: ReadonlySet<string>; registryDown: boolean }) {
   const shown = markets.filter(({ progress }) => {
     if (progress.isError) return true
     const p = progress.data as MarketProgress | undefined
     return p !== undefined && p.step >= 3 && !listedPools.has(p.predicted.pool)
   })
-  if (shown.length === 0) return null
+  if (shown.length === 0 && !registryDown) return null
   return (
     <section aria-labelledby="in-progress-heading" className="grid gap-2">
       <h2 id="in-progress-heading" className="font-serif text-xl text-ink">
         Markets being created
       </h2>
+      {registryDown ? (
+        <p className="text-sm text-ink-muted">
+          Markets started from other browsers could not be read from the registry right now. Their wizard links still open them.
+        </p>
+      ) : null}
       <ul className="grid gap-2">
         {shown.map(({ salt, progress }) => {
           const p = progress.data as MarketProgress | undefined
@@ -279,14 +291,14 @@ function MarketsInProgress({ markets, listedPools }: { markets: InProgress[]; li
  * are read on each market's own contracts and scoped to them. An unreadable figure says
  * "Unavailable" with its reason, never a zero.
  */
-export function MyMarkets({ invalid }: { invalid: InvalidMarkets }) {
+export function MyMarkets({ invalid, salts }: { invalid: InvalidMarkets; salts: RegistrySalts }) {
   const manifest = useManifest()
   const { state } = useWallet()
   const { account, roles, pending } = useMyRoles()
   const { ledgerTime } = useLedgerClock()
   const [view, setView] = useState<View>("mine")
   const states = useMarketStates(manifest.markets.map((m) => m.marketId))
-  const inProgress = useMarketsInProgress()
+  const inProgress = useMarketsInProgress(salts.status === "ok" ? salts.salts : NO_SALTS, account)
   const listedPools = new Set(manifest.markets.map((m) => m.contracts.pool))
   const issuer = account !== null && issuesAnAsset(roles)
 
@@ -325,7 +337,7 @@ export function MyMarkets({ invalid }: { invalid: InvalidMarkets }) {
           </Button>
         </div>
       ) : null}
-      <MarketsInProgress markets={inProgress} listedPools={listedPools} />
+      <MarketsInProgress markets={inProgress} listedPools={listedPools} registryDown={issuer && salts.status === "unavailable"} />
 
       {view === "mine" && state.status !== "connected" ? (
         <p className="rounded-lg border border-line bg-surface p-5 text-ink">

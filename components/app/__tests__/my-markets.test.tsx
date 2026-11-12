@@ -33,6 +33,7 @@ const mocks = vi.hoisted(() => ({
   execute: vi.fn(),
   toast: vi.fn(),
   inProgress: [] as { salt: string; progress: { data?: unknown; isPending: boolean; isError: boolean; error?: Error | null } }[],
+  inProgressArgs: [] as unknown[],
 }))
 
 vi.mock("@/components/app/manifest-provider", () => ({ useManifest: () => manifest }))
@@ -50,7 +51,12 @@ vi.mock("@/hooks/use-execute", () => ({
   useExecute: () => ({ prepareManager: mocks.prepareManager, execute: mocks.execute, pending: false }),
 }))
 vi.mock("@/components/app/actions/tx-feedback", () => ({ showTxToast: mocks.toast }))
-vi.mock("@/hooks/use-wizard", () => ({ useMarketsInProgress: () => mocks.inProgress }))
+vi.mock("@/hooks/use-wizard", () => ({
+  useMarketsInProgress: (...args: unknown[]) => {
+    mocks.inProgressArgs = args
+    return mocks.inProgress
+  },
+}))
 vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} })
 
 import { MyMarkets } from "../manage/my-markets"
@@ -82,7 +88,9 @@ function setRoles(a: MarketRoles | undefined, b: MarketRoles | undefined) {
   mocks.roles = { markets, shared }
 }
 const noInvalid: Parameters<typeof MyMarkets>[0]["invalid"] = { status: "ok", rows: [] }
-const show = (invalid: Parameters<typeof MyMarkets>[0]["invalid"] = noInvalid) => render(<TooltipProvider><MyMarkets invalid={invalid} /></TooltipProvider>)
+const noSalts = { status: "ok" as const, salts: [] }
+const show = (invalid: Parameters<typeof MyMarkets>[0]["invalid"] = noInvalid, salts: Parameters<typeof MyMarkets>[0]["salts"] = noSalts) =>
+  render(<TooltipProvider><MyMarkets invalid={invalid} salts={salts} /></TooltipProvider>)
 
 function managerReview(call: ManagerCall): ManagerReview {
   const now = Date.now()
@@ -345,5 +353,15 @@ describe("creating a market (spec 0002 §5, R5-10)", () => {
     expect(within(section).queryByText(/step 7/)).toBeNull()
     expect(within(section).getByText(/Unavailable \(rpc 503\)/)).toBeTruthy()
     expect(within(section).getByRole("link", { name: "Open" }).getAttribute("href")).toBe(`/app/manage/new?salt=${salt("a4")}`)
+  })
+
+  it("the registry's half-finished salts are listed for the connected wallet (any browser), and a registry that cannot be read is said", () => {
+    const salts = { status: "ok" as const, salts: ["c1".repeat(32)] }
+    mocks.roles = { ...mocks.roles, testAssetIssuer: live(true) }
+    const { unmount } = show(noInvalid, salts)
+    expect(mocks.inProgressArgs).toEqual([salts.salts, ME])
+    unmount()
+    show(noInvalid, { status: "unavailable" })
+    expect(screen.getByText(/Markets started from other browsers could not be read from the registry/)).toBeTruthy()
   })
 })

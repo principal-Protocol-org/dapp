@@ -5,7 +5,9 @@ import "server-only"
  * contracts and pins the Wasm hash of every market contract kind, and its `markets[]` are seeds.
  * Other markets are discovered from the Router's `mkt_reg` / `mkt_unreg` and the factory's
  * `mkt_new` events, or published by the wizard (`POST /api/markets`), and cached in
- * `market_registry` keyed by pool.
+ * `market_registry` keyed by pool. The factory's `mkt_tok`, `mkt_eng` and `mkt_new` also index each
+ * market by its salt (`market_salts`), so one whose creation stopped part way is listed to resume from
+ * any browser (spec 0002 §5 "Resuming"); where it stands is read from the chain, never from here.
  *
  * A market is listed only after it passes `validateMarket`: 0001's topology rule, wiring to this
  * network's Router, oracle, Permissioning and RiskControl, and every contract running the code the
@@ -22,7 +24,9 @@ import "server-only"
  * reading the list gives up on a slow database and lists the seeds.
  */
 import { Asset, StrKey, scValToNative, type xdr } from "@stellar/stellar-sdk"
+import { bytesToHex } from "@/lib/protocol/bytes"
 import { cursorLedger, idOf, type RawEvent } from "@/lib/protocol/events"
+import { deriveMarketContracts } from "@/lib/protocol/factory"
 import { parseMarket } from "@/lib/protocol/manifest"
 import { fetchTopology } from "@/lib/protocol/market-state"
 import { isContractError, readLive, toBool, type ContractReader } from "@/lib/protocol/reader"
@@ -79,8 +83,18 @@ export type RegistryWrite = {
   market: Market | null
 }
 
+/** The factory phase an event shows done: `mkt_tok` (tokens), `mkt_eng` (engine), `mkt_new` (pool and escrow). */
+export type SaltPhase = "tokens" | "engine" | "pool"
+
+/** One `market_salts` row: a market the factory started, by salt (lower-case hex), at the furthest phase seen. */
+export type SaltRow = { factory: string; salt: string; phase: SaltPhase; ledger: number }
+
 export type RegistryStore = {
   rows(): Promise<RegistryRow[]>
+  /** The salts `factory` started, newest first (by the ledger of the furthest phase seen). */
+  salts(factory: string): Promise<SaltRow[]>
+  /** Upserts by factory and salt, keeping the furthest phase and the latest ledger. */
+  recordSalt(row: SaltRow): Promise<void>
   /**
    * Upserts by pool. Source precedence: seed > published > discovered. `valid: null` on an existing
    * row keeps its verdict and market and updates the reason; `market: null` keeps a stored market.
@@ -502,11 +516,24 @@ function native(v: xdr.ScVal): unknown {
 
 type Step = { pool: string; action: "check" | "unregistered"; at: string }
 
-/** One page's events as steps: the last event per pool wins, in the order of those last events. */
-function stepsOf(manifest: Manifest, events: RawEvent[]): Step[] {
+const PHASE: Record<string, SaltPhase> = { mkt_tok: "tokens", mkt_eng: "engine", mkt_new: "pool" }
+const PHASE_RANK: Record<SaltPhase, number> = { tokens: 0, engine: 1, pool: 2 }
+
+/** The salt a factory event names first (`BytesN<32>`), as lower-case hex; null for any other shape. */
+function saltOf(data: unknown): string | null {
+  const first = Array.isArray(data) ? data[0] : undefined
+  return first instanceof Uint8Array && first.length === 32 ? bytesToHex(first) : null
+}
+
+/**
+ * One page's events as steps: the last event per pool wins, in the order of those last events. The
+ * factory's events also name the salts it started, each at the furthest phase seen (spec 0002 §5).
+ */
+function stepsOf(manifest: Manifest, events: RawEvent[]): { steps: Step[]; salts: SaltRow[] } {
   const router = manifest.shared.router
   const factory = manifest.shared.factory
   const steps = new Map<string, Step>()
+  const salts = new Map<string, SaltRow>()
   for (const e of [...events].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))) {
     if (e.inSuccessfulContractCall === false) continue
     const from = idOf(e.contractId)
@@ -523,14 +550,41 @@ function stepsOf(manifest: Manifest, events: RawEvent[]): Step[] {
       steps.delete(step.pool)
       steps.set(step.pool, step)
     }
+    const phase = factory && from === factory && topic ? PHASE[topic] : undefined
+    const salt = phase ? saltOf(data) : null
+    if (factory && phase && salt) {
+      const prev = salts.get(salt)
+      salts.set(salt, {
+        factory,
+        salt,
+        phase: prev && PHASE_RANK[prev.phase] > PHASE_RANK[phase] ? prev.phase : phase,
+        ledger: Math.max(prev?.ledger ?? 0, e.ledger),
+      })
+    }
   }
-  return [...steps.values()]
+  return { steps: [...steps.values()], salts: [...salts.values()] }
+}
+
+/**
+ * Indexes the salts of one page. Best effort: the salt index only lists markets to resume (each one's
+ * progress is read from the chain), so a failed write is logged by its code and never stops the
+ * discovery of markets, whose cursor moves on.
+ */
+async function indexSalts(store: RegistryStore, salts: SaltRow[]): Promise<void> {
+  for (const row of salts) {
+    try {
+      await store.recordSalt(row)
+    } catch (error) {
+      console.error(`registry: the salt ${row.salt.slice(0, 8)}… could not be indexed (${dbCode(error)})`)
+    }
+  }
 }
 
 /**
  * Scans the Router's and the factory's events since the stored cursor (`ingest_cursor`) and checks
  * every pool they name: `mkt_reg` and the factory's `mkt_new` (pool, escrow) are checked;
- * `mkt_unreg` marks the pool invalid. Events are applied page by page in id order, so the last one
+ * `mkt_unreg` marks the pool invalid. The factory's `mkt_tok`, `mkt_eng` and `mkt_new` index their
+ * salt (`indexSalts`), with no read. Events are applied page by page in id order, so the last one
  * wins. If the cursor is older than the RPC's oldest ledger the scan restarts there and the gap is
  * logged and reported; markets are never invented to fill it.
  *
@@ -581,7 +635,9 @@ export async function discover(deps: RegistryDeps, opts: { deadline?: number } =
       res = await rpc.getEvents(request)
     }
 
-    for (const step of stepsOf(manifest, res.events)) {
+    const found = stepsOf(manifest, res.events)
+    await indexSalts(store, found.salts)
+    for (const step of found.steps) {
       if (late(deps, opts.deadline)) return { checked, gap, complete: false }
       if (!rows) {
         rows = await store.rows()
@@ -778,6 +834,50 @@ export async function invalidMarkets(deps: {
   }
 }
 
+/** The most half-finished markets the manager view lists from the registry (each costs a progress read). */
+export const MAX_RESUMABLE = 20
+
+/**
+ * The salts of markets this network's factory started and that are not listed yet (spec 0002 §5
+ * "Resuming"): newest first, at most `MAX_RESUMABLE`, leaving out each one whose pool is a listed
+ * market (a seed not hidden, or a registry row with `valid = true`): it has nothing left to resume.
+ * The manager view reads each one's progress from the chain and shows it to the asset's issuer and
+ * the protocol admin. When the registry cannot be read, or is slower than `timeoutMs`, the answer is
+ * `unavailable`, never an empty list.
+ */
+export async function resumableSalts(deps: {
+  store: RegistryStore
+  manifest: Manifest
+  timeoutMs?: number
+}): Promise<{ status: "ok"; salts: string[] } | { status: "unavailable" }> {
+  const { store, manifest } = deps
+  const factory = manifest.shared.factory
+  if (!factory) return { status: "ok", salts: [] }
+  let rows: RegistryRow[]
+  let salts: SaltRow[]
+  try {
+    ;[rows, salts] = await within(Promise.all([store.rows(), store.salts(factory)]), deps.timeoutMs ?? ROWS_TIMEOUT_MS)
+  } catch (error) {
+    if (!(error instanceof DatabaseConfigError) && !(error instanceof RegistryTimeout)) {
+      console.error(`registry: the salts could not be read (${dbCode(error)})`)
+    }
+    return { status: "unavailable" }
+  }
+  const hidden = new Set(rows.filter((r) => r.valid === false).map((r) => r.pool))
+  const listed = new Set([
+    ...manifest.markets.map((m) => m.contracts.pool).filter((pool) => !hidden.has(pool)),
+    ...rows.filter((r) => r.valid === true).map((r) => r.pool),
+  ])
+  const open = salts.filter((row) => {
+    try {
+      return !listed.has(deriveMarketContracts(manifest, row.salt).pool)
+    } catch {
+      return false
+    }
+  })
+  return { status: "ok", salts: open.slice(0, MAX_RESUMABLE).map((row) => row.salt) }
+}
+
 /** A database failure by its code only: its message can carry the host or the connection string. */
 function dbCode(error: unknown): string {
   return error && typeof error === "object" && "code" in error ? String((error as { code: unknown }).code) : "unknown"
@@ -810,7 +910,7 @@ export const resetPublishLimitsForTests = (): void => publishLimiter.reset()
 
 // ---------------------------------------------------------------- the SQL store
 
-/** `market_registry` and `ingest_cursor` (db/migrations 0001, 0002) behind `RegistryStore`. */
+/** `market_registry`, `ingest_cursor` and `market_salts` (db/migrations 0001 to 0003) behind `RegistryStore`. */
 export function sqlRegistryStore(sql: Sql): RegistryStore {
   return {
     async rows() {
@@ -848,6 +948,23 @@ export function sqlRegistryStore(sql: Sql): RegistryStore {
           market = case when excluded.valid is null then market_registry.market else coalesce(excluded.market, market_registry.market) end,
           market_id = case when excluded.valid is null then market_registry.market_id else coalesce(excluded.market_id, market_registry.market_id) end,
           reason = excluded.reason,
+          updated_at = excluded.updated_at`
+    },
+    async salts(factory) {
+      const rows = await sql<{ factory: string; salt: string; phase: SaltPhase; ledger: string | number }>`
+        select factory, salt, phase, ledger from market_salts where factory = ${factory} order by ledger desc, salt`
+      return rows.map((r) => ({ factory: r.factory, salt: r.salt, phase: r.phase, ledger: Number(r.ledger) }))
+    },
+    async recordSalt(row) {
+      await sql`
+        insert into market_salts (factory, salt, phase, ledger, updated_at)
+        values (${row.factory}, ${row.salt}, ${row.phase}, ${row.ledger}, now())
+        on conflict (factory, salt) do update set
+          phase = case
+            when market_salts.phase = 'pool' or excluded.phase = 'pool' then 'pool'
+            when market_salts.phase = 'engine' or excluded.phase = 'engine' then 'engine'
+            else 'tokens' end,
+          ledger = greatest(market_salts.ledger, excluded.ledger),
           updated_at = excluded.updated_at`
     },
     async cursor(name) {

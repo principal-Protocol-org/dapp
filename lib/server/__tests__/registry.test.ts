@@ -148,8 +148,15 @@ function ev(contractId: string, topic: string, value: xdr.ScVal, ledger: number,
 const addr = (id: string) => nativeToScVal(id, { type: "address" })
 const reg = (pool: string, ledger: number, i = 0) => ev(SHARED.router, "mkt_reg", addr(pool), ledger, i)
 const unreg = (pool: string, ledger: number, i = 0) => ev(SHARED.router, "mkt_unreg", addr(pool), ledger, i)
-const mktNew = (pool: string, escrow: string, ledger: number) =>
-  ev(SHARED.factory, "mkt_new", xdr.ScVal.scvVec([xdr.ScVal.scvBytes(Buffer.alloc(32, 9)), addr(pool), addr(escrow)]), ledger)
+const mktNew = (pool: string, escrow: string, ledger: number, salt = Buffer.alloc(32, 9)) =>
+  ev(SHARED.factory, "mkt_new", xdr.ScVal.scvVec([xdr.ScVal.scvBytes(salt), addr(pool), addr(escrow)]), ledger)
+/** The factory's `mkt_tok (salt, sy_wrapper)` and `mkt_eng (salt, principal_manager)`: a market part way created. */
+const mktTok = (salt: Buffer, sy: string, ledger: number, i = 0, factory = SHARED.factory) =>
+  ev(factory, "mkt_tok", xdr.ScVal.scvVec([xdr.ScVal.scvBytes(salt), addr(sy)]), ledger, i)
+const mktEng = (salt: Buffer, manager: string, ledger: number, i = 0) =>
+  ev(SHARED.factory, "mkt_eng", xdr.ScVal.scvVec([xdr.ScVal.scvBytes(salt), addr(manager)]), ledger, i)
+const saltOf = (n: number) => Buffer.alloc(32, n)
+const hex = (b: Buffer) => b.toString("hex")
 
 function instanceEntry(contractId: string, hex: string) {
   const executable = xdr.ContractExecutable.contractExecutableWasm(Uint8Array.from(hex.match(/../g)!.map((b) => parseInt(b, 16))))
@@ -203,21 +210,38 @@ import {
   resolvedMarkets,
   revalidate,
   validateMarket,
+  resumableSalts,
   type RegistryRow,
   type RegistryStore,
+  type SaltRow,
 } from "@/lib/server/registry"
+import { deriveMarketContracts } from "@/lib/protocol/factory"
 
-/** In-memory `market_registry` and `ingest_cursor`, with the SQL store's upsert rules. */
+/** In-memory `market_registry`, `ingest_cursor` and `market_salts`, with the SQL store's upsert rules. */
 function memoryStore() {
   const rows = new Map<string, RegistryRow>()
   const cursors = new Map<string, { ledger: number; cursor: string | null }>()
+  const salts = new Map<string, SaltRow>()
+  const phaseRank = { tokens: 0, engine: 1, pool: 2 } as const
   let clock = 0
   const stamp = () => new Date(Date.UTC(2026, 9, 1) + ++clock * 1000).toISOString()
   const rank = { discovered: 0, published: 1, seed: 2 } as const
-  const store: RegistryStore & { rowsMap: typeof rows; cursors: typeof cursors; writes: number; fail?: Error } = {
+  const store: RegistryStore & { rowsMap: typeof rows; cursors: typeof cursors; saltsMap: typeof salts; writes: number; fail?: Error; failSalts?: Error } = {
     rowsMap: rows,
     cursors,
+    saltsMap: salts,
     writes: 0,
+    async salts(factory) {
+      if (store.fail) throw store.fail
+      return [...salts.values()].filter((r) => r.factory === factory).sort((a, b) => b.ledger - a.ledger).map((r) => ({ ...r }))
+    },
+    async recordSalt(row) {
+      if (store.failSalts) throw store.failSalts
+      store.writes++
+      const prev = salts.get(`${row.factory}:${row.salt}`)
+      const phase = prev && phaseRank[prev.phase] > phaseRank[row.phase] ? prev.phase : row.phase
+      salts.set(`${row.factory}:${row.salt}`, { ...row, phase, ledger: Math.max(row.ledger, prev?.ledger ?? 0) })
+    },
     async rows() {
       if (store.fail) throw store.fail
       return [...rows.values()].map((r) => structuredClone(r))
@@ -672,6 +696,71 @@ describe("discover and resolvedMarkets", () => {
 })
 
 // ---------------------------------------------------------------- publish (POST /api/markets)
+
+describe("half-finished markets by salt (spec 0002 §5 \"Resuming\"): the factory's mkt_tok, mkt_eng and mkt_new", () => {
+  it("indexes each salt the factory names, at the furthest phase seen, without a single read", async () => {
+    const manifest = manifestWith([])
+    chain.events = [mktTok(saltOf(1), cid(60), 300), mktEng(saltOf(1), cid(64), 301), mktTok(saltOf(2), cid(70), 302), mktTok(saltOf(1), cid(60), 299, 1)]
+    const result = await discover(depsFor(manifest))
+    expect(result.checked).toEqual([])
+    expect(chain.reads).toEqual([])
+    expect([...store.saltsMap.values()]).toEqual([
+      { factory: SHARED.factory, salt: hex(saltOf(1)), phase: "engine", ledger: 301 },
+      { factory: SHARED.factory, salt: hex(saltOf(2)), phase: "tokens", ledger: 302 },
+    ])
+  })
+
+  it("mkt_new indexes its salt too, and its pool is still checked", async () => {
+    const c = chain.deploy(20)
+    const manifest = manifestWith([])
+    chain.events = [mktNew(c.pool, c.recoveryEscrow, 300, saltOf(3))]
+    const result = await discover(depsFor(manifest))
+    expect(result.checked).toEqual([c.pool])
+    expect(store.saltsMap.get(`${SHARED.factory}:${hex(saltOf(3))}`)).toMatchObject({ phase: "pool", ledger: 300 })
+  })
+
+  it("an event from another contract, or of another shape, indexes nothing", async () => {
+    const manifest = manifestWith([])
+    chain.events = [
+      mktTok(saltOf(4), cid(60), 300, 0, cid(99)),
+      ev(SHARED.factory, "mkt_tok", xdr.ScVal.scvVec([xdr.ScVal.scvBytes(Buffer.alloc(31, 1)), addr(cid(60))]), 301),
+      ev(SHARED.factory, "mkt_eng", addr(cid(60)), 302),
+    ]
+    await discover(depsFor({ ...manifest }))
+    expect(store.saltsMap.size).toBe(0)
+  })
+
+  it("a salt that cannot be written never stops discovery: the market is still checked and the cursor moves on", async () => {
+    const c = chain.deploy(20)
+    const manifest = manifestWith([])
+    store.failSalts = Object.assign(new Error('relation "market_salts" does not exist'), { code: "42P01" })
+    chain.events = [mktTok(saltOf(5), cid(60), 290), reg(c.pool, 300)]
+    const result = await discover(depsFor(manifest))
+    expect(result).toMatchObject({ checked: [c.pool], complete: true })
+    expect(store.rowsMap.get(c.pool)).toMatchObject({ valid: true })
+    expect(JSON.stringify(error.mock.calls)).toMatch(/42P01/)
+    expect(JSON.stringify(error.mock.calls)).not.toMatch(/does not exist/)
+  })
+
+  it("resumableSalts lists this factory's salts, newest first, leaving out those whose pool is listed", async () => {
+    const manifest = manifestWith([])
+    const done = saltOf(6)
+    const donePool = deriveMarketContracts(manifest, hex(done)).pool
+    await store.recordSalt({ factory: SHARED.factory, salt: hex(saltOf(7)), phase: "tokens", ledger: 300 })
+    await store.recordSalt({ factory: SHARED.factory, salt: hex(done), phase: "pool", ledger: 310 })
+    await store.recordSalt({ factory: SHARED.factory, salt: hex(saltOf(8)), phase: "engine", ledger: 320 })
+    await store.recordSalt({ factory: cid(77), salt: hex(saltOf(9)), phase: "tokens", ledger: 330 })
+    await store.record({ pool: donePool, source: "published", valid: true, reason: null, market: { ...seedMarket(contractsOf(80)), contracts: { ...seedMarket(contractsOf(80)).contracts, pool: donePool } } })
+    expect(await resumableSalts({ store, manifest })).toEqual({ status: "ok", salts: [hex(saltOf(8)), hex(saltOf(7))] })
+  })
+
+  it("resumableSalts says it is unavailable when the registry cannot be read, and lists nothing without a factory", async () => {
+    store.fail = Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" })
+    expect(await resumableSalts({ store, manifest: manifestWith([]) })).toEqual({ status: "unavailable" })
+    store.fail = undefined
+    expect(await resumableSalts({ store, manifest: manifestWith([], { shared: { ...SHARED, factory: undefined } }) })).toEqual({ status: "ok", salts: [] })
+  })
+})
 
 describe("publishMarket", () => {
   it("POST validates before writing: an invalid pool writes nothing", async () => {
