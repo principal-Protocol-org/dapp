@@ -175,13 +175,17 @@ function WizardSteps({ salt }: { salt: string }) {
 
   const current: WizardStep | undefined = !p ? undefined : p.step >= 4 ? p.step : (view ?? (p.step === 3 ? 3 : 1))
   const { network } = manifest
+  const deployedSomething = p !== undefined && p.step >= 3
   useEffect(() => {
-    // A market with something on chain, or about to be, is listed in the manager view to resume.
-    if (current !== undefined && current >= 3) rememberWizardSalt(network, salt)
-  }, [current, network, salt])
+    // Listed in the manager view to resume once a phase is on chain, not when step 3 is merely shown.
+    if (deployedSomething) rememberWizardSalt(network, salt)
+  }, [deployedSomething, network, salt])
 
   if (progress.isPending) return <p className="text-ink-muted">Reading where this market stands on chain…</p>
-  if (progress.isError) {
+  // The full error view only when there is no read at all. A failed refresh (a poll, or the refresh
+  // after a signature) keeps the last read and the step mounted, with any review in progress: it is
+  // said beside it, never in its place (TanStack keeps `data` with `isError`).
+  if (p === undefined) {
     return (
       <div role="alert" className="grid gap-3 rounded-lg border border-line bg-surface p-5">
         <p className="text-ink">
@@ -195,11 +199,22 @@ function WizardSteps({ salt }: { salt: string }) {
       </div>
     )
   }
-  if (!p || current === undefined) return null
+  if (current === undefined) return null
 
+  const refreshError = progress.isError ? progress.error.message : null
   const header = (
     <>
       <StepList current={current} />
+      {refreshError ? (
+        <div role="status" className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-line bg-surface p-3">
+          <p className="min-w-0 text-sm text-ink">
+            Could not refresh where this market stands ({refreshError}). What is shown is the last read.
+          </p>
+          <Button type="button" variant="secondary" size="toggle" onClick={() => void progress.refetch()}>
+            Refresh
+          </Button>
+        </div>
+      ) : null}
       <p className="text-sm text-ink-muted">
         This page&apos;s link holds the market&apos;s salt (<span className="font-mono break-all">{salt}</span>), which fixes its seven
         addresses. Keep the link to come back: where the market stands is read from the chain.

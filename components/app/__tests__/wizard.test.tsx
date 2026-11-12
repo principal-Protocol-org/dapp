@@ -93,6 +93,8 @@ const mocks = vi.hoisted(() => ({
   reads: {} as Record<string, unknown>,
   readCalls: [] as string[],
   deployed: [] as string[],
+  /** Set: the ledger-entries read fails, like a rate-limited RPC. */
+  rpcError: null as string | null,
   prepareManager: vi.fn(),
   execute: vi.fn(),
   toast: vi.fn(),
@@ -124,6 +126,7 @@ vi.mock("@/lib/protocol/stellar", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/protocol/stellar")>()),
   createRpcServer: () => ({
     async getLedgerEntries(...keys: xdr.LedgerKey[]) {
+      if (mocks.rpcError) throw new Error(mocks.rpcError)
       const entries = mocks.deployed.flatMap((id) => {
         const key = new Contract(id).getFootprint()
         if (!keys.some((k) => k.toXDR("base64") === key.toXDR("base64"))) return []
@@ -147,6 +150,7 @@ vi.mock("@/lib/protocol/stellar", async (importOriginal) => ({
 }))
 vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} })
 
+import { readWizardSalts } from "@/lib/app/wizard-salts"
 import { Wizard } from "../manage/wizard"
 
 function managerReview(call: ManagerCall): ManagerReview {
@@ -200,6 +204,8 @@ beforeEach(() => {
   mocks.reads = { ...CURRENT_READS }
   mocks.readCalls = []
   mocks.deployed = []
+  mocks.rpcError = null
+  localStorage.clear()
   mocks.prepareManager.mockReset().mockImplementation(async (call: ManagerCall) => managerReview(call))
   mocks.execute.mockReset().mockResolvedValue({ status: "SUCCESS", hash: "abc" })
   mocks.toast.mockReset()
@@ -346,6 +352,68 @@ describe("step 3: deploy (R5-10)", () => {
     await user.click(deploy)
     await signAll(user, 3)
     expect(kinds()).toEqual(["create_tokens", "create_engine", "create_pool_and_escrow"])
+  })
+
+  it("a refresh that fails while the progress is held keeps the step and its review open, and says so", async () => {
+    connect(ISSUER)
+    const user = userEvent.setup()
+    show()
+    await toDeploy(user)
+    const deploy = await screen.findByRole("button", { name: "Deploy the market" })
+    await waitFor(() => expect((deploy as HTMLButtonElement).disabled).toBe(false))
+    await user.click(deploy)
+    const dialog = await screen.findByRole("dialog")
+    await within(dialog).findByText("Step 1 of 3")
+    // A poll or a post-signature refresh fails (rate-limited RPC): the last read stays, nothing is unmounted.
+    mocks.rpcError = "rpc 429"
+    await act(async () => {
+      await client.refetchQueries({ queryKey: ["manage", manifest.network, "wizard-progress"] })
+    })
+    expect(await screen.findByText(/Could not refresh where this market stands \(.*rpc 429\)\. What is shown is the last read\./)).toBeTruthy()
+    expect(screen.getByRole("dialog")).toBe(dialog)
+    // Behind the modal (aria-hidden while it is open), the step is still the deploy step.
+    expect(screen.getByRole("heading", { name: /Step 3 of 7: Deploy/, hidden: true })).toBeTruthy()
+    // Retrying once the RPC answers clears the note.
+    mocks.rpcError = null
+    await act(async () => {
+      await client.refetchQueries({ queryKey: ["manage", manifest.network, "wizard-progress"] })
+    })
+    await waitFor(() => expect(screen.queryByText(/Could not refresh/)).toBeNull())
+  })
+
+  it("the inline Refresh reads the chain again and clears the note once it answers", async () => {
+    const user = userEvent.setup()
+    show()
+    await screen.findByRole("heading", { name: /Step 1 of 7: Parameters/ })
+    mocks.rpcError = "rpc 503"
+    await act(async () => {
+      await client.refetchQueries({ queryKey: ["manage", manifest.network, "wizard-progress"] })
+    })
+    expect(await screen.findByText(/Could not refresh where this market stands/)).toBeTruthy()
+    expect(screen.getByRole("heading", { name: /Step 1 of 7: Parameters/ })).toBeTruthy()
+    mocks.rpcError = null
+    await user.click(screen.getByRole("button", { name: "Refresh" }))
+    await waitFor(() => expect(screen.queryByText(/Could not refresh/)).toBeNull())
+  })
+
+  it("a salt is remembered only once a phase is deployed, not when step 3 is merely viewed", async () => {
+    const user = userEvent.setup()
+    const { unmount } = show()
+    await toDeploy(user)
+    expect(readWizardSalts(manifest.network)).toEqual([])
+    unmount()
+    mocks.deployed = [predicted.sy, predicted.pt, predicted.yt]
+    Object.assign(mocks.reads, {
+      [`${predicted.pt}.underlying_address`]: SAC,
+      [`${predicted.pt}.maturity`]: 1_810_000_000n,
+      [`${predicted.pt}.name`]: "PT chain",
+      [`${predicted.pt}.symbol`]: "PT-CHAIN",
+      [`${predicted.yt}.name`]: "YT chain",
+      [`${predicted.yt}.symbol`]: "YT-CHAIN",
+    })
+    show()
+    await screen.findByRole("heading", { name: /Step 3 of 7: Deploy/ })
+    await waitFor(() => expect(readWizardSalts(manifest.network)).toEqual([SALT]))
   })
 
   it("a wallet that is not the SAC admin is told who must sign", async () => {

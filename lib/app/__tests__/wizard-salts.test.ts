@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
-import { readWizardSalts, rememberWizardSalt } from "../wizard-salts"
+import { forgetWizardSalt, readWizardSalts, rememberWizardSalt, subscribeWizardSalts } from "../wizard-salts"
 
 const A = "aa".repeat(32)
 const B = "bb".repeat(32)
@@ -26,6 +26,20 @@ describe("the salts of the markets this browser started (a convenience: the link
     expect(readWizardSalts("local")).toEqual([A])
     localStorage.setItem("pp-wizard-salts:local", "{not json")
     expect(readWizardSalts("local")).toEqual([])
+  })
+
+  it("forgets a salt, and tells subscribers of every change in this tab", () => {
+    const seen = vi.fn()
+    const stop = subscribeWizardSalts(seen)
+    rememberWizardSalt("testnet", A)
+    rememberWizardSalt("testnet", B)
+    forgetWizardSalt("testnet", A)
+    expect(readWizardSalts("testnet")).toEqual([B])
+    expect(seen).toHaveBeenCalledTimes(3)
+    stop()
+    forgetWizardSalt("testnet", B)
+    expect(readWizardSalts("testnet")).toEqual([])
+    expect(seen).toHaveBeenCalledTimes(3)
   })
 
   it("does not throw when storage is blocked", () => {

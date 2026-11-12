@@ -1,9 +1,9 @@
 "use client"
 
-import { useMemo, useSyncExternalStore } from "react"
+import { useEffect, useMemo, useSyncExternalStore } from "react"
 import { useQueries, useQuery } from "@tanstack/react-query"
 import { useManifest } from "@/components/app/manifest-provider"
-import { readWizardSalts } from "@/lib/app/wizard-salts"
+import { forgetWizardSalt, readWizardSalts, subscribeWizardSalts } from "@/lib/app/wizard-salts"
 import { predictMarket, readDefaults, readFixedParams, readSacAdmin } from "@/lib/protocol/factory"
 import { marketProgress, type MarketProgress } from "@/lib/protocol/market-progress"
 import { createRpcReader } from "@/lib/protocol/reader"
@@ -21,13 +21,15 @@ const progressKey = (manifest: Manifest, salt: string) => ["manage", manifest.ne
 const progressQuery = (manifest: Manifest, salt: string) => ({
   queryKey: progressKey(manifest, salt),
   queryFn: () => marketProgress(createRpcReader(manifest), createRpcServer(manifest.rpcUrl), manifest, salt),
-  refetchInterval: PROGRESS_REFETCH_MS,
 })
 
-/** Where `salt`'s market stands, read from the chain (`marketProgress`); an error when it cannot be read. */
+/**
+ * Where `salt`'s market stands, read from the chain (`marketProgress`), and polled while the wizard
+ * shows it. A failed refresh keeps the last read (`data`) beside the error.
+ */
 export function useMarketProgress(salt: string) {
   const manifest = useManifest()
-  return useQuery(progressQuery(manifest, salt))
+  return useQuery({ ...progressQuery(manifest, salt), refetchInterval: PROGRESS_REFETCH_MS })
 }
 
 /** The current market's settings, the defaults of a new one; none without a current market. */
@@ -74,24 +76,32 @@ export function useSacAdmin(sac: string | undefined) {
   })
 }
 
-function subscribeStorage(onChange: () => void): () => void {
-  window.addEventListener("storage", onChange)
-  return () => window.removeEventListener("storage", onChange)
-}
-
 /**
  * The markets this browser started creating (`wizard-salts`), each with its progress read from the
- * chain: what the manager view lists as "Resume at step N".
+ * chain: what the manager view lists as "Resume at step N". Each is read on mount (and on focus), not
+ * polled: a full progress read is some thirty RPC calls. A salt whose pool is listed has nothing left
+ * to resume, and one with nothing on chain (a reset network) never had: both are forgotten.
  */
 export function useMarketsInProgress() {
   const manifest = useManifest()
   // Browser storage, as a string snapshot (stable by value); none on the server and during hydration.
   const raw = useSyncExternalStore(
-    subscribeStorage,
+    subscribeWizardSalts,
     () => readWizardSalts(manifest.network).join(","),
     () => "",
   )
   const salts = useMemo(() => (raw === "" ? [] : raw.split(",")), [raw])
   const queries = useQueries({ queries: salts.map((salt) => progressQuery(manifest, salt)) })
-  return salts.map((salt, i) => ({ salt, progress: queries[i] }))
+
+  const listed = useMemo(() => new Set(manifest.markets.map((m) => m.contracts.pool)), [manifest])
+  const done = salts.filter((salt, i) => {
+    const p = queries[i]?.data
+    return p !== undefined && (p.step === 1 || listed.has(p.predicted.pool))
+  })
+  const doneKey = done.join(",")
+  useEffect(() => {
+    for (const salt of doneKey === "" ? [] : doneKey.split(",")) forgetWizardSalt(manifest.network, salt)
+  }, [doneKey, manifest.network])
+
+  return salts.filter((salt) => !done.includes(salt)).map((salt) => ({ salt, progress: queries[salts.indexOf(salt)] }))
 }
