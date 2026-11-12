@@ -840,23 +840,10 @@ export function readSacAdmin(reader: ContractReader, sac: string): Promise<Live<
 
 
 /**
- * Who may resume a market part way created (spec 0002 §5 "Resuming"): the underlying SAC's admin,
- * once the tokens exist (the SY wrapper's `underlying_address`, then the SAC's `admin()`), and the
- * protocol admin, once the engine does (`MarketConfig.protocol_admin()`). The manager view lists the
- * registry's half-finished markets to them only. A phase not deployed reads nothing; each read is its
- * own `Live`, so a failed one is unavailable, never "someone else".
+ * `MarketConfig.protocol_admin()`, read live: with the asset's issuer, who may resume a half-finished
+ * market (spec 0002 §5 "Resuming"). Before the engine exists there is no config to read, and the read
+ * is unavailable: never "someone else".
  */
-export async function readCreatorRoles(
-  reader: ContractReader,
-  predicted: MarketContracts,
-  phases: { tokens: boolean; engine: boolean },
-): Promise<{ sacAdmin?: Live<string>; protocolAdmin?: Live<string> }> {
-  const sacAdmin = phases.tokens
-    ? readLive<unknown, string>(reader, { contractId: predicted.sy, functionName: "underlying_address" }, toAddress).then((sac) =>
-        sac.status === "live" ? readSacAdmin(reader, sac.value) : sac,
-      )
-    : undefined
-  const protocolAdmin = phases.engine ? readLive<unknown, string>(reader, { contractId: predicted.config, functionName: "protocol_admin" }, toAddress) : undefined
-  const [s, p] = await Promise.all([sacAdmin, protocolAdmin])
-  return { ...(s ? { sacAdmin: s } : {}), ...(p ? { protocolAdmin: p } : {}) }
+export function readProtocolAdmin(reader: ContractReader, config: string): Promise<Live<string>> {
+  return readLive<unknown, string>(reader, { contractId: config, functionName: "protocol_admin" }, toAddress)
 }

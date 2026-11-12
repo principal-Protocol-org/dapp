@@ -4,7 +4,7 @@ import { useEffect, useMemo, useSyncExternalStore } from "react"
 import { useQueries, useQuery } from "@tanstack/react-query"
 import { useManifest } from "@/components/app/manifest-provider"
 import { forgetWizardSalt, readWizardSalts, subscribeWizardSalts } from "@/lib/app/wizard-salts"
-import { predictMarket, readContractAdmin, readCreatorRoles, readDefaults, readFixedParams, readSacAdmin } from "@/lib/protocol/factory"
+import { deriveMarketContracts, predictMarket, readContractAdmin, readDefaults, readFixedParams, readProtocolAdmin, readSacAdmin } from "@/lib/protocol/factory"
 import { marketProgress, type MarketProgress } from "@/lib/protocol/market-progress"
 import { createRpcReader } from "@/lib/protocol/reader"
 import { readSeedState } from "@/lib/protocol/seed"
@@ -104,6 +104,9 @@ export function useSeedState(predicted: MarketContracts, account: string | null)
 /** The Resume list is read on mount and on focus, not polled, and a read stays fresh this long (ms). */
 export const IN_PROGRESS_STALE_MS = 60_000
 
+/** A half-finished market from the registry: its salt and the asset its SY wraps (checked on chain when indexed). */
+export type RegistrySalt = { salt: string; underlying: string }
+
 /**
  * The markets being created that the manager view lists as "Resume at step N" (spec 0002 §5
  * "Resuming"), each with its progress read from the chain:
@@ -111,38 +114,65 @@ export const IN_PROGRESS_STALE_MS = 60_000
  * - the salts this browser started (`wizard-salts`), whoever is connected. One whose pool is listed
  *   has nothing left to resume, and one with nothing on chain (a reset network) never had: both are
  *   forgotten;
- * - the registry's salts (`registry`, the factory's events, so from any browser), deduplicated with
- *   those, and listed only to `account` when it is the asset's issuer or the market's protocol admin
- *   (`readCreatorRoles`), and only while the pool is not listed.
+ * - the registry's salts (`registry`, from the factory's events, so from any browser), deduplicated
+ *   with those, and listed only to `account` when it is the asset's issuer or the market's protocol
+ *   admin, and only while the pool is not listed.
  *
- * Each is read on mount (and on focus), not polled: a full progress read is some thirty RPC calls; a
- * read stays fresh for a minute (`IN_PROGRESS_STALE_MS`).
+ * Ownership is decided before any progress is read (a full progress read is some thirty RPC calls):
+ * one SAC `admin()` read per asset covers all its salts, then one `protocol_admin()` read per salt on
+ * an asset this account does not issue (its config is derived from the salt, locally). A read that
+ * fails is "not this account's". Without a wallet the registry's salts cost no read at all.
+ *
+ * Nothing here is polled: each read is made on mount (and on focus) and stays fresh for a minute
+ * (`IN_PROGRESS_STALE_MS`).
  */
-export function useMarketsInProgress(registry: readonly string[] = [], account: string | null = null) {
+export function useMarketsInProgress(registry: readonly RegistrySalt[] = [], account: string | null = null) {
   const manifest = useManifest()
+  const { network } = manifest
   // Browser storage, as a string snapshot (stable by value); none on the server and during hydration.
   const raw = useSyncExternalStore(
     subscribeWizardSalts,
-    () => readWizardSalts(manifest.network).join(","),
+    () => readWizardSalts(network).join(","),
     () => "",
   )
   const salts = useMemo(() => (raw === "" ? [] : raw.split(",")), [raw])
-  const fromRegistry = registry.filter((salt) => !salts.includes(salt))
-  const all = [...salts, ...fromRegistry]
+  const fromRegistry = account === null ? [] : registry.filter((r) => !salts.includes(r.salt))
+
+  // 1. The asset's issuer: one admin() per asset.
+  const assets = [...new Set(fromRegistry.map((r) => r.underlying))]
+  const sacAdmins = useQueries({
+    queries: assets.map((sac) => ({
+      queryKey: ["manage", network, "sac-admin", sac],
+      queryFn: () => readSacAdmin(createRpcReader(manifest), sac),
+      staleTime: IN_PROGRESS_STALE_MS,
+    })),
+  })
+  const adminOf = (sac: string) => sacAdmins[assets.indexOf(sac)]?.data
+  const issues = (sac: string) => {
+    const a = adminOf(sac)
+    return a?.status === "live" && a.value === account
+  }
+  // 2. The protocol admin, for the salts on an asset this account does not issue.
+  const others = fromRegistry.filter((r) => adminOf(r.underlying) !== undefined && !issues(r.underlying))
+  const protocolAdmins = useQueries({
+    queries: others.map((r) => ({
+      queryKey: ["manage", network, "protocol-admin", r.salt],
+      queryFn: () => readProtocolAdmin(createRpcReader(manifest), deriveMarketContracts(manifest, r.salt).config),
+      staleTime: IN_PROGRESS_STALE_MS,
+    })),
+  })
+  const owned = fromRegistry
+    .filter((r) => {
+      if (issues(r.underlying)) return true
+      const p = protocolAdmins[others.indexOf(r)]?.data
+      return p?.status === "live" && p.value === account
+    })
+    .map((r) => r.salt)
+
+  // 3. Progress, for this browser's salts and the registry's salts this account owns only.
+  const all = [...salts, ...owned]
   const queries = useQueries({ queries: all.map((salt) => ({ ...progressQuery(manifest, salt), staleTime: IN_PROGRESS_STALE_MS })) })
   const progressOf = (salt: string) => queries[all.indexOf(salt)]?.data as MarketProgress | undefined
-  // Who may resume each registry salt, once its progress says which phases exist; only for a wallet.
-  const creators = useQueries({
-    queries: fromRegistry.map((salt) => {
-      const p = progressOf(salt)
-      return {
-        queryKey: ["manage", manifest.network, "wizard-creators", salt, p?.phases.tokens, p?.phases.engine],
-        queryFn: () => readCreatorRoles(createRpcReader(manifest), (p as MarketProgress).predicted, (p as MarketProgress).phases),
-        enabled: account !== null && p !== undefined && p.phases.tokens,
-        staleTime: IN_PROGRESS_STALE_MS,
-      }
-    }),
-  })
 
   const listed = useMemo(() => new Set(manifest.markets.map((m) => m.contracts.pool)), [manifest])
   const done = salts.filter((salt) => {
@@ -151,14 +181,15 @@ export function useMarketsInProgress(registry: readonly string[] = [], account: 
   })
   const doneKey = done.join(",")
   useEffect(() => {
-    for (const salt of doneKey === "" ? [] : doneKey.split(",")) forgetWizardSalt(manifest.network, salt)
-  }, [doneKey, manifest.network])
+    for (const salt of doneKey === "" ? [] : doneKey.split(",")) forgetWizardSalt(network, salt)
+  }, [doneKey, network])
 
-  const mine = fromRegistry.filter((salt, i) => {
-    const p = progressOf(salt)
-    const who = creators[i]?.data
-    if (account === null || p === undefined || p.step === 1 || listed.has(p.predicted.pool) || who === undefined) return false
-    return [who.sacAdmin, who.protocolAdmin].some((r) => r?.status === "live" && r.value === account)
-  })
-  return [...salts.filter((salt) => !done.includes(salt)), ...mine].map((salt) => ({ salt, progress: queries[all.indexOf(salt)] }))
+  const shown = [
+    ...salts.filter((salt) => !done.includes(salt)),
+    ...owned.filter((salt) => {
+      const p = progressOf(salt)
+      return p === undefined || (p.step !== 1 && !listed.has(p.predicted.pool))
+    }),
+  ]
+  return shown.map((salt) => ({ salt, progress: queries[all.indexOf(salt)] }))
 }

@@ -13,7 +13,7 @@ import { useLedgerClock } from "@/hooks/use-ledger-clock"
 import { useManifestFindings } from "@/hooks/use-manifest-findings"
 import { useMarketStates } from "@/hooks/use-market-state"
 import { useAccruedFees, useMyRoles } from "@/hooks/use-manage"
-import { useMarketsInProgress } from "@/hooks/use-wizard"
+import { useMarketsInProgress, type RegistrySalt } from "@/hooks/use-wizard"
 import { useWallet } from "@/hooks/use-wallet"
 import type { Blocker } from "@/lib/protocol/gates"
 import { formatAmount, shorten } from "@/lib/protocol/format"
@@ -44,10 +44,13 @@ import type { Live, Market } from "@/lib/protocol/types"
 /** Passed from the server page: the registry rows the app does not list (R2-38). */
 export type InvalidMarkets = { status: "ok"; rows: InvalidMarket[] } | { status: "unavailable" }
 
-/** Passed from the server page: the salts of markets the factory started and that are not listed (spec 0002 §5 "Resuming"). */
-export type RegistrySalts = { status: "ok"; salts: string[] } | { status: "unavailable" }
+/**
+ * Passed from the server page: the markets the factory started and that are not listed (spec 0002 §5
+ * "Resuming"), each with the asset its SY wraps.
+ */
+export type RegistrySalts = { status: "ok"; salts: RegistrySalt[] } | { status: "unavailable" }
 
-const NO_SALTS: string[] = []
+const NO_SALTS: RegistrySalt[] = []
 
 const ROLE_NAME: Record<Role, string> = {
   issuer: "Issuer",

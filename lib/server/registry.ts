@@ -919,15 +919,18 @@ export const MAX_RESUMABLE = 20
  * manifest change may drop one), leaving out each one whose pool is a listed market (a seed not
  * hidden, or a registry row with `valid = true`): it has nothing left to resume. Capped at
  * `MAX_RESUMABLE` per asset, never overall, so one asset's issuer cannot push another's markets out
- * (security review, Task 8). The manager view reads each one's progress from the chain and shows it
- * to the asset's issuer and the protocol admin. When the registry cannot be read, or is slower than
+ * (security review, Task 8). Each comes with its asset, so the manager view decides who owns it with
+ * one `admin()` read per asset before it reads any market's progress. When the registry cannot be read, or is slower than
  * `timeoutMs`, the answer is `unavailable`, never an empty list.
  */
+/** A half-finished market the manager view may list: its salt, and the asset its SY wraps (read on chain when indexed). */
+export type ResumableSalt = { salt: string; underlying: string }
+
 export async function resumableSalts(deps: {
   store: RegistryStore
   manifest: Manifest
   timeoutMs?: number
-}): Promise<{ status: "ok"; salts: string[] } | { status: "unavailable" }> {
+}): Promise<{ status: "ok"; salts: ResumableSalt[] } | { status: "unavailable" }> {
   const { store, manifest } = deps
   const factory = manifest.shared.factory
   if (!factory) return { status: "ok", salts: [] }
@@ -959,7 +962,7 @@ export async function resumableSalts(deps: {
     perAsset.set(row.underlying, n + 1)
     return n < MAX_RESUMABLE
   })
-  return { status: "ok", salts: open.map((row) => row.salt) }
+  return { status: "ok", salts: open.map((row) => ({ salt: row.salt, underlying: row.underlying })) }
 }
 
 /** A database failure by its code only: its message can carry the host or the connection string. */

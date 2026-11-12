@@ -793,7 +793,7 @@ describe("half-finished markets by salt (spec 0002 §5 \"Resuming\"): the factor
     }
     await discover(depsFor(manifest))
     expect([...store.saltsMap.values()].map((r) => r.salt)).toEqual([hex(legit)])
-    expect(await resumableSalts({ store, manifest })).toEqual({ status: "ok", salts: [hex(legit)] })
+    expect(await resumableSalts({ store, manifest })).toEqual({ status: "ok", salts: [{ salt: hex(legit), underlying: SAC }] })
   })
 
   it("resumableSalts lists this factory's salts newest first, capped per asset, leaving out listed pools and assets this network does not list", async () => {
@@ -816,13 +816,16 @@ describe("half-finished markets by salt (spec 0002 §5 \"Resuming\"): the factor
 
     const r = await resumableSalts({ store, manifest })
     if (r.status !== "ok") throw new Error("unavailable")
-    const onSac = r.salts.filter((s) => s.endsWith("ab".repeat(31)) || s === hex(saltOf(7)))
+    // Each salt comes with its asset, so the manager view reads one admin() per asset.
+    expect(r.salts.find((x) => x.salt === hex(saltOf(8)))).toEqual({ salt: hex(saltOf(8)), underlying: SAC_B })
+    const salts = r.salts.map((x) => x.salt)
+    const onSac = salts.filter((s) => s.endsWith("ab".repeat(31)) || s === hex(saltOf(7)))
     expect(onSac).toHaveLength(MAX_RESUMABLE)
-    expect(r.salts).toContain(hex(saltOf(8)))
-    expect(r.salts).not.toContain(hex(done))
-    expect(r.salts).not.toContain(hex(saltOf(9)))
-    expect(r.salts).not.toContain(hex(saltOf(14)))
-    expect(r.salts[0]).toBe(`19${"ab".repeat(31)}`)
+    expect(salts).toContain(hex(saltOf(8)))
+    expect(salts).not.toContain(hex(done))
+    expect(salts).not.toContain(hex(saltOf(9)))
+    expect(salts).not.toContain(hex(saltOf(14)))
+    expect(salts[0]).toBe(`19${"ab".repeat(31)}`)
   })
 
   it("resumableSalts says it is unavailable when the registry cannot be read, and lists nothing without a factory", async () => {

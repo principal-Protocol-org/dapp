@@ -13,8 +13,10 @@ const mocks = vi.hoisted(() => ({
   progress: {} as Record<string, unknown>,
   calls: [] as string[],
   listedPool: "",
-  /** Who may resume each registry salt: the asset's issuer and the protocol admin, read on chain. */
-  creators: {} as Record<string, unknown>,
+  /** Who may resume a registry salt, read on chain: each asset's SAC admin, each market's protocol admin. */
+  sacAdmins: {} as Record<string, string>,
+  protocolAdmins: {} as Record<string, string>,
+  adminReads: [] as string[],
 }))
 
 vi.mock("@/components/app/manifest-provider", () => {
@@ -34,9 +36,14 @@ vi.mock("@/components/app/manifest-provider", () => {
 })
 vi.mock("@/lib/protocol/reader", () => ({ createRpcReader: () => ({}) }))
 vi.mock("@/lib/protocol/stellar", () => ({ createRpcServer: () => ({}) }))
+const answer = (value: string | undefined) =>
+  value === undefined ? { status: "unavailable", error: "no contract at this address" } : { status: "live", value, ledger: 1 }
 vi.mock("@/lib/protocol/factory", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/protocol/factory")>()),
-  readCreatorRoles: async (_reader: unknown, predicted: { pool: string }) => mocks.creators[predicted.pool],
+  // The new market's config is derived from its salt, locally.
+  deriveMarketContracts: (_manifest: unknown, s: string) => ({ config: `config-${s}`, pool: `pool-${s}` }),
+  readSacAdmin: async (_reader: unknown, sac: string) => (mocks.adminReads.push(`admin ${sac}`), answer(mocks.sacAdmins[sac])),
+  readProtocolAdmin: async (_reader: unknown, config: string) => (mocks.adminReads.push(`protocol_admin ${config}`), answer(mocks.protocolAdmins[config])),
 }))
 vi.mock("@/lib/protocol/market-progress", () => ({
   marketProgress: async (_reader: unknown, _rpc: unknown, _manifest: unknown, s: string) => {
@@ -85,40 +92,61 @@ describe("useMarketsInProgress (the manager view's Resume list)", () => {
 describe("useMarketsInProgress with the registry's salts (spec 0002 §5: resume from any browser)", () => {
   const ISSUER = "GISSUER"
   const ADMIN = "GADMIN"
-  const theirs = salt("b1")
+  const SAC_A = contractAt(70)
+  const SAC_B = contractAt(71)
   const mine = salt("b2")
+  const mineToo = salt("b4")
   const protocol = salt("b3")
-  const live = (value: string) => ({ status: "live", value, ledger: 1 })
+  const theirs = salt("b1")
+  /** What the server hands over: each salt with the asset its SY wraps (checked on chain when indexed). */
+  const registry = [
+    { salt: theirs, underlying: SAC_B },
+    { salt: mine, underlying: SAC_A },
+    { salt: protocol, underlying: SAC_B },
+    { salt: mineToo, underlying: SAC_A },
+    { salt: HALFWAY, underlying: SAC_A },
+  ]
+  const progressRead = (s: string) => mocks.calls.includes(s)
 
   beforeEach(() => {
-    Object.assign(mocks.progress, {
-      [theirs]: { step: 3, predicted: { pool: contractAt(61) }, phases: { tokens: true, engine: false, poolAndEscrow: false } },
-      [mine]: { step: 5, predicted: { pool: contractAt(62) }, phases: { tokens: true, engine: true, poolAndEscrow: true } },
-      [protocol]: { step: 6, predicted: { pool: contractAt(63) }, phases: { tokens: true, engine: true, poolAndEscrow: true } },
-    })
-    mocks.creators = {
-      [contractAt(61)]: { sacAdmin: live("GSOMEONE") },
-      [contractAt(62)]: { sacAdmin: live(ISSUER), protocolAdmin: live("GSOMEONE") },
-      [contractAt(63)]: { sacAdmin: live("GSOMEONE"), protocolAdmin: live(ADMIN) },
-      [contractAt(51)]: { sacAdmin: live(ISSUER) },
+    mocks.adminReads = []
+    for (const [s, step, pool] of [[theirs, 3, 61], [mine, 5, 62], [protocol, 6, 63], [mineToo, 4, 64]] as const) {
+      mocks.progress[s] = { step, predicted: { pool: contractAt(pool) }, phases: { tokens: true, engine: true, poolAndEscrow: true } }
     }
+    mocks.sacAdmins = { [SAC_A]: ISSUER, [SAC_B]: "GSOMEONE" }
+    // `theirs` has no engine yet: no config to read, which is "not this wallet's", never a guess.
+    mocks.protocolAdmins = { [`config-${protocol}`]: ADMIN }
   })
 
-  it("lists a registry salt to the asset's issuer or the market's protocol admin, deduplicated with this browser's, and to no one else", async () => {
-    const registry = [theirs, mine, protocol, HALFWAY]
-    const asIssuer = renderHook(() => useMarketsInProgress(registry, ISSUER), { wrapper })
-    await waitFor(() => expect(asIssuer.result.current.map((m) => m.salt)).toEqual([HALFWAY, mine]))
-    const asAdmin = renderHook(() => useMarketsInProgress(registry, ADMIN), { wrapper })
-    await waitFor(() => expect(asAdmin.result.current.map((m) => m.salt)).toEqual([HALFWAY, protocol]))
-    const noWallet = renderHook(() => useMarketsInProgress(registry, null), { wrapper })
-    await waitFor(() => expect(noWallet.result.current.map((m) => m.salt)).toEqual([HALFWAY]))
+  it("no wallet: not a single read for the registry's salts", async () => {
+    const { result } = renderHook(() => useMarketsInProgress(registry, null), { wrapper })
+    await waitFor(() => expect(result.current.map((m) => m.salt)).toEqual([HALFWAY]))
+    expect(mocks.adminReads).toEqual([])
+    expect(mocks.calls).toEqual([PUBLISHED, HALFWAY, NOTHING])
+  })
+
+  it("the asset's issuer: one admin() read per asset, and progress read only for the salts it owns", async () => {
+    const { result } = renderHook(() => useMarketsInProgress(registry, ISSUER), { wrapper })
+    await waitFor(() => expect(result.current.map((m) => m.salt)).toEqual([HALFWAY, mine, mineToo]))
+    expect(mocks.adminReads.filter((r) => r.startsWith("admin")).sort()).toEqual([`admin ${SAC_A}`, `admin ${SAC_B}`])
+    // The asset it issues needs no protocol_admin read; the other asset's markets do, one each.
+    expect(mocks.adminReads.filter((r) => r.startsWith("protocol_admin")).sort()).toEqual([`protocol_admin config-${protocol}`, `protocol_admin config-${theirs}`].sort())
+    expect([mine, mineToo].every(progressRead)).toBe(true)
+    expect(progressRead(theirs) || progressRead(protocol)).toBe(false)
     // A registry salt is never written to this browser's list.
     expect(readWizardSalts("testnet")).toEqual([HALFWAY])
   })
 
+  it("the market's protocol admin: progress read for that market only", async () => {
+    const { result } = renderHook(() => useMarketsInProgress(registry, ADMIN), { wrapper })
+    await waitFor(() => expect(result.current.map((m) => m.salt)).toEqual([HALFWAY, protocol]))
+    expect(progressRead(protocol)).toBe(true)
+    expect([theirs, mine, mineToo].some(progressRead)).toBe(false)
+  })
+
   it("the list is not polled, and stays fresh for about a minute (refetched on mount and focus after that)", async () => {
-    const { result } = renderHook(() => useMarketsInProgress([mine], ISSUER), { wrapper })
-    await waitFor(() => expect(result.current.map((m) => m.salt)).toEqual([HALFWAY, mine]))
+    const { result } = renderHook(() => useMarketsInProgress(registry, ISSUER), { wrapper })
+    await waitFor(() => expect(result.current.map((m) => m.salt)).toEqual([HALFWAY, mine, mineToo]))
     for (const s of [HALFWAY, mine]) {
       const query = client.getQueryCache().find({ queryKey: ["manage", "testnet", "wizard-progress", s] })
       for (const observer of query!.observers) {

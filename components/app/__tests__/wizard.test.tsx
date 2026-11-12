@@ -844,6 +844,46 @@ describe("steps 6 and 7: seed and publish (spec 0002 §5, R5-10)", () => {
     expect(mocks.simulate.mock.invocationCallOrder[2]).toBeGreaterThan(mocks.execute.mock.invocationCallOrder[1])
   })
 
+  it("a pool another deposit seeded while the seed ran: its first deposit is refused when it is built, and nothing is prepared", async () => {
+    granted()
+    chainAnswers()
+    const land = mocks.execute.getMockImplementation() as (r: ManagerReview) => Promise<unknown>
+    mocks.execute.mockImplementation(async (review: ManagerReview) => {
+      const result = await land(review)
+      // Someone with the grants called the pool directly between our deposit and our first deposit.
+      if (review.origin.type === "manager" && review.origin.call.kind === "seed_deposit") {
+        mocks.reads[`${predicted.pool}.pool_state`] = {
+          ...(mocks.reads[`${predicted.pool}.pool_state`] as object),
+          pt_reserve: 2_000_000n,
+          sy_reserve: 1_000_000n,
+          total_lp: 1_414_213n,
+        }
+      }
+      return result
+    })
+    connect(ISSUER)
+    const user = userEvent.setup()
+    show()
+    await typeSeed(user, "5", "1000")
+    const seed = screen.getByRole("button", { name: "Seed the pool" })
+    await waitFor(() => expect((seed as HTMLButtonElement).disabled).toBe(false))
+    await user.click(seed)
+    // The mint and the deposit, steps 1 and 2 of 3.
+    for (let i = 0; i < 2; i++) {
+      const open = await screen.findByRole("dialog")
+      await within(open).findByText(`Step ${i + 1} of 3`)
+      const sign = await within(open).findByRole("button", { name: "Sign transaction" })
+      await waitFor(() => expect((sign as HTMLButtonElement).disabled).toBe(false))
+      await user.click(sign)
+      await waitFor(() => expect(mocks.execute).toHaveBeenCalledTimes(i + 1))
+    }
+    const dialog = await screen.findByRole("dialog")
+    expect(await within(dialog).findByText(/already seeded by another deposit/)).toBeTruthy()
+    // Never prepared at someone else's ratio under "Seed the pool": the add was not even simulated.
+    expect(kinds()).toEqual(["seed_mint", "seed_deposit"])
+    expect(mocks.simulate.mock.calls.map(([p]) => (p as { invocation: ContractInvocation }).invocation.functionName)).toEqual(["wrap_and_mint", "deposit"])
+  })
+
   it("a starting APY of 0 or less is refused before anything is signed (R5-10)", async () => {
     granted()
     connect(ISSUER)

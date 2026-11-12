@@ -151,6 +151,12 @@ export function StepSeed({ salt, progress, account, ledgerTime }: ChainStepProps
         if (st.status !== "live" || pt === undefined || sy === undefined) {
           throw new Error("The pool or your PT and SY could not be read, so the first deposit cannot be worked out. Nothing was signed; try again in a moment.")
         }
+        // Anyone with the grants can call the pool: had another deposit seeded it meanwhile, this call
+        // would land as a proportional deposit at that deposit's ratio, not as the seed this step offers.
+        // Its floor guards the moments between this check and inclusion.
+        if (st.value.totalLp > 0n) {
+          throw new Error("The pool was already seeded by another deposit while this ran, so there is no first deposit left to make. Nothing was signed. Close this; the wizard moves on.")
+        }
         const min = (a: bigint, b: bigint | undefined) => (b !== undefined && b < a ? b : a)
         const pair = seedPair({
           apy,

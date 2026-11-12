@@ -356,7 +356,7 @@ describe("creating a market (spec 0002 §5, R5-10)", () => {
   })
 
   it("the registry's half-finished salts are listed for the connected wallet (any browser), and a registry that cannot be read is said", () => {
-    const salts = { status: "ok" as const, salts: ["c1".repeat(32)] }
+    const salts = { status: "ok" as const, salts: [{ salt: "c1".repeat(32), underlying: A.underlying.sac }] }
     mocks.roles = { ...mocks.roles, testAssetIssuer: live(true) }
     const { unmount } = show(noInvalid, salts)
     expect(mocks.inProgressArgs).toEqual([salts.salts, ME])
