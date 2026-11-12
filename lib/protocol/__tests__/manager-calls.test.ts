@@ -15,8 +15,11 @@ import {
   claimProtocolFeesCall,
   grantAccountCall,
   grantAssetCall,
+  managerCallAmounts,
   managerCallTree,
   rebuildManagerCall,
+  seedCall,
+  seedInvocation,
   registerMarketCall,
   setAuthorizedCall,
   setPausedCall,
@@ -209,7 +212,7 @@ describe("manager call builders encode each call as the contract declares it", (
   })
 
   it("names who authorizes each call: the signer once, the issuer over the factory's own calls, or nobody for the permissionless fee claims (R29)", () => {
-    const expected: Record<ManagerCallKind, "caller" | "caller_tree" | "none"> = {
+    const expected: Record<ManagerCallKind, "caller" | "caller_tree" | "none" | "rooted"> = {
       set_authorized: "caller",
       grant_account: "caller",
       grant_asset: "caller",
@@ -222,6 +225,10 @@ describe("manager call builders encode each call as the contract declares it", (
       create_tokens: "caller_tree",
       create_engine: "caller_tree",
       create_pool_and_escrow: "caller_tree",
+      // The seed moves the issuer's tokens: like the client's same calls, its transfers sit beneath the call.
+      seed_mint: "rooted",
+      seed_deposit: "rooted",
+      seed_add_liquidity: "rooted",
     }
     expect(MANAGER_CALL_AUTH).toEqual(expected)
   })
@@ -328,6 +335,90 @@ describe("MarketFactory create_* calls (spec 0002 §5 step 3, R5-10): the issuer
     expect(tamper(pool, (a) => (struct(a[5]).extra = bool(true)))).toThrow("PoolEscrowParams has a field extra the contract does not declare.")
     expect(tamper(engine, (a) => a.pop())).toThrow("create_engine takes 5 arguments, not 4.")
     expect(tamper(engine, (a) => (struct(a[4]).yt_fee_bps = { type: "u32", value: 9000 }))).toThrow("YT fee")
+  })
+})
+
+describe("the seed's calls (spec 0002 §5 step 6, R5-10): the new market's pool and SY from the salt, floors never zero", () => {
+  const predicted = deriveMarketContracts(manifest, SALT)
+  const NEW = { salt: SALT, underlying: TEST_SAC }
+  const DEADLINE = 1_800_000_300n
+  const mint = () => seedCall(manifest, { source: SIGNER, market: NEW, kind: "seed_mint", amount: 4_000_000_001n, floor: 3_900_000_000n, deadline: DEADLINE })
+  const deposit = () => seedCall(manifest, { source: SIGNER, market: NEW, kind: "seed_deposit", amount: 6_000_000_000n, floor: 5_812_345_678n })
+  const add = () =>
+    seedCall(manifest, { source: SIGNER, market: NEW, kind: "seed_add_liquidity", pt: 4_100_000_005n, sy: 3_500_000_000n, floor: 3_700_000_000n, deadline: DEADLINE })
+  const i128 = (value: bigint): ScArg => ({ type: "i128", value })
+
+  it("Router wrap_and_mint(from, pool, amount, min_pt_out, deadline) (router:483), with the label stating every amount signed", () => {
+    const call = mint()
+    expect(call).toMatchObject({ kind: "seed_mint", source: SIGNER, newMarket: NEW })
+    expect(call.invocation).toEqual({
+      contractId: router,
+      functionName: "wrap_and_mint",
+      args: [address(SIGNER), address(predicted.pool), i128(4_000_000_001n), i128(3_900_000_000n), { type: "u64", value: DEADLINE }],
+    })
+    expect(encodedTypes(call)).toEqual(["scvAddress", "scvAddress", "scvI128", "scvI128", "scvU64"])
+    expect(call.label).toBe("Mint PT and YT of the new USDY market from 400.0000001 USDY: at least 390 PT, and as much YT")
+  })
+
+  it("SY deposit(from, amount, min_shares_out) on the new market's SY wrapper", () => {
+    const call = deposit()
+    expect(call.invocation).toEqual({ contractId: predicted.sy, functionName: "deposit", args: [address(SIGNER), i128(6_000_000_000n), i128(5_812_345_678n)] })
+    expect(call.label).toBe("Deposit 600 USDY into the new USDY market's SY wrapper, for at least 581.2345678 SY")
+  })
+
+  it("Router add_liquidity(from, pool, pt_in, sy_in, min_lp_out, deadline) (router:803)", () => {
+    const call = add()
+    expect(call.invocation).toEqual({
+      contractId: router,
+      functionName: "add_liquidity",
+      args: [address(SIGNER), address(predicted.pool), i128(4_100_000_005n), i128(3_500_000_000n), i128(3_700_000_000n), { type: "u64", value: DEADLINE }],
+    })
+    expect(call.label).toBe("Seed the pool of the new USDY market with 410.0000005 PT and 350 SY, for at least 370 LP")
+    expect(managerCallTree(manifest, call)).toEqual(["Router.add_liquidity", "MarketPool.add_liquidity"])
+    expect(managerCallTree(manifest, mint())).toEqual(["Router.wrap_and_mint", "SYWrapper.deposit", "PrincipalManager.mint"])
+    expect(managerCallTree(manifest, deposit())).toEqual(["SYWrapper.deposit"])
+  })
+
+  it("the review lists what each call gives and the least it gets, as signed", () => {
+    expect(managerCallAmounts(manifest, mint())).toEqual({ give: ["400.0000001 USDY"], getAtLeast: ["390 PT, and the same amount of YT"], deadline: Number(DEADLINE) })
+    expect(managerCallAmounts(manifest, deposit())).toEqual({ give: ["600 USDY"], getAtLeast: ["581.2345678 SY"] })
+    expect(managerCallAmounts(manifest, add())).toEqual({ give: ["410.0000005 PT", "350 SY"], getAtLeast: ["370 LP"], deadline: Number(DEADLINE) })
+    expect(managerCallAmounts(manifest, registerMarketCall(manifest, { source: SIGNER, pool: NEW_POOL }))).toEqual({ give: [], getAtLeast: [] })
+  })
+
+  it("a zero or negative floor is refused: the floor comes from the call's simulation (0001's rule)", () => {
+    for (const floor of [0n, -1n]) {
+      expect(() => seedCall(manifest, { source: SIGNER, market: NEW, kind: "seed_deposit", amount: 6_000_000_000n, floor })).toThrow(/zero floor/)
+    }
+    // Simulated only: the invocation itself may carry the zero floor.
+    expect(seedInvocation(manifest, SIGNER, NEW, { kind: "seed_deposit", amount: 1n, floor: 0n }).args[2]).toEqual(i128(0n))
+  })
+
+  it("an underlying this network does not know, and a non-positive amount, are refused", () => {
+    expect(() => seedCall(manifest, { source: SIGNER, market: { salt: SALT, underlying: FOREIGN }, kind: "seed_deposit", amount: 1n, floor: 1n })).toThrow(
+      /not the asset contract/,
+    )
+    expect(() => seedCall(manifest, { source: SIGNER, market: NEW, kind: "seed_deposit", amount: 0n, floor: 1n })).toThrow(/above 0/)
+  })
+
+  it("R31: rebuilt from the salt it carries; another pool or SY, another salt, a changed amount or no salt is refused", () => {
+    for (const call of [mint(), deposit(), add()]) {
+      const copy = rebuildManagerCall(manifest, call)
+      expect(copy).toEqual(call)
+      expect(copy).not.toBe(call)
+    }
+    const swapPool = { ...add(), invocation: { ...add().invocation, args: add().invocation.args.map((a, i) => (i === 1 ? address(FOREIGN) : a)) } }
+    expect(() => rebuildManagerCall(manifest, swapPool)).toThrow(/differ/)
+    const swapSy = { ...deposit(), invocation: { ...deposit().invocation, contractId: FOREIGN } }
+    expect(() => rebuildManagerCall(manifest, swapSy)).toThrow(/differ/)
+    expect(() => rebuildManagerCall(manifest, { ...deposit(), newMarket: { salt: "22".repeat(32), underlying: TEST_SAC } })).toThrow(/differ/)
+    const more = { ...deposit(), invocation: { ...deposit().invocation, args: [address(SIGNER), i128(7_000_000_000n), i128(5_812_345_678n)] } }
+    expect(() => rebuildManagerCall(manifest, more)).toThrow(/differ/)
+    const zero = { ...deposit(), invocation: { ...deposit().invocation, args: [address(SIGNER), i128(6_000_000_000n), i128(0n)] } }
+    expect(() => rebuildManagerCall(manifest, zero)).toThrow(/zero floor/)
+    expect(() => rebuildManagerCall(manifest, { ...deposit(), newMarket: undefined })).toThrow(/names no new market/)
+    const otherFrom = { ...deposit(), invocation: { ...deposit().invocation, args: [address(ACCOUNT), i128(6_000_000_000n), i128(5_812_345_678n)] } }
+    expect(() => rebuildManagerCall(manifest, otherFrom)).toThrow(/differ/)
   })
 })
 

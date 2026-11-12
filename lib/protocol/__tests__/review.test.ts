@@ -19,7 +19,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import testnetJson from "@/lib/protocol/__tests__/fixtures/testnet-interim.json"
 import { ACTION_META, invocationFor, type ActionId, type ActionInput, type GuardValues } from "../actions"
 import { hashLike } from "../hash"
-import { engineAuthTree, poolAuthTree, tokensAuthTree, type MarketParams } from "../factory"
+import { deriveMarketContracts, engineAuthTree, poolAuthTree, tokensAuthTree, type MarketParams } from "../factory"
 import {
   addConsumerCall,
   claimCreatorFeesCall,
@@ -27,6 +27,7 @@ import {
   createEngineCall,
   createPoolAndEscrowCall,
   createTokensCall,
+  seedCall,
   grantAccountCall,
   grantAssetCall,
   registerMarketCall,
@@ -1432,6 +1433,56 @@ describe("manager reviews (0002 §5): the same review → sign pipeline as an ac
           "is more than the base fee plus the resource fee it declares",
         )
       })
+    })
+  })
+
+  describe("the seed's calls (spec 0002 §5 step 6, R5-10): the issuer's own tokens move, so the review lists them", () => {
+    const at = (fill: number) => StrKey.encodeContract(new Uint8Array(32).fill(fill))
+    const seedManifest: Manifest = { ...manifest, shared: { ...manifest.shared, factory: at(40) } }
+    const SALT = "11".repeat(32)
+    const NEW = { salt: SALT, underlying: market.underlying.sac }
+    const predicted = deriveMarketContracts(seedManifest, SALT)
+    const DEADLINE = 1_800_000_300n
+    const add = () =>
+      seedCall(seedManifest, { source: SOURCE, market: NEW, kind: "seed_add_liquidity", pt: 4_100_000_005n, sy: 3_500_000_000n, floor: 3_700_000_000n, deadline: DEADLINE })
+    const argsOfInvocation = (i: ContractInvocation) =>
+      new xdr.InvokeContractArgs({ contractAddress: new Address(i.contractId).toScAddress(), functionName: i.functionName, args: i.args.map(scArgToVal) })
+    /** What the pool's first deposit moves under the signer's authorization: its PT and its SY, to the pool. */
+    const transfers = () =>
+      [predicted.pt, predicted.sy].map((token, i) =>
+        argsOfInvocation({
+          contractId: token,
+          functionName: "transfer",
+          args: [
+            { type: "address", value: SOURCE },
+            { type: "address", value: predicted.pool },
+            { type: "i128", value: i === 0 ? 4_100_000_005n : 3_500_000_000n },
+          ],
+        }),
+      )
+    const preparedBy = (prepare: (tx: Transaction) => Transaction, call = add()) =>
+      prepareManagerReview({ manifest: seedManifest, call, rpc: fakeRpc({ prepareTransaction: async (tx) => prepare(tx) }) })
+
+    it("prepares it with the signer's authorization rooted at the call and its transfers beneath, and lists what is given and the floor", async () => {
+      const r = await preparedBy((tx) => assemble(tx, { auth: [authWith(callOf(tx), transfers())] }))
+      expect(r.callTree).toEqual(["Router.add_liquidity", "MarketPool.add_liquidity"])
+      expect(r.summary).toMatchObject({ give: ["410.0000005 PT", "350 SY"], getAtLeast: ["370 LP"], deadline: Number(DEADLINE) })
+      const server = fakeRpc({ prepareTransaction: async (tx) => assemble(tx, { auth: [authWith(callOf(tx), transfers())] }) })
+      const review = await prepareManagerReview({ manifest: seedManifest, call: add(), rpc: server })
+      const result = await executeReview({ review, manifest: seedManifest, sign: signWith(), rpc: server, nowMs: review.preparedAtMs + 1_000 })
+      expect(result.status).toBe("SUCCESS")
+    })
+
+    it("refuses an authorization rooted anywhere but the call (R29)", async () => {
+      const elsewhere = argsOf(grantAccountCall(seedManifest, { source: SOURCE, account: GRANTEE }))
+      await expect(preparedBy((tx) => assemble(tx, { auth: [authFor(elsewhere)] }))).rejects.toThrow(
+        "RPC added an authorization for something other than this call. Refusing to review it; try again or use another RPC.",
+      )
+    })
+
+    it("refuses a zero floor before any RPC call: floors come only from the simulation", async () => {
+      const zero = { ...add(), invocation: { ...add().invocation, args: add().invocation.args.map((a, i) => (i === 4 ? { type: "i128" as const, value: 0n } : a)) } }
+      await expect(prepareManagerReview({ manifest: seedManifest, call: zero, rpc: noIo })).rejects.toThrow(/zero floor/)
     })
   })
 

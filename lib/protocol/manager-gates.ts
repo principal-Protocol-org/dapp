@@ -51,6 +51,11 @@ export const REQUIRED_ROLE: Record<ManagerCallKind, RoleRequirement | null> = {
   create_tokens: { role: "issuer", who: "the asset's issuer", can: "deploy a market on it" },
   create_engine: { role: "issuer", who: "the asset's issuer", can: "deploy a market on it" },
   create_pool_and_escrow: { role: "issuer", who: "the asset's issuer", can: "deploy a market on it" },
+  // Spec 0002 §5 step 6: the seeder is the asset's issuer, the account step 5 grants the new PT and YT
+  // (deploy.sh's lists). The contracts check those grants, which the simulation runs.
+  seed_mint: { role: "issuer", who: "the asset's issuer", can: "seed this market's pool" },
+  seed_deposit: { role: "issuer", who: "the asset's issuer", can: "seed this market's pool" },
+  seed_add_liquidity: { role: "issuer", who: "the asset's issuer", can: "seed this market's pool" },
 }
 
 /**

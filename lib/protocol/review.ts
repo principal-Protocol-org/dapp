@@ -36,7 +36,7 @@ import { bytesToHex } from "./bytes"
 import { formatAmount, shorten } from "./format"
 import { parseOutput, type ActionOutput } from "./guards"
 import { hashLike } from "./hash"
-import { MANAGER_CALL_AUTH, managerCallAuthTree, managerCallTree, rebuildManagerCall, type ManagerCall } from "./manager-calls"
+import { MANAGER_CALL_AUTH, managerCallAmounts, managerCallAuthTree, managerCallTree, rebuildManagerCall, type ManagerCall } from "./manager-calls"
 import { getMarket } from "./manifest"
 import {
   assertSignedTransactionMatchesReview,
@@ -112,8 +112,10 @@ type PreparedTransaction = {
 export type Review = PreparedTransaction & { origin: { type: "action"; input: ActionInput }; input: ActionInput }
 
 /**
- * A prepared review of a manager call (0002 §5). It moves no amount from the signer, so it has no
- * floor and `give` / `getAtLeast` are empty; every other rule of an action holds (R29, R31, expiry).
+ * A prepared review of a manager call (0002 §5). Most move no amount from the signer: they have no
+ * floor and `give` / `getAtLeast` are empty. The seed's calls (step 6, R5-10) move the issuer's
+ * tokens: they list what is given and the floor as signed, and their builder refuses a zero floor.
+ * Every other rule of an action holds (R29, R31, expiry).
  */
 export type ManagerReview = PreparedTransaction & { origin: { type: "manager"; call: ManagerCall } }
 
@@ -701,8 +703,8 @@ export async function prepareReview(p: { manifest: Manifest; input: ActionInput;
  * call: one no builder of `manager-calls.ts` makes for this manifest is refused. The simulation must
  * succeed, and RPC may not change the call, its source, sequence or time bounds, charge a fee it
  * does not explain or one above the cap, or authorize anything but what the call's rule allows
- * (`MANAGER_CALL_AUTH`: the signer's own authorization of exactly this call, or none) (R29). A
- * manager call moves no amount from the signer, so it has no floor.
+ * (`MANAGER_CALL_AUTH`: the signer's own authorization of exactly this call, or none) (R29). Only
+ * the seed's calls move the signer's tokens; their floors are in the call, never zero (R5-10).
  */
 export async function prepareManagerReview(p: { manifest: Manifest; call: ManagerCall; rpc?: ReviewRpcServer }): Promise<ManagerReview> {
   const { manifest } = p
@@ -724,7 +726,7 @@ export async function prepareManagerReview(p: { manifest: Manifest; call: Manage
     fee: prepared.fee,
     preparedAtMs,
     expiresAtMs: preparedAtMs + REVIEW_TTL_MS,
-    summary: { give: [], getAtLeast: [], fees: [networkFee(prepared.fee)], validUntil: maxTimeOf(built) },
+    summary: { ...managerCallAmounts(manifest, call), fees: [networkFee(prepared.fee)], validUntil: maxTimeOf(built) },
     callTree: managerCallTree(manifest, call),
   }
   issued.set(review, { preparedAtMs, unsignedXdrHash: review.unsignedXdrHash, origin })

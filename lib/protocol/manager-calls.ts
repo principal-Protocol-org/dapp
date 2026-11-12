@@ -35,7 +35,7 @@ import {
   type PoolParamsInput,
   type TokenParamsInput,
 } from "./factory"
-import { shorten } from "./format"
+import { formatAmount, shorten } from "./format"
 import { getMarket } from "./manifest"
 import { scArgEquals, type ContractInvocation, type ScArg } from "./stellar"
 import type { Manifest, Market, MarketContractName } from "./types"
@@ -52,13 +52,41 @@ export type ManagerCallKind =
   | "create_tokens"
   | "create_engine"
   | "create_pool_and_escrow"
+  | "seed_mint"
+  | "seed_deposit"
+  | "seed_add_liquidity"
 
 /** The MarketFactory's three deployment calls (spec 0002 §5 step 3). */
 export const FACTORY_CALLS = ["create_tokens", "create_engine", "create_pool_and_escrow"] as const satisfies readonly ManagerCallKind[]
 export type FactoryCallKind = (typeof FACTORY_CALLS)[number]
 
+/**
+ * The seed of a new market's pool (spec 0002 §5 step 6, R5-10): the first deposit, which the client
+ * pipeline refuses (`poolGate`), so it is signed as manager calls. Router `wrap_and_mint`, SY
+ * `deposit` and Router `add_liquidity`, in that order, each with a floor from its own simulation.
+ */
+export const SEED_CALLS = ["seed_mint", "seed_deposit", "seed_add_liquidity"] as const satisfies readonly ManagerCallKind[]
+export type SeedCallKind = (typeof SEED_CALLS)[number]
+
+/**
+ * The market a seed call acts on, which the manifest does not list yet: its pool and SY wrapper are
+ * derived from the salt (`deriveMarketContracts`), never taken from the call's arguments, and R31
+ * derives them again before signing. `underlying` is its asset contract (labels name its code).
+ */
+export type NewMarket = { salt: string; underlying: string }
+
 /** A manager call, ready for review: `source` signs it, `label` says what it does in plain words. */
-export type ManagerCall = { kind: ManagerCallKind; source: string; invocation: ContractInvocation; label: string }
+export type ManagerCall = {
+  kind: ManagerCallKind
+  source: string
+  invocation: ContractInvocation
+  label: string
+  /** A seed call only: the new market it seeds. */
+  newMarket?: NewMarket
+}
+
+/** Who authorizes a manager call (R29); `review.ts` checks the prepared transaction against it. */
+export type ManagerAuthRule = "caller" | "caller_tree" | "none" | "rooted"
 
 /** A market contract an admin can pause: `set_paused(caller, paused)`. */
 export type PausableContract = "pool" | "sy" | "manager"
@@ -76,9 +104,12 @@ export type FeeContract = "pool" | "manager"
  * the factory's calls (R5-10): the issuer, once, for exactly this call, with the factory's own calls
  * beneath it: each child contract's `initialize` and wiring calls `admin.require_auth()` again
  * (sy_wrapper:151, pt_token:141, yt_token:210, market_pool:275, ...), so the issuer's authorization of
- * the factory call carries them.
+ * the factory call carries them. `rooted`, for the seed (R5-10): the only manager calls that move the
+ * signer's own tokens. Like the client actions that make the same calls, every authorization entry is
+ * for exactly the call, with the token transfers it makes beneath it (Router `wrap_and_mint` deposits
+ * the underlying and mints; `add_liquidity` moves PT and SY to the pool).
  */
-export const MANAGER_CALL_AUTH: Record<ManagerCallKind, "caller" | "caller_tree" | "none"> = {
+export const MANAGER_CALL_AUTH: Record<ManagerCallKind, ManagerAuthRule> = {
   set_authorized: "caller",
   grant_account: "caller",
   grant_asset: "caller",
@@ -90,6 +121,9 @@ export const MANAGER_CALL_AUTH: Record<ManagerCallKind, "caller" | "caller_tree"
   create_tokens: "caller_tree",
   create_engine: "caller_tree",
   create_pool_and_escrow: "caller_tree",
+  seed_mint: "rooted",
+  seed_deposit: "rooted",
+  seed_add_liquidity: "rooted",
 }
 
 /** Contract type names, as call trees show them. */
@@ -314,6 +348,120 @@ export function createPoolAndEscrowCall(manifest: Manifest, p: FactoryCallParams
   }
 }
 
+/** PT, SY and LP have 7 decimals, like every Principal token. */
+const TOKEN_DECIMALS = 7
+
+/** What a seed call signs besides the signer and the new market; `floor` is its slippage floor. */
+export type SeedCallParams =
+  | { kind: "seed_mint"; amount: bigint; floor: bigint; deadline: bigint }
+  | { kind: "seed_deposit"; amount: bigint; floor: bigint }
+  | { kind: "seed_add_liquidity"; pt: bigint; sy: bigint; floor: bigint; deadline: bigint }
+
+const I128_MAX = (1n << 127n) - 1n
+
+function positive(value: bigint, what: string): ScArg {
+  if (value <= 0n || value > I128_MAX) throw new Error(`${what} must be above 0.`)
+  return { type: "i128", value }
+}
+
+function u64Arg(value: bigint, what: string): ScArg {
+  if (value <= 0n || value >= 1n << 64n) throw new Error(`${what} is out of range.`)
+  return { type: "u64", value }
+}
+
+/** The new market's code and decimals: its underlying must be an asset this network knows. */
+function newMarketAsset(manifest: Manifest, market: NewMarket): { code: string; decimals: number } {
+  const found = knownUnderlyings(manifest).get(market.underlying)
+  if (!found) throw new Error(`${shorten(market.underlying)} is not the asset contract of an asset on this network.`)
+  return found
+}
+
+/**
+ * The seed call's invocation: Router `wrap_and_mint(from, pool, amount, min_pt_out, deadline)`, SY
+ * `deposit(from, amount, min_shares_out)` or Router `add_liquidity(from, pool, pt_in, sy_in,
+ * min_lp_out, deadline)` (router:483, sy_wrapper deposit, router:803), the pool and SY derived from
+ * the salt. The floor is not checked here: an invocation with a zero floor is only ever simulated
+ * (`seedCall` refuses it).
+ */
+export function seedInvocation(manifest: Manifest, source: string, market: NewMarket, p: SeedCallParams): ContractInvocation {
+  const from = address(signerOf(source))
+  const { pool, sy } = deriveMarketContracts(manifest, market.salt)
+  const floor: ScArg = { type: "i128", value: p.floor }
+  switch (p.kind) {
+    case "seed_mint":
+      return {
+        contractId: manifest.shared.router,
+        functionName: "wrap_and_mint",
+        args: [from, address(pool), positive(p.amount, "The amount to mint from"), floor, u64Arg(p.deadline, "The deadline")],
+      }
+    case "seed_deposit":
+      return { contractId: sy, functionName: "deposit", args: [from, positive(p.amount, "The amount to deposit"), floor] }
+    case "seed_add_liquidity":
+      return {
+        contractId: manifest.shared.router,
+        functionName: "add_liquidity",
+        args: [from, address(pool), positive(p.pt, "The PT"), positive(p.sy, "The SY"), floor, u64Arg(p.deadline, "The deadline")],
+      }
+  }
+}
+
+/**
+ * A seed call (spec 0002 §5 step 6), signed by the asset's issuer, whom step 5 granted the new PT
+ * and YT. Never with a zero floor: each floor comes from the call's own simulation (`seed.ts`). The
+ * label states every signed amount in full, with its token: it is what the review shows as signed.
+ */
+export function seedCall(manifest: Manifest, p: { source: string; market: NewMarket } & SeedCallParams): ManagerCall {
+  const { source, market } = p
+  if (p.floor <= 0n) {
+    throw new Error("zero floor: a seed call is never signed without a minimum above 0 from its simulation. Review it again.")
+  }
+  const params: SeedCallParams =
+    p.kind === "seed_mint"
+      ? { kind: p.kind, amount: p.amount, floor: p.floor, deadline: p.deadline }
+      : p.kind === "seed_deposit"
+        ? { kind: p.kind, amount: p.amount, floor: p.floor }
+        : { kind: p.kind, pt: p.pt, sy: p.sy, floor: p.floor, deadline: p.deadline }
+  const invocation = seedInvocation(manifest, source, market, params)
+  const { code, decimals } = newMarketAsset(manifest, market)
+  const exact = (value: bigint, d: number) => formatAmount(value, d, d)
+  const tok = (value: bigint, token: string) => `${exact(value, TOKEN_DECIMALS)} ${token}`
+  let label: string
+  switch (params.kind) {
+    case "seed_mint":
+      label = `Mint PT and YT of the new ${code} market from ${exact(params.amount, decimals)} ${code}: at least ${tok(params.floor, "PT")}, and as much YT`
+      break
+    case "seed_deposit":
+      label = `Deposit ${exact(params.amount, decimals)} ${code} into the new ${code} market's SY wrapper, for at least ${tok(params.floor, "SY")}`
+      break
+    case "seed_add_liquidity":
+      label = `Seed the pool of the new ${code} market with ${tok(params.pt, "PT")} and ${tok(params.sy, "SY")}, for at least ${tok(params.floor, "LP")}`
+      break
+  }
+  return { kind: params.kind, source, invocation, label, newMarket: { salt: market.salt, underlying: market.underlying } }
+}
+
+/**
+ * What a seed call gives and gets at least, as signed, for the review (spec 0002 §5 step 6): the
+ * same lines a client action's review shows. Empty for every other manager call.
+ */
+export function managerCallAmounts(manifest: Manifest, call: ManagerCall): { give: string[]; getAtLeast: string[]; deadline?: number } {
+  if (!isSeedCall(call.kind) || !call.newMarket) return { give: [], getAtLeast: [] }
+  const { code, decimals } = newMarketAsset(manifest, call.newMarket)
+  const v = (i: number) => call.invocation.args[i]?.value as bigint
+  const exact = (value: bigint, d: number) => formatAmount(value, d, d)
+  const tok = (value: bigint, token: string) => `${exact(value, TOKEN_DECIMALS)} ${token}`
+  switch (call.kind) {
+    case "seed_mint":
+      return { give: [`${exact(v(2), decimals)} ${code}`], getAtLeast: [`${tok(v(3), "PT")}, and the same amount of YT`], deadline: Number(v(4)) }
+    case "seed_deposit":
+      return { give: [`${exact(v(1), decimals)} ${code}`], getAtLeast: [tok(v(2), "SY")] }
+    case "seed_add_liquidity":
+      return { give: [tok(v(2), "PT"), tok(v(3), "SY")], getAtLeast: [tok(v(4), "LP")], deadline: Number(v(5)) }
+  }
+}
+
+export const isSeedCall = (kind: ManagerCallKind): kind is SeedCallKind => (SEED_CALLS as readonly string[]).includes(kind)
+
 const isFactoryCall = (kind: ManagerCallKind): kind is FactoryCallKind => (FACTORY_CALLS as readonly string[]).includes(kind)
 
 /** The asset a factory call deploys a market on (its params' `underlying`); undefined for any other call or an unreadable one. */
@@ -401,6 +549,22 @@ function factoryArgs(fn: FactoryCallKind, args: ScArg[], count: number): [string
   return [decodeSalt(args[1], `argument 2 of ${fn}`), args[count - 1]]
 }
 
+/** A seed call's integer arguments, in order, from exactly `types` (addresses are compared after the rebuild). */
+function seedArgs(fn: SeedCallKind, args: ScArg[], types: readonly ("address" | "i128" | "u64")[]): bigint[] {
+  if (args.length !== types.length) throw new Error(`${fn} takes ${types.length} arguments, not ${args.length}.`)
+  return types.map((type, i) => {
+    const arg = args[i]
+    const ok = arg.type === type && (type === "address" ? typeof arg.value === "string" : typeof arg.value === "bigint")
+    if (!ok) throw new Error(`argument ${i + 1} of ${fn} must be ${type === "address" ? "an address" : `an ${type}`}.`)
+    return type === "address" ? 0n : (arg.value as bigint)
+  })
+}
+
+function newMarketOf(call: ManagerCall): NewMarket {
+  if (!call.newMarket) throw new Error(`${call.kind} names no new market to seed.`)
+  return call.newMarket
+}
+
 /** Reads `call` back into its builder's parameters and builds it again. */
 function rebuild(manifest: Manifest, call: ManagerCall): ManagerCall {
   const { kind, source } = call
@@ -450,6 +614,20 @@ function rebuild(manifest: Manifest, call: ManagerCall): ManagerCall {
       const [salt, params] = factoryArgs(kind, args, 6)
       return createPoolAndEscrowCall(manifest, { source, salt, params: decodePoolEscrowParams(params) })
     }
+    // The amounts, floor and deadline are read back; the Router, the pool and the SY wrapper are not:
+    // the builder derives them from the call's salt, and the comparison below refuses any other.
+    case "seed_mint": {
+      const [, , amount, floor, deadline] = seedArgs(kind, args, ["address", "address", "i128", "i128", "u64"])
+      return seedCall(manifest, { source, market: newMarketOf(call), kind, amount, floor, deadline })
+    }
+    case "seed_deposit": {
+      const [, amount, floor] = seedArgs(kind, args, ["address", "i128", "i128"])
+      return seedCall(manifest, { source, market: newMarketOf(call), kind, amount, floor })
+    }
+    case "seed_add_liquidity": {
+      const [, , pt, sy, floor, deadline] = seedArgs(kind, args, ["address", "address", "i128", "i128", "i128", "u64"])
+      return seedCall(manifest, { source, market: newMarketOf(call), kind, pt, sy, floor, deadline })
+    }
     default: {
       const unknown: never = kind
       throw new Error(`"${String(unknown)}" is not a manager call this app builds.`)
@@ -464,6 +642,8 @@ function sameCall(a: ManagerCall, b: ManagerCall): boolean {
     a.kind === b.kind &&
     a.source === b.source &&
     a.label === b.label &&
+    a.newMarket?.salt === b.newMarket?.salt &&
+    a.newMarket?.underlying === b.newMarket?.underlying &&
     x.contractId === y.contractId &&
     x.functionName === y.functionName &&
     x.args.length === y.args.length &&
@@ -510,5 +690,12 @@ export function managerCallTree(manifest: Manifest, call: ManagerCall): string[]
     case "claim_creator_fees":
       // The claim pays the payee in SY: SYWrapper.transfer from the claiming contract.
       return [`${CONTRACT_TYPE[marketContractOf(manifest, contractId, FEE_CONTRACTS).contract]}.${functionName}`, "SYWrapper.transfer"]
+    // The seed: the same calls as the client's mint, deposit and add liquidity (review.ts CALL_TREES).
+    case "seed_mint":
+      return ["Router.wrap_and_mint", "SYWrapper.deposit", "PrincipalManager.mint"]
+    case "seed_deposit":
+      return ["SYWrapper.deposit"]
+    case "seed_add_liquidity":
+      return ["Router.add_liquidity", "MarketPool.add_liquidity"]
   }
 }

@@ -75,7 +75,7 @@ function asObject<T extends object>(value: unknown, what: string): T {
   throw new Error(`${what} did not return a struct`)
 }
 
-function parsePoolState(raw: unknown): PoolStateView {
+export function parsePoolState(raw: unknown): PoolStateView {
   const s = asObject<RawPoolState>(raw, "pool_state")
   return {
     ptReserve: toBigint(s.pt_reserve),

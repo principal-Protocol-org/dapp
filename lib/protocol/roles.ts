@@ -155,6 +155,13 @@ export function rolesForCall(call: ManagerCall, market: MarketRoles | undefined,
       const underlying = factoryCallUnderlying(call)
       return asRoles("issuer", market && market.sac === underlying ? market.issuer : undefined, "Your issuer role on this asset")
     }
+    // Spec 0002 §5 step 6: the seed of a new market, by the issuer of the asset it is on.
+    case "seed_mint":
+    case "seed_deposit":
+    case "seed_add_liquidity": {
+      const underlying = call.newMarket?.underlying
+      return asRoles("issuer", market && underlying !== undefined && market.sac === underlying ? market.issuer : undefined, "Your issuer role on this asset")
+    }
   }
 }
 
