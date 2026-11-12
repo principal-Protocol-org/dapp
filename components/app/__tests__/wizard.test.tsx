@@ -641,4 +641,86 @@ describe("steps 4 and 5: wire and grants (R5-10, spec 0002 §5)", () => {
     const button = screen.queryByRole("button", { name: "Sign the grants" }) as HTMLButtonElement | null
     expect(button === null || button.disabled).toBe(true)
   })
+
+  describe("the chain moving on while a flow is open (a step never unmounts under its review)", () => {
+    /** Everything wired and granted except one grant: the chain reads step 5. */
+    const toStep5 = () =>
+      Object.assign(mocks.reads, {
+        [key(riskControl, "is_consumer", predicted.sy)]: true,
+        [key(riskControl, "is_consumer", predicted.manager)]: true,
+        [key(router, "is_registered", predicted.pool)]: true,
+        [key(SAC, "authorized", predicted.sy)]: false,
+      })
+    const refresh = () => act(async () => void (await client.invalidateQueries({ queryKey: ["manage"] })))
+
+    it("(a) this wallet's last wire signature lands: the wire step stays until its flow is closed, then the wizard advances", async () => {
+      market({ [key(router, "is_registered", predicted.pool)]: false })
+      mocks.reads[`${router}.get_admin`] = ISSUER
+      connect(ISSUER)
+      let wireShownWhileOpen = false
+      let settled = false
+      mocks.execute.mockImplementation(async () => {
+        toStep5()
+        await client.invalidateQueries({ queryKey: ["manage"] })
+        await new Promise((r) => setTimeout(r, 60)) // let React render the new read
+        wireShownWhileOpen = screen.queryByRole("heading", { name: /Step 4 of 7: Wire/, hidden: true }) !== null && screen.queryByRole("dialog") !== null
+        settled = true
+        return { status: "SUCCESS", hash: "abc" }
+      })
+      const user = userEvent.setup()
+      show()
+      await signAllNow(user, "Wire the market", 1)
+      await waitFor(() => expect(settled).toBe(true))
+      expect(wireShownWhileOpen).toBe(true)
+      expect(await screen.findByRole("heading", { name: /Step 5 of 7: Grants/ })).toBeTruthy()
+      expect(screen.queryByRole("heading", { name: /Step 4 of 7/ })).toBeNull()
+      expect(kinds()).toEqual(["register_market"])
+    })
+
+    it("(b) another wallet completed the call under an open review: nothing unmounts, the review says it is done and cannot be signed", async () => {
+      unwired()
+      mocks.reads[`${riskControl}.get_admin`] = ISSUER
+      mocks.reads[`${router}.get_admin`] = ISSUER
+      connect(ISSUER)
+      const user = userEvent.setup()
+      show()
+      await user.click(await screen.findByRole("button", { name: "Wire the market" }).then(async (b) => (await waitFor(() => expect((b as HTMLButtonElement).disabled).toBe(false)), b)))
+      const dialog = await screen.findByRole("dialog")
+      await within(dialog).findByText("Step 1 of 3")
+      toStep5()
+      await refresh()
+      expect(screen.getByRole("heading", { name: /Step 4 of 7: Wire/, hidden: true })).toBeTruthy()
+      expect(screen.getByRole("dialog")).toBe(dialog)
+      expect(await within(dialog).findByText(/already done on chain/)).toBeTruthy()
+      expect((within(dialog).getByRole("button", { name: "Sign transaction" }) as HTMLButtonElement).disabled).toBe(true)
+      expect(mocks.execute).not.toHaveBeenCalled()
+      // Closing it lets the wizard move to the chain's step.
+      await user.click(within(dialog).getByRole("button", { name: "Cancel" }))
+      expect(await screen.findByRole("heading", { name: /Step 5 of 7: Grants/ })).toBeTruthy()
+    })
+
+    it("(c) the last deployment signature moves the chain to step 4: the deploy step stays until its flow is closed", async () => {
+      connect(ISSUER)
+      let deployShownWhileOpen = false
+      let settled = false
+      mocks.execute.mockImplementation(async () => {
+        if (mocks.execute.mock.calls.length < 3) return { status: "SUCCESS", hash: "abc" }
+        market({ [key(riskControl, "is_consumer", predicted.sy)]: false })
+        await client.invalidateQueries({ queryKey: ["manage"] })
+        await new Promise((r) => setTimeout(r, 60))
+        deployShownWhileOpen = screen.queryByRole("heading", { name: /Step 3 of 7: Deploy/, hidden: true }) !== null && screen.queryByRole("dialog") !== null
+        settled = true
+        return { status: "SUCCESS", hash: "abc" }
+      })
+      const user = userEvent.setup()
+      show()
+      await user.click(await screen.findByRole("button", { name: "Next: preview the addresses" }))
+      await screen.findByText(predicted.pool)
+      await user.click(screen.getByRole("button", { name: "Next: deploy" }))
+      await signAllNow(user, "Deploy the market", 3)
+      await waitFor(() => expect(settled).toBe(true))
+      expect(deployShownWhileOpen).toBe(true)
+      expect(await screen.findByRole("heading", { name: /Step 4 of 7: Wire/ })).toBeTruthy()
+    })
+  })
 })

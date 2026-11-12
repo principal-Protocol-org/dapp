@@ -2,10 +2,11 @@
 
 import Link from "next/link"
 import { useSearchParams } from "next/navigation"
-import { useEffect, useId, useState, type ComponentType } from "react"
+import { useEffect, useId, useMemo, useRef, useState, type ComponentType } from "react"
 import { Button } from "@/components/ui/button"
 import { UNAVAILABLE } from "@/components/app/live"
 import { useManifest } from "@/components/app/manifest-provider"
+import { FlowBusyContext } from "@/components/app/manage/flow-busy"
 import { StepGrants } from "@/components/app/manage/step-grants"
 import { StepWire } from "@/components/app/manage/step-wire"
 import { StepDeploy } from "@/components/app/manage/step-deploy"
@@ -156,10 +157,33 @@ function WizardFor({ salt }: { salt: string }) {
       </p>
     )
   }
-  return <WizardSteps salt={salt} />
+  return <WizardFrame salt={salt} />
 }
 
-function WizardSteps({ salt }: { salt: string }) {
+/** Holds the pin (flow-busy.tsx): the step a open review or sign flow started, shown until it closes. */
+function WizardFrame({ salt }: { salt: string }) {
+  const chainStepRef = useRef<WizardStep | undefined>(undefined)
+  const [pin, setPin] = useState<WizardStep | null>(null)
+  const open = useRef(0)
+  const flowBusy = useMemo(
+    () => ({
+      enter() {
+        if (open.current++ === 0) setPin(chainStepRef.current ?? null)
+      },
+      leave() {
+        if (--open.current === 0) setPin(null)
+      },
+    }),
+    [],
+  )
+  return (
+    <FlowBusyContext.Provider value={flowBusy}>
+      <WizardSteps salt={salt} pin={pin} chainStepRef={chainStepRef} />
+    </FlowBusyContext.Provider>
+  )
+}
+
+function WizardSteps({ salt, pin, chainStepRef }: { salt: string; pin: WizardStep | null; chainStepRef: { current: WizardStep | undefined } }) {
   const manifest = useManifest()
   const { state: wallet } = useWallet()
   const account = wallet.status === "connected" ? wallet.publicKey : null
@@ -175,7 +199,13 @@ function WizardSteps({ salt }: { salt: string }) {
   const source = currentMarket(manifest, baseUnderlying)
   const defaults = useParamDefaults(source)
 
-  const current: WizardStep | undefined = !p ? undefined : p.step >= 4 ? p.step : (view ?? (p.step === 3 ? 3 : 1))
+  const chainStep: WizardStep | undefined = !p ? undefined : p.step >= 4 ? p.step : (view ?? (p.step === 3 ? 3 : 1))
+  // A step with a flow open stays shown while the chain moves on (flow-busy.tsx): the step that
+  // started it renders its own outcome, and the wizard advances once every flow is closed.
+  useEffect(() => {
+    chainStepRef.current = chainStep
+  })
+  const current: WizardStep | undefined = chainStep === undefined ? undefined : (pin ?? chainStep)
   const { network } = manifest
   const deployedSomething = p !== undefined && p.step >= 3
   useEffect(() => {

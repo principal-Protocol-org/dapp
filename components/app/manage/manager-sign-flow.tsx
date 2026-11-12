@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react"
 import { Button } from "@/components/ui/button"
+import { useReportFlowBusy } from "@/components/app/manage/flow-busy"
 import { ReviewDialog } from "@/components/app/actions/review-dialog"
 import { showTxToast } from "@/components/app/actions/tx-feedback"
 import { useExecute } from "@/hooks/use-execute"
@@ -134,6 +135,8 @@ export function ManagerSignFlow(props: ManagerSignFlowProps) {
   }
 
   const active = flow.step === "idle" ? null : flow
+  // The wizard keeps its step mounted while a review or signature is open (flow-busy.tsx).
+  useReportFlowBusy(active !== null)
   const call = active ? runSteps[active.i] : undefined
   const blockers = call ? props.blockersFor(call) : []
   const shown = flow.step === "review" || flow.step === "signing" ? flow.review : null

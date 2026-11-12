@@ -52,14 +52,29 @@ export function RoleCalls({ listLabel, items, label, account, ledgerTime, networ
     buildError = error instanceof Error ? error.message : String(error)
   }
   // The signer was matched against the contract's own admin above, so the role holds for each call.
+  // Re-checked against the chain on every render: a call whose effect has already landed (another
+  // admin signed it while this review was open) is not signed again, and the dialog says so plainly.
+  const alreadyDone = (call: ManagerCall): boolean =>
+    items.some((it) => {
+      if (!it.held) return false
+      try {
+        return it.build(call.source).label === call.label
+      } catch {
+        return false
+      }
+    })
   const blockersFor = (call: ManagerCall): Blocker[] => {
     const role = REQUIRED_ROLE[call.kind]?.role
-    return evaluateManagerGates(call, {
+    const blockers = evaluateManagerGates(call, {
       wallet,
       roles: { status: "live", value: role ? [role] : [], ledger: 0 },
       findings,
       listed: true,
     })
+    if (alreadyDone(call)) {
+      blockers.push({ code: "topology", message: "This is already done on chain, so there is nothing to sign. Close this; the wizard moves on." })
+    }
+    return blockers
   }
 
   return (

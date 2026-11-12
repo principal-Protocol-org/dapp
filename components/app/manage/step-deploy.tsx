@@ -68,7 +68,7 @@ export function StepDeploy({ manifest, salt, progress, underlying, params, error
       calls = [
         ...(progress.phases.tokens ? [] : [createTokensCall(manifest, c)]),
         ...(progress.phases.engine ? [] : [createEngineCall(manifest, c)]),
-        createPoolAndEscrowCall(manifest, c),
+        ...(progress.phases.poolAndEscrow ? [] : [createPoolAndEscrowCall(manifest, c)]),
       ]
     } catch (error) {
       buildError = error instanceof Error ? error.message : String(error)
@@ -76,7 +76,16 @@ export function StepDeploy({ manifest, salt, progress, underlying, params, error
   }
 
   // The factory is a shared contract: no listed market is needed (R2-53's `listed`).
-  const blockersFor = (call: ManagerCall): Blocker[] => evaluateManagerGates(call, { wallet, roles, findings, listed: true })
+  // Re-checked on every render: a phase another signature (or wallet) already deployed is not signed again.
+  const PHASE_OF = { create_tokens: "tokens", create_engine: "engine", create_pool_and_escrow: "poolAndEscrow" } as const
+  const blockersFor = (call: ManagerCall): Blocker[] => {
+    const blockers = evaluateManagerGates(call, { wallet, roles, findings, listed: true })
+    const phase = PHASE_OF[call.kind as keyof typeof PHASE_OF]
+    if (phase && progress.phases[phase]) {
+      blockers.push({ code: "topology", message: "This part of the market is already deployed on chain, so there is nothing to sign. Close this; the wizard moves on." })
+    }
+    return blockers
+  }
   const problems = Object.entries(errors) as [keyof MarketParams, string][]
 
   return (
