@@ -169,8 +169,15 @@ export async function complianceKind(manifest: Manifest, market: Market): Promis
 /**
  * A fresh keypair, onboarded as a user would be: Friendbot, the user's trustline, then the server
  * faucet on the real chain (authorize, grant account, PT, YT, pay 100,000 of the test asset).
+ * `markets` is the faucet route's own list (`resolvedMarkets`: the seeds and the registry markets),
+ * whose PT and YT the faucet grants; without it, the manifest's markets.
  */
-export async function onboardFreshAccount(manifest: Manifest, market: Market, kind: ComplianceKind): Promise<KeypairSigner> {
+export async function onboardFreshAccount(
+  manifest: Manifest,
+  market: Market,
+  kind: ComplianceKind,
+  markets?: () => Promise<Market[]>,
+): Promise<KeypairSigner> {
   const signer = await fundedKeypairSigner(manifest)
   const account = signer.publicKey
   const read = () => fetchAccountState(createRpcReader(manifest), createHorizon(manifest.horizonUrl), manifest, market.marketId, account, kind)
@@ -184,7 +191,7 @@ export async function onboardFreshAccount(manifest: Manifest, market: Market, ki
   await eventually(read, (a) => a.trustline.status === "live" && a.trustline.value !== "none", "the trustline on Horizon")
   resetFaucetStateForTests()
   const chain = createStellarFaucetChain(manifest, { env: { FAUCET_ISSUER_SECRET: faucetIssuerSecret() } })
-  const outcome = await runFaucet({ account, manifest, ip: "127.0.0.1", now: Date.now(), chain })
+  const outcome = await runFaucet({ account, manifest, ...(markets ? { markets } : {}), ip: "127.0.0.1", now: Date.now(), chain })
   if (!("performed" in outcome)) throw new Error(`faucet refused: ${json(outcome)}`)
   await eventually(read, (a) => a.trustline.status === "live" && a.trustline.value === "authorized", "the authorized trustline on Horizon")
   return signer

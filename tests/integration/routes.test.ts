@@ -50,7 +50,7 @@ vi.mock("server-only", () => ({}))
 
 import { fetchAccountState, type ComplianceKind } from "@/lib/protocol/account-state"
 import type { ActionInput } from "@/lib/protocol/actions"
-import { impliedRate, curveStateFrom, type CurveState } from "@/lib/protocol/curve"
+import { curveStateFrom } from "@/lib/protocol/curve"
 import { fetchAccountHistory } from "@/lib/protocol/events"
 import { type ActionOutput } from "@/lib/protocol/guards"
 import { createHorizon } from "@/lib/protocol/horizon"
@@ -60,8 +60,8 @@ import { BPS, ceilDiv, SCALE } from "@/lib/protocol/math"
 import { previewDeposit, previewWithdraw } from "@/lib/protocol/previews"
 import { createRpcReader, readLive, toBigint } from "@/lib/protocol/reader"
 import { describeHoldings, planRoute, routeHoldings, unwindFrom, type Holdings, type RouteRequest, type StepPlan } from "@/lib/protocol/routes"
-import { currentContractsAdapter, toRouteRequest, type PlanContext, type TradeQuote, type TradeRequest } from "@/lib/protocol/trade-adapter"
-import type { Finding, Live, Manifest, Market } from "@/lib/protocol/types"
+import { currentContractsAdapter, toRouteRequest, type PlanContext, type TradeRequest } from "@/lib/protocol/trade-adapter"
+import type { Finding, Manifest, Market } from "@/lib/protocol/types"
 import { solveBuyYt } from "@/lib/protocol/yt-solver"
 import type { KeypairSigner } from "./keypair-signer"
 import {
@@ -83,7 +83,7 @@ import {
   units,
   type Balances,
 } from "./local-stack"
-import { createRunner, SLIPPAGE_BPS, type Runner, type Snapshot, type StepRecord } from "./route-runner"
+import { createRunner, live, planContext, runTrade, showPool, SLIPPAGE_BPS, type Runner, type Snapshot, type StepRecord, type TradeRun } from "./route-runner"
 
 /** The run takes minutes; below this much life left the suite skips (R2-68: it never redeploys). */
 const MIN_RUNWAY_SECONDS = 1_800
@@ -135,22 +135,9 @@ const ONE_CALL: ActionInput["action"][] = [
 /** Every balance a test account holds in this market. */
 const TOKENS: (keyof Balances)[] = ["underlying", "sy", "pt", "yt", "lp"]
 
-function live<T>(v: Live<T>, what: string): T {
-  if (v.status !== "live") throw new Error(`${what}: ${v.error}`)
-  return v.value
-}
-
 const parsePair = (raw: unknown): [bigint, bigint] => {
   if (!Array.isArray(raw) || raw.length !== 2) throw new Error("accrued_fees did not return a pair")
   return [toBigint(raw[0]), toBigint(raw[1])]
-}
-
-const showPool = (p: PoolStateView) => `PT ${units(p.ptReserve)}, SY ${units(p.syReserve)}, LP ${units(p.totalLp)}, τ ${p.secondsToMaturity} s`
-
-/** The fixed APR at `SCALE` of `after`'s reserves on `before`'s clock, exponent and oracle rate: the trade's own move. */
-function rateMove(before: PoolStateView, after: PoolStateView): { before: bigint; after: bigint } {
-  const at: CurveState = { ...before }
-  return { before: impliedRate(at), after: impliedRate({ ...at, ptReserve: after.ptReserve, syReserve: after.syReserve, totalLp: after.totalLp }) }
 }
 
 /**
@@ -235,38 +222,11 @@ describe.skipIf(skip !== null)("every route on the local USDY market (Task 24; 0
     `oracle ${s.oracle} @ ${s.oracleTs}; supply PT ${units(s.totalPt)}, YT ${units(s.totalYt)}; ` +
     `fees pool ${s.poolFees.join("/")} manager ${s.managerFees.join("/")} (protocol/creator, SY raw); treasury ${showBalances(s.treasury)}`
 
-  /**
-   * `useTradeRoute`'s plan context: the manifest alone decides a one-step route (R5-4), and the plan
-   * sizes with the slippage the quote uses (R5-2).
-   */
-  const planCtx = (s: Snapshot): PlanContext => ({
-    marketId: market.marketId,
-    source: r.account,
-    matured: false,
-    routerFunctions: manifest.routerFunctions ?? [],
-    slippageBps: SLIPPAGE_BPS,
-    ms: s.ms,
-  })
-
-  type TradeRun = {
-    request: RouteRequest
-    plans: StepPlan[]
-    quote: TradeQuote
-    /** Step 1 as `useTradeRoute` simulated it before the start: what the quote's exact figures come from. */
-    firstOutput?: ActionOutput
-    steps: StepRecord[]
-    outputs: ActionOutput[]
-    pool0: PoolStateView
-    pool1: PoolStateView
-    bal0: Balances
-    bal1: Balances
-    rate: { before: bigint; after: bigint }
-    onChain: { before: bigint; after: bigint }
-  }
+  const planCtx = (s: Snapshot): PlanContext => planContext(manifest, market, r, s)
 
   /**
-   * A trade as the tab runs it: planned and quoted by the adapter, checked before the start as
-   * `useTradeRoute` does, then every step in order (by `runner`, `r` unless said). Returns what it moved.
+   * A trade as the tab runs it (`runTrade`, by `runner`, `r` unless said); a one-transaction trade is
+   * listed for the report.
    */
   async function trade(
     req: TradeRequest,
@@ -274,46 +234,9 @@ describe.skipIf(skip !== null)("every route on the local USDY market (Task 24; 0
     expectPlan?: (plans: StepPlan[], s: Snapshot) => void,
     runner: Runner = r,
   ): Promise<TradeRun> {
-    const s0 = await runner.snapshot()
-    const ctx = planCtx(s0)
-    const planned = currentContractsAdapter.plan(req, ctx)
-    if (!Array.isArray(planned)) throw new Error(`${req.kind}: not offered: ${planned.disabled}`)
-    expect(planned.map((p) => p.action), `${req.kind} route`).toEqual(expectActions)
-    expectPlan?.(planned, s0)
-    const request = toRouteRequest(req, ctx)
-    const pre = await runner.preStart(request, planned)
-    expect(pre.blockers, `${req.kind}: refusals before the start`).toEqual([])
-    const lp = s0.acc.lp.status === "live" ? { heldLp: s0.acc.lp.value } : {}
-    const firstStep = pre.firstOutput ? { firstStep: { action: planned[0].action, output: pre.firstOutput } } : {}
-    const quoted = currentContractsAdapter.quote(req, { ms: s0.ms, slippageBps: SLIPPAGE_BPS, plans: planned, ...lp, ...firstStep })
-    if (quoted.status !== "live") throw new Error(`${req.kind}: quote unavailable: ${quoted.error}`)
-    const quote = quoted.value
-    const pool0 = live(s0.ms.poolState, "pool state")
-    const { outputs, steps } = await runner.runRoute(request, planned)
-    const s1 = await runner.snapshot()
-    const pool1 = live(s1.ms.poolState, "pool state")
-    const run: TradeRun = {
-      request,
-      plans: planned,
-      quote,
-      ...(pre.firstOutput ? { firstOutput: pre.firstOutput } : {}),
-      steps,
-      outputs,
-      pool0,
-      pool1,
-      bal0: balancesOf(s0.acc),
-      bal1: balancesOf(s1.acc),
-      rate: rateMove(pool0, pool1),
-      onChain: { before: live(s0.ms.impliedRate, "implied rate"), after: live(s1.ms.impliedRate, "implied rate") },
-    }
-    log(
-      `${req.kind} ${units(req.amount)} (pay ${req.pay}, receive ${req.receive}): quote out ${units(quote.out)} ${quote.outToken} (${quote.exactness}), ` +
-        `APY ${quote.apyBefore?.toFixed(6)} -> ${quote.apyAfter?.toFixed(6)}; pool ${showPool(pool0)} -> ${showPool(pool1)}; ` +
-        `implied APR (same clock) ${run.rate.before} -> ${run.rate.after}, on-chain implied_rate ${run.onChain.before} -> ${run.onChain.after}; ` +
-        `account ${showBalances(run.bal1)}`,
-    )
-    if (planned.length === 1 && ONE_CALL.includes(planned[0].action)) {
-      oneStep.push({ what: `${req.kind} (${planned[0].action})`, step: steps[0] })
+    const run = await runTrade({ manifest, market, runner, log, req, expectActions, ...(expectPlan ? { expectPlan } : {}) })
+    if (run.plans.length === 1 && ONE_CALL.includes(run.plans[0].action)) {
+      oneStep.push({ what: `${req.kind} (${run.plans[0].action})`, step: run.steps[0] })
     }
     return run
   }
