@@ -17,9 +17,27 @@ Current state and known limits in full: [`.rness/docs/dapp.md`](../../.rness/doc
 | `/app/markets/[marketId]` | One market: stats and chart (fixed against variable rate), the info card (Details, Compliance, Safety), and the action panel (PT, YT and LP tabs, plus Quick actions). |
 | `/app/portfolio` | Your PT, YT and LP positions and pending yield; claim yield. |
 | `/app/history` | Your transactions, read from RPC events and a local log. |
-| `/app/manage` | Manager view: the markets where your wallet holds a role, with the actions that role can sign. |
+| `/app/manage` | Manager view: the markets where your wallet holds a role, with the actions that role can sign, and the half-finished markets you can resume. |
+| `/app/manage/new` | The market-creation wizard (seven steps). See "Manager view and the wizard". |
 | `POST /api/faucet` | Server route behind "Get test tokens". |
 | `GET` or `POST /api/cron/record` | The rate recorder, called by a scheduler. Both methods run the same checks. Refuses any other caller. |
+
+## Trade flows
+
+Each trade is one signature when the manifest's `routerFunctions` lists the Router function it
+needs. Otherwise the planner falls back to a multi-step route and says why.
+
+- **Buy PT and Sell PT**, paid or received in USDY: one signature.
+- **Buy YT** is a flash swap, for an SY payer and for a USDY payer. No temporary capital: the
+  pool lends the SY inside the call. The budget is sized from the quote, and the review shows the net cost.
+- **Sell YT** to USDY: one signature.
+- **LP only** (Keep YT off), from SY or from USDY: one signature. The pool keeps the PT dust.
+- **LP withdraw** before maturity pays out USDY in one signature.
+- **Keep YT** (add liquidity and keep the minted YT): one signature, with the contract's new arguments.
+- The sales, Buy YT and the LP withdraw sweep only what the call produced (gain-based), so SY or PT
+  already in the wallet no longer blocks them.
+- The PrincipalManager's pause is read (`is_paused`) and shown like the other pauses. While it is
+  paused, mint, YT, claim and redeem actions are blocked.
 
 ## Network selection
 
@@ -36,12 +54,15 @@ runtime. The format is described in
 `shared` contracts, and a `markets[]` list with the underlying, maturity and nine contract IDs per
 market.
 
-- The app targets the contracts at `principal` `97ac23e`: OracleAdapter v2 and the five
-  one-transaction Router functions, used when the manifest's `routerFunctions` lists them.
+- The app targets the contracts at `principal` `665bb67`: OracleAdapter v2, the one-transaction
+  Router functions (flash Buy YT, LP only and LP withdraw in USDY, the sales, Keep YT), the gain-based
+  sweeps and `PrincipalManager.is_paused`. They are used when the manifest's `routerFunctions` lists them.
+  `deploy.sh` leaves the Router's `quote_*` views out of that list.
 - `testnet.json` is committed. For now it holds the app team's interim Testnet deployment, made
-  with `PRINCIPAL_NETWORK=testnet scripts/dev-stack/deploy.sh` from `principal` at `97ac23e` on
-  4 Nov 2026: one market, `testnet-usdy-1801581040` (USDY test asset, matures 2 Feb 2027), with
-  `wasmHashes` pinned, a v2 oracle and the five one-transaction Router functions. It replaced the
+  with `PRINCIPAL_NETWORK=testnet scripts/dev-stack/deploy.sh` from `principal` (the deployed market was made at `97ac23e` on
+  4 Nov 2026): one market, `testnet-usdy-1801581040` (USDY test asset, matures 2 Feb 2027), with
+  `wasmHashes` pinned, a v2 oracle and the five one-transaction Router functions. It must be
+  redeployed from `665bb67` for the new flows (see Known limits). It replaced the
   `be2a1a5` deployment (`testnet-usdy-1801356335`, v1 oracle), whose contracts stay on-chain
   unused. It is replaced by the Deliverable 1 manifest. Tests use a frozen copy of the earlier
   interim file (`lib/protocol/__tests__/fixtures/testnet-interim.json`); they only check that the
@@ -51,6 +72,31 @@ market.
 - Each market should pin `wasmHashes` (the Wasm hash of each contract, in hex). Restoring archived
   contract code is refused without them, and the registry hides a market whose code it cannot
   check.
+
+## Manager view and the wizard
+
+`/app/manage` lists the markets where the connected wallet holds a role, with the fees, the grants
+and the actions that role can sign. Every call goes through the same review and signature path as a
+trade. Half-finished markets are listed too, for the underlying's SAC admin and the protocol admin.
+
+`/app/manage/new` creates a market in seven steps. The `?salt=` in the URL fixes the market's
+addresses, and where the market stands is read from the chain, never from a saved draft.
+
+| Step | What it does | Who signs |
+|---|---|---|
+| 1. Parameters | Maturity, fees, treasury and the curve parameters. Defaults come from the current market. | Nobody |
+| 2. Addresses | Shows the seven addresses the salt gives (`predict_market`). | Nobody |
+| 3. Deploy | The factory's `create_tokens`, `create_engine` and `create_pool_and_escrow`, one transaction each. | The underlying SAC's `admin()` |
+| 4. Wire | RiskControl lists the SY wrapper and the manager as consumers; the Router registers the pool. | RiskControl admin, Router admin |
+| 5. Grants | The compliance grants (asset `set_authorized`, Permissioning `grant_account` and `grant_asset`), each read from the chain. Only the missing ones are offered. | The SAC admin for the asset, the Permissioning admin for the rest |
+| 6. Seed the pool | Mints and deposits from a starting fixed APY and an amount, then adds the first liquidity. PT must stay below par. | The SAC admin (the market's issuer) |
+| 7. Publish | Posts the pool to the registry so the market appears in `/app`. Nothing is signed. | Nobody |
+
+- **Resume.** A step that another wallet must sign names that account, and can be finished from that
+  wallet. The factory indexes each market's salt (migration 0003, table `market_salts`), so
+  `/app/manage` shows "Resume at step N" from any browser. Opening the link also resumes it.
+- **Publish.** The registry checks the market like any discovered one, and lists it as `published`
+  only when it passes. A refresh of `/app` then shows it.
 
 ## Environment variables
 
@@ -230,7 +276,7 @@ Where each funded Tranche 2 item lives in the final interface. Open a market fro
 | Claim yield | `/app/portfolio`. |
 | Redeem at maturity | The PT tab once the market has matured; before maturity, Quick actions → Recombine PT + YT. |
 | Transaction history | `/app/history`. |
-| Market manager | `/app/manage`, shown for a wallet that holds a role on a market. |
+| Market manager | `/app/manage`, shown for a wallet that holds a role on a market; `/app/manage/new` creates a market. |
 
 ## Known limits
 
@@ -239,30 +285,26 @@ contract team are in [`.rness/docs/requests-arthur-0002.md`](../../.rness/docs/r
 
 - **The Testnet v1 seed stays hidden or refused** until Arthur's v2 manifest with `wasmHashes`
   arrives. It pins no Wasm hashes, so the recorder's validation marks it invalid.
-- **The create-market wizard is held** until the new factory and AMM ABI exists (R2-39). `/app/manage`
-  lists markets, roles, fees and grants; it does not create markets yet.
+- **A PrincipalManager older than `665bb67` has no `is_paused`.** The dApp reads it, so on an older
+  manager mint, YT and claim actions read "unavailable" and are blocked (fail closed). Ship the dApp
+  together with the redeploy from `665bb67`. The committed Testnet market (`97ac23e`) needs that
+  redeploy first.
+- **The wizard must be signed by the underlying SAC's `admin()`.** The contracts check it live, so
+  any other wallet is told which account must sign.
+- **Testnet needs migration 0003 applied** (`pnpm db:migrate --env-file .env.testnet`) for Resume to
+  work across browsers. Until then Resume lists only the salts this browser saved.
+- **LP only in USDY signs `sy_in` at the current SY rate, with no headroom** (R5-5). If the rate
+  rose between simulation and inclusion, the call would revert, or take a few raw units of SY the
+  wallet already held. Harmless while every SYWrapper is at rate 1.0, as all deployed ones are.
+- **The countdown shows "Unavailable" for a moment while the clock loads.** Known, with a fix pending.
 - **OracleAdapter v2 is required.** The app reads `is_available()` and the oracle's policy (R4-2).
   On a v1 oracle (such as the earlier `be2a1a5` Testnet deployment), the oracle shows unavailable and
   every gated write is refused, and `/api/cron/oracle` answers 500 `failed`.
-- **Buy YT needs temporary capital** (about leverage times the spend, mostly returned in the same
-  transaction, or in the last step of the multi-step route) until a flash-swap function exists. See
-  the request document.
-- **LP only (Keep YT off) fails about 1 add in 12 on-chain.** `add_liquidity_single_sy` refunds PT
-  only when the refund is above zero. When the refund is 0 at simulation and 1 at inclusion, the
-  transaction touches the PT contract outside its footprint and fails. The user loses only the
-  network fee, the app says the pool's refund rounding moved, and the route can be prepared again. A
-  contract fix (an unconditional PT refund) is proposed to the contract team.
-- **Two-sided add, Keep YT and Buy YT can fail** if the pool or oracle moves between review and
-  inclusion. On the one-step Keep YT and Buy YT, an oracle tick that lands between review and
+- **Two-sided add and Keep YT can fail** if the pool or oracle moves between review and
+  inclusion. On the one-step Keep YT, an oracle tick that lands between review and
   inclusion is enough: the Router passes the oracle-priced `pt_minted` into a call the user
   authorized, so it no longer matches and the app says "Amounts moved…". The user loses only the
   network fee. The panel names the cause. Prepare again.
-- **Any SY held, even one raw unit, keeps the one-call sales and Buy YT on the multi-step route.**
-  Their Router functions end with `withdraw_all` and refuse a wallet that already holds SY
-  (`PreexistingSyBalance`). The app plans the multi-step route and says why. SY worth under 2 raw
-  USDY cannot be withdrawn (its slippage floor is 0), so the app does not point at Withdraw for it.
-  One-step Keep YT sizes its split to leave no SY on the pool it read; a pool that moves before
-  inclusion can still leave a raw unit.
 - **A later step can fail on rent.** Step 2 of a multi-step route, prepared in the ledger its
   previous step landed in, can fail with an insufficient refundable fee (reproduced twice locally).
   The app says "prepare it again" and the route stays continuable. The fix is the refundable-fee
@@ -284,7 +326,6 @@ contract team are in [`.rness/docs/requests-arthur-0002.md`](../../.rness/docs/r
 - **History** reads RPC `getEvents`. Its retention window is limited and it takes at most 5
   contract IDs per request. Entries older than the window come only from the local log in the
   browser.
-- **Pause detection.** PrincipalManager has no pause view. A pause is detected only by simulation.
 - **SEP-57 compliance path** is untested on Testnet.
 
 ### Before mainnet

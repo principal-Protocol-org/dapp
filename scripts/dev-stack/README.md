@@ -23,12 +23,12 @@ scripts/dev-stack/oracle-tick.sh                          # run this every 30 mi
   `principal-localdev-treasury`. The names are deliberately unlike any real key: the admin's secret is
   written to `.env.local`, so a real identity must never share them.
 - `deploy.sh` reads `PRINCIPAL_REPO` (default `../principal`), `PRINCIPAL_REF` (default
-  `origin/feat/tranche-1-mvp`) and `MATURITY_SECONDS` (default `3600`). It extracts the sources with
+  `origin/feat/tranche-1-mvp`, which is `665bb67` today) and `MATURITY_SECONDS` (default `3600`). It extracts the sources with
   `git archive` into `$TMPDIR/principal-dev-stack/<commit>` (read-only for the repository, cached per
   commit), builds the WASM, issues `USDY` (`ASSET_CODE`, default `USDY`, shown as "USDY (test)"; AUTH_REQUIRED, AUTH_REVOCABLE, AUTH_CLAWBACK_ENABLED) from
   `principal-localdev-admin`, deploys its SAC, and runs steps 1-11 of the repository's
   `docs/DEPLOYMENT.md`. It then deposits 200,000 USDY, mints PT/YT from 100,000 SY, and seeds the
-  pool with all the PT and 95 % of its value in SY. It also deploys the stateless `MarketFactory` (its address is `shared.factory`, the wasm hashes of the seven market contracts are recorded) and runs `scripts/db-migrate.mjs` when that file exists. Every run deploys a new market and overwrites `config/manifests/local.json`.
+  pool with all the PT and 95 % of its value in SY. It also deploys the stateless `MarketFactory` (its address is `shared.factory`, the wasm hashes of the seven market contracts are recorded) and runs `scripts/db-migrate.mjs` when that file exists (migrations 0001 to 0003; 0003 adds `market_salts`). Every run deploys a new market and overwrites `config/manifests/local.json`.
   Allow for the run: a deploy takes a few minutes, so do not set `MATURITY_SECONDS` below about 600.
 - The OracleAdapter is v2, which the dApp requires (R4-9). `deploy.sh` initializes it with
   `max_stale_seconds = 3600` and `max_deviation_bps = 1000`, sets one primary source and no
@@ -46,7 +46,7 @@ scripts/dev-stack/oracle-tick.sh                          # run this every 30 mi
 
 Outputs (both git-ignored; never commit them):
 
-- `config/manifests/local.json`: a v2 manifest (shared contracts, factory, `wasmHashes`, `routerFunctions`, `testAsset`, one market).
+- `config/manifests/local.json`: a v2 manifest (shared contracts, factory, `wasmHashes`, `routerFunctions` (every Router function the wasm exposes except the `quote_*` views), `testAsset`, one market).
 - `.env.local`: `NEXT_PUBLIC_PRINCIPAL_NETWORK=local`, `FAUCET_ISSUER_SECRET` (the
   `principal-localdev-admin` secret, valid on this throwaway network only) and `DATABASE_URL` for `principal-pg`.
 
@@ -66,7 +66,8 @@ and the roles are split so the server never holds the protocol admin:
 
 - `MATURITY_SECONDS` defaults to 90 days on testnet. The market id is `testnet-usdy-<maturity>`.
 - It writes `config/manifests/testnet.json` (committed: public addresses and hashes only), no env
-  file and no database migration. It never prints a secret: copy them yourself with
+  file and no database migration. Apply migration 0003 to the Testnet database yourself
+  (`pnpm db:migrate --env-file .env.testnet`). It never prints a secret: copy them yourself with
   `stellar keys secret <name>` into the testnet environment of the hosting.
 - The oracle is kept fresh by the app's `/api/cron/oracle` schedule (see the main README);
   `PRINCIPAL_NETWORK=testnet scripts/dev-stack/oracle-tick.sh` does it by hand.
