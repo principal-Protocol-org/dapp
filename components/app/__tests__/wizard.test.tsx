@@ -5,7 +5,10 @@ import { Address, Contract, Keypair, StrKey, xdr } from "@stellar/stellar-sdk"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import testnetJson from "@/lib/protocol/__tests__/fixtures/testnet-interim.json"
 import { deriveMarketContracts } from "@/lib/protocol/factory"
+import { minAfterSlippage } from "@/lib/protocol/guards"
 import type { ManagerCall } from "@/lib/protocol/manager-calls"
+import { seedAmounts } from "@/lib/protocol/seed"
+import type { ContractInvocation, SimulationOutcome } from "@/lib/protocol/stellar"
 import { parseManifest } from "@/lib/protocol/manifest"
 import type { ManagerReview } from "@/lib/protocol/review"
 import type { Manifest, Market, MarketContractName, WalletState } from "@/lib/protocol/types"
@@ -98,9 +101,14 @@ const mocks = vi.hoisted(() => ({
   prepareManager: vi.fn(),
   execute: vi.fn(),
   toast: vi.fn(),
+  /** The seed's simulations (step 6): each call simulated as the signer, with a zero floor. */
+  simulate: vi.fn(),
+  refresh: vi.fn(),
+  /** Set: what the manifest provider hands out instead (the market list after a refresh). */
+  manifest: null as Manifest | null,
 }))
 
-vi.mock("@/components/app/manifest-provider", () => ({ useManifest: () => manifest }))
+vi.mock("@/components/app/manifest-provider", () => ({ useManifest: () => mocks.manifest ?? manifest }))
 vi.mock("@/hooks/use-wallet", () => ({ useWallet: () => ({ state: mocks.wallet }) }))
 vi.mock("@/hooks/use-ledger-clock", () => ({ useLedgerClock: () => ({ ledgerTime: LEDGER, sequence: 1, isError: false }) }))
 vi.mock("@/hooks/use-manifest-findings", () => ({ useManifestFindings: () => [] }))
@@ -108,7 +116,7 @@ vi.mock("@/hooks/use-execute", () => ({
   useExecute: () => ({ prepareManager: mocks.prepareManager, execute: mocks.execute, pending: false }),
 }))
 vi.mock("@/components/app/actions/tx-feedback", () => ({ showTxToast: mocks.toast }))
-vi.mock("next/navigation", () => ({ useSearchParams: () => mocks.search }))
+vi.mock("next/navigation", () => ({ useSearchParams: () => mocks.search, useRouter: () => ({ refresh: mocks.refresh }) }))
 // The chain: contract reads by `contract.function(args)` (or `contract.function`), and the ledger
 // entries of the contracts deployed so far.
 vi.mock("@/lib/protocol/reader", async (importOriginal) => ({
@@ -124,7 +132,12 @@ vi.mock("@/lib/protocol/reader", async (importOriginal) => ({
 }))
 vi.mock("@/lib/protocol/stellar", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/protocol/stellar")>()),
+  simulateInvocation: (p: { source: string; invocation: ContractInvocation }) => mocks.simulate(p),
   createRpcServer: () => ({
+    // The seed's deferred calls read the ledger time when their turn comes, for their deadline.
+    async getLatestLedger() {
+      return { sequence: 10, closeTime: LEDGER }
+    },
     async getLedgerEntries(...keys: xdr.LedgerKey[]) {
       if (mocks.rpcError) throw new Error(mocks.rpcError)
       const entries = mocks.deployed.flatMap((id) => {
@@ -209,6 +222,9 @@ beforeEach(() => {
   mocks.prepareManager.mockReset().mockImplementation(async (call: ManagerCall) => managerReview(call))
   mocks.execute.mockReset().mockResolvedValue({ status: "SUCCESS", hash: "abc" })
   mocks.toast.mockReset()
+  mocks.simulate.mockReset()
+  mocks.refresh.mockReset()
+  mocks.manifest = null
 })
 
 describe("step 1: parameters", () => {
@@ -721,6 +737,227 @@ describe("steps 4 and 5: wire and grants (R5-10, spec 0002 §5)", () => {
       await waitFor(() => expect(settled).toBe(true))
       expect(deployShownWhileOpen).toBe(true)
       expect(await screen.findByRole("heading", { name: /Step 4 of 7: Wire/ })).toBeTruthy()
+    })
+  })
+})
+
+describe("steps 6 and 7: seed and publish (spec 0002 §5, R5-10)", () => {
+  const { riskControl, router, permissioning, oracle } = manifest.shared
+  const key = (contract: string, fn: string, ...args: string[]) => `${contract}.${fn}(${args.join(",")})`
+  const TAU = 7_776_000n
+  const EXPONENT = WAD - (TAU * WAD) / (3n * 31_536_000n)
+  const RATE = 10_500_000n
+  const XR = 10_200_000n
+
+  /** Deployed, wired and granted: the chain reads step 6 until the pool holds liquidity. */
+  function granted(over: Record<string, unknown> = {}) {
+    mocks.deployed = Object.values(predicted).filter((id) => id !== manifest.shared.router && id !== manifest.shared.oracle)
+    Object.assign(mocks.reads, {
+      [`${predicted.config}.underlying`]: SAC,
+      [`${predicted.config}.treasury`]: TREASURY,
+      [`${riskControl}.is_consumer`]: true,
+      [`${router}.is_registered`]: true,
+      [`${predicted.pool}.lp_total_supply`]: 0n,
+      [`${SAC}.authorized`]: true,
+      [`${permissioning}.is_allowed`]: true,
+      [`${permissioning}.is_allowed_for_asset`]: true,
+      [`${SAC}.admin`]: ISSUER,
+      // What the seed reads: the unseeded pool, the oracle, the SY wrapper and the config.
+      [`${predicted.pool}.pool_state`]: { pt_reserve: 0n, sy_reserve: 0n, total_lp: 0n, rate: RATE, exponent: EXPONENT, fee_rate: 0n, seconds_to_maturity: TAU },
+      [`${oracle}.is_available`]: true,
+      [`${predicted.sy}.exchange_rate`]: XR,
+      [`${predicted.config}.tokenization_fee_bps`]: 7n,
+      [key(predicted.pt, "balance", ISSUER)]: 0n,
+      [key(predicted.sy, "balance_of", ISSUER)]: 0n,
+      ...over,
+    })
+  }
+
+  /** The simulations answer what the calls would make; the signatures land them on the fake chain. */
+  function chainAnswers() {
+    const v = (i: ContractInvocation, n: number) => i.args[n].value as bigint
+    mocks.simulate.mockImplementation(async ({ invocation: i }: { invocation: ContractInvocation }): Promise<SimulationOutcome> => {
+      const retval =
+        i.functionName === "wrap_and_mint"
+          ? { pt_minted: ((((v(i, 2) * 10_000_000n) / XR) * 9_993n) / 10_000n * RATE) / 10_000_000n, yt_minted: 0n, fee_shares: 0n }
+          : i.functionName === "deposit"
+            ? (v(i, 1) * 10_000_000n) / XR
+            : [v(i, 2), v(i, 3), 1_000_000n]
+      return { ok: true, retval, latestLedger: 10, minResourceFee: "0" }
+    })
+    mocks.execute.mockImplementation(async (review: ManagerReview) => {
+      const call = review.origin.type === "manager" ? review.origin.call : undefined
+      const sim = mocks.simulate.mock.results[mocks.simulate.mock.results.length - 1]
+      const out = (await sim.value) as { retval: unknown }
+      const add = (k: string, v: bigint) => (mocks.reads[k] = (mocks.reads[k] as bigint) + v)
+      if (call?.kind === "seed_mint") add(key(predicted.pt, "balance", ISSUER), (out.retval as { pt_minted: bigint }).pt_minted)
+      if (call?.kind === "seed_deposit") add(key(predicted.sy, "balance_of", ISSUER), out.retval as bigint)
+      return { status: "SUCCESS", hash: "abc" }
+    })
+  }
+
+  async function typeSeed(user: ReturnType<typeof userEvent.setup>, apy: string, amount: string) {
+    await screen.findByRole("heading", { name: /Step 6 of 7: Seed the pool/ })
+    await user.type(await screen.findByLabelText("Starting fixed APY (%)"), apy)
+    await user.type(screen.getByLabelText("Amount (USDY)"), amount)
+  }
+
+  it("the seed runs wrap_and_mint, deposit and add_liquidity in that order through the manager-call path, floors from each simulation", async () => {
+    granted()
+    chainAnswers()
+    connect(ISSUER)
+    const user = userEvent.setup()
+    show()
+    await typeSeed(user, "5", "1000")
+    const plan = seedAmounts({ apy: 500_000n, amountUnderlying: 10_000_000_000n, s: { secondsToMaturity: TAU, exponent: EXPONENT }, oracleRate: RATE, exchangeRate: XR, feeBps: 7n })
+    if ("error" in plan) throw new Error(plan.error)
+    // The plan is shown before anything is signed: the starting APY the pool will show.
+    expect(await screen.findByText(/starts at 5\.00%/)).toBeTruthy()
+    const seed = screen.getByRole("button", { name: "Seed the pool" })
+    await waitFor(() => expect((seed as HTMLButtonElement).disabled).toBe(false))
+    await user.click(seed)
+    await signAll(user, 3)
+
+    expect(kinds()).toEqual(["seed_mint", "seed_deposit", "seed_add_liquidity"])
+    const calls = mocks.prepareManager.mock.calls.map(([c]) => c as ManagerCall)
+    expect(calls.map((c) => c.invocation.functionName)).toEqual(["wrap_and_mint", "deposit", "add_liquidity"])
+    expect(calls.map((c) => c.invocation.contractId)).toEqual([router, predicted.sy, router])
+    for (const c of calls) expect(c.source).toBe(ISSUER)
+    // The amounts are the plan's; the whole amount is used.
+    const [mint, deposit, add] = calls.map((c) => c.invocation.args.map((a) => a.value))
+    expect(mint[1]).toBe(predicted.pool)
+    expect(mint[2]).toBe(plan.mintUnderlying)
+    expect(deposit[1]).toBe(plan.depositUnderlying)
+    expect(add[2]).toBe(plan.pt)
+    expect(add[3]).toBe(plan.sy)
+    // The deadlines are the ledger's time when each call was built, plus the 300 s setting.
+    expect([mint[4], add[5]]).toEqual([BigInt(LEDGER + 300), BigInt(LEDGER + 300)])
+    // Each was simulated with a zero floor, then signed with the simulated output less 0.5 % (never zero).
+    const sims = mocks.simulate.mock.calls.map(([p]) => (p as { invocation: ContractInvocation }).invocation)
+    expect(sims.map((i) => i.functionName)).toEqual(["wrap_and_mint", "deposit", "add_liquidity"])
+    expect([sims[0].args[3].value, sims[1].args[2].value, sims[2].args[4].value]).toEqual([0n, 0n, 0n])
+    const outs = await Promise.all(mocks.simulate.mock.results.map((r) => r.value as Promise<{ retval: unknown }>))
+    expect(mint[3]).toBe(minAfterSlippage((outs[0].retval as { pt_minted: bigint }).pt_minted, 50n))
+    expect(deposit[2]).toBe(minAfterSlippage(outs[1].retval as bigint, 50n))
+    expect(add[4]).toBe(minAfterSlippage(1_000_000n, 50n))
+    // The pool's first deposit is simulated only once the mint and the deposit have landed.
+    expect(mocks.simulate.mock.invocationCallOrder[2]).toBeGreaterThan(mocks.execute.mock.invocationCallOrder[1])
+  })
+
+  it("a starting APY of 0 or less is refused before anything is signed (R5-10)", async () => {
+    granted()
+    connect(ISSUER)
+    const user = userEvent.setup()
+    show()
+    await typeSeed(user, "0", "1000")
+    expect(await screen.findByText(/Enter a starting APY above 0%/)).toBeTruthy()
+    expect((screen.getByRole("button", { name: "Seed the pool" }) as HTMLButtonElement).disabled).toBe(true)
+    expect(mocks.simulate).not.toHaveBeenCalled()
+    expect(mocks.prepareManager).not.toHaveBeenCalled()
+  })
+
+  it("a stale oracle is said, and nothing is offered to sign", async () => {
+    granted({ [`${oracle}.is_available`]: false })
+    connect(ISSUER)
+    const user = userEvent.setup()
+    show()
+    await typeSeed(user, "5", "1000")
+    expect(await screen.findByText(/oracle price is stale/)).toBeTruthy()
+    expect((screen.getByRole("button", { name: "Seed the pool" }) as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it("a wallet that is not the issuer is told who seeds the pool", async () => {
+    granted()
+    connect(OTHER)
+    show()
+    await screen.findByRole("heading", { name: /Step 6 of 7: Seed the pool/ })
+    expect((await screen.findAllByText(ISSUER, { exact: false })).length).toBeGreaterThan(0)
+    expect((screen.getByRole("button", { name: "Seed the pool" }) as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it("a seed started before finishes with the PT the wallet holds: no second mint", async () => {
+    granted({ [key(predicted.pt, "balance", ISSUER)]: 5_000_000_000n, [key(predicted.sy, "balance_of", ISSUER)]: 1_000_000_000n })
+    chainAnswers()
+    connect(ISSUER)
+    const user = userEvent.setup()
+    show()
+    await screen.findByRole("heading", { name: /Step 6 of 7: Seed the pool/ })
+    expect(await screen.findByText(/already holds/)).toBeTruthy()
+    expect(screen.queryByLabelText("Amount (USDY)")).toBeNull()
+    await user.type(screen.getByLabelText("Starting fixed APY (%)"), "5")
+    const seed = screen.getByRole("button", { name: "Seed the pool" })
+    await waitFor(() => expect((seed as HTMLButtonElement).disabled).toBe(false))
+    await user.click(seed)
+    await signAll(user, 2)
+    expect(kinds()).toEqual(["seed_deposit", "seed_add_liquidity"])
+    const add = (mocks.prepareManager.mock.calls[1][0] as ManagerCall).invocation.args
+    expect(add[2].value).toBe(5_000_000_000n)
+  })
+
+  it("an already seeded pool sends the wizard on to step 7", async () => {
+    granted({ [`${predicted.pool}.lp_total_supply`]: 2_000n })
+    show()
+    expect(await screen.findByRole("heading", { name: /Step 7 of 7: Publish/ })).toBeTruthy()
+    const steps = screen.getByRole("list", { name: "Steps" })
+    expect(within(steps).getByText("Seed the pool").closest("li")?.textContent).toMatch(/Done/)
+  })
+
+  describe("publish", () => {
+    const listed: Market = {
+      ...CURRENT,
+      marketId: "testnet-usdy-1807776000",
+      displayName: "USDY (test)",
+      maturity: 1_807_776_000,
+      contracts: { ...predicted },
+    }
+    let fetchMock: ReturnType<typeof vi.fn>
+    beforeEach(() => {
+      fetchMock = vi.fn()
+      vi.stubGlobal("fetch", fetchMock)
+    })
+
+    it("posts the pool to the registry, and the market appears after one refresh (spec §1)", async () => {
+      granted({ [`${predicted.pool}.lp_total_supply`]: 2_000n })
+      fetchMock.mockResolvedValue(new Response(JSON.stringify({ market: listed }), { status: 200, headers: { "content-type": "application/json" } }))
+      // The refresh re-renders the server layout, which lists the registry's valid markets.
+      mocks.refresh.mockImplementation(() => {
+        mocks.manifest = { ...manifest, markets: [...manifest.markets, listed] }
+      })
+      const user = userEvent.setup()
+      show()
+      await user.click(await screen.findByRole("button", { name: "Publish the market" }))
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+      expect(url).toBe("/api/markets")
+      expect(init.method).toBe("POST")
+      expect(new Headers(init.headers).get("content-type")).toBe("application/json")
+      expect(JSON.parse(String(init.body))).toEqual({ pool: predicted.pool })
+      expect(mocks.refresh).toHaveBeenCalledTimes(1)
+      expect(await screen.findByText(/is in the market list/)).toBeTruthy()
+      expect(screen.getByRole("link", { name: "Open the market" }).getAttribute("href")).toBe(`/app/markets/${listed.marketId}`)
+    })
+
+    it("a market the registry refuses is not listed, and the reason is shown", async () => {
+      granted({ [`${predicted.pool}.lp_total_supply`]: 2_000n })
+      fetchMock.mockResolvedValue(
+        new Response(JSON.stringify({ error: "invalid_market", message: "This pool is not a market this app can list. The reason says what to fix.", reason: "pool (C…) runs Wasm 00…, which the manifest does not pin for pool" }), {
+          status: 422,
+          headers: { "content-type": "application/json" },
+        }),
+      )
+      const user = userEvent.setup()
+      show()
+      await user.click(await screen.findByRole("button", { name: "Publish the market" }))
+      expect(await screen.findByText(/which the manifest does not pin for pool/)).toBeTruthy()
+      expect(mocks.refresh).not.toHaveBeenCalled()
+    })
+
+    it("a market already in the list says so, and offers nothing to publish", async () => {
+      granted({ [`${predicted.pool}.lp_total_supply`]: 2_000n })
+      mocks.manifest = { ...manifest, markets: [...manifest.markets, listed] }
+      show()
+      expect(await screen.findByText(/is in the market list/)).toBeTruthy()
+      expect(screen.queryByRole("button", { name: "Publish the market" })).toBeNull()
     })
   })
 })

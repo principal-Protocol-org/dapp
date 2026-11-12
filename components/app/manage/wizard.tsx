@@ -12,6 +12,8 @@ import { StepWire } from "@/components/app/manage/step-wire"
 import { StepDeploy } from "@/components/app/manage/step-deploy"
 import { StepParams } from "@/components/app/manage/step-params"
 import { StepPreview } from "@/components/app/manage/step-preview"
+import { StepPublish } from "@/components/app/manage/step-publish"
+import { StepSeed } from "@/components/app/manage/step-seed"
 import { useHydrated } from "@/hooks/use-hydrated"
 import { useLedgerClock } from "@/hooks/use-ledger-clock"
 import { useWallet } from "@/hooks/use-wallet"
@@ -54,10 +56,10 @@ export type ChainStepProps = {
 }
 
 /**
- * Steps 4–7, by number (plan 0005 Tasks 7–8 add theirs here: `4: StepWire`, ...). The wizard shows
- * the step the chain has reached; a step with no component yet says what comes next.
+ * Steps 4–7, by number (plan 0005 Tasks 7–8). The wizard shows the step the chain has reached; a step
+ * with no component says what comes next.
  */
-export const CHAIN_STEPS: Partial<Record<ChainStep, ComponentType<ChainStepProps>>> = { 4: StepWire, 5: StepGrants }
+export const CHAIN_STEPS: Partial<Record<ChainStep, ComponentType<ChainStepProps>>> = { 4: StepWire, 5: StepGrants, 6: StepSeed, 7: StepPublish }
 
 const NEXT_STEP: Record<ChainStep, string> = {
   4: "Every contract of the market is deployed. Next, RiskControl lists the SY wrapper and the PrincipalManager as consumers, and the Router registers the pool. Their admins sign these.",

@@ -19,13 +19,24 @@ type Flow =
   | { step: "signing"; i: number; review: ManagerReview }
   | { step: "error"; i: number; message: string }
 
+/**
+ * A step built only when its turn comes, once the step before it has confirmed (plan 0005 Task 8):
+ * the seed's calls take their floors from a simulation run then, since the pool's first deposit cannot
+ * be simulated before the mint and the deposit have landed. A build that throws stops the flow with
+ * its message; nothing of that step is prepared or signed.
+ */
+export type DeferredCall = { build(): Promise<ManagerCall> }
+export type ManagerStep = ManagerCall | DeferredCall
+
+const isDeferred = (step: ManagerStep): step is DeferredCall => "build" in step
+
 export type ManagerSignFlowProps = {
   /** The button's text. */
   label: string
   /** What the dialog and the toasts call this action ("Claim creator fees"). */
   title: string
   /** One transaction per call, signed one after the other: each has its own review. */
-  steps: ManagerCall[]
+  steps: ManagerStep[]
   /** The live reasons `call` may not be signed now; any of them turns signing off. */
   blockersFor(call: ManagerCall): Blocker[]
   disabled?: boolean
@@ -49,9 +60,12 @@ export function ManagerSignFlow(props: ManagerSignFlowProps) {
   const { prepareManager } = exec
   const [flow, setFlow] = useState<Flow>({ step: "idle" })
   const [nowMs, setNowMs] = useState<number | null>(null)
-  // The steps fixed at start: in state for rendering, mirrored in a ref for the async paths.
-  const [runSteps, setRunSteps] = useState<ManagerCall[]>([])
-  const stepsRef = useRef<ManagerCall[]>([])
+  // The steps fixed at start: in state for rendering, mirrored in a ref for the async paths. A
+  // deferred step's call is known once it is built (`built`, by index).
+  const [runSteps, setRunSteps] = useState<ManagerStep[]>([])
+  const stepsRef = useRef<ManagerStep[]>([])
+  const [built, setBuilt] = useState<(ManagerCall | undefined)[]>([])
+  const builtRef = useRef<(ManagerCall | undefined)[]>([])
   const reviewRef = useRef<ManagerReview | null>(null)
   const prepareSeq = useRef(0)
   const busy = useRef(false)
@@ -66,7 +80,13 @@ export function ManagerSignFlow(props: ManagerSignFlowProps) {
       reviewRef.current = null
       setFlow({ step: "preparing", i })
       try {
-        const review = await prepareManager(stepsRef.current[i])
+        const step = stepsRef.current[i]
+        // A deferred step is built again each time it is prepared (a review older than 60 s too).
+        const call = isDeferred(step) ? await step.build() : step
+        if (seq !== prepareSeq.current) return
+        builtRef.current = builtRef.current.map((c, n) => (n === i ? call : c))
+        setBuilt(builtRef.current)
+        const review = await prepareManager(call)
         if (seq !== prepareSeq.current) return
         reviewRef.current = review
         setFlow({ step: "review", i, review })
@@ -81,6 +101,8 @@ export function ManagerSignFlow(props: ManagerSignFlowProps) {
     if (flow.step !== "idle" || props.disabled || props.steps.length === 0) return
     stepsRef.current = props.steps
     setRunSteps(props.steps)
+    builtRef.current = props.steps.map((step) => (isDeferred(step) ? undefined : step))
+    setBuilt(builtRef.current)
     void prepare(0)
   }
 
@@ -107,8 +129,8 @@ export function ManagerSignFlow(props: ManagerSignFlowProps) {
     if (flow.step !== "review" || busy.current) return
     const review = reviewRef.current
     const { i } = flow
-    const call = stepsRef.current[i]
-    if (review === null || review !== flow.review) return
+    const call = builtRef.current[i]
+    if (review === null || review !== flow.review || call === undefined) return
     if (latest.current.disabled || latest.current.blockersFor(call).length > 0) return
     if (isExpired(review, Date.now() + SIGN_MARGIN_MS)) {
       void prepare(i)
@@ -137,7 +159,7 @@ export function ManagerSignFlow(props: ManagerSignFlowProps) {
   const active = flow.step === "idle" ? null : flow
   // The wizard keeps its step mounted while a review or signature is open (flow-busy.tsx).
   useReportFlowBusy(active !== null)
-  const call = active ? runSteps[active.i] : undefined
+  const call = active ? built[active.i] : undefined
   const blockers = call ? props.blockersFor(call) : []
   const shown = flow.step === "review" || flow.step === "signing" ? flow.review : null
   const secondsLeft =
