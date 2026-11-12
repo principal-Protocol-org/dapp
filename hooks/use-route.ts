@@ -427,6 +427,9 @@ export function useRoute(opts: UseRouteOptions): RouteControls {
         const clock = latest.current.ledgerTime
         if (clock === null) return interrupt(g, i, clockMissing(i + 1))
         const ledgerAt = Math.floor(clock)
+        // One read of the rates for both the open guards and the floors: the floors follow the rate
+        // the step was simulated with (R5-3).
+        const rates = latest.current.rates
         const draft: ActionInput = {
           action: plan.action,
           marketId: r.marketId,
@@ -434,7 +437,7 @@ export function useRoute(opts: UseRouteOptions): RouteControls {
           amount: amounts.amount,
           ...(amounts.secondaryAmount !== undefined ? { secondaryAmount: amounts.secondaryAmount } : {}),
           ...(amounts.desired ? { desired: amounts.desired } : {}),
-          guards: openGuards(plan.action, amounts.amount, latest.current.rates),
+          guards: openGuards(plan.action, amounts.amount, rates),
           deadline: BigInt(ledgerAt + latest.current.deadlineSeconds),
         }
         const outcome = await simulate(latest.current.manifest, draft)
@@ -443,7 +446,7 @@ export function useRoute(opts: UseRouteOptions): RouteControls {
           !outcome.ok && outcome.kind === "restore_required" ? { source: r.account, invocation: invocationFor(latest.current.manifest, draft) } : undefined
         const blockers = latest.current.opts.gate(draft, outcome)
         if (blockers.length > 0) return interrupt(g, i, blockers[0].message, { blockers, ...(restore ? { restore } : {}) })
-        const { guards } = derive(draft, outcome, latest.current.slippageBps, latest.current.rates)
+        const { guards } = derive(draft, outcome, latest.current.slippageBps, rates)
         if (!guards?.ok) return interrupt(g, i, guards?.reason ?? `Step ${i + 1} has no exact quote, so it was not prepared. Continue to try again.`)
         const review = await exe().prepare({ ...draft, guards: guards.guards })
         if (!live(g)) return

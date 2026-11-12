@@ -504,18 +504,18 @@ describe("prepareReview", () => {
       })
     })
 
-    it("flash Buy YT: the budget, the bound as signed (SY), and at least the YT floor (R5-2, P4)", async () => {
+    it("flash Buy YT: the budget in, the bound as signed (SY) of it spent, the rest back in the token paid (R5-2, P4)", async () => {
       const g: GuardValues = { minOut: 1_2345678n, minOut2: 6_5000000n, maxNetCost: 3_5000000n }
       const lines = async (action: ActionId) => {
         const { give, getAtLeast } = (await review(action, { guards: g, secondaryAmount: 9_0000000n })).summary
         return { give, getAtLeast }
       }
       expect(await lines("buy_yt_flash")).toEqual({
-        give: ["10 SY budget: you pay at most 3.5 SY, the rest of the 10 SY comes back in the same transaction"],
+        give: ["10 SY in; at most 3.5 SY of it is spent, the rest comes back as SY in the same transaction"],
         getAtLeast: ["1.2345678 YT"],
       })
       expect(await lines("buy_yt_flash_underlying")).toEqual({
-        give: ["10 STA budget: at most 3.5 SY of it is spent, the rest comes back as STA in the same transaction"],
+        give: ["10 STA in; at most 3.5 SY of it is spent, the rest comes back as STA in the same transaction"],
         getAtLeast: ["1.2345678 YT"],
       })
     })

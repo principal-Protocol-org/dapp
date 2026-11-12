@@ -48,13 +48,21 @@ export const withOpenGuards = (input: ActionInput, rates?: GuardRates): ActionIn
   guards: openGuards(input.action, input.amount, rates),
 })
 
-/** `withOpenGuards`, or the refusal as the outcome the simulation would have given: nothing is simulated without it. */
-function openFor(input: ActionInput, rates?: GuardRates): { input: ActionInput } | { outcome: SimulationOutcome } {
+/**
+ * `withOpenGuards`, or null while a rate it needs is not read (the USDY flash's exchange rate, R5-3):
+ * nothing is simulated then, and the simulation waits for the market data rather than failing.
+ */
+function openFor(input: ActionInput, rates?: GuardRates): ActionInput | null {
   try {
-    return { input: withOpenGuards(input, rates) }
-  } catch (error) {
-    return { outcome: { ok: false, kind: "rpc_error", message: error instanceof Error ? error.message : String(error) } }
+    return withOpenGuards(input, rates)
+  } catch {
+    return null
   }
+}
+
+/** The rate an action's open guards depend on, as a key part: only the USDY flash's budget in SY needs one (R5-3). */
+function rateKey(input: ActionInput, rates?: GuardRates): string[] {
+  return input.action === "buy_yt_flash_underlying" ? [rates?.exchangeRate.toString() ?? "no-rate"] : []
 }
 
 /** One simulation of the real call as the user; a throw becomes an `rpc_error` outcome. Also used per route step. */
@@ -122,27 +130,29 @@ export function useSimulation(input: ActionInput | null): Simulation {
     return () => clearTimeout(timer)
   }, [key])
   const live = input !== null && settled === key ? input : null
+  // What is simulated, with the rates of this render. The rate an open guard depends on is in the
+  // query key, so an outcome is always for these rates, and the floors are derived with them.
+  const open = live ? openFor(live, rates) : null
 
-  const queryKey = ["simulation", network, ...(live ? keyParts(live) : ["idle"])]
+  const queryKey = ["simulation", network, ...(live ? [...keyParts(live), ...rateKey(live, rates)] : ["idle"])]
   const query = useQuery({
     queryKey,
     // The latest render's input: its deadline is current when the outcome is re-read.
     queryFn: async () => {
-      if (!live) throw new Error("Nothing to simulate.")
-      const open = openFor(live, rates)
-      return "outcome" in open ? open.outcome : simulate(manifest, open.input)
+      if (!open) throw new Error("Nothing to simulate.")
+      return simulate(manifest, open)
     },
-    enabled: live !== null,
+    enabled: open !== null,
     gcTime: 0,
     retry: false,
     refetchInterval: MARKET_REFETCH_MS,
   })
 
-  const outcome = live ? query.data : undefined
+  const outcome = open ? query.data : undefined
   return {
     outcome,
-    ...(live && outcome ? derive(live, outcome, slippageBps, rates) : {}),
-    simulated: live && outcome ? (() => { const open = openFor(live, rates); return "input" in open ? open.input : undefined })() : undefined,
+    ...(open && outcome ? derive(open, outcome, slippageBps, rates) : {}),
+    simulated: open && outcome ? open : undefined,
     pending: input !== null && outcome === undefined,
     // Reset, not refetch: the old outcome (e.g. "restore required") must not stand meanwhile.
     refresh: () => void queryClient.resetQueries({ queryKey, exact: true }),

@@ -347,11 +347,12 @@ function eventText(data: xdr.ScVal): string {
 
 /**
  * The host refused to touch an entry outside the transaction's footprint (`Error(Storage,
- * ExceededLimit)`, "trying to access … outside of the footprint", soroban-env-host storage.rs). Seen
- * on LP only: `add_liquidity_single_sy` refunds PT only when the refund is above zero, so a refund of
- * 0 at simulation leaves the PT contract out of the footprint, and a refund of 1 at inclusion traps.
- * Both the structured error, raised in a call that failed, and the text are needed: the same error
- * covers other storage limits.
+ * ExceededLimit)`, "trying to access … outside of the footprint", soroban-env-host storage.rs). First
+ * seen on LP only before principal 665bb67, when `add_liquidity_single_sy` refunded PT only when the
+ * refund was above zero: a refund of 0 at simulation left the PT contract out of the footprint, and a
+ * refund of 1 at inclusion trapped. The zap no longer sends PT (R5-5), but any call whose path depends
+ * on the pool's state can trap the same way. Both the structured error, raised in a call that failed,
+ * and the text are needed: the same error covers other storage limits.
  */
 function footprintExceeded(events: readonly xdr.DiagnosticEvent[] | undefined): boolean {
   try {

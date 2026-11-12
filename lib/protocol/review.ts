@@ -567,16 +567,13 @@ function summarize(market: Market, input: ActionInput, fee: string, validUntil: 
       break
     case "buy_yt_flash":
     case "buy_yt_flash_underlying": {
-      // R5-2, R5-3: `a` is the budget, in the token paid. The pool pulls max_net_cost SY up front and
-      // refunds what the trade does not cost, in the same transaction; max_net_cost is capped at the
-      // budget, so it never takes SY held before. The bound is stated as signed (P4), in SY.
+      // R5-2, R5-3: `a` is the budget, in the token paid (a USDY budget is deposited as SY first). The
+      // pool pulls max_net_cost SY up front and refunds what the trade does not cost, in the same
+      // transaction; max_net_cost is capped at the budget, so it never takes SY held before. The bound
+      // is stated as signed (P4), in SY; what comes back is in the token paid.
       const maxNetCost = g.maxNetCost ?? 0n
       const paid = input.action === "buy_yt_flash" ? "SY" : underlying
-      give = [
-        input.action === "buy_yt_flash"
-          ? `${amount(a, paid)} budget: you pay at most ${amount(maxNetCost, "SY")}, the rest of the ${amount(a, paid)} comes back in the same transaction`
-          : `${amount(a, paid)} budget: at most ${amount(maxNetCost, "SY")} of it is spent, the rest comes back as ${underlying} in the same transaction`,
-      ]
+      give = [`${amount(a, paid)} in; at most ${amount(maxNetCost, "SY")} of it is spent, the rest comes back as ${paid} in the same transaction`]
       getAtLeast = [floor(g.minOut, "YT")]
       protocolFees = [tokenizationFee, swapFee]
       break

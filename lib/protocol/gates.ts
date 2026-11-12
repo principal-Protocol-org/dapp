@@ -161,8 +161,8 @@ const EVERY_WRITE_ITEMS: readonly ComplianceItem["id"][] = ["account", "trustlin
  * R22b: actions that move PT / YT to or from the account need its per-asset grant. PT/YT `mint`
  * and `transfer` check `is_allowed_for_asset` on the recipient and the sender (pt_token:189-195,
  * :427; yt_token:282-285). Buy YT mints PT and sells it (router:347, market_pool:329); sell PT,
- * two-sided add (market_pool:446) and sell YT (:363) send PT/YT; the zap can refund PT
- * (:499-502). Recombine and redeem only burn, with no per-asset check.
+ * two-sided add (market_pool:446) and sell YT (:363) send PT/YT. Recombine and redeem only burn,
+ * with no per-asset check.
  *
  * R5-5: neither LP only action (`add_liquidity_sy`, `add_liquidity_underlying`) needs the PT grant: the
  * contract keeps the PT dust in the reserve and never sends PT to the caller (9509529). R5-2: the flash
@@ -341,6 +341,18 @@ function amountGate(input: ActionInput, g: Gates): void {
       // amount is the underlying deposited; secondaryAmount the SY shares the mint inside takes (R4-4).
       if (input.amount <= 0n) g.block("amount", "Enter an amount greater than zero.")
       if ((input.secondaryAmount ?? 0n) <= 0n) g.block("amount", "Enter an SY amount greater than zero: keeping YT mints PT and YT from part of the deposit.")
+      return
+    case "buy_yt_flash":
+    case "buy_yt_flash_underlying":
+      // amount is the budget; secondaryAmount the `sy_in` the planner sized for it (R5-2). It is signed
+      // as a literal, so a missing one is refused, never stood in for.
+      if (input.amount <= 0n) g.block("amount", "Enter an amount greater than zero.")
+      else if ((input.secondaryAmount ?? 0n) <= 0n) g.block("amount", "This amount is too small to buy any YT with: enter a larger amount.")
+      return
+    case "add_liquidity_underlying":
+      // amount is the underlying deposited; secondaryAmount the `sy_in` its deposit gives (R5-5).
+      if (input.amount <= 0n) g.block("amount", "Enter an amount greater than zero.")
+      else if ((input.secondaryAmount ?? 0n) <= 0n) g.block("amount", "This amount is too small to deposit any SY: enter a larger amount.")
       return
     default:
       if (input.amount <= 0n) g.block("amount", "Enter an amount greater than zero.")
@@ -564,11 +576,13 @@ export function breakerReport(input: ActionInput, ctx: Pick<GateContext, "market
   if (rate.status !== "live") return undefined
   if (a === "buy_yt_flash" || a === "buy_yt_flash_underlying") {
     // R5-2: the PrincipalManager mint of `secondaryAmount` (sy_in) SY at the SY's value; the USDY flash
-    // also deposits its budget (`amount`) through SYWrapper first. Without sy_in, the budget bounds it.
+    // also deposits its budget (`amount`) through SYWrapper first. sy_in is a multiple of the budget,
+    // so nothing stands in for a missing one: only the deposit is counted (the amount gate refuses it).
     const deposited = a === "buy_yt_flash_underlying" ? amount : 0n
     const shares = input.secondaryAmount ?? 0n
-    const minted = shares > 0n ? (shares * rate.value) / SCALE : (amount * rate.value) / SCALE
-    return deposited + (minted > 0n ? minted : shares > 0n ? shares : amount)
+    if (shares <= 0n) return deposited
+    const minted = (shares * rate.value) / SCALE
+    return deposited + (minted > 0n ? minted : shares)
   }
   if (a === "add_liquidity_keep_yt") {
     // The deposit (its amount), then the mint of `secondaryAmount` SY shares at the SY's value.

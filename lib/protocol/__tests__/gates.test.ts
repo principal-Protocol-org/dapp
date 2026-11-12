@@ -1509,6 +1509,15 @@ describe("one-transaction Router actions: amounts and balances (0004 Task 4)", (
     expect(codes(gates("add_liquidity_keep_yt", undefined, { amount: 0n }))).toEqual(["amount"])
   })
 
+  it("the flash Buy YTs and LP only from USDY need their sized sy_in above zero: missing, it is never stood in for", () => {
+    for (const a of ["buy_yt_flash", "buy_yt_flash_underlying", "add_liquidity_underlying"] as const) {
+      for (const secondaryAmount of [undefined, 0n, -1n]) expect(codes(gates(a, undefined, { secondaryAmount })), `${a} ${secondaryAmount}`).toEqual(["amount"])
+      expect(codes(gates(a, undefined, { amount: 0n }))).toContain("amount")
+    }
+    expect(gates("add_liquidity_underlying", undefined, { secondaryAmount: 0n })[0].message).toMatch(/too small to deposit any SY/)
+    expect(gates("buy_yt_flash", undefined, { secondaryAmount: undefined })[0].message).toMatch(/too small to buy any YT/)
+  })
+
   it("the maturity refusal of a one-step trade says trading closed; Keep YT gets the general message", () => {
     const after: Mutate = (c) => {
       c.ledgerTime = AFTER
@@ -1547,6 +1556,12 @@ describe("breakerReport and capCharge for the one-transaction Router actions (R2
     expect(breakerReport(at("buy_yt_flash_underlying"), { market: twice })).toBe(20n * UNIT)
     expect(breakerReport(at("buy_yt_flash"), { market: { ...market, exchangeRate: down() } })).toBeUndefined()
     expect(breakerReport(at("buy_yt_flash_underlying"), { market: { ...market, exchangeRate: down() } })).toBeUndefined()
+  })
+
+  it("without its sy_in a flash reports only what it deposits: the budget never stands in for the mint (the amount gate refuses it)", () => {
+    expect(breakerReport(at("buy_yt_flash", { secondaryAmount: undefined }), { market })).toBe(0n)
+    expect(breakerReport(at("buy_yt_flash_underlying", { secondaryAmount: undefined }), { market })).toBe(10n * UNIT)
+    expect(breakerReport(at("buy_yt_flash_underlying", { secondaryAmount: 0n }), { market })).toBe(10n * UNIT)
   })
 
   it("only the USDY flash charges the deposit cap, its budget; the SY flash mints with no SYWrapper.deposit", () => {

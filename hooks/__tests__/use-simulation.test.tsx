@@ -97,12 +97,31 @@ describe("useSimulation hands the live exchange rate to the open guards and to d
     expect(call.args.map((a: { value: unknown }) => a.value)).toContain(budget)
   })
 
-  it("an unreadable exchange rate is not simulated at all, and says why", async () => {
+  it("without the exchange rate the USDY flash is not simulated: it waits, and is never reported as a failed simulation", async () => {
     mocks.fetchMarketState.mockResolvedValue(marketState({ exchangeRate: down() }))
     const { result } = renderHook(() => useSimulation(buyYt), { wrapper })
-    await waitFor(() => expect(result.current.outcome).toBeDefined())
-    expect(result.current.outcome).toMatchObject({ ok: false, kind: "rpc_error", message: expect.stringMatching(/exchange rate/) })
+    await waitFor(() => expect(mocks.fetchMarketState).toHaveBeenCalled())
+    await new Promise((resolve) => setTimeout(resolve, 600))
+    expect(result.current.outcome).toBeUndefined()
+    expect(result.current.guards).toBeUndefined()
     expect(result.current.simulated).toBeUndefined()
+    expect(result.current.pending).toBe(true)
     expect(mocks.simulateInvocation).not.toHaveBeenCalled()
+  })
+
+  it("once the rate loads it simulates at once, with that rate: no refusal is kept from before (the rate is in the key)", async () => {
+    mocks.fetchMarketState.mockResolvedValue(marketState({ exchangeRate: down() }))
+    const { result } = renderHook(() => useSimulation(buyYt), { wrapper })
+    await new Promise((resolve) => setTimeout(resolve, 600))
+    expect(result.current.outcome).toBeUndefined()
+    mocks.fetchMarketState.mockResolvedValue(marketState({ exchangeRate: live(10_500_000n) }))
+    await client.refetchQueries({ queryKey: ["market"] })
+    await waitFor(() => expect(result.current.guards).toBeDefined())
+    expect(result.current.outcome).toMatchObject({ ok: true })
+    const budget = (100n * S * S) / 10_500_000n
+    // Simulated with the budget at the rate that loaded, and the floors from that same rate.
+    expect(result.current.simulated?.guards).toEqual({ minOut: 0n, maxNetCost: budget, minOut2: 0n })
+    const maxNetCost = (15n * S * 10_050n + 9_999n) / 10_000n
+    expect(result.current.guards).toEqual({ ok: true, guards: { minOut: (40n * S * 9_950n) / 10_000n, maxNetCost, minOut2: ((budget - maxNetCost) * 10_500_000n) / S } })
   })
 })
