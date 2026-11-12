@@ -25,11 +25,18 @@
  * Then a fresh account, onboarded through the faucet with the faucet route's market list (it grants
  * the new market's PT and YT), trades the new market: a flash Buy YT and an LP only, both paid in USDY.
  *
- * It needs the local stack and its database (`DATABASE_URL` from `.env.local`, `pnpm db:migrate`).
- * Each run leaves one new market on the local chain, registered with the Router and published to the
- * registry (the recorder would list it anyway from the Router's event). The developer's market is
- * only read; `config/manifests/local.json` is not rewritten. Discovery runs under a test-only cursor,
- * removed after: the recorder's live cursor is never read or written. Secret keys are never printed.
+ * Opt-in: it runs only with `WIZARD_LIVE=1` (`WIZARD_LIVE=1 pnpm test:integration`), because each run
+ * leaves one new market on the local chain for good: registered with the Router, seeded and published
+ * to the registry, so it lists on `/app` and `/app/manage` (deleting its registry row would not undo
+ * that: the recorder lists it again from the Router's event). Without it the suite skips and says why.
+ * It also needs the local stack and its database (`DATABASE_URL` from `.env.local`, `pnpm db:migrate`).
+ * The developer's market is only read; `config/manifests/local.json` is not rewritten. Discovery runs
+ * under a test-only cursor, removed after: the recorder's live cursor is never read or written.
+ * Secret keys are never printed.
+ *
+ * The tests are one wizard run in order, sharing its state (the salt, the progress, the new market,
+ * the trading account), so they run sequentially and fail fast: once one fails, every later test is
+ * skipped with the name of the step that did not complete, and that first failure is the one reported.
  */
 import { Keypair } from "@stellar/stellar-sdk"
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
@@ -147,7 +154,13 @@ async function databaseReason(): Promise<string | null> {
   }
 }
 
+/** The opt-in: each run leaves one new market on the local chain (see the header). */
+const LIVE = process.env.WIZARD_LIVE === "1"
+
 async function wizardReason(): Promise<string | null> {
+  if (!LIVE) {
+    return "each run leaves one new market, registered, seeded and published, on the local chain and in the registry; set WIZARD_LIVE=1 to run it (WIZARD_LIVE=1 pnpm test:integration)"
+  }
   const down = await skipReason()
   if (down) return down
   const m = readManifest()
@@ -162,7 +175,9 @@ if (skip) console.info(`[wizard] skipped: ${skip}.`)
 const out = createLog("wizard")
 const log = out.log
 
-describe.skipIf(skip !== null)("the market wizard on the local stack (spec 0002 §5, plan 0005 Task 10)", () => {
+// One run in order (vitest 5 has no `describe.sequential`; a suite runs its tests in order unless it is
+// made concurrent or shuffled, so both are pinned off here whatever the config says).
+describe.skipIf(skip !== null)("the market wizard on the local stack (spec 0002 §5, plan 0005 Task 10)", { concurrent: false, shuffle: false }, () => {
   let manifest: Manifest
   let findings: Finding[]
   let admin: KeypairSigner
@@ -230,6 +245,33 @@ describe.skipIf(skip !== null)("the market wizard on the local stack (spec 0002 
     return call
   }
 
+  /**
+   * The first step that failed. Every test needs the ones before it (the same salt, market and
+   * account), so once one fails the later ones are skipped with its name: the run reports one failure,
+   * not a cascade of errors on state that was never set.
+   */
+  let broken: string | null = null
+
+  /** One step of the run (`it`), skipped when an earlier step failed, and marking the run broken when it fails. */
+  function step(label: string, name: string, fn: () => Promise<void>, timeout: number) {
+    it(
+      name,
+      async (ctx) => {
+        if (broken !== null) {
+          log(`${label}: skipped: ${broken} did not complete`)
+          ctx.skip(`skipped: ${broken} did not complete`)
+        }
+        try {
+          await fn()
+        } catch (error) {
+          broken = label
+          throw error
+        }
+      },
+      timeout,
+    )
+  }
+
   /** The roles `StepDeploy` and `StepSeed` hand the gates: the issuer role when the wallet is the SAC's admin. */
   const issuerRoles = (sacAdmin: string): Live<Role[]> => ({ status: "live", value: sacAdmin === admin.publicKey ? ["issuer"] : [], ledger: 0 })
 
@@ -283,7 +325,7 @@ describe.skipIf(skip !== null)("the market wizard on the local stack (spec 0002 
     out.summary()
   }, MINUTE)
 
-  it("steps 1–2: the parameters start from the current market's settings, and predict_market gives the salt's seven addresses", async () => {
+  step("steps 1–2", "steps 1–2: the parameters start from the current market's settings, and predict_market gives the salt's seven addresses", async () => {
     salt = randomSalt()
     expect((await readProgress()).step, "nothing is deployed at a fresh salt").toBe(1)
 
@@ -312,7 +354,7 @@ describe.skipIf(skip !== null)("the market wizard on the local stack (spec 0002 
     log(`step 2: predict_market = the derivation: ${json(predicted)}`)
   }, 2 * MINUTE)
 
-  it("step 3, interrupted: create_tokens alone; the registry indexes the salt and the Resume list shows it to the asset's issuer only", async () => {
+  step("step 3 (create_tokens)", "step 3, interrupted: create_tokens alone; the registry indexes the salt and the Resume list shows it to the asset's issuer only", async () => {
     const sacAdmin = live(await readSacAdmin(reader(), params.underlying), "SAC admin")
     const blockersFor = (call: ManagerCall) => evaluateManagerGates(call, { wallet, roles: issuerRoles(sacAdmin), findings, listed: true })
     // StepDeploy's calls for the phases left; the flow is stopped after the first (its second review is cancelled).
@@ -346,7 +388,7 @@ describe.skipIf(skip !== null)("the market wizard on the local stack (spec 0002 
     log(`step 3 interrupted after create_tokens: market_salts ${json(row)}; resumable for ${owner} at step 3, not for another account`)
   }, 4 * MINUTE)
 
-  it("step 3, resumed from the chain: create_engine and create_pool_and_escrow, each with its exact authorization tree", async () => {
+  step("step 3 (resumed)", "step 3, resumed from the chain: create_engine and create_pool_and_escrow, each with its exact authorization tree", async () => {
     // As the wizard resumes: what the deployed tokens fixed wins over the defaults.
     const fixed = await readFixedParams(reader(), predicted, progress.phases)
     expect(fixed).toEqual({
@@ -382,7 +424,7 @@ describe.skipIf(skip !== null)("the market wizard on the local stack (spec 0002 
     expect(progress.live).toMatchObject({ underlying: params.underlying, admin: admin.publicKey, treasury: params.treasury, lpTotalSupply: 0n })
   }, 4 * MINUTE)
 
-  it("step 4: RiskControl lists the SY wrapper and the manager, and the Router registers the pool, each signed by that contract's admin", async () => {
+  step("step 4", "step 4: RiskControl lists the SY wrapper and the manager, and the Router registers the pool, each signed by that contract's admin", async () => {
     const live4 = progress.live!
     const rc = await readContractAdmin(reader(), manifest.shared.riskControl)
     const router = await readContractAdmin(reader(), manifest.shared.router)
@@ -404,7 +446,7 @@ describe.skipIf(skip !== null)("the market wizard on the local stack (spec 0002 
     expect(progress.live!.wiring).toEqual({ syConsumer: true, managerConsumer: true, registered: true })
   }, 3 * MINUTE)
 
-  it("step 5: every missing compliance grant, the SAC's authorizations by its admin and the Permissioning grants by its admin", async () => {
+  step("step 5", "step 5: every missing compliance grant, the SAC's authorizations by its admin and the Permissioning grants by its admin", async () => {
     const live5 = progress.live!
     const perm = await readContractAdmin(reader(), manifest.shared.permissioning)
     expect(live5.grants.length).toBe(17)
@@ -433,7 +475,7 @@ describe.skipIf(skip !== null)("the market wizard on the local stack (spec 0002 
     expect(progress.live!.grants.every((g) => g.held)).toBe(true)
   }, 5 * MINUTE)
 
-  it("step 6: an APY of 0 or less and too small an amount are refused before anything is signed", async () => {
+  step("step 6 (refusals)", "step 6: an APY of 0 or less and too small an amount are refused before anything is signed", async () => {
     const seed = await readSeedState(reader(), manifest, predicted, admin.publicKey)
     const pool = live(seed.poolState, "pool state")
     const s = { secondsToMaturity: pool.secondsToMaturity, exponent: pool.exponent }
@@ -452,7 +494,7 @@ describe.skipIf(skip !== null)("the market wizard on the local stack (spec 0002 
     expect((await readProgress()).step).toBe(6)
   }, 2 * MINUTE)
 
-  it("step 6: the seed signs wrap_and_mint, deposit and add_liquidity in order, floors from simulation; the pool's implied rate compounds to the APY typed", async () => {
+  step("step 6 (seed)", "step 6: the seed signs wrap_and_mint, deposit and add_liquidity in order, floors from simulation; the pool's implied rate compounds to the APY typed", async () => {
     const live6 = progress.live!
     const isIssuer = live6.admin === admin.publicKey
     expect(isIssuer).toBe(true)
@@ -557,7 +599,7 @@ describe.skipIf(skip !== null)("the market wizard on the local stack (spec 0002 
     log(`step 6: the seeder keeps ${ptLeft} raw PT and ${syLeft} raw SY`)
   }, 5 * MINUTE)
 
-  it("step 7: the wizard's POST /api/markets publishes the market; the registry lists it, it passes validation, and its salt leaves the Resume list", async () => {
+  step("step 7", "step 7: the wizard's POST /api/markets publishes the market; the registry lists it, it passes validation, and its salt leaves the Resume list", async () => {
     const { POST } = await import("@/app/api/markets/route")
     // StepPublish's request, as the browser sends it from this app's page.
     const response = await POST(
@@ -598,7 +640,7 @@ describe.skipIf(skip !== null)("the market wizard on the local stack (spec 0002 
     log(`step 7: published ${market.marketId} (${market.displayName}), pool ${market.contracts.pool}, maturing ${new Date(market.maturity * 1000).toISOString()}; verdict ${json(verdict)}`)
   }, 3 * MINUTE)
 
-  it("a fresh account onboarded through the faucet holds the new market's PT and YT grants", async () => {
+  step("the faucet onboarding", "a fresh account onboarded through the faucet holds the new market's PT and YT grants", async () => {
     kind = await complianceKind(resolved, market)
     // The faucet route's own list: the seeds and the registry markets.
     const signer = await onboardFreshAccount(resolved, market, kind, () => registry.reg.resolvedMarkets({ store: registry.tables, manifest }))
@@ -612,7 +654,7 @@ describe.skipIf(skip !== null)("the market wizard on the local stack (spec 0002 
     log(`fresh account ${trader.account} onboarded: ${showBalances(balancesOf(s.acc))}`)
   }, 3 * MINUTE)
 
-  it("the fresh account buys YT on the new market with USDY: one flash (flash_mint_yt_from_underlying), within its budget; the rate rises", async () => {
+  step("the flash Buy YT", "the fresh account buys YT on the new market with USDY: one flash (flash_mint_yt_from_underlying), within its budget; the rate rises", async () => {
     const req: TradeRequest = { kind: "buy_yt", amount: 5n * U, pay: "underlying", receive: "underlying" }
     const t = await runTrade({ manifest: resolved, market, runner: trader, log, req, expectActions: ["buy_yt_flash_underlying"] })
     const [buy] = t.steps
@@ -632,7 +674,7 @@ describe.skipIf(skip !== null)("the market wizard on the local stack (spec 0002 
     log(`buy_yt (USDY flash) on ${market.marketId}: budget ${units(req.amount)} USDY, net cost ${units(net_cost)} SY, ${units(underlying_back)} USDY back, YT ${units(yt_out)}; tx ${buy.hash}`)
   }, 3 * MINUTE)
 
-  it("the fresh account adds liquidity to the new market from USDY only: one transaction (add_liquidity_single_underlying); the rate falls", async () => {
+  step("the LP only", "the fresh account adds liquidity to the new market from USDY only: one transaction (add_liquidity_single_underlying); the rate falls", async () => {
     const req: TradeRequest = { kind: "lp_only", amount: 200n * U, pay: "underlying", receive: "underlying" }
     let syIn = 0n
     const t = await runTrade({
@@ -658,7 +700,7 @@ describe.skipIf(skip !== null)("the market wizard on the local stack (spec 0002 
     log(`lp_only (USDY) on ${market.marketId}: ${units(req.amount)} USDY -> LP ${units(add.decoded.lp)}, ${units(syIn - add.decoded.sy_used)} SY back; tx ${add.hash}`)
   }, 3 * MINUTE)
 
-  it("the new market's history lists both trades with their kinds", async () => {
+  step("the history", "the new market's history lists both trades with their kinds", async () => {
     const history = await fetchAccountHistory({ manifest: resolved, marketId: market.marketId, account: trader.account })
     expect([...history.entries].reverse().map((e) => [e.hash, e.kind])).toEqual(trades.map((s) => [s.hash, HISTORY_KIND[s.action]]))
     const acc = await fetchAccountState(reader(), createHorizon(manifest.horizonUrl), resolved, market.marketId, trader.account, kind)

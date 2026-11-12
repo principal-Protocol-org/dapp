@@ -196,6 +196,14 @@ Use `pnpm`.
 LIFECYCLE_REDEPLOY=1 pnpm test:integration
 ```
 
+- The wizard suite (`tests/integration/wizard.test.ts`, plan 0005) creates, seeds and publishes a new
+  market through the wizard's steps, which stays on the local chain and in the market list. It runs
+  only with `WIZARD_LIVE=1`:
+
+```bash
+WIZARD_LIVE=1 pnpm test:integration
+```
+
 CI (`.github/workflows/ci.yml`) runs lint, typecheck, test and build on pull requests, then the
 server-secret bundle check.
 

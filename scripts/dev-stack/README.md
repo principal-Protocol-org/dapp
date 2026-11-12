@@ -97,12 +97,17 @@ runs it for you). Call `GET /api/cron/record` with `Authorization: Bearer $CRON_
 | `history.test.ts` | The history queries, and the recorder writing one snapshot of the live market to `principal-pg` (the row is deleted afterwards). |
 | `oracle.test.ts` | The OracleAdapter v2 policy read through the app's reader (the primary source id above, no fallback, no rejection, 3,600 s, 1,000 bps), and one keeper tick (`tickOracle`, behind `/api/cron/oracle`) that reports `updated`. |
 | `lifecycle.test.ts` | The full lifecycle proof of plan 0001. Skipped unless `LIFECYCLE_REDEPLOY=1`. |
+| `wizard.test.ts` | The market-creation wizard's seven steps signed on the local network, then a fresh account trading the new market. Skipped unless `WIZARD_LIVE=1`. |
 
 - The suites sign with the throwaway dev accounts (`principal-localdev-admin`, `principal-localdev-treasury`).
 - Cases that need a market near maturity are skipped.
 - `lifecycle.test.ts` deploys a new market and rewrites `local.json`. Run it
   (`LIFECYCLE_REDEPLOY=1 pnpm test:integration`) only on a stack nobody is using.
-- The creation wizard is held, so there is no wizard suite yet.
+- `wizard.test.ts` creates a new market through the factory and publishes it to the registry. The
+  market stays on the local chain and in `/app` for good (deleting its registry row does not remove
+  it: the recorder lists it again from the Router's event), so each run adds one. Run it
+  (`WIZARD_LIVE=1 pnpm test:integration`) only when that is wanted. It needs `principal-pg` with the
+  migrations applied (`pnpm db:migrate`).
 
 ## Teardown
 
