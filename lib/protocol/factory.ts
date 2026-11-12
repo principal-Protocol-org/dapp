@@ -452,7 +452,7 @@ type FieldType = "address" | "u32" | "u64" | "string" | "bytes"
 function fieldsOf(arg: ScArg, what: string, spec: Record<string, FieldType>): Record<string, ScArg> {
   if (arg.type !== "struct") throw new Error(`${what} must be a struct.`)
   for (const name of Object.keys(arg.value)) {
-    if (!(name in spec)) throw new Error(`${what} has a field ${name} the contract does not declare.`)
+    if (!Object.hasOwn(spec, name)) throw new Error(`${what} has a field ${name} the contract does not declare.`)
   }
   for (const [name, type] of Object.entries(spec)) {
     const field = arg.value[name]
@@ -826,6 +826,11 @@ export async function readFixedParams(reader: ContractReader, predicted: MarketC
     Object.assign(out, { protocolAdmin, treasury, tokenizationFeeBps, ytFeeBps, swapFeeTierBps, protocolShareBps })
   }
   return out
+}
+
+/** `get_admin()` of RiskControl, the Router or Permissioning, read live: who must sign a call on it (R5-10, spec §5 step 4). */
+export function readContractAdmin(reader: ContractReader, contractId: string): Promise<Live<string>> {
+  return readLive<unknown, string>(reader, { contractId, functionName: "get_admin" }, toAddress)
 }
 
 /** The admin of an asset's SAC, read live: who must sign a deployment on it (R5-10). */

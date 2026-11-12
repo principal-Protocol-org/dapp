@@ -26,14 +26,11 @@ export class WasmReadError extends Error {
   }
 }
 
-/** The Wasm hash (lower-case hex) the contract's instance runs. */
-export async function contractWasmHash(rpc: LedgerEntriesRpc, contractId: string): Promise<string> {
-  const { entries } = await rpc.getLedgerEntries(new Contract(contractId).getFootprint())
-  const data = entries
-    .map((entry) => entry.val)
-    .find((val) => val.type === "contractData" && Address.fromScAddress(val.contractData.contract).toString() === contractId)
-  if (!data || data.type !== "contractData") throw new WasmReadError("missing", `There is no contract at ${contractId}.`)
-  const instance = data.contractData.val
+function hashOf(contractId: string, val: xdr.LedgerEntryData | undefined): string {
+  if (!val || val.type !== "contractData" || Address.fromScAddress(val.contractData.contract).toString() !== contractId) {
+    throw new WasmReadError("missing", `There is no contract at ${contractId}.`)
+  }
+  const instance = val.contractData.val
   if (instance.type !== "scvContractInstance") {
     throw new WasmReadError("missing", `The ledger entry of ${contractId} is not a contract instance.`)
   }
@@ -46,4 +43,35 @@ export async function contractWasmHash(rpc: LedgerEntriesRpc, contractId: string
     case "contractExecutableExternalRef":
       throw new WasmReadError("external_ref", `${contractId} runs code by external reference, which cannot be pinned.`)
   }
+}
+
+/** The Wasm hash (lower-case hex) the contract's instance runs. */
+export async function contractWasmHash(rpc: LedgerEntriesRpc, contractId: string): Promise<string> {
+  return (await contractWasmHashes(rpc, [contractId]))[0] as string
+}
+
+/**
+ * The Wasm hashes of several contracts from ONE `getLedgerEntries` call, one atomic ledger snapshot
+ * (a phase landing between separate reads could otherwise look half deployed). Results are in the
+ * order of `ids`: a hash, or the `WasmReadError` that contract's entry gave. An RPC failure throws.
+ */
+export async function contractWasmHashesSettled(rpc: LedgerEntriesRpc, ids: string[]): Promise<(string | WasmReadError)[]> {
+  const { entries } = await rpc.getLedgerEntries(...ids.map((id) => new Contract(id).getFootprint()))
+  return ids.map((id) => {
+    const data = entries.map((entry) => entry.val).find((val) => val.type === "contractData" && Address.fromScAddress(val.contractData.contract).toString() === id)
+    try {
+      return hashOf(id, data)
+    } catch (error) {
+      if (error instanceof WasmReadError) return error
+      throw error
+    }
+  })
+}
+
+async function contractWasmHashes(rpc: LedgerEntriesRpc, ids: string[]): Promise<string[]> {
+  const settled = await contractWasmHashesSettled(rpc, ids)
+  return settled.map((r) => {
+    if (r instanceof WasmReadError) throw r
+    return r
+  })
 }

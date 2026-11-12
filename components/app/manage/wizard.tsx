@@ -6,6 +6,8 @@ import { useEffect, useId, useState, type ComponentType } from "react"
 import { Button } from "@/components/ui/button"
 import { UNAVAILABLE } from "@/components/app/live"
 import { useManifest } from "@/components/app/manifest-provider"
+import { StepGrants } from "@/components/app/manage/step-grants"
+import { StepWire } from "@/components/app/manage/step-wire"
 import { StepDeploy } from "@/components/app/manage/step-deploy"
 import { StepParams } from "@/components/app/manage/step-params"
 import { StepPreview } from "@/components/app/manage/step-preview"
@@ -54,7 +56,7 @@ export type ChainStepProps = {
  * Steps 4–7, by number (plan 0005 Tasks 7–8 add theirs here: `4: StepWire`, ...). The wizard shows
  * the step the chain has reached; a step with no component yet says what comes next.
  */
-export const CHAIN_STEPS: Partial<Record<ChainStep, ComponentType<ChainStepProps>>> = {}
+export const CHAIN_STEPS: Partial<Record<ChainStep, ComponentType<ChainStepProps>>> = { 4: StepWire, 5: StepGrants }
 
 const NEXT_STEP: Record<ChainStep, string> = {
   4: "Every contract of the market is deployed. Next, RiskControl lists the SY wrapper and the PrincipalManager as consumers, and the Router registers the pool. Their admins sign these.",

@@ -4,7 +4,7 @@ import { useEffect, useMemo, useSyncExternalStore } from "react"
 import { useQueries, useQuery } from "@tanstack/react-query"
 import { useManifest } from "@/components/app/manifest-provider"
 import { forgetWizardSalt, readWizardSalts, subscribeWizardSalts } from "@/lib/app/wizard-salts"
-import { predictMarket, readDefaults, readFixedParams, readSacAdmin } from "@/lib/protocol/factory"
+import { predictMarket, readContractAdmin, readDefaults, readFixedParams, readSacAdmin } from "@/lib/protocol/factory"
 import { marketProgress, type MarketProgress } from "@/lib/protocol/market-progress"
 import { createRpcReader } from "@/lib/protocol/reader"
 import { createRpcServer } from "@/lib/protocol/stellar"
@@ -72,6 +72,16 @@ export function useSacAdmin(sac: string | undefined) {
     queryKey: ["manage", manifest.network, "sac-admin", sac],
     queryFn: () => readSacAdmin(createRpcReader(manifest), sac as string),
     enabled: sac !== undefined,
+    refetchInterval: PROGRESS_REFETCH_MS,
+  })
+}
+
+/** A shared contract's `get_admin()` (RiskControl, Router, Permissioning): who must sign its wiring and grants. */
+export function useContractAdmin(contractId: string) {
+  const manifest = useManifest()
+  return useQuery({
+    queryKey: ["manage", manifest.network, "contract-admin", contractId],
+    queryFn: () => readContractAdmin(createRpcReader(manifest), contractId),
     refetchInterval: PROGRESS_REFETCH_MS,
   })
 }

@@ -42,7 +42,10 @@ export function StepPreview({ salt, onBack, onNext }: StepPreviewProps) {
       {predicted.isPending ? <p className="text-ink-muted">Reading the predicted addresses…</p> : null}
       {predicted.isError ? (
         <p role="alert" className="text-sm text-negative">
-          {UNAVAILABLE}: {predicted.error.message}
+          {UNAVAILABLE}: {predicted.error.message}{" "}
+          <button type="button" className="underline" onClick={() => void predicted.refetch()}>
+            Try again
+          </button>
         </p>
       ) : null}
       {predicted.data ? (

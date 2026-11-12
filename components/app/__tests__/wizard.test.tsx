@@ -190,7 +190,7 @@ const kinds = () => mocks.prepareManager.mock.calls.map(([call]) => (call as Man
 async function signAll(user: ReturnType<typeof userEvent.setup>, count: number) {
   for (let i = 0; i < count; i++) {
     const dialog = await screen.findByRole("dialog")
-    await within(dialog).findByText(`Step ${i + 1} of ${count}`)
+    if (count > 1) await within(dialog).findByText(`Step ${i + 1} of ${count}`)
     const sign = await within(dialog).findByRole("button", { name: "Sign transaction" })
     await waitFor(() => expect((sign as HTMLButtonElement).disabled).toBe(false))
     await user.click(sign)
@@ -505,5 +505,140 @@ describe("the salt and the later steps", () => {
     expect(await screen.findByText(/only partly deployed/)).toBeTruthy()
     expect(screen.queryByRole("heading", { name: /Step \d of 7/ })).toBeNull()
     await act(async () => {})
+  })
+})
+
+describe("steps 4 and 5: wire and grants (R5-10, spec 0002 §5)", () => {
+  const { riskControl, router, permissioning } = manifest.shared
+  const RC_ADMIN = Keypair.random().publicKey()
+  const ROUTER_ADMIN = Keypair.random().publicKey()
+  const PERM_ADMIN = Keypair.random().publicKey()
+  const key = (contract: string, fn: string, ...args: string[]) => `${contract}.${fn}(${args.join(",")})`
+
+  /** A fully deployed market; `over` changes what the chain says of its wiring and grants. */
+  function market(over: Record<string, unknown> = {}) {
+    mocks.deployed = Object.values(predicted).filter((id) => id !== manifest.shared.router && id !== manifest.shared.oracle)
+    Object.assign(mocks.reads, {
+      [`${predicted.config}.underlying`]: SAC,
+      [`${predicted.config}.treasury`]: TREASURY,
+      [`${riskControl}.is_consumer`]: true,
+      [`${router}.is_registered`]: true,
+      [`${predicted.pool}.lp_total_supply`]: 0n,
+      [`${SAC}.authorized`]: true,
+      [`${permissioning}.is_allowed`]: true,
+      [`${permissioning}.is_allowed_for_asset`]: true,
+      [`${riskControl}.get_admin`]: RC_ADMIN,
+      [`${router}.get_admin`]: ROUTER_ADMIN,
+      [`${permissioning}.get_admin`]: PERM_ADMIN,
+      ...over,
+    })
+  }
+  const unwired = () =>
+    market({
+      [key(riskControl, "is_consumer", predicted.sy)]: false,
+      [key(riskControl, "is_consumer", predicted.manager)]: false,
+      [key(router, "is_registered", predicted.pool)]: false,
+    })
+  const signAllNow = async (user: ReturnType<typeof userEvent.setup>, name: string, count: number) => {
+    const button = await screen.findByRole("button", { name })
+    await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(false))
+    await user.click(button)
+    await signAll(user, count)
+  }
+
+  it("names the RiskControl and Router admins when the wallet is neither, and offers nothing to sign", async () => {
+    unwired()
+    connect(OTHER)
+    show()
+    await screen.findByRole("heading", { name: /Step 4 of 7: Wire/ })
+    expect((await screen.findAllByText(RC_ADMIN, { exact: false })).length).toBeGreaterThan(0)
+    expect((await screen.findAllByText(ROUTER_ADMIN, { exact: false })).length).toBeGreaterThan(0)
+    expect(screen.getAllByText(/Must be signed by/).length).toBe(3)
+    const button = screen.queryByRole("button", { name: /Wire the market|Sign the/ }) as HTMLButtonElement | null
+    expect(button === null || button.disabled).toBe(true)
+    expect(mocks.prepareManager).not.toHaveBeenCalled()
+  })
+
+  it("a wallet holding both roles signs add_consumer for the SY wrapper and the manager, then register_market", async () => {
+    unwired()
+    mocks.reads[`${riskControl}.get_admin`] = ISSUER
+    mocks.reads[`${router}.get_admin`] = ISSUER
+    connect(ISSUER)
+    const user = userEvent.setup()
+    show()
+    await signAllNow(user, "Wire the market", 3)
+    expect(kinds()).toEqual(["add_consumer", "add_consumer", "register_market"])
+    const calls = mocks.prepareManager.mock.calls.map(([c]) => c as ManagerCall)
+    expect(calls[0].invocation.args[1]).toEqual({ type: "address", value: predicted.sy })
+    expect(calls[1].invocation.args[1]).toEqual({ type: "address", value: predicted.manager })
+    expect(calls[2].invocation.args[1]).toEqual({ type: "address", value: predicted.pool })
+  })
+
+  it("offers only what is missing, and only what this wallet's role can sign; the rest names its signer", async () => {
+    unwired()
+    mocks.reads[key(riskControl, "is_consumer", predicted.sy)] = true
+    mocks.reads[`${riskControl}.get_admin`] = RC_ADMIN
+    mocks.reads[`${router}.get_admin`] = ISSUER
+    connect(ISSUER)
+    const user = userEvent.setup()
+    show()
+    await signAllNow(user, "Wire the market", 1)
+    expect(kinds()).toEqual(["register_market"])
+    expect(screen.getAllByText(RC_ADMIN, { exact: false }).length).toBeGreaterThan(0)
+  })
+
+  it("lists the 17 grants with their state, and offers the missing ones signed by each role holder", async () => {
+    market({
+      [key(SAC, "authorized", predicted.pool)]: false,
+      [key(permissioning, "is_allowed_for_asset", predicted.recoveryEscrow, predicted.pt)]: false,
+    })
+    mocks.reads[`${SAC}.admin`] = ISSUER
+    mocks.reads[`${permissioning}.get_admin`] = PERM_ADMIN
+    connect(ISSUER)
+    show()
+    const heading = await screen.findByRole("heading", { name: /Step 5 of 7: Grants/ })
+    const list = within(heading.closest("section") as HTMLElement).getByRole("list", { name: "Grants" })
+    const rows = within(list).getAllByRole("listitem")
+    expect(rows).toHaveLength(17)
+    expect(rows.filter((r) => /To do/.test(r.textContent ?? ""))).toHaveLength(2)
+    // The issuer holds the SAC admin role only: Permissioning's admin is named for the other grant.
+    expect((await screen.findAllByText(PERM_ADMIN, { exact: false })).length).toBeGreaterThan(0)
+    const user = userEvent.setup()
+    await signAllNow(user, "Sign the grants", 1)
+    expect(kinds()).toEqual(["set_authorized"])
+    const call = mocks.prepareManager.mock.calls[0][0] as ManagerCall
+    expect(call.invocation.contractId).toBe(SAC)
+    expect(call.invocation.args).toEqual([{ type: "address", value: predicted.pool }, { type: "bool", value: true }])
+  })
+
+  it("the Permissioning admin signs the missing Permissioning grants, account and asset", async () => {
+    market({
+      [key(permissioning, "is_allowed", predicted.manager)]: false,
+      [key(permissioning, "is_allowed_for_asset", predicted.pool, predicted.yt)]: false,
+    })
+    mocks.reads[`${SAC}.admin`] = ISSUER
+    mocks.reads[`${permissioning}.get_admin`] = PERM_ADMIN
+    connect(PERM_ADMIN)
+    const user = userEvent.setup()
+    show()
+    await signAllNow(user, "Sign the grants", 2)
+    expect(kinds()).toEqual(["grant_account", "grant_asset"])
+    const calls = mocks.prepareManager.mock.calls.map(([c]) => c as ManagerCall)
+    expect(calls[0].invocation.args[1]).toEqual({ type: "address", value: predicted.manager })
+    expect(calls[1].invocation.args.slice(1)).toEqual([
+      { type: "address", value: predicted.pool },
+      { type: "address", value: predicted.yt },
+    ])
+  })
+
+  it("a wallet with none of the roles sees who must sign and nothing signable", async () => {
+    market({ [key(SAC, "authorized", predicted.sy)]: false })
+    mocks.reads[`${SAC}.admin`] = ISSUER
+    connect(OTHER)
+    show()
+    await screen.findByRole("heading", { name: /Step 5 of 7: Grants/ })
+    expect((await screen.findAllByText(ISSUER, { exact: false })).length).toBeGreaterThan(0)
+    const button = screen.queryByRole("button", { name: "Sign the grants" }) as HTMLButtonElement | null
+    expect(button === null || button.disabled).toBe(true)
   })
 })

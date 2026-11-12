@@ -22,7 +22,7 @@ import { shorten } from "./format"
 import { isContractError, readLive, toAddress, toBigint, toBool, type ContractReader } from "./reader"
 import type { ScArg } from "./stellar"
 import type { Manifest, MarketContractName, MarketContracts } from "./types"
-import { contractWasmHash, WasmReadError, type LedgerEntriesRpc } from "./wasm"
+import { contractWasmHashesSettled, WasmReadError, type LedgerEntriesRpc } from "./wasm"
 
 export type WizardStep = 1 | 2 | 3 | 4 | 5 | 6 | 7
 
@@ -100,17 +100,19 @@ export function requiredGrants(predicted: MarketContracts, who: { sac: string; t
   ]
 }
 
-/** Whether the contract at `id` exists, refusing one that runs code other than `pin`. */
-async function exists(rpc: LedgerEntriesRpc, id: string, kind: MarketContractName, pin: string | undefined): Promise<boolean> {
-  let hash: string
-  try {
-    hash = await contractWasmHash(rpc, id)
-  } catch (error) {
-    if (error instanceof WasmReadError && error.kind === "missing") return false
-    if (error instanceof WasmReadError) throw new Error(`The ${NAME[kind]} at ${shorten(id)} is not a contract this app can check: ${error.message}`)
-    throw new Error(`Could not read whether the new market's ${NAME[kind]} exists: ${error instanceof Error ? error.message : String(error)}`)
+/**
+ * Whether the contract at `id` exists, from its one entry of the shared snapshot `hash`; refuses one
+ * that runs code other than `pin`, or when the manifest has no pin to compare with.
+ */
+function exists(id: string, kind: MarketContractName, pin: string | undefined, hash: string | WasmReadError): boolean {
+  if (hash instanceof WasmReadError) {
+    if (hash.kind === "missing") return false
+    throw new Error(`The ${NAME[kind]} at ${shorten(id)} is not a contract this app can check: ${hash.message}`)
   }
-  if (pin === undefined || hash !== pin.toLowerCase()) {
+  if (pin === undefined) {
+    throw new Error(`This network's manifest has no code pin for the ${NAME[kind]}, so the ${NAME[kind]} at ${shorten(id)} cannot be checked. The manifest needs the pin before a market can be created.`)
+  }
+  if (hash !== pin.toLowerCase()) {
     throw new Error(
       `The ${NAME[kind]} at ${shorten(id)} runs code this network's manifest does not pin, so this market could never be listed. Start a new market.`,
     )
@@ -151,7 +153,14 @@ async function grantHeld(reader: ContractReader, manifest: Manifest, sac: string
  */
 export async function marketProgress(reader: ContractReader, rpc: LedgerEntriesRpc, manifest: Manifest, salt: string): Promise<MarketProgress> {
   const predicted = deriveMarketContracts(manifest, salt)
-  const found = await Promise.all(KINDS.map((kind) => exists(rpc, predicted[kind], kind, manifest.wasmHashes[kind])))
+  // One ledger snapshot for all seven: separate reads could straddle a landing phase and look half deployed.
+  let hashes: (string | WasmReadError)[]
+  try {
+    hashes = await contractWasmHashesSettled(rpc, KINDS.map((kind) => predicted[kind]))
+  } catch (error) {
+    throw new Error(`Could not read whether the new market's contracts exist: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  const found = KINDS.map((kind, i) => exists(predicted[kind], kind, manifest.wasmHashes[kind], hashes[i]))
   const deployed = Object.fromEntries(KINDS.map((kind, i) => [kind, found[i]])) as Record<MarketContractName, boolean>
 
   // Each phase is atomic and needs the one before it (market_factory): anything else is not the factory's doing.

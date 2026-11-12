@@ -199,4 +199,17 @@ describe("marketProgress: the step, derived from the chain", () => {
     await expect(marketProgress(tableReader({}), chain(["sy", "pt"]), manifest, SALT)).rejects.toThrow(/only partly deployed/)
     await expect(marketProgress(tableReader({}), chain(["config", "manager"]), manifest, SALT)).rejects.toThrow(/only partly deployed/)
   })
+
+  it("reads the seven contracts' entries in one getLedgerEntries call: one snapshot", async () => {
+    const inner = chain(KINDS)
+    let calls = 0
+    const counting: LedgerEntriesRpc = { getLedgerEntries: (...keys) => (calls++, inner.getLedgerEntries(...keys)) }
+    await marketProgress(tableReader(deployedMarket()), counting, manifest, SALT)
+    expect(calls).toBe(1)
+  })
+
+  it("a manifest with no pin for a kind says the pin is missing, not that the code is unpinned", async () => {
+    const unpinned: Manifest = { ...manifest, wasmHashes: { ...WASM, pt: undefined } as unknown as Manifest["wasmHashes"] }
+    await expect(marketProgress(tableReader({}), chain(TOKENS), unpinned, SALT)).rejects.toThrow(/manifest has no code pin for the PT/)
+  })
 })

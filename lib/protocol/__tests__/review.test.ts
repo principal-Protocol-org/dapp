@@ -19,12 +19,13 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import testnetJson from "@/lib/protocol/__tests__/fixtures/testnet-interim.json"
 import { ACTION_META, invocationFor, type ActionId, type ActionInput, type GuardValues } from "../actions"
 import { hashLike } from "../hash"
-import { engineAuthTree, tokensAuthTree, type MarketParams } from "../factory"
+import { engineAuthTree, poolAuthTree, tokensAuthTree, type MarketParams } from "../factory"
 import {
   addConsumerCall,
   claimCreatorFeesCall,
   claimProtocolFeesCall,
   createEngineCall,
+  createPoolAndEscrowCall,
   createTokensCall,
   grantAccountCall,
   grantAssetCall,
@@ -1480,6 +1481,10 @@ describe("manager reviews (0002 §5): the same review → sign pipeline as an ac
       const engine = createEngineCall(factoryManifest, { source: SOURCE, salt: SALT, params })
       const engineTree = engineAuthTree(factoryManifest, { issuer: SOURCE, salt: SALT, params }).map(argsOfInvocation)
       await expect(preparedBy((tx) => assemble(tx, { auth: [authWith(callOf(tx), engineTree)] }), engine)).resolves.toBeTruthy()
+      // create_pool_and_escrow carries its own tree too (the pool's initialize, then the recovery escrow wiring).
+      const pool = createPoolAndEscrowCall(factoryManifest, { source: SOURCE, salt: SALT, params })
+      const poolTree = poolAuthTree(factoryManifest, { issuer: SOURCE, salt: SALT, params }).map(argsOfInvocation)
+      await expect(preparedBy((tx) => assemble(tx, { auth: [authWith(callOf(tx), poolTree)] }), pool)).resolves.toBeTruthy()
       // create_tokens' tree under create_engine is not create_engine's.
       await expect(preparedBy((tx) => assemble(tx, { auth: [authWith(callOf(tx), childInits())] }), engine)).rejects.toThrow(foreignAuth)
     })
