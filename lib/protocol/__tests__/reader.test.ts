@@ -12,6 +12,10 @@ const SIMULATION_ERROR = [
 ].join("\n")
 
 describe("unavailable", () => {
+  it("summarizes a JSON-RPC error object rather than [object Object]", () => {
+    expect(unavailable({ code: -32600, message: "rpc refused" })).toEqual({ status: "unavailable", error: "rpc refused (code -32600)" })
+  })
+
   it("keeps only the error's first line, without the simulation's diagnostic event log", () => {
     const live = unavailable(new Error(SIMULATION_ERROR))
     expect(live).toEqual({ status: "unavailable", error: "HostError: Error(Contract, #13)" })

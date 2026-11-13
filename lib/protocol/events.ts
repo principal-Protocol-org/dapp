@@ -1,4 +1,5 @@
 import { scValToNative, type xdr } from "@stellar/stellar-sdk"
+import { errorMessage } from "./errors"
 import { formatAmount, shorten } from "./format"
 import { getMarket } from "./manifest"
 import { createRpcServer } from "./stellar"
@@ -185,12 +186,7 @@ const PRUNED_RANGE = /startLedger must be within the ledger range:\s*(\d+)\s*-\s
 
 /** The oldest ledger a pruned-range refusal names, or undefined for any other failure. */
 function prunedOldest(error: unknown): number | undefined {
-  const message =
-    error instanceof Error
-      ? error.message
-      : error !== null && typeof error === "object" && "message" in error
-        ? String((error as { message: unknown }).message)
-        : String(error)
+  const message = errorMessage(error)
   const match = PRUNED_RANGE.exec(message)
   return match ? Number(match[1]) : undefined
 }

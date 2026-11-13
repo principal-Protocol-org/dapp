@@ -44,7 +44,7 @@ export function RouteSteps({
 }: {
   plans: StepPlan[]
   steps?: RouteStep[]
-  /** 1-based step prepared or on screen. */
+  /** 1-based step prepared or on screen; 0 when none is (a finished route), which shows no "once step n is confirmed" note. */
   current: number
   review?: Review
 }) {
@@ -67,8 +67,17 @@ export function RouteSteps({
             <p className="text-ink">You give: {plan.gives}</p>
             <p className="text-ink">You get: {plan.takes}</p>
             {isCurrent && review ? (
-              <p className="font-mono text-ink tabular-nums">At least: {review.summary.getAtLeast.join(", ") || "nothing"}</p>
-            ) : n > current ? (
+              <p className="font-mono text-ink tabular-nums">
+                At least:{" "}
+                {review.summary.getAtLeast.length === 0
+                  ? "nothing"
+                  : review.summary.getAtLeast.map((line, k) => (
+                      <span key={`${line}-${k}`} className="block">
+                        {line}
+                      </span>
+                    ))}
+              </p>
+            ) : current > 0 && n > current ? (
               <p className="text-ink-muted">
                 Its minimum is set from a fresh quote once step {n - 1} is confirmed, not from this review.
               </p>

@@ -259,4 +259,24 @@ describe("RouteFlow", () => {
     expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: "Buy YT: all steps confirmed." }))
     expect(screen.getByRole("heading", { name: "Route complete: 3 of 3 steps confirmed" })).toBeTruthy()
   })
+
+  it("a finished route lists every step and shows no 'once step n is confirmed' note", () => {
+    setup({ phase: "done", step: 3, of: 3, run: run(["confirmed", "confirmed", "confirmed"]), canDismiss: true })
+    render(<RouteFlow {...base} />)
+    const list = screen.getByRole("list", { name: "Route steps" })
+    expect(list.textContent).toContain("Step 3 of 3")
+    expect(list.textContent).not.toContain("is confirmed, not from this review")
+    expect(list.textContent).not.toContain("step 0")
+  })
+
+  it("the At least lines are separate lines, not one comma-joined run", () => {
+    const r = review()
+    r.summary.getAtLeast = ["Your pending yield. This call sets no minimum.", "Any PT left over. This call sets no minimum on it."]
+    setup({ phase: "reviewing", step: 1, of: 3, run: run(["pending", "pending", "pending"]), review: r })
+    render(<RouteFlow {...base} />)
+    const list = screen.getByRole("list", { name: "Route steps" })
+    expect(list.textContent).not.toContain("., ")
+    const lines = Array.from(list.querySelectorAll("span.block")).map((e) => e.textContent)
+    expect(lines).toEqual(r.summary.getAtLeast)
+  })
 })

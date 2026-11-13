@@ -1,4 +1,5 @@
 import { StrKey } from "@stellar/stellar-sdk"
+import { errorMessage } from "./errors"
 import { createRpcServer, simulateContractRead, type ContractReadResult, type ScArg } from "./stellar"
 import type { Live, Manifest } from "./types"
 
@@ -32,7 +33,7 @@ const MAX_ERROR_LENGTH = 160
  * first line, so it still works on the summary.
  */
 function summarizeError(error: unknown): string {
-  const text = error instanceof Error ? error.message : String(error)
+  const text = errorMessage(error)
   const first = text.split("\n").map((line) => line.trim()).find((line) => line !== "") ?? "unknown error"
   return first.length <= MAX_ERROR_LENGTH ? first : `${first.slice(0, MAX_ERROR_LENGTH - 1)}…`
 }
