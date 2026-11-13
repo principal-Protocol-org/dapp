@@ -4,7 +4,8 @@
  *
  *   pnpm walkthrough:shots [--out <dir>] [--base <url>] [--onboard-base <url>] [--claim-wait <minutes>] [--headed]
  *
- * - `--out`: where the PNGs go. Default: the docs images folder, `../docs/public/images/walkthrough`.
+ * - `--out`: where the PNGs go. Default: `e2e-artifacts/walkthrough/` (gitignored). The docs set
+ *   (`../docs/public/images/walkthrough`) is replaced only by hand, or with that path as an explicit `--out`.
  * - `--base`: the app the journey runs on. Default: the live Testnet app, https://testnet.principalmarket.fi.
  *   A local production build of the `testnet` branch on Testnet works too (`http://localhost:3000`): build and
  *   start it with `NEXT_PUBLIC_PRINCIPAL_NETWORK=testnet DATABASE_URL= FAUCET_ISSUER_SECRET=` in front of both
@@ -61,7 +62,8 @@ type Args = { out: string; base: string; onboardBase: string; claimWaitMinutes: 
 function parseArgs(argv: string[]): Args {
   const dapp = resolve(import.meta.dirname, "..", "..")
   const args: Args = {
-    out: resolve(dapp, "..", "docs", "public", "images", "walkthrough"),
+    // Never the docs set by default: a run replaces only what it shoots, and the docs set mixes sources.
+    out: resolve(dapp, "e2e-artifacts", "walkthrough"),
     base: LIVE,
     onboardBase: LIVE,
     claimWaitMinutes: 45,
@@ -143,7 +145,13 @@ function throwawayWallet(): ThrowawayWallet {
             },
           }
         case "SUBMIT_TRANSACTION":
-          return sign(request.transactionXdr, request.networkPassphrase)
+          try {
+            return sign(request.transactionXdr, request.networkPassphrase)
+          } catch (error) {
+            // A malformed envelope: answered as an error, as freighter-api expects, so the app never waits on the wallet.
+            log(`refused to sign: ${error instanceof Error ? error.message : String(error)}`)
+            return { apiError: { code: -1, message: "The wallet could not read this transaction." } }
+          }
         default:
           return { apiError: { code: -1, message: `${request.type} is not supported by this test wallet` } }
       }
@@ -162,9 +170,13 @@ async function installWallet(context: BrowserContext, wallet: ThrowawayWallet): 
       if (!data || typeof data !== "object") return
       const { source, messageId, ...request } = data as { source?: unknown; messageId?: unknown }
       if (source !== "FREIGHTER_EXTERNAL_MSG_REQUEST") return
-      void page.__walkthroughWallet(request).then((answer) =>
-        page.postMessage({ ...answer, source: "FREIGHTER_EXTERNAL_MSG_RESPONSE", messagedId: messageId }, page.location.origin),
-      )
+      const reply = (answer: Record<string, unknown>) =>
+        page.postMessage({ ...answer, source: "FREIGHTER_EXTERNAL_MSG_RESPONSE", messagedId: messageId }, page.location.origin)
+      // Any failure still answers the request, so the app never waits on the wallet.
+      void page
+        .__walkthroughWallet(request)
+        .then(reply)
+        .catch(() => reply({ apiError: { code: -1, message: "The wallet encountered an internal error." } }))
     })
   })
 }
@@ -212,6 +224,9 @@ async function shot(shots: Shots, page: Page, name: string, target: Locator | { 
     const x = Math.max(0, box.x - pad)
     const y = Math.max(0, box.y - pad)
     clip = { x, y, width: Math.min(view.width - x, box.width + 2 * pad), height: Math.min(view.height - y, box.height + 2 * pad) }
+    if (clip.width < box.width + 2 * pad || clip.height < box.height + 2 * pad) {
+      log(`warning: ${name}.png is cut to the ${view.width} x ${view.height} viewport (the element is ${Math.round(box.width)} x ${Math.round(box.height)} at ${Math.round(box.x)}, ${Math.round(box.y)})`)
+    }
   } else {
     clip = target
   }
@@ -519,21 +534,22 @@ async function main() {
   const wallet = throwawayWallet()
   log(`account ${wallet.publicKey} (throwaway, Testnet); journey on ${args.base}, onboarding on ${args.onboardBase}; PNGs to ${args.out}`)
 
-  const browser = await chromium.launch({ headless: !args.headed })
-  const context = await browser.newContext({
-    viewport: { width: 1280, height: 1100 },
-    deviceScaleFactor: 2,
-    colorScheme: "light",
-    reducedMotion: "reduce",
-    locale: "en-US",
-    timezoneId: "UTC",
-  })
-  await installWallet(context, wallet)
-  const page = await context.newPage()
-  page.on("pageerror", (error) => log(`page error: ${error.message}`))
-  const c: Ctx = { page, args, shots: { dir: args.out, taken: [] }, wallet }
+  const shots: Shots = { dir: args.out, taken: [] }
   const results: { id: string; ok: boolean; note: string }[] = []
+  const browser = await chromium.launch({ headless: !args.headed })
   try {
+    const context = await browser.newContext({
+      viewport: { width: 1280, height: 1100 },
+      deviceScaleFactor: 2,
+      colorScheme: "light",
+      reducedMotion: "reduce",
+      locale: "en-US",
+      timezoneId: "UTC",
+    })
+    await installWallet(context, wallet)
+    const page = await context.newPage()
+    page.on("pageerror", (error) => log(`page error: ${error.message}`))
+    const c: Ctx = { page, args, shots, wallet }
     for (const step of STEPS) {
       const started = Date.now()
       log(`step ${step.id}`)
@@ -554,7 +570,7 @@ async function main() {
   }
   log(`signed ${wallet.signed()} transactions; debug shots of failed steps in ${debugDir}`)
   for (const r of results) log(`${r.ok ? "ok  " : "FAIL"} ${r.id}: ${r.note}`)
-  for (const s of c.shots.taken) log(`${s.name}: ${Math.round(s.bytes / 1024)} KB, ${s.source}`)
+  for (const s of shots.taken) log(`${s.name}: ${Math.round(s.bytes / 1024)} KB, ${s.source}`)
   if (results.some((r) => !r.ok)) process.exitCode = 1
 }
 
