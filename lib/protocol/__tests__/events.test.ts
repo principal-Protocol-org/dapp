@@ -394,6 +394,65 @@ describe("fetchAccountHistory", () => {
     expect(res.truncated).toBe(false)
   })
 
+  describe("a window the RPC prunes while the walk is on (Testnet keeps about 7 days and drops a ledger every ~5 s)", () => {
+    /** The RPC's refusal, shaped as the SDK hands it over (a JSON-RPC error object, code -32600). */
+    const pruned = (oldest: number, latest = 600) => ({ code: -32600, message: `startLedger must be within the ledger range: ${oldest} - ${latest}` })
+    const all = [104, 110, 300].map((l) => ev(l, `h${l}`, C.sy, "deposit", addr(ACCOUNT), i128(1n), i128(1n)))
+    /** A server whose oldest ledger moved from 100 to `nowOldest` after `getHealth`, refusing any range that starts before it. */
+    function pruning(nowOldest: number, opts: { refuseAgain?: boolean } = {}) {
+      const base = fakeServer(all, { oldest: 100, latest: 500 })
+      // Per contract group: the two groups walk at the same time. With `refuseAgain`, the RPC has
+      // pruned 50 more ledgers by the time a group asks again.
+      const refusals = new Map<string, number>()
+      const getEvents = vi.fn(async (req: Req) => {
+        const group = req.filters[0].contractIds[0]
+        const n = refusals.get(group) ?? 0
+        const oldest = nowOldest + (opts.refuseAgain && n > 0 ? 50 : 0)
+        if (req.cursor === undefined && (req.startLedger ?? 0) < oldest) {
+          refusals.set(group, n + 1)
+          throw pruned(oldest)
+        }
+        return base.getEvents(req)
+      })
+      return { getEvents, getHealth: base.getHealth }
+    }
+
+    it("reads the oldest window again from the ledger the RPC names, once, and loses only what it pruned", async () => {
+      const server = pruning(105)
+      const res = await fetchAccountHistory({ manifest, marketId: market.marketId, account: ACCOUNT, server: server as never, windowLedgers: 100 })
+      expect(res.entries.map((e) => e.hash)).toEqual(["h300", "h110"])
+      expect(res.truncated).toBe(false)
+      const starts = server.getEvents.mock.calls.map((c) => c[0].startLedger).filter((s) => s !== undefined && s < 201)
+      // Each group: the refused start at 101, then the same window again from 105.
+      expect(starts.filter((s) => s === 105)).toHaveLength(2)
+    })
+
+    it("never asks for an older window the RPC no longer has", async () => {
+      // Windows of 100 from 501 down: [101, 201) is read again from 102, and [100, 101) is gone whole.
+      const server = pruning(102)
+      const res = await fetchAccountHistory({ manifest, marketId: market.marketId, account: ACCOUNT, server: server as never, windowLedgers: 100 })
+      expect(res.entries.map((e) => e.hash)).toEqual(["h300", "h110", "h104"])
+      expect(res.truncated).toBe(false)
+    })
+
+    it("rejects when the same window is refused again (never a silent gap)", async () => {
+      const server = pruning(105, { refuseAgain: true })
+      await expect(
+        fetchAccountHistory({ manifest, marketId: market.marketId, account: ACCOUNT, server: server as never, windowLedgers: 100 }),
+      ).rejects.toMatchObject({ message: expect.stringMatching(/ledger range: 155/) })
+    })
+
+    it("rejects any other RPC failure as before", async () => {
+      const base = fakeServer(all)
+      const getEvents = vi.fn(async () => {
+        throw new Error("503 Service Unavailable")
+      })
+      await expect(
+        fetchAccountHistory({ manifest, marketId: market.marketId, account: ACCOUNT, server: { getEvents, getHealth: base.getHealth } as never }),
+      ).rejects.toThrow("503")
+    })
+  })
+
   it("uses a supplied window instead of calling getHealth", async () => {
     const server = fakeServer([])
     await fetchAccountHistory({ manifest, marketId: market.marketId, account: ACCOUNT, server: server as never, window: { oldestLedger: 100, latestLedger: 500 } })

@@ -180,6 +180,21 @@ export function cursorLedger(cursor: string): number {
 
 type Scan = { maxPages: number; windowLedgers: number }
 
+/** The RPC's refusal of a range that starts before its oldest ledger, which it names. */
+const PRUNED_RANGE = /startLedger must be within the ledger range:\s*(\d+)\s*-\s*(\d+)/
+
+/** The oldest ledger a pruned-range refusal names, or undefined for any other failure. */
+function prunedOldest(error: unknown): number | undefined {
+  const message =
+    error instanceof Error
+      ? error.message
+      : error !== null && typeof error === "object" && "message" in error
+        ? String((error as { message: unknown }).message)
+        : String(error)
+  const match = PRUNED_RANGE.exec(message)
+  return match ? Number(match[1]) : undefined
+}
+
 async function fetchGroup(
   server: EventsRpcServer,
   contractIds: string[],
@@ -189,18 +204,36 @@ async function fetchGroup(
   const filters = [{ type: "contract" as const, contractIds }]
   const events: RawEvent[] = []
   let calls = 0
-  for (let end = window.latestLedger + 1; end > window.oldestLedger; end -= scan.windowLedgers) {
-    const start = Math.max(window.oldestLedger, end - scan.windowLedgers)
+  // The RPC drops its oldest ledger as new ones close (on Testnet about every 5 s, keeping about 7
+  // days), and the walk below takes seconds, newest window first: by the time it asks for the oldest
+  // window, `window.oldestLedger` may be gone, and the RPC refuses the range, naming its new oldest
+  // ledger. That window is read again once from there, and the walk stops at it: anything older is
+  // gone from the network. Any other failure, or a second refusal of the same window, still rejects.
+  let floor = window.oldestLedger
+  for (let end = window.latestLedger + 1; end > floor; end -= scan.windowLedgers) {
+    let start = Math.max(floor, end - scan.windowLedgers)
     const inWindow: RawEvent[] = []
     let cursor: string | undefined
+    let readAgain = false
     for (;;) {
       if (calls >= scan.maxPages) return { events, truncated: true }
       calls++
-      const res = await server.getEvents(
-        cursor === undefined
-          ? { startLedger: start, endLedger: end, filters, limit: EVENTS_LIMIT }
-          : { cursor, filters, limit: EVENTS_LIMIT },
-      )
+      let res: Awaited<ReturnType<EventsRpcServer["getEvents"]>>
+      try {
+        res = await server.getEvents(
+          cursor === undefined
+            ? { startLedger: start, endLedger: end, filters, limit: EVENTS_LIMIT }
+            : { cursor, filters, limit: EVENTS_LIMIT },
+        )
+      } catch (error) {
+        const oldest = cursor === undefined && !readAgain ? prunedOldest(error) : undefined
+        if (oldest === undefined || oldest <= start) throw error
+        readAgain = true
+        floor = oldest
+        start = oldest
+        if (start >= end) break
+        continue
+      }
       let pastEnd = false
       for (const e of res.events) {
         if (e.ledger >= end) pastEnd = true
