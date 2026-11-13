@@ -7,6 +7,7 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     setupFiles: ["./vitest.setup.ts"],
-    exclude: ["**/node_modules/**", "**/.next/**", "tests/integration/**"],
+    // The live suites sign real transactions: their own configs run them (test:integration, test:e2e:testnet).
+    exclude: ["**/node_modules/**", "**/.next/**", "tests/integration/**", "tests/e2e-testnet/**"],
   },
 })

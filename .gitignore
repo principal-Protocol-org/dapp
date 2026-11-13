@@ -12,6 +12,8 @@
 
 # testing
 /coverage
+# live Testnet run records (pnpm test:e2e:testnet): transaction hashes and public keys, kept per run
+/e2e-artifacts/
 
 # next.js
 /.next/
