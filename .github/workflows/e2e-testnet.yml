@@ -31,7 +31,7 @@ jobs:
   journey:
     name: "Suite A: live journey"
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
@@ -46,7 +46,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Suite A (journey.test.ts)
         # About 5 minutes. Stops before the job's limit so the record is still uploaded.
-        timeout-minutes: 38
+        timeout-minutes: 16
         run: pnpm test:e2e:testnet tests/e2e-testnet/journey.test.ts
       - name: Upload the run record (e2e-artifacts/)
         if: always()
@@ -60,7 +60,9 @@ jobs:
   lifecycle:
     name: "Suite B: ephemeral lifecycle"
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    # Typically about 24 minutes. The limit leaves room for a cold build (step limit 12) and the suite's
+    # worst case (step limit 40), then the record's upload.
+    timeout-minutes: 55
     defaults:
       run:
         working-directory: dapp
@@ -75,6 +77,10 @@ jobs:
       STELLAR_CLI_VERSION: 28.1.0
       STELLAR_CLI_SHA256: c1680deee94301d33ada7a17f98411e642a4248c727afbd2e43050d345746462
       STELLAR_NO_UPDATE_CHECK: "1"
+      # The rustc that built the official deployment: at 665bb67 it reproduces the manifest's wasmHashes
+      # byte for byte (checked on macOS; the job summary checks it on Linux), so the throwaway market runs
+      # the same wasm. Stable would drift with each release. Part of the wasm cache key.
+      RUST_VERSION: 1.95.0
     steps:
       - uses: actions/checkout@v4
         with:
@@ -119,20 +125,32 @@ jobs:
           mkdir -p "$RUNNER_TEMP/stellar-cli"
           tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP/stellar-cli" stellar
           echo "$RUNNER_TEMP/stellar-cli" >>"$GITHUB_PATH"
-      # The rustc that built the official deployment: at 665bb67 it reproduces the manifest's wasmHashes
-      # byte for byte, so the throwaway market runs the same wasm. Stable would drift with each release.
-      - name: Install Rust 1.95.0 with the wasm32v1-none target
-        uses: dtolnay/rust-toolchain@1.95.0
+      - name: Install Rust ${{ env.RUST_VERSION }} with the wasm32v1-none target
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_VERSION }}
           targets: wasm32v1-none
+      # Before the build, so a missing tool fails in seconds. The runner ships its own stable Rust: the
+      # check makes sure the pinned one is the default.
+      - name: Check the tools deploy.sh needs
+        run: |
+          set -euo pipefail
+          stellar --version | grep -F "stellar $STELLAR_CLI_VERSION "
+          rustc --version | grep -F "rustc $RUST_VERSION "
+          cargo --version | grep -F "cargo $RUST_VERSION "
+          rustup target list --installed | grep -Fx wasm32v1-none
+          jq --version
+          node --version
+          git --version
+          shasum --version
       # Only the .wasm files are cached (about 0.5 MB): deploy.sh reads nothing else from its build directory.
-      # Exact key, no restore-keys: another commit's wasm must never land in this commit's directory.
+      # Exact key, no restore-keys: another commit's (or another rustc's) wasm must never land here.
       - name: Restore the contract build
         id: wasm-cache
         uses: actions/cache/restore@v4
         with:
           path: ${{ steps.manifest.outputs.build-dir }}/target/wasm32v1-none/release/*.wasm
-          key: principal-wasm-${{ steps.manifest.outputs.commit }}
+          key: principal-wasm-rust${{ env.RUST_VERSION }}-${{ runner.os }}-${{ steps.manifest.outputs.commit }}
       - name: Restore the cargo registry
         if: steps.wasm-cache.outputs.cache-hit != 'true'
         uses: actions/cache@v4
@@ -144,17 +162,20 @@ jobs:
           key: cargo-registry-${{ runner.os }}-${{ hashFiles('principal/Cargo.lock') }}
       - name: Build the contracts
         if: steps.wasm-cache.outputs.cache-hit != 'true'
+        # About 1 to 3 minutes on a runner.
+        timeout-minutes: 12
         env:
           COMMIT: ${{ steps.manifest.outputs.commit }}
           BUILD_DIR: ${{ steps.manifest.outputs.build-dir }}
         # deploy.sh's own extraction and build, run here so the build is a step of its own (outside the
-        # suite's deploy budget) and its cache is saved even when the suite fails.
+        # suite's deploy budget) and its cache is saved even when the suite fails. --locked: exactly the
+        # commit's Cargo.lock, as principal's own CI builds it.
         run: |
           set -euo pipefail
           rm -rf "$BUILD_DIR"
           mkdir -p "$BUILD_DIR"
           git -C "$PRINCIPAL_REPO" archive "$COMMIT" | tar -x -C "$BUILD_DIR"
-          (cd "$BUILD_DIR" && cargo build --workspace --release --target wasm32v1-none)
+          (cd "$BUILD_DIR" && cargo build --workspace --release --locked --target wasm32v1-none)
           # deploy.sh reuses the build when these two exist.
           for f in principal_router.wasm principal_market_factory.wasm; do
             test -f "$BUILD_DIR/target/wasm32v1-none/release/$f"
@@ -164,17 +185,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ${{ steps.manifest.outputs.build-dir }}/target/wasm32v1-none/release/*.wasm
-          key: principal-wasm-${{ steps.manifest.outputs.commit }}
-      - name: Check the tools deploy.sh needs
-        run: |
-          set -euo pipefail
-          stellar --version | grep -F "stellar $STELLAR_CLI_VERSION "
-          rustc --version
-          cargo --version
-          jq --version
-          node --version
-          git --version
-          shasum --version
+          key: principal-wasm-rust${{ env.RUST_VERSION }}-${{ runner.os }}-${{ steps.manifest.outputs.commit }}
       - name: Compare the wasm with the official deployment's (informational)
         env:
           COMMIT: ${{ steps.manifest.outputs.commit }}
@@ -197,9 +208,9 @@ jobs:
           } >>"$GITHUB_STEP_SUMMARY"
           echo "$same of $total wasm files are byte-identical to the official deployment's"
       - name: Suite B (lifecycle.test.ts)
-        # About 22 minutes, set by the market's 20-minute maturity. Stops before the job's limit so the
-        # record is still uploaded.
-        timeout-minutes: 38
+        # About 22 minutes, set by the market's 20-minute maturity. The worst case is a failed deploy:
+        # beforeAll's 35 minutes, then afterAll's 3, which writes the record.
+        timeout-minutes: 40
         run: pnpm test:e2e:testnet tests/e2e-testnet/lifecycle.test.ts
       - name: Upload the run record (e2e-artifacts/)
         if: always()

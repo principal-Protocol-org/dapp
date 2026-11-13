@@ -258,25 +258,31 @@ Two workflows run on pull requests:
 - `.github/workflows/ci.yml` runs lint, typecheck, test and build on every pull request, then the
   server-secret bundle check.
 - `.github/workflows/e2e-testnet.yml` runs the live end-to-end suites on Stellar Testnet on every
-  pull request to `testnet` and `main`, every night, and by hand. They sign real Testnet
-  transactions with keypairs made in the run. The workflow uses no repository secret, and no key
-  is set in its environment.
+  pull request to `testnet` and `main`, and also nightly and by hand once it is on `main` (see
+  below). They sign real Testnet transactions with keypairs made in the run. The workflow uses no
+  repository secret, and no key is set in its environment.
 
 | Job | Suite | What it covers | Time |
 |---|---|---|---|
 | Suite A: live journey | `tests/e2e-testnet/journey.test.ts` | The user journey on the official deployment (`config/manifests/testnet.json`). Two fresh accounts are onboarded through the public faucet, then: deposit, split, Buy and Sell PT and YT in USDY, liquidity in and out, a PT and a YT transfer, the History page's reads, and the refusal of an account that was not onboarded. | about 5 min |
 | Suite B: ephemeral lifecycle | `tests/e2e-testnet/lifecycle.test.ts` | A throwaway market with a 20-minute maturity, deployed by `scripts/dev-stack/deploy.sh` (`EPHEMERAL=1`) with four keys generated in the run, from `principal` at the manifest's `sourceCommit`. It covers an oracle tick, a yield claim, compliance recovery (deauthorize, seize, settle the record), the stale-oracle and post-maturity refusals, and redemption at maturity. The keys are removed at the end. | about 22 min |
 
-- The two jobs run in parallel, so a run takes about 25 minutes. Each job stops at 45 minutes.
-- Suite B builds the contracts with the Stellar CLI 28.1.0 and Rust 1.95.0, the versions that built
-  the official deployment (they reproduce its `wasmHashes`; the job summary compares them). The
-  build is cached by commit: it runs again, in a few minutes, only when `sourceCommit` changes.
+- The two jobs run in parallel, so a run takes about 25 minutes. Suite A stops at 20 minutes and
+  Suite B at 55 (room for a cold build and a failed deploy, with the record still uploaded).
+- Suite B builds the contracts with cargo and Rust 1.95.0, the toolchain that built the official
+  deployment, and deploys them with the Stellar CLI 28.1.0. On macOS that toolchain reproduces the
+  deployment's `wasmHashes` byte for byte; each run's job summary compares the Linux build with them.
+- The build (a few minutes) is cached by `sourceCommit` and Rust version. It runs again when either
+  changes, when the cache has not been used for 7 days, and on a pull request's first run until the
+  nightly run on `main` has warmed the cache (a pull request's cache is its own).
 - Each job uploads its run record (`e2e-artifacts/journey.json` or `lifecycle.json`: public keys,
   transaction hashes, the refusals) as an artifact, kept 30 days, also when the run fails.
-- A newer push to a pull request cancels its older run. The nightly run uses the copy of the
-  workflow and of `testnet.json` on `main`, the default branch.
+- A newer push to a pull request cancels its older run.
 
-Run it by hand from the Actions tab ("E2E Testnet", then "Run workflow"), or:
+The nightly run and manual runs need the workflow file on the default branch, `main`. They start
+once this workflow is on `main`; until then, the pull-request run is the proof. The nightly run uses
+the copy of the workflow and of `testnet.json` on `main`. Once it is there, run it by hand from the
+Actions tab ("E2E Testnet", then "Run workflow"), or:
 
 ```bash
 gh workflow run e2e-testnet.yml --ref testnet
