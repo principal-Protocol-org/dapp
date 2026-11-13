@@ -73,6 +73,29 @@ and the roles are split so the server never holds the protocol admin:
   `PRINCIPAL_NETWORK=testnet scripts/dev-stack/oracle-tick.sh` does it by hand.
 - Every run deploys a new market and overwrites `testnet.json`.
 
+### Ephemeral deploy (end-to-end suites, local experiments)
+
+Extra variables, all optional except where marked:
+
+| Variable | Effect |
+|---|---|
+| `MANIFEST_OUT=<path>` | Writes the manifest there instead of `config/manifests/<network>.json`, and writes no `.env.*` (locally it also skips the database migration). |
+| `EPHEMERAL=1` | Throwaway market on Testnet. Requires `MANIFEST_OUT` and `PRINCIPAL_NETWORK=testnet`; never writes `config/manifests/*`, `.env.*` or touches a database; prints no cron/QStash notes. Refuses any key name matching `principal-testnet-*` and needs four distinct names, so a local run can never sign with the official keys. |
+| `ADMIN_KEY`, `TREASURY_KEY`, `ISSUER_KEY`, `ORACLE_KEY` | Keystore names for the four roles on Testnet (defaults `principal-testnet-*`). Use run-unique names, e.g. `e2e-<runid>-admin`. |
+| `ORACLE_MAX_STALE_SECONDS` | Oracle freshness window passed to `initialize` (default `3600`). |
+
+Missing names are generated and funded by the script itself (`stellar keys generate <name>`, then Friendbot
+through `ensure_funded_key`). Afterwards remove them, since the secrets live in the local keystore:
+
+```bash
+RUNID=$(date +%s)
+EPHEMERAL=1 MANIFEST_OUT=/tmp/e2e-market.json PRINCIPAL_NETWORK=testnet \
+  ADMIN_KEY=e2e-$RUNID-admin TREASURY_KEY=e2e-$RUNID-treasury ISSUER_KEY=e2e-$RUNID-issuer ORACLE_KEY=e2e-$RUNID-oracle \
+  ORACLE_MAX_STALE_SECONDS=300 scripts/dev-stack/deploy.sh
+# cleanup afterwards (--force skips the confirmation prompt):
+for r in admin treasury issuer oracle; do stellar keys rm "e2e-$RUNID-$r" --force; done
+```
+
 ## Keep the oracle fresh
 
 The oracle goes stale after about 1 h. A stale oracle refuses most writes and the app shows

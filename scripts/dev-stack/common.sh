@@ -26,17 +26,18 @@ esac
 # would use for a real key. Locally one dev key plays every role, so `.env.local` never receives the
 # secret of a real account. On testnet the roles are split: the protocol admin and the treasury stay
 # on this machine; the issuer (also SAC admin and Permissioning admin: the faucet's key) and the
-# oracle admin (the keeper's key) are the only keys a server ever holds.
+# oracle admin (the keeper's key) are the only keys a server ever holds. On testnet each name can be
+# overridden with ADMIN_KEY / TREASURY_KEY / ISSUER_KEY / ORACLE_KEY (deploy.sh EPHEMERAL=1 requires it).
 if [ "$NETWORK" = local ]; then
   ADMIN_KEY="principal-localdev-admin"
   TREASURY_KEY="principal-localdev-treasury"
   ISSUER_KEY="$ADMIN_KEY"
   ORACLE_KEY="$ADMIN_KEY"
 else
-  ADMIN_KEY="principal-$NETWORK-admin"
-  TREASURY_KEY="principal-$NETWORK-treasury"
-  ISSUER_KEY="principal-$NETWORK-issuer"
-  ORACLE_KEY="principal-$NETWORK-oracle"
+  ADMIN_KEY="${ADMIN_KEY:-principal-$NETWORK-admin}"
+  TREASURY_KEY="${TREASURY_KEY:-principal-$NETWORK-treasury}"
+  ISSUER_KEY="${ISSUER_KEY:-principal-$NETWORK-issuer}"
+  ORACLE_KEY="${ORACLE_KEY:-principal-$NETWORK-oracle}"
 fi
 
 DEV_STACK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

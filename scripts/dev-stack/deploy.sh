@@ -7,6 +7,10 @@
 # Usage: [PRINCIPAL_NETWORK=local|testnet] [PRINCIPAL_REPO=../principal] \
 #        [PRINCIPAL_REF=origin/feat/tranche-1-mvp] [MATURITY_SECONDS=3600 locally, 7776000 on testnet] \
 #        [ASSET_CODE=USDY] scripts/dev-stack/deploy.sh
+# Options: MANIFEST_OUT=<path> writes the manifest there instead of config/manifests/<network>.json and
+#          writes no .env file. ORACLE_MAX_STALE_SECONDS=<n> sets the oracle freshness window (default 3600).
+#          EPHEMERAL=1 (testnet, needs MANIFEST_OUT and run-unique ADMIN_KEY/TREASURY_KEY/ISSUER_KEY/ORACLE_KEY
+#          names, never principal-testnet-*) deploys a throwaway market: no database, no env file, no notes.
 set -euo pipefail
 # shellcheck source=common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
@@ -17,6 +21,36 @@ need jq "brew install jq"
 need node "Install Node.js."
 need git ""
 need shasum ""
+
+# Ephemeral mode guards: they run before the build and before any network call.
+EPHEMERAL="${EPHEMERAL:-}"
+MANIFEST_OUT="${MANIFEST_OUT:-}"
+ORACLE_MAX_STALE_SECONDS="${ORACLE_MAX_STALE_SECONDS:-3600}"
+case "$ORACLE_MAX_STALE_SECONDS" in '' | *[!0-9]*) die "ORACLE_MAX_STALE_SECONDS must be a positive integer" ;; esac
+[ "$ORACLE_MAX_STALE_SECONDS" -gt 0 ] || die "ORACLE_MAX_STALE_SECONDS must be positive"
+if [ -n "$MANIFEST_OUT" ]; then
+  case "$MANIFEST_OUT" in /*) ;; *) MANIFEST_OUT="$PWD/$MANIFEST_OUT" ;; esac
+  # Resolve `..` and symlinks of the directory before comparing, so no spelling reaches config/manifests.
+  out_dir="$(cd "$(dirname "$MANIFEST_OUT")" 2>/dev/null && pwd -P)" || die "the directory of MANIFEST_OUT does not exist"
+  MANIFEST_OUT="$out_dir/$(basename "$MANIFEST_OUT")"
+  case "$MANIFEST_OUT" in
+    "$(cd "$DAPP_DIR" && pwd -P)"/config/manifests/*) [ -z "$EPHEMERAL" ] || die "EPHEMERAL=1: MANIFEST_OUT must not be inside config/manifests (that would point the app at a throwaway market)" ;;
+  esac
+fi
+if [ -n "$EPHEMERAL" ]; then
+  [ "$EPHEMERAL" = 1 ] || die "EPHEMERAL must be 1 when set"
+  [ -n "$MANIFEST_OUT" ] || die "EPHEMERAL=1 requires MANIFEST_OUT: an ephemeral deploy never writes config/manifests/<network>.json"
+  [ "$NETWORK" = testnet ] || die "EPHEMERAL=1 needs PRINCIPAL_NETWORK=testnet"
+  for var in ADMIN_KEY TREASURY_KEY ISSUER_KEY ORACLE_KEY; do
+    name="${!var}"
+    role="$(tr '[:upper:]' '[:lower:]' <<<"${var%_KEY}")"
+    case "$name" in
+      principal-testnet-*) die "EPHEMERAL=1 refuses the official key name '$name' ($var): set $var to a run-unique name, e.g. e2e-<runid>-$role" ;;
+    esac
+  done
+  [ "$(printf '%s\n' "$ADMIN_KEY" "$TREASURY_KEY" "$ISSUER_KEY" "$ORACLE_KEY" | sort -u | wc -l | tr -d ' ')" = 4 ] ||
+    die "EPHEMERAL=1 needs four distinct key names (ADMIN_KEY, TREASURY_KEY, ISSUER_KEY, ORACLE_KEY)"
+fi
 
 PRINCIPAL_REPO="${PRINCIPAL_REPO:-../principal}"
 PRINCIPAL_REF="${PRINCIPAL_REF:-origin/feat/tranche-1-mvp}"
@@ -137,8 +171,8 @@ log "1. OracleAdapter"
 deploy_contract oracle principal_oracle_adapter.wasm
 ORACLE="$LAST_ID"
 # The oracle admin is its own key on testnet: it can only push a value (the keeper's job).
-# v2 (R4-9): 1 h freshness window, 10 % deviation bound, one primary source, no fallback.
-adm "$ORACLE" initialize --admin "$ORACLE_ADMIN" --max_stale_seconds 3600 --max_deviation_bps 1000
+# v2 (R4-9): freshness window ORACLE_MAX_STALE_SECONDS (default 1 h), 10 % deviation bound, one primary source, no fallback.
+adm "$ORACLE" initialize --admin "$ORACLE_ADMIN" --max_stale_seconds "$ORACLE_MAX_STALE_SECONDS" --max_deviation_bps 1000
 ORACLE_SOURCE="$(printf '%s' "principal-oracle-source:${NETWORK}:${ASSET_CODE}:app-team:keeper" | shasum -a 256 | cut -d' ' -f1)"
 [[ "$ORACLE_SOURCE" =~ ^[0-9a-f]{64}$ ]] || die "could not derive the oracle source id"
 invoke "$ORACLE_KEY" "$ORACLE" set_sources --caller "$ORACLE_ADMIN" --primary_source "$ORACLE_SOURCE" >/dev/null ||
@@ -269,7 +303,7 @@ adm "$POOL" add_liquidity --from "$ADMIN" --pt_desired "$PT_MINTED" --sy_desired
 # Outputs
 # ---------------------------------------------------------------------------------------------
 MARKET_ID="$NETWORK-$(tr "[:upper:]" "[:lower:]" <<<"$ASSET_CODE")-$MATURITY"
-MANIFEST="$DAPP_DIR/config/manifests/$NETWORK.json"
+MANIFEST="${MANIFEST_OUT:-$DAPP_DIR/config/manifests/$NETWORK.json}"
 mkdir -p "$(dirname "$MANIFEST")"
 
 jq -n \
@@ -297,6 +331,12 @@ jq -n \
     }]
   }' >"$MANIFEST"
 
+if [ -n "$EPHEMERAL" ]; then
+  log "Wrote $MANIFEST (ephemeral: no env file, no database, nothing points the app at this market)"
+  log "Market $MARKET_ID matures at $MATURITY. Remove the keys afterwards: stellar keys rm <name> --force"
+  exit 0
+fi
+
 if [ "$NETWORK" != local ]; then
   # No env file and no database migration off the local network: the server's keys are set in the
   # hosting environment by hand, and the network's database is migrated with `pnpm db:migrate`.
@@ -307,7 +347,12 @@ if [ "$NETWORK" != local ]; then
   log "  NEXT_PUBLIC_PRINCIPAL_NETWORK=$NETWORK"
   log "  FAUCET_ISSUER_SECRET        <- stellar keys secret $ISSUER_KEY"
   log "  ORACLE_ADMIN_SECRET         <- stellar keys secret $ORACLE_KEY"
-  log "Schedule POST /api/cron/oracle every 30 minutes: the oracle value is fresh for 3600 s."
+  log "Schedule POST /api/cron/oracle every 30 minutes: the oracle value is fresh for $ORACLE_MAX_STALE_SECONDS s."
+  exit 0
+fi
+
+if [ -n "$MANIFEST_OUT" ]; then
+  log "Wrote $MANIFEST (MANIFEST_OUT: no .env.local, no database migration)"
   exit 0
 fi
 
