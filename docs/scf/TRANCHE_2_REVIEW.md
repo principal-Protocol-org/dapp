@@ -362,7 +362,7 @@ headed **Signing is off** that lists the reasons, and its review button stays of
 ### 3.1 E2E tests pass in CI against the live Testnet deployment
 
 1. Open the workflow [.github/workflows/e2e-testnet.yml](https://github.com/principal-Protocol-org/dapp/blob/testnet/.github/workflows/e2e-testnet.yml).
-   It runs on every pull request to `testnet` and `main`, by hand and nightly. It has two jobs, run in parallel:
+   It runs on every pull request to `testnet`, by hand and nightly (the nightly tests branch `testnet`). It has two jobs, run in parallel:
    - **Suite A: live journey**, on the official deployment, with fresh accounts onboarded through the app's public
      faucet;
    - **Suite B: ephemeral lifecycle**, on a market it deploys on Testnet with `deploy.sh`, for the steps that need admin

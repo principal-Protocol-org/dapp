@@ -8,8 +8,10 @@ name: E2E Testnet
 #   manifest's sourceCommit.
 # No repository secret is used and no key is set in any environment: both suites make their keys in the run.
 on:
+  # Pull requests to `testnet` only. `main` is the production landing site and holds no app code until
+  # Mainnet; add it back when the app lands there.
   pull_request:
-    branches: [testnet, main]
+    branches: [testnet]
   workflow_dispatch:
   schedule:
     # Nightly. Schedules run the default branch's copy of this file (main). Off the hour, as GitHub advises.
@@ -35,6 +37,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          # The nightly and a run started from `main` test branch `testnet`, where the app lives.
+          ref: ${{ (github.event_name == 'schedule' || github.ref_name == 'main') && 'testnet' || '' }}
           persist-credentials: false
       - uses: pnpm/action-setup@v4
         with:
@@ -84,6 +88,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          # Same as Suite A: the nightly and a run started from `main` test branch `testnet`.
+          ref: ${{ (github.event_name == 'schedule' || github.ref_name == 'main') && 'testnet' || '' }}
           path: dapp
           persist-credentials: false
       - name: Read the official deployment's source commit

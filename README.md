@@ -255,8 +255,7 @@ Two workflows run on pull requests:
 - `.github/workflows/ci.yml` runs lint, typecheck, test and build on every pull request, then the
   server-secret bundle check.
 - `.github/workflows/e2e-testnet.yml` runs the live end-to-end suites on Stellar Testnet on every
-  pull request to `testnet` and `main`, and also nightly and by hand once it is on `main` (see
-  below). They sign real Testnet transactions with keypairs made in the run. The workflow uses no
+  pull request to `testnet`, and also nightly and by hand (see below). They sign real Testnet transactions with keypairs made in the run. The workflow uses no
   repository secret, and no key is set in its environment.
 
 | Job | Suite | What it covers | Time |
@@ -279,10 +278,12 @@ Two workflows run on pull requests:
   transaction hashes, the refusals) as an artifact, kept 30 days, also when the run fails.
 - A newer push to a pull request cancels its older run.
 
-The nightly run and manual runs need the workflow file on the default branch, `main`. They start
-once this workflow is on `main`; until then, the pull-request run is the proof. The nightly run uses
-the copy of the workflow and of `testnet.json` on `main`. Once it is there, run it by hand from the
-Actions tab ("E2E Testnet", then "Run workflow"), or:
+The nightly run and manual runs need the workflow file on the default branch, `main`, so `main`
+carries a copy of this one file. `main` is the production landing site (see Deployments) and holds
+no app code until Mainnet, so pull requests to `main` do not run these suites. The nightly run, and
+any run started from `main`, check out branch `testnet` and test it with its own `testnet.json`. Keep
+the two copies of the workflow identical. Run it by hand from the Actions tab ("E2E Testnet", then
+"Run workflow"), or:
 
 ```bash
 gh workflow run e2e-testnet.yml --ref testnet

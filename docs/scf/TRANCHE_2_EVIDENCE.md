@@ -109,7 +109,7 @@ and the [README's CI section](https://github.com/principal-Protocol-org/dapp/blo
 | Item | Value |
 |---|---|
 | Workflow | "E2E Testnet": jobs "Suite A: live journey" and "Suite B: ephemeral lifecycle", in parallel |
-| Triggers | every pull request to `testnet` and `main`; `workflow_dispatch`; nightly at 03:17 UTC (nightly and manual runs need the file on `main`) |
+| Triggers | every pull request to `testnet`; `workflow_dispatch`; nightly at 03:17 UTC. The nightly and manual runs use the copy on `main` (the production landing site, which holds only this workflow file) and test branch `testnet`. |
 | Secrets | none: no repository secret is used and no key is set in the environment |
 | Run records | artifacts `e2e-journey-<attempt>` and `e2e-lifecycle-<attempt>`, kept 30 days |
 | All runs | <https://github.com/principal-Protocol-org/dapp/actions/workflows/e2e-testnet.yml> |
