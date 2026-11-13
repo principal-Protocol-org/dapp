@@ -140,7 +140,8 @@ criterion; [1.6](#16-the-description-item-by-item) maps them one by one, includi
 
 1. Open [evidence §3.2](TRANCHE_2_EVIDENCE.md#32-transactions): the 12 transactions of Suite A on the official market, 13 November 2026,
    15:04 to 15:08 UTC: deposit, split into PT + YT, buy and sell PT, buy and sell YT, two liquidity deposits, a
-   liquidity withdrawal, a PT transfer and a YT transfer. Open any hash on stellar.expert: it is successful, and its
+   liquidity withdrawal, a PT transfer, a YT transfer, and the trustline of a third account kept off the allow-list for
+   the compliance check. Open any hash on stellar.expert: it is successful, and its
    invocation names the contract function.
 2. Open [evidence §6.2](TRANCHE_2_EVIDENCE.md#62-browser-runs-on-the-official-market): the same journey done in a browser on the official market, with a yield
    claim.
@@ -173,13 +174,14 @@ criterion; [1.6](#16-the-description-item-by-item) maps them one by one, includi
    # SY, PT, YT and pool each print "CAMOWBMTMDLFJLFOSTULXQO7MUK2PT3XAQ62CA4L5DGPQKZFJWEKN24Q", the manifest's recoveryEscrow
    ```
 
-4. **Compliance recovery, end to end.** [Evidence §4.5](TRANCHE_2_EVIDENCE.md#45-compliance-recovery): on Suite B's market, the issuer authority
-   deauthorizes an account on the SAC, `seize_all_positions` moves its SY, PT, YT and LP to the escrow, and after
+4. **Compliance recovery, end to end.** [Evidence §4.5](TRANCHE_2_EVIDENCE.md#45-compliance-recovery): on Suite B's market, the issuer
+   authority (the SAC admin, which is the market admin key) deauthorizes an account on the SAC, `seize_all_positions` moves its SY, PT, YT and LP to the escrow, and after
    maturity `finalize_record` settles the seized PT and YT into USDY. The record reads back `finalized: true`. Each step
    has its transaction hash.
 
 **Status: Met.** The recovery sequence ran on Suite B's market, with the same contract code as the official one. It
-needs the admin key, which never leaves the developer's machine, so it is not run on the official market.
+needs the market admin key, which stays on the developer's machine and is never held by the app's server
+([evidence §1.3](TRANCHE_2_EVIDENCE.md#13-test-asset-and-roles)), so it is not run on the official market.
 
 ### 1.5 Oracle safety guards are working
 
@@ -199,14 +201,22 @@ needs the admin key, which never leaves the developer's machine, so it is not ru
 3. **The staleness guard blocks a real call.** [Evidence §4.6](TRANCHE_2_EVIDENCE.md#46-refusals-at-maturity): on Suite B's market, ledger
    5712285, the first redemption after maturity was refused because the oracle was stale: PrincipalManager contract
    error #7, [`OracleStale`](https://github.com/principal-Protocol-org/principal/blob/665bb6760372d30307a1a035da24e51776f727e8/contracts/principal_manager/src/lib.rs#L199).
-   The app showed its blocker before any signature.
+   Before that simulation, the app's gate logic (`evaluateGates`, run by the suite without a browser) had already
+   returned its stale-oracle blocker.
 4. **The deviation guard and the availability block, live.** The contracts repository's
    [ORACLE_SAFETY_EXTENSION.md §4](https://github.com/principal-Protocol-org/principal/blob/665bb6760372d30307a1a035da24e51776f727e8/docs/ORACLE_SAFETY_EXTENSION.md#4-live-testnet-evidence)
    records, with transaction links: a 20% jump against the 10% cap returns `false`, leaves the price unchanged and is
    read back from `last_rejection()`; a 5% move is accepted; a mint reverts `OracleStale` while the oracle is stale and
-   succeeds once it is fresh again. The fallback's rule (it may only refresh the timestamp, never the value) is covered
-   by the unit tests in
-   [contracts/oracle_adapter/src/test.rs](https://github.com/principal-Protocol-org/principal/blob/665bb6760372d30307a1a035da24e51776f727e8/contracts/oracle_adapter/src/test.rs).
+   succeeds once it is fresh again. That evidence ran on an earlier build (OracleAdapter wasm `c21408bd…`, not the
+   deployed `adb87f76…`). For the deployed code, the proof is the unit tests at `665bb67` in
+   [contracts/oracle_adapter/src/test.rs](https://github.com/principal-Protocol-org/principal/blob/665bb6760372d30307a1a035da24e51776f727e8/contracts/oracle_adapter/src/test.rs):
+   - deviation guard: `deviation_within_bound_is_accepted`, `deviation_over_bound_is_rejected_gracefully`,
+     `deviation_guard_does_not_apply_to_the_first_ever_value`, `deviation_overflow_is_rejected_gracefully_not_panicked`
+     ([lines 260 to 314](https://github.com/principal-Protocol-org/principal/blob/665bb6760372d30307a1a035da24e51776f727e8/contracts/oracle_adapter/src/test.rs#L260-L314));
+   - fallback (it may only refresh the timestamp, never the value): `fallback_may_refresh_timestamp_only`,
+     `fallback_cannot_move_the_value_even_within_the_deviation_bound`, `fallback_never_hides_a_stale_timestamp`;
+   - availability: `is_available_follows_the_contract_s_own_configured_staleness`,
+     `assert_available_panics_oracle_unavailable_when_stale`.
 5. **Ongoing freshness.** Open the official oracle on stellar.expert,
    <https://stellar.expert/explorer/testnet/contract/CDYGBFGO7KD446CDTGJ7M4OWUXC7UPBGPVM5CUWP2NSNX2CKK2TYYIPS>. Its calls
    show a `set_reference_value` every 30 minutes, sent by the app's scheduled keeper (`/api/cron/oracle`) from the
@@ -216,8 +226,8 @@ needs the admin key, which never leaves the developer's machine, so it is not ru
    does the same by hand.
 
 **Status: Met.** The staleness guard is shown on this deployment's contract code (Suite B). The deviation guard is
-**met in the contracts repository** (live transactions on a contracts-team oracle instance, plus unit tests); it has not
-fired on the official oracle, whose `last_rejection` is `null`. The official oracle has one primary source and no
+**met in the contracts repository**: unit tests on the deployed code at `665bb67`, and live transactions on an earlier
+build of the oracle. It has not fired on the official oracle, whose `last_rejection` is `null`. The official oracle has one primary source and no
 fallback configured.
 
 ### 1.6 The description, item by item
@@ -243,7 +253,11 @@ claimed by omission. "Open" items are owned by the app team, whose script became
 | price-deviation guard rejecting updates that move more than ±10% | `max_deviation_bps` 1000 on the official oracle. A rise above 10% is rejected; any decrease is refused outright (`ValueDecreased`). | Done in the contracts ([1.5](#15-oracle-safety-guards-are-working) step 4) |
 
 The contracts repository's [ORACLE_SAFETY_EXTENSION.md §7](https://github.com/principal-Protocol-org/principal/blob/665bb6760372d30307a1a035da24e51776f727e8/docs/ORACLE_SAFETY_EXTENSION.md#7-what-is-still-open)
-lists the pipeline as outside that repository's scope; the app team's `deploy.sh` is that pipeline.
+leaves the scripted pipeline "out of scope for this change", and its technical specification lists it as a separate
+work package ([TRANCHE_2_3_TECHNICAL_SPECIFICATION.md §14.2](https://github.com/principal-Protocol-org/principal/blob/665bb6760372d30307a1a035da24e51776f727e8/docs/TRANCHE_2_3_TECHNICAL_SPECIFICATION.md#142-deployment-automation-package):
+`scripts/deploy/deploy.sh`, `verify-deployment.sh`, an `env.example`, idempotent resume, deployment transaction capture).
+That package was not built in the contracts repository. The official deployment uses the app team's `deploy.sh`
+instead, and the open items above are the app team's.
 
 ---
 
@@ -263,10 +277,10 @@ lists the pipeline as outside that repository's scope; the app team's `deploy.sh
 
 ### 2.1 The dApp is live at a public Testnet URL
 
-1. Open <https://testnet.principalmarket.fi>. A banner on every page reads "Stellar Testnet — test assets only, no real
-   value."
-2. Click **Launch app**. The app opens on **Markets** (`/app`) and lists the market **USDY (test)**, maturing on
-   11 February 2027. Its page is <https://testnet.principalmarket.fi/app/markets/testnet-usdy-1802336344>.
+1. Open <https://testnet.principalmarket.fi>, the landing page.
+2. Click **Launch app**. The app opens on **Markets** (`/app`). A banner on every page of the app reads "Stellar
+   Testnet — test assets only, no real value." Markets lists the market **USDY (test)**, maturing on 11 February 2027.
+   Its page is <https://testnet.principalmarket.fi/app/markets/testnet-usdy-1802336344>.
 
 **Status: Met.**
 
@@ -318,13 +332,13 @@ headed **Signing is off** that lists the reasons, and its review button stays of
    wallet is on a different network from this market. Switch it to the network …". The unit tests in
    [evidence §5](TRANCHE_2_EVIDENCE.md#5-gate-refusals) pin this.
 3. **Stale oracle (recorded, not reproducible on the official market).** The keeper keeps the official oracle fresh, so
-   a reviewer cannot make it stale. Suite B let its own oracle go stale: the app refused the redemption with "The
-   oracle price is stale: it has not been updated in the last 5 minutes. …", and the contract refused it too (error
-   #7). The app's rules for a stale oracle are pinned in
+   a reviewer cannot make it stale. Suite B let its own oracle go stale. For the redemption, the app's gate logic (`evaluateGates`, run by the suite
+   without a browser) returned "The oracle price is stale: it has not been updated in the last 5 minutes. …", and the
+   contract refused it too (error #7). The app's rules for a stale oracle are pinned in
    [lib/protocol/\_\_tests\_\_/gates.test.ts](https://github.com/principal-Protocol-org/dapp/blob/testnet/lib/protocol/__tests__/gates.test.ts#L372-L435).
-4. **Maturity (recorded; on the official market after 11 February 2027).** On Suite B's market after maturity, the app
-   refused a PT purchase with "Trading closed at maturity: this market has matured, so PT and YT can no longer be bought
-   or sold in the pool. …", and the pool refused it too (error #6,
+4. **Maturity (recorded; on the official market after 11 February 2027).** On Suite B's market after maturity, the app's
+   gate logic returned, for a PT purchase, "Trading closed at maturity: this market has matured, so PT and YT can no
+   longer be bought or sold in the pool. …", and the pool refused it too (error #6,
    [`Expired`](https://github.com/principal-Protocol-org/principal/blob/665bb6760372d30307a1a035da24e51776f727e8/contracts/market_pool/src/lib.rs#L162)).
    The rules are pinned in the same [gates.test.ts](https://github.com/principal-Protocol-org/dapp/blob/testnet/lib/protocol/__tests__/gates.test.ts#L313-L369).
 

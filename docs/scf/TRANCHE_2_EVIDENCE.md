@@ -58,12 +58,30 @@ account it was created (for the Router: 13 November 2026 09:06:44 UTC, by the ad
 
 | Role | Public address | Source |
 |---|---|---|
-| USDY issuer (classic), Permissioning admin, faucet | [GDUGKHAJJPEYRF4T5XG7HJSUY3AGMHKHCSTSLZSGOCK2673N5ZKDFIDT](https://stellar.expert/explorer/testnet/account/GDUGKHAJJPEYRF4T5XG7HJSUY3AGMHKHCSTSLZSGOCK2673N5ZKDFIDT) | manifest; Permissioning `get_admin` |
-| SAC admin of USDY, admin of the Router and of every market contract | [GBLPAJ2GVSFUWCUIFMEV4EOV2XIOEWMJRIQ3LOM2Z42TNIY3J6ACB7UA](https://stellar.expert/explorer/testnet/account/GBLPAJ2GVSFUWCUIFMEV4EOV2XIOEWMJRIQ3LOM2Z42TNIY3J6ACB7UA) | SAC `admin`; Router `get_admin` |
-| OracleAdapter admin (the keeper: can only push the value) | [GABQLCMTB2M2E4O3GWAG3ZIMLDVIGQJE3CKPLRRZK2GJF3LABSOLTGD5](https://stellar.expert/explorer/testnet/account/GABQLCMTB2M2E4O3GWAG3ZIMLDVIGQJE3CKPLRRZK2GJF3LABSOLTGD5) | OracleAdapter `get_admin` |
+| Issuer: USDY classic issuer and Permissioning admin; held by the app's server (faucet) | [GDUGKHAJJPEYRF4T5XG7HJSUY3AGMHKHCSTSLZSGOCK2673N5ZKDFIDT](https://stellar.expert/explorer/testnet/account/GDUGKHAJJPEYRF4T5XG7HJSUY3AGMHKHCSTSLZSGOCK2673N5ZKDFIDT) | manifest; Permissioning `get_admin`; Horizon flags |
+| Market admin: SAC admin of USDY; admin of the Router, RiskControl, SYWrapper, PTToken, YTToken, PrincipalManager and MarketPool; MarketConfig's protocol admin and creator; stays on the developer's machine | [GBLPAJ2GVSFUWCUIFMEV4EOV2XIOEWMJRIQ3LOM2Z42TNIY3J6ACB7UA](https://stellar.expert/explorer/testnet/account/GBLPAJ2GVSFUWCUIFMEV4EOV2XIOEWMJRIQ3LOM2Z42TNIY3J6ACB7UA) | SAC `admin`; `get_admin` of each listed contract; MarketConfig `protocol_admin`, `creator` |
+| Oracle admin: OracleAdapter admin; held by the app's server (keeper) | [GABQLCMTB2M2E4O3GWAG3ZIMLDVIGQJE3CKPLRRZK2GJF3LABSOLTGD5](https://stellar.expert/explorer/testnet/account/GABQLCMTB2M2E4O3GWAG3ZIMLDVIGQJE3CKPLRRZK2GJF3LABSOLTGD5) | OracleAdapter `get_admin` |
 
-The admin key stays on the developer's machine. The app's server holds only the issuer key (for the faucet) and the
-oracle key (for the keeper), so it cannot administer the market.
+What each key can do, from the contracts at `665bb67` and the asset's flags on Horizon:
+
+- **Market admin** (GBLPAJ…B7UA). The SAC admin of USDY and the admin of the contracts listed above. Suite B used this
+  role on its own market to deauthorize an account on the SAC, `seize_all_positions` and `finalize_record` (§4.3). It
+  stays on the developer's machine, as does the treasury key, which only receives fee shares. The app's server never
+  holds either.
+- **Issuer** (GDUGKH…FIDT), held by the app's server for the faucet. The classic issuer of USDY, with `auth_required`,
+  `auth_revocable` and `auth_clawback_enabled` set (§1.4; holders' trustlines show `is_clawback_enabled: true`). With
+  classic operations it can authorize and deauthorize any account's USDY trustline, claw back USDY from it, and pay
+  out new USDY (the faucet's `pay` step). As the Permissioning admin it can grant and revoke accounts and PT/YT grants
+  (`grant_account`, `grant_accounts`, `revoke_account`, `grant_asset`, `revoke_asset`) and hand the role to another
+  key (`transfer_admin`). It is not the SAC admin and administers no other Principal contract.
+- **Oracle admin** (GABQLC…TGD5), held by the app's server for the keeper. It pushes values (`set_reference_value`,
+  within the deviation cap and never lower than the current value). It can also change the freshness window and the
+  deviation cap (`set_safety_params`: any window above 0 s, a cap up to 10,000 bps), set the primary and fallback
+  sources (`set_sources`), set value bounds (`set_value_bounds`) and hand the role to another key (`transfer_admin`).
+  Suite B used its own oracle admin for `set_safety_params` (§4.3).
+
+So the server cannot administer the market contracts or the SAC. With its two keys, though, it controls the oracle's
+settings and values, and which accounts may hold and use USDY, PT and YT.
 
 ### 1.4 Live reads, 13 November 2026
 
@@ -126,7 +144,7 @@ After the faucet, the trader and the recipient each held 100,000 USDY and nothin
 
 ### 3.2 Transactions
 
-All signed by the trader. Amounts in USDY unless stated.
+Signed by the trader, except the last row, which the outsider signed. Amounts in USDY unless stated.
 
 | Step | Contract function | Amount | Ledger | Transaction |
 |---|---|---|---|---|
@@ -246,11 +264,12 @@ The oracle moved from 1.0000000 to 1.0500000. The trader's pending yield, comput
 
 ### 4.5 Compliance recovery
 
-The sequence of the contracts' recovery design: the issuer authority deauthorizes the account on the SAC, the escrow
-seizes every position, and after maturity the record is settled into the underlying.
+The sequence of the contracts' recovery design: the issuer authority (the SAC admin, here the run's market admin
+key) deauthorizes the account on the SAC, the escrow seizes every position, and after maturity the record is settled
+into the underlying.
 
-1. **Deauthorize** the trader (GAZZJ7…5MQD) on the USDY SAC, ledger 5712132. The app then blocks the account with
-   "Blocked by the issuer: your trustline exists but is not authorized. …". Its own USDY balance (98,812.8507142)
+1. **Deauthorize** the trader (GAZZJ7…5MQD) on the USDY SAC, ledger 5712132. The app's gate logic then returns, for that
+   account, "Blocked by the issuer: your trustline exists but is not authorized. …". Its own USDY balance (98,812.8507142)
    stays on its trustline, now deauthorized (Horizon, 13 November 2026: `balance` 98812.8507142, `is_authorized`
    false).
 2. **Seize** with `seize_all_positions([trader])`, ledger 5712133 (15:38:29 UTC). Record `0`, read back with
@@ -405,7 +424,10 @@ Described in the page's text instead:
 ## 7. Oracle safety in the contracts repository
 
 The OracleAdapter extension is contract code at `665bb67`. Its live evidence was produced by the contracts team on a
-separate oracle instance, before the official deployment:
+separate oracle instance, before the official deployment, and on an earlier build: OracleAdapter wasm `c21408bd…`
+(PrincipalManager `fd68e764…`), where the official deployment runs `adb87f76…` (PrincipalManager `adcc724a…`). It
+shows the mechanism; the proof for the deployed code is the unit tests at `665bb67` below and, for the staleness guard,
+Suite B (§4.6):
 [docs/ORACLE_SAFETY_EXTENSION.md §4](https://github.com/principal-Protocol-org/principal/blob/665bb6760372d30307a1a035da24e51776f727e8/docs/ORACLE_SAFETY_EXTENSION.md#4-live-testnet-evidence).
 
 | What it shows | Transaction |
@@ -416,9 +438,16 @@ separate oracle instance, before the official deployment:
 | `set_safety_params` narrows the window to 2 s; the next mint then reverts `OracleStale` (a simulation, so it has no transaction) | [cfd49f60…6a29](https://stellar.expert/explorer/testnet/tx/cfd49f60705948d9a35fce34f4f4f2a6ac3957968bf715f35c4829bb2b926a29) |
 | Fresh again, the mint succeeds | [427bf580…b597](https://stellar.expert/explorer/testnet/tx/427bf5800fb11cd3b7c27fb4b9c8cc145e817123543896714845ffa4b25ab597) |
 
-Unit tests: [contracts/oracle_adapter/src/test.rs](https://github.com/principal-Protocol-org/principal/blob/665bb6760372d30307a1a035da24e51776f727e8/contracts/oracle_adapter/src/test.rs)
-(sources, the deviation guard and its boundary, the fallback's timestamp-only rule, `is_available` and
-`assert_available`). The contracts team's own Testnet deployments, including a recovery and a settlement, are in
+Unit tests at `665bb67`, in [contracts/oracle_adapter/src/test.rs](https://github.com/principal-Protocol-org/principal/blob/665bb6760372d30307a1a035da24e51776f727e8/contracts/oracle_adapter/src/test.rs):
+- deviation guard ([lines 260 to 314](https://github.com/principal-Protocol-org/principal/blob/665bb6760372d30307a1a035da24e51776f727e8/contracts/oracle_adapter/src/test.rs#L260-L314)): `deviation_within_bound_is_accepted`,
+  `deviation_over_bound_is_rejected_gracefully`, `deviation_guard_does_not_apply_to_the_first_ever_value`,
+  `deviation_overflow_is_rejected_gracefully_not_panicked`;
+- fallback: `fallback_may_refresh_timestamp_only`, `fallback_cannot_move_the_value_even_within_the_deviation_bound`,
+  `fallback_never_hides_a_stale_timestamp`;
+- availability: `is_available_follows_the_contract_s_own_configured_staleness`,
+  `assert_available_panics_oracle_unavailable_when_stale`, `assert_available_is_silent_when_fresh`.
+
+The contracts repository's [CI](https://github.com/principal-Protocol-org/principal/blob/665bb6760372d30307a1a035da24e51776f727e8/.github/workflows/ci.yml) runs them with `cargo test --workspace --locked`. The contracts team's own Testnet deployments, including a recovery and a settlement, are in
 [docs/TESTNET_DEPLOYMENT_EVIDENCE_2026_11_05.md](https://github.com/principal-Protocol-org/principal/blob/665bb6760372d30307a1a035da24e51776f727e8/docs/TESTNET_DEPLOYMENT_EVIDENCE_2026_11_05.md).
 
 ## 8. Open items
