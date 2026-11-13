@@ -246,6 +246,39 @@ function xlm(stroops: bigint): string {
   return `${formatAmount(stroops, XLM_DECIMALS, XLM_DECIMALS)} XLM`
 }
 
+/**
+ * Headroom on the resource fee RPC simulates, in basis points of it. The Principal contracts extend
+ * the TTL of what they touch on every call (`extend_ttl(n, n)`), so the rent a call pays depends on
+ * when the entries it touches were last extended: simulated in the ledger where the account's
+ * previous transaction landed, a sell to USDY on Testnet asked 36,192 stroops of resource fee, and
+ * 42,044 one ledger later (+16 %); signed with the first, it failed on-chain ("refundable resource
+ * fee was not sufficient to cover the events fee after paying for ledger storage rent: 2500 > 67").
+ * The refundable part not used is refunded, so the headroom costs nothing; it only raises the most
+ * the review says the network may take.
+ */
+export const RESOURCE_FEE_HEADROOM_BPS = 3_000n
+
+/**
+ * `prepared` declaring its resource fee with `RESOURCE_FEE_HEADROOM_BPS` of headroom, rounded up,
+ * and its total fee raised by as much, cut to what fits under `MAX_TX_FEE_STROOPS`. Everything
+ * else (call, authorization, footprint, resources, sequence, time bounds) is kept as it is. Applied
+ * by this app, after RPC's output passed `assertPreparedMatches`.
+ */
+export function withResourceFeeHeadroom(prepared: Transaction): Transaction {
+  const envelope = prepared.toEnvelope()
+  if (envelope.type !== "envelopeTypeTx") return prepared
+  const ext = envelope.value.tx.ext
+  if (ext.type !== "sorobanData") return prepared
+  const resourceFee = BigInt(ext.sorobanData.resourceFee)
+  const fits = MAX_TX_FEE_STROOPS - BigInt(prepared.fee)
+  const wanted = (resourceFee * RESOURCE_FEE_HEADROOM_BPS + 9_999n) / 10_000n
+  const headroom = wanted < fits ? wanted : fits
+  if (headroom <= 0n) return prepared
+  const sorobanData = new SorobanDataBuilder(ext.sorobanData).setResourceFee((resourceFee + headroom).toString()).build()
+  // `cloneFrom` keeps the inclusion fee and the operation as it is; `build` adds the new resource fee.
+  return TransactionBuilder.cloneFrom(prepared, { sorobanData }).build()
+}
+
 /** The resource fee the transaction's Soroban data declares (0 without Soroban data). */
 function sorobanResourceFee(transaction: Transaction): bigint {
   const envelope = transaction.toEnvelope()
@@ -675,7 +708,10 @@ export async function prepareReview(p: { manifest: Manifest; input: ActionInput;
   const invocation = invocationFor(manifest, input)
 
   const server = p.rpc ?? createRpcServer(manifest.rpcUrl)
-  const { built, prepared } = await buildAndPrepare(server, manifest, input.source, invocation)
+  const { built, prepared: fromRpc } = await buildAndPrepare(server, manifest, input.source, invocation)
+  assertPreparedMatches(built, fromRpc)
+  // Headroom for the rent (this app's own change, checked again like RPC's output).
+  const prepared = withResourceFeeHeadroom(fromRpc)
   assertPreparedMatches(built, prepared)
 
   const unsignedXdr = prepared.toXDR()
@@ -711,7 +747,10 @@ export async function prepareManagerReview(p: { manifest: Manifest; call: Manage
   const call = rebuildManagerCall(manifest, p.call)
 
   const server = p.rpc ?? createRpcServer(manifest.rpcUrl)
-  const { built, prepared } = await buildAndPrepare(server, manifest, call.source, call.invocation)
+  const { built, prepared: fromRpc } = await buildAndPrepare(server, manifest, call.source, call.invocation)
+  assertPreparedMatches(built, fromRpc, MANAGER_CALL_AUTH[call.kind], beneathOf(manifest, call))
+  // Headroom for the rent (this app's own change, checked again like RPC's output).
+  const prepared = withResourceFeeHeadroom(fromRpc)
   assertPreparedMatches(built, prepared, MANAGER_CALL_AUTH[call.kind], beneathOf(manifest, call))
 
   const unsignedXdr = prepared.toXDR()

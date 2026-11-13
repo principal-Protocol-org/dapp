@@ -41,6 +41,7 @@ import { parseManifest } from "../manifest"
 import { AMOUNTS_MOVED_REASON, SubmissionRejectedError, createRpcServer, scArgToVal, transactionEnvelopeHash, type ContractInvocation } from "../stellar"
 import {
   MAX_TX_FEE_STROOPS,
+  RESOURCE_FEE_HEADROOM_BPS,
   REVIEW_TTL_MS,
   executeRestore,
   executeReview,
@@ -53,6 +54,7 @@ import {
   type Review,
   type ReviewRpcServer,
   TX_TIMEOUT_SECONDS,
+  withResourceFeeHeadroom,
 } from "../review"
 import type { Finding, Live, Manifest, WalletState } from "../types"
 
@@ -63,8 +65,13 @@ const wallet = Keypair.random()
 const SOURCE = wallet.publicKey()
 const SEQUENCE = "41"
 const RESOURCE_FEE = 12_345n
-/** `assembleTransaction` keeps the 100-stroop inclusion fee and adds the resource fee. */
-const PREPARED_FEE = (BigInt(BASE_FEE) + RESOURCE_FEE).toString()
+/** The headroom a review adds to the simulated resource fee: 30 % of 12,345 stroops, rounded up. */
+const FEE_HEADROOM = 3_704n
+/**
+ * `assembleTransaction` keeps the 100-stroop inclusion fee and adds the resource fee; the review
+ * declares the resource fee with its headroom (refunded when unused).
+ */
+const PREPARED_FEE = (BigInt(BASE_FEE) + RESOURCE_FEE + FEE_HEADROOM).toString()
 const DEADLINE = 1_900_000_000n
 /** The hash the fake RPC claims for every submission; the pipeline must report the real one. */
 const HASH = "abc123"
@@ -376,6 +383,42 @@ describe("prepareReview", () => {
     await expect(review("mint", {}, server)).rejects.toThrow("not the transaction that was requested")
   })
 
+  describe("declares headroom over the simulated resource fee (rent can rise between simulation and inclusion)", () => {
+    /** The resource fee and the rest of the Soroban data a transaction declares. */
+    const sorobanOf = (tx: Transaction) => {
+      const envelope = tx.toEnvelope()
+      if (envelope.type !== "envelopeTypeTx" || envelope.value.tx.ext.type !== "sorobanData") throw new Error("no Soroban data")
+      const data = envelope.value.tx.ext.sorobanData
+      return { resourceFee: BigInt(data.resourceFee), rest: new SorobanDataBuilder(data).setResourceFee(0).build().toXdr("base64") }
+    }
+
+    it("raises the declared resource fee by 30 %, rounded up, and the total fee with it; nothing else changes", async () => {
+      expect(RESOURCE_FEE_HEADROOM_BPS).toBe(3_000n)
+      const server = fakeRpc()
+      const r = await review("mint", {}, server)
+      const signed = new Transaction(r.unsignedXdr, passphrase)
+      const fromRpc = assemble(server.calls.prepared[0])
+      expect(sorobanOf(signed).resourceFee).toBe(RESOURCE_FEE + FEE_HEADROOM)
+      expect(r.fee).toBe((BigInt(BASE_FEE) + RESOURCE_FEE + FEE_HEADROOM).toString())
+      expect(r.summary.fees[0]).toBe("Network fee: up to 0.0016149 XLM")
+      // The same call, authorization, footprint, resources, sequence and time bounds as RPC prepared.
+      expect(sorobanOf(signed).rest).toBe(sorobanOf(fromRpc).rest)
+      const op = signed.operations[0]
+      const rpcOp = fromRpc.operations[0]
+      if (op.type !== "invokeHostFunction" || rpcOp.type !== "invokeHostFunction") throw new Error("not a contract call")
+      expect(callOf(signed).toXdr("base64")).toBe(callOf(fromRpc).toXdr("base64"))
+      expect(op.auth?.map((a) => a.toXdr("base64"))).toEqual(rpcOp.auth?.map((a) => a.toXdr("base64")))
+      expect([signed.source, signed.sequence, signed.timeBounds]).toEqual([fromRpc.source, fromRpc.sequence, fromRpc.timeBounds])
+    })
+
+    it("cuts the headroom to what fits under the 10 XLM cap, and adds none at the cap", async () => {
+      const near = await review("mint", {}, fakeRpc({ prepareTransaction: async (tx) => assemble(tx, { resourceFee: MAX_TX_FEE_STROOPS - BigInt(BASE_FEE) - 1_000n }) }))
+      expect(near.fee).toBe(MAX_TX_FEE_STROOPS.toString())
+      const at = await review("mint", {}, fakeRpc({ prepareTransaction: async (tx) => assemble(tx, { resourceFee: MAX_TX_FEE_STROOPS - BigInt(BASE_FEE) }) }))
+      expect(at.fee).toBe(MAX_TX_FEE_STROOPS.toString())
+    })
+  })
+
   describe("treats what RPC prepares as untrusted (R29)", () => {
     const preparedBy = (prepare: (tx: Transaction) => Transaction) => review("mint", {}, fakeRpc({ prepareTransaction: async (tx) => prepare(tx) }))
 
@@ -439,7 +482,7 @@ describe("prepareReview", () => {
       // 7 decimals: the exact floor being signed, not a rounded one.
       expect(r.summary.getAtLeast).toEqual(["9.4525001 PT"])
       expect(r.summary.give).toEqual(["10 SY"])
-      expect(r.summary.fees[0]).toBe("Network fee: up to 0.0012445 XLM")
+      expect(r.summary.fees[0]).toBe("Network fee: up to 0.0016149 XLM")
       expect(r.summary.deadline).toBe(Number(DEADLINE))
     })
 
@@ -581,7 +624,7 @@ describe("prepareReview", () => {
       const ptOnly = (await review("redeem", { guards: {}, secondaryAmount: 0n })).summary
       expect(ptOnly.give).toEqual(["10 PT"])
       expect(ptOnly.getAtLeast).toHaveLength(2)
-      expect(ptOnly.fees).toEqual(["Network fee: up to 0.0012445 XLM"])
+      expect(ptOnly.fees).toEqual(["Network fee: up to 0.0016149 XLM"])
       // A YT-only redeem lists no "0 PT" (M4).
       const ytOnly = (await review("redeem", { guards: {}, amount: 0n, secondaryAmount: 2_0000000n })).summary
       expect(ytOnly.give).toEqual(["2 YT"])
@@ -590,7 +633,7 @@ describe("prepareReview", () => {
 
     it("lists the protocol fee the action pays, after the network fee", async () => {
       const fees = async (action: ActionId) => (await review(action, { guards: { minOut: 1n, minOut2: 1n, maxNetCost: 1n } })).summary.fees
-      expect(await fees("deposit")).toEqual(["Network fee: up to 0.0012445 XLM"])
+      expect(await fees("deposit")).toEqual(["Network fee: up to 0.0016149 XLM"])
       expect((await fees("mint"))[1]).toMatch(/^Tokenization fee:/)
       expect((await fees("buy_pt"))[1]).toMatch(/^Swap fee:/)
       expect(await fees("buy_yt")).toHaveLength(3)
@@ -1340,7 +1383,7 @@ describe("manager reviews (0002 §5): the same review → sign pipeline as an ac
       expect(r.summary).toEqual({
         give: [],
         getAtLeast: [],
-        fees: ["Network fee: up to 0.0012445 XLM"],
+        fees: ["Network fee: up to 0.0016149 XLM"],
         validUntil: Number(prepared.timeBounds?.maxTime),
       })
       expect(r.expiresAtMs - r.preparedAtMs).toBe(REVIEW_TTL_MS)
@@ -1672,7 +1715,8 @@ describe("manager reviews (0002 §5): the same review → sign pipeline as an ac
       })
         .addOperation(new Contract(call.invocation.contractId).call(call.invocation.functionName, ...callOf(tx).args))
         .build()
-      return rpc.assembleTransaction(built, simulationSuccess({ auth })).build()
+      // As a review prepares it: the RPC's assembly, then the app's fee headroom.
+      return withResourceFeeHeadroom(rpc.assembleTransaction(built, simulationSuccess({ auth })).build())
     }
 
     it("signs, checks, submits and polls a manager review; there is no action output to decode", async () => {
