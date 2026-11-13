@@ -5,34 +5,35 @@
   "rpcUrl": "https://soroban-testnet.stellar.org",
   "horizonUrl": "https://horizon-testnet.stellar.org",
   "friendbotUrl": "https://friendbot.stellar.org",
-  "generatedAt": "2026-11-04T15:42:37Z",
-  "sourceCommit": "97ac23e88f2ade1d8f34acf8e82048811d386ec8",
+  "generatedAt": "2026-11-13T09:08:56Z",
+  "sourceCommit": "665bb6760372d30307a1a035da24e51776f727e8",
   "shared": {
-    "router": "CCCINV6QYOC4BXWEAZUDEDKCYKOLQJCHJST47L3IJLZS2JOQ2J7QONMR",
-    "oracle": "CCKV2VGMOIUUQGATMNJLTP2RAHMF3I24BLZMHZ7UWD5YPH335TVHYIPO",
-    "permissioning": "CCLONXPSDH4EATM7PUVEBHZZE3RXZ3QRATHIHNY57TUARQFZEAJFSID6",
-    "riskControl": "CA3ZGON5ITBULHQ4WFMSR6CIUFZ7LSAMPJN64UHSISHEEXASRHIEZQ3I",
-    "factory": "CBMZGU5Z5WSXH2UJRSFPNOD65XSYKWHJTMP6QJYJ2SA7MPW62LN7JBS7"
+    "router": "CC4BQRFRQQZF5VQUHZV3PS4LSIPNNAGI3UOL3K24DZNTCHGZQ3JHQ3E2",
+    "oracle": "CDYGBFGO7KD446CDTGJ7M4OWUXC7UPBGPVM5CUWP2NSNX2CKK2TYYIPS",
+    "permissioning": "CAFQMOCW3673DBKJBJ7C555IYPOULPH2WFOEOX52JAUCZRGZF5FRVLBA",
+    "riskControl": "CCRZ55SG273OTUZSFME6A6XXXEZ3GM5IMVRLF4NEEWNC54NGCRHIMHJC",
+    "factory": "CCTRU7IYGPXPY57FAT2TOYRYU6FZY7EPXZBZWDHGQB42V5JXPLN6XTXK"
   },
   "wasmHashes": {
-    "oracle": "0d6d3456d17a56d0a5db64fdd41a7904baf1eb770e886ee6e497a10d50df7d0d",
+    "oracle": "adb87f76c1bafd93c67489645fe49df771ede639edc0d1919233563ffae86bce",
     "permissioning": "bf902fe36e73da56ec9aa9ab72728d9e0a4ea923814925fa4259e025ff98eb9e",
     "riskControl": "0e55d8200021b680176eca83738a639de6bfc8ab7f70a5985d3ef2d4669fa7a0",
-    "sy": "cb2918d0b0354d2b2eaa3b3ab5f93bc3cab7a61daf223c46a58fbcd18ae13c1a",
+    "sy": "64a8f41122a1599f100c1fd288b1879c19e6b71aed1b6dc3bc22604f0d008bcb",
     "pt": "6464745ba7eb96c77a59f724d29d8f7ed6f378a77e1d2bff4fc08663e315078b",
-    "yt": "6517a26d2ab475222ffee9bb9821b2d4fef4f3c6a1b0987ebaa4a6eb8f2d979d",
+    "yt": "f45e230ba03149ece9a3bbad0d8173ce6dfa456f066c139cf1fd8b2b4ac2fb47",
     "config": "3ab03fa1ee0cd13b871174f9478def5e34df599932358ba457ece80b6e295000",
-    "manager": "d7babcf4c6d8df840d1864979e2d765ad00ce3fb650f8ccc0b0c90e9ffec1f78",
-    "pool": "e0f3a7bd0be0564be84591e985c4d4a9e16d5c186957859cff8b47cf1df40152",
+    "manager": "adcc724a270398a5c48bb20f417f37ad8d2def6a7f6897aa371170e363875f48",
+    "pool": "ab240fd7f4da359cc562ebb9d21761b9f4513fb96d5b0c0e829dfd441596e3eb",
     "recoveryEscrow": "795f16109536cf8908796d6315d21e0e7bccf29d043ddd0f5763520fa9b88c74",
-    "router": "2df7b39a30179afa32033539859dc0c20b9f7e31881270c04faf3a2f17d4e0b3",
-    "factory": "ba545a010da08b8085af70f46de057f8a9224d426d29292bdea07e4d8680cd45"
+    "router": "9cd0403a156b192e09c1c614743e99c0b167e9a3c65c7e5553596639e772fd39",
+    "factory": "790244c989a4c1f59c52d19250c5d63763b359cfc0d77ffc3317a176abfdbab8"
   },
   "routerFunctions": [
     "unwrap",
     "recombine",
     "claim_yield",
     "add_liquidity",
+    "flash_mint_yt",
     "wrap_and_mint",
     "swap_pt_for_sy",
     "swap_sy_for_pt",
@@ -45,7 +46,10 @@
     "swap_underlying_for_pt",
     "swap_underlying_for_yt",
     "swap_yt_for_underlying",
-    "add_liquidity_single_sy"
+    "add_liquidity_single_sy",
+    "flash_mint_yt_from_underlying",
+    "remove_liquidity_to_underlying",
+    "add_liquidity_single_underlying"
   ],
   "testAsset": {
     "code": "USDY",
@@ -56,7 +60,7 @@
   },
   "markets": [
     {
-      "marketId": "testnet-usdy-1801581040",
+      "marketId": "testnet-usdy-1802336344",
       "displayName": "USDY (test)",
       "underlying": {
         "code": "USDY",
@@ -64,17 +68,17 @@
         "sac": "CB2YO6BCOTN336RQUAMHOBCNABJG74URBIMNUHXB27K2QOLJKDCDXODZ",
         "decimals": 7
       },
-      "maturity": 1801581040,
+      "maturity": 1802336344,
       "contracts": {
-        "router": "CCCINV6QYOC4BXWEAZUDEDKCYKOLQJCHJST47L3IJLZS2JOQ2J7QONMR",
-        "oracle": "CCKV2VGMOIUUQGATMNJLTP2RAHMF3I24BLZMHZ7UWD5YPH335TVHYIPO",
-        "sy": "CDAYDWUEIGECIAQEGZPW7WKYAIZWVQDFWQ4SZ4CQSOTTDUITIOJGRHNF",
-        "pt": "CCDL4KDIDIBJNSNE5UZALHTX66EQUYIDAETBEB6AF533QZ5QV4FJB36U",
-        "yt": "CDOP3RCXWA7FXY7YYBOGY6RARWMLQQLW2T6RMG33WCFBEBISNQYRW7ZH",
-        "config": "CA7AC2XSVCLAHENPOWYGV4DHONRTELHEGHZLTFKBUA4FY565PU7OVQZO",
-        "manager": "CB5SJLXKNB4RBMZX5K6NRTBE7324NKHYPQEKDSYTXWW22AGFJPPQJLCL",
-        "pool": "CBUFHFZ7MGDJEK6ZKV4Q6NKKQFUL72NJ6AMFZHX77LP2IS2D47XEHGHI",
-        "recoveryEscrow": "CAGHR5TDHZQT4WGELSF2CJ7MDD257C5ITGR3Y6MLMC3JDKUSI5B2VRA2"
+        "router": "CC4BQRFRQQZF5VQUHZV3PS4LSIPNNAGI3UOL3K24DZNTCHGZQ3JHQ3E2",
+        "oracle": "CDYGBFGO7KD446CDTGJ7M4OWUXC7UPBGPVM5CUWP2NSNX2CKK2TYYIPS",
+        "sy": "CA62ACRTFADKNOP37CS7DPQ5DNJML4TFHIX6LZG5IBEHJM3PED2V7F2I",
+        "pt": "CCQPYQNDIHVLZZPK6CCF3CNBUP25BHJHX36PQXV6MG3ELPM7JYWDSPA5",
+        "yt": "CAXVQIHH7US4DUK2E2GE2N6VNXDECC6D4DOGXUSEG6SPKS7USNMYXDCB",
+        "config": "CBJT4OZDU2LFYQU5D6EQAYTLCLFOUJ3JK55HUBZVUMZ5FQVHK37VHJJ4",
+        "manager": "CDYL4ZOIZ3DKEDWIMBUXHYQUAT4BAZTYZ7ZRCVLAMFAXGTJZRTOLVG47",
+        "pool": "CB3JI6H2HZ3PMWKLEKDPQUURFSKJSFTLNFNBU4CFEHAZXMWL5SNNS6OJ",
+        "recoveryEscrow": "CAMOWBMTMDLFJLFOSTULXQO7MUK2PT3XAQ62CA4L5DGPQKZFJWEKN24Q"
       }
     }
   ]
