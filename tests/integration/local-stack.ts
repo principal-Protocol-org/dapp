@@ -21,7 +21,10 @@ import { createRpcReader } from "@/lib/protocol/reader"
 import { createRpcServer, getLedgerClock } from "@/lib/protocol/stellar"
 import type { Manifest, Market } from "@/lib/protocol/types"
 import { createStellarFaucetChain, resetFaucetStateForTests, runFaucet } from "@/lib/server/faucet"
+import { eventually, json, redact } from "../live/util"
 import { fundedKeypairSigner, type KeypairSigner } from "./keypair-signer"
+
+export { eventually, json, redact, sleep } from "../live/util"
 
 export const run = promisify(execFile)
 
@@ -83,25 +86,6 @@ export function loadDatabaseUrl(): void {
     /* no .env.local */
   }
 }
-
-/** Secret keys (S + 55 base32 characters) never reach a log or an error. */
-export const redact = (text: unknown) => String(text ?? "").replace(/S[A-Z2-7]{55}/g, "S…[redacted]")
-
-export const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
-
-/** Polls `read` until `done` holds (Horizon trails RPC by a ledger or two). */
-export async function eventually<T>(read: () => Promise<T>, done: (value: T) => boolean, what: string, timeoutMs = 30_000): Promise<T> {
-  const until = Date.now() + timeoutMs
-  for (;;) {
-    const value = await read()
-    if (done(value)) return value
-    if (Date.now() > until) throw new Error(`timed out waiting for ${what}`)
-    await sleep(1_000)
-  }
-}
-
-/** JSON that survives bigints (results and outcomes carry them). */
-export const json = (value: unknown) => JSON.stringify(value, (_, v: unknown) => (typeof v === "bigint" ? v.toString() : v))
 
 /** A log whose lines are printed as they come and again, all together, at the end of the suite. */
 export function createLog(prefix = "integration") {
@@ -177,6 +161,10 @@ export async function onboardFreshAccount(
   market: Market,
   kind: ComplianceKind,
   markets?: () => Promise<Market[]>,
+  /** The issuer's secret; the dev stack's `FAUCET_ISSUER_SECRET` when omitted. */
+  issuerSecret?: string,
+  /** The Permissioning admin's secret, when it is not the issuer. */
+  permissioningAdminSecret?: string,
 ): Promise<KeypairSigner> {
   const signer = await fundedKeypairSigner(manifest)
   const account = signer.publicKey
@@ -190,7 +178,12 @@ export async function onboardFreshAccount(
   })
   await eventually(read, (a) => a.trustline.status === "live" && a.trustline.value !== "none", "the trustline on Horizon")
   resetFaucetStateForTests()
-  const chain = createStellarFaucetChain(manifest, { env: { FAUCET_ISSUER_SECRET: faucetIssuerSecret() } })
+  const chain = createStellarFaucetChain(manifest, {
+    env: {
+      FAUCET_ISSUER_SECRET: issuerSecret ?? faucetIssuerSecret(),
+      ...(permissioningAdminSecret ? { FAUCET_PERMISSIONING_ADMIN_SECRET: permissioningAdminSecret } : {}),
+    },
+  })
   const outcome = await runFaucet({ account, manifest, ...(markets ? { markets } : {}), ip: "127.0.0.1", now: Date.now(), chain })
   if (!("performed" in outcome)) throw new Error(`faucet refused: ${json(outcome)}`)
   await eventually(read, (a) => a.trustline.status === "live" && a.trustline.value === "authorized", "the authorized trustline on Horizon")
