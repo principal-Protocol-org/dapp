@@ -5,21 +5,18 @@
  * and freshness window. Each is signed by a keypair the caller holds and sent as the app sends a
  * transaction: built, prepared by the RPC and checked against what was built (`assertPreparedMatches`),
  * given the app's resource-fee headroom (these calls follow one another on the same entries: Task 3,
- * finding 2), signed, sent and confirmed.
+ * finding 2), signed, sent and confirmed. Its reads, its preparation and its confirmation wait out an
+ * overloaded RPC (`liveRpcServer`); the submission itself is never repeated here: a caller runs the
+ * whole step once more only when nothing of it landed (`tests/live/retry.ts`).
  *
  * No server code here (`pnpm test` loads `tests/live/`), and no secret is ever printed.
  */
 import { Address, BASE_FEE, Contract, type Keypair, TransactionBuilder, nativeToScVal, xdr } from "@stellar/stellar-sdk"
-import { createRpcReader, type ContractReader } from "@/lib/protocol/reader"
+import type { ContractReader } from "@/lib/protocol/reader"
 import { assertPreparedMatches, withResourceFeeHeadroom } from "@/lib/protocol/review"
-import {
-  createRpcServer,
-  failedTransactionReason,
-  pollTransactionStatus,
-  submitSignedTransaction,
-  type ScArg,
-} from "@/lib/protocol/stellar"
+import { failedTransactionReason, type ScArg } from "@/lib/protocol/stellar"
 import type { Manifest, Market } from "@/lib/protocol/types"
+import { liveReader, liveRpcServer, submitAndPoll } from "./rpc"
 import { json, sleep } from "./util"
 
 type Network = Pick<Manifest, "rpcUrl" | "networkPassphrase">
@@ -39,7 +36,7 @@ export const scAddressVec = (accounts: string[]) => xdr.ScVal.scvVec(accounts.ma
 /** The ledger a transaction landed in, asked again while the RPC node asked does not know it yet. */
 async function ledgerOf(rpcUrl: string, hash: string): Promise<number> {
   for (let attempt = 1; ; attempt++) {
-    const tx = await createRpcServer(rpcUrl).getTransaction(hash)
+    const tx = await liveRpcServer(rpcUrl).getTransaction(hash)
     if (tx.status !== "NOT_FOUND") return tx.ledger
     if (attempt === 30) throw new Error(`transaction ${hash} confirmed, then not found by the RPC ${attempt} times`)
     await sleep(1_000)
@@ -50,7 +47,8 @@ async function ledgerOf(rpcUrl: string, hash: string): Promise<number> {
 export async function sendAs(p: { manifest: Network; signer: Keypair; contractId: string; method: string; args: xdr.ScVal[] }): Promise<Sent> {
   const { rpcUrl, networkPassphrase } = p.manifest
   const call = `${p.contractId}.${p.method}`
-  const server = createRpcServer(rpcUrl)
+  // Its reads and its preparation are retried while the RPC is overloaded: nothing is signed yet.
+  const server = liveRpcServer(rpcUrl)
   const account = await server.getAccount(p.signer.publicKey())
   const built = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase })
     .addOperation(new Contract(p.contractId).call(p.method, ...p.args))
@@ -62,10 +60,10 @@ export async function sendAs(p: { manifest: Network; signer: Keypair; contractId
   const prepared = withResourceFeeHeadroom(fromRpc)
   assertPreparedMatches(built, prepared)
   prepared.sign(p.signer)
-  const { hash, status } = await submitSignedTransaction({ rpcUrl, networkPassphrase, signedXdr: prepared.toXDR() })
-  // Not taken: nothing of it can land (a caller may retry it once, `tests/live/retry.ts`).
-  if (status === "TRY_AGAIN_LATER") throw new Error(`${call} ${hash}: TRY_AGAIN_LATER, the network is busy and did not accept it`)
-  const polled = await pollTransactionStatus({ rpcUrl, hash, attempts: 30, intervalMs: 2_000 })
+  // Sent once; TRY_AGAIN_LATER (not taken) and an unanswered send the network does not show throw,
+  // and a caller may run the step once more if nothing of it landed (`tests/live/retry.ts`).
+  const polled = await submitAndPoll({ rpcUrl, networkPassphrase, signedXdr: prepared.toXDR(), what: call })
+  const { hash } = polled
   if (polled.status !== "SUCCESS") {
     const why = polled.status === "FAILED" ? `: ${failedTransactionReason(polled.failure)}` : ""
     throw new Error(`${call} ${hash} ${polled.status}${why}`)
@@ -108,7 +106,7 @@ export async function oraclePrimarySource(reader: ContractReader, oracle: string
  */
 export async function oracleSetValue(p: { manifest: Manifest; oracleAdmin: Keypair; value: bigint; timestamp: number }): Promise<Sent & { accepted: boolean }> {
   const oracle = p.manifest.shared.oracle
-  const source = await oraclePrimarySource(createRpcReader(p.manifest), oracle)
+  const source = await oraclePrimarySource(liveReader(p.manifest), oracle)
   const sent = await sendAs({
     manifest: p.manifest,
     signer: p.oracleAdmin,

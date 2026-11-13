@@ -8,9 +8,9 @@ import type { ActionId } from "@/lib/protocol/actions"
 import { fetchMarketCompliance } from "@/lib/protocol/compliance"
 import type { HistoryKind } from "@/lib/protocol/events"
 import { createHorizon } from "@/lib/protocol/horizon"
-import { createRpcReader } from "@/lib/protocol/reader"
-import { createRpcServer, getLedgerClock } from "@/lib/protocol/stellar"
+import { getLedgerClock } from "@/lib/protocol/stellar"
 import type { Manifest, Market } from "@/lib/protocol/types"
+import { liveReader, liveRpcServer } from "./rpc"
 import { redact } from "./util"
 
 /** One whole token at 7 decimals. */
@@ -61,15 +61,15 @@ export const HISTORY_KIND: Record<ActionId, HistoryKind> = {
   add_liquidity_keep_yt: "add_liquidity",
 }
 
-/** The live ledger clock, interpolated between reads. */
+/** The live ledger clock, interpolated between reads; read again while the RPC is overloaded (`tests/live/rpc.ts`). */
 export async function ledgerClock(manifest: Manifest) {
-  const clock = await getLedgerClock(createRpcServer(manifest.rpcUrl))
+  const clock = await getLedgerClock(liveRpcServer(manifest.rpcUrl))
   return { ...clock, now: () => clock.closeTime + (Date.now() - clock.readAtMs) / 1000 }
 }
 
 /** The market's compliance model kind (`sac` for the dev stack's and the Testnet USDY). */
 export async function complianceKind(manifest: Manifest, market: Market): Promise<ComplianceKind> {
-  const model = await fetchMarketCompliance(createHorizon(manifest.horizonUrl), createRpcReader(manifest), market)
+  const model = await fetchMarketCompliance(createHorizon(manifest.horizonUrl), liveReader(manifest), market)
   if (model.status !== "live") throw new Error(`compliance model: ${model.error}`)
   return model.value.kind
 }

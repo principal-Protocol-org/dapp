@@ -19,10 +19,12 @@
  * 5. Compliance: an account that was not onboarded is refused with the plain reason, before and
  *    after it adds a trustline, and the contracts refuse it too.
  *
- * Testnet is shared and rate-limited: an external failure (Friendbot, the RPC, a stale sequence) is
- * retried once at the step level, and only when nothing of it landed (`tests/live/retry.ts`); no
- * assertion is ever skipped. A Testnet that cannot be reached, an oracle that is not fresh, or a
- * market too close to maturity fails the run with the reason: it never passes empty.
+ * Testnet is shared and rate-limited: every read and simulation waits out an RPC that is overloaded
+ * or unreachable for a moment, for up to 75 s (`tests/live/rpc.ts`), and an external failure
+ * (Friendbot, the RPC, a stale sequence) of a signed step is retried once at the step level, and only
+ * when nothing of it landed (`tests/live/retry.ts`); no assertion is ever skipped. A Testnet that
+ * cannot be reached, an oracle that is not fresh, or a market too close to maturity fails the run
+ * with the reason: it never passes empty.
  *
  * The amounts stay small: the official pool holds about 100,000 PT and 95,000 SY, and other people
  * use it. Nothing is asserted on the pool's reserves, which they may move during the run; every
@@ -33,9 +35,8 @@ import { mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { Keypair } from "@stellar/stellar-sdk"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
-import { simulate } from "@/hooks/use-simulation"
 import { fetchAccountState, type AccountState, type ComplianceKind } from "@/lib/protocol/account-state"
-import type { ActionInput } from "@/lib/protocol/actions"
+import { invocationFor, type ActionInput } from "@/lib/protocol/actions"
 import { evaluateAccountCompliance } from "@/lib/protocol/compliance"
 import { curveStateFrom } from "@/lib/protocol/curve"
 import { fetchAccountHistory, type HistoryKind } from "@/lib/protocol/events"
@@ -47,18 +48,9 @@ import { fetchMarketState, type MarketState } from "@/lib/protocol/market-state"
 import { BPS } from "@/lib/protocol/math"
 import { addTrustline } from "@/lib/protocol/onboarding"
 import { previewDeposit, previewWithdraw } from "@/lib/protocol/previews"
-import { createRpcReader } from "@/lib/protocol/reader"
 import { assertPreparedMatches, withResourceFeeHeadroom } from "@/lib/protocol/review"
 import { planRoute, routeHoldings, type Holdings, type RouteRequest, type StepPlan } from "@/lib/protocol/routes"
-import {
-  buildInvocationEnvelope,
-  createRpcServer,
-  pollTransactionStatus,
-  simulateInvocation,
-  submitSignedTransaction,
-  type ContractInvocation,
-  type SimulationOutcome,
-} from "@/lib/protocol/stellar"
+import { buildInvocationEnvelope, simulateInvocation, type ContractInvocation, type SimulationOutcome } from "@/lib/protocol/stellar"
 import type { TradeRequest } from "@/lib/protocol/trade-adapter"
 import type { Finding, Manifest, Market } from "@/lib/protocol/types"
 import { solveBuyYt } from "@/lib/protocol/yt-solver"
@@ -67,6 +59,7 @@ import { createRunner, live, runTrade, SLIPPAGE_BPS, type Runner, type Snapshot,
 import { balancesOf, complianceKind, createLog, HISTORY_KIND, ledgerClock, MINUTE, showBalances, U, units, type Balances } from "../live/chain"
 import { fundOnce, liveContext, type OnboardedSigner, type Onboarding } from "../live/context"
 import { retryOnce } from "../live/retry"
+import { liveReader, liveRpcServer, submitAndPoll } from "../live/rpc"
 import { eventually, json, redact } from "../live/util"
 
 const DAPP = join(__dirname, "..", "..")
@@ -159,8 +152,9 @@ describe("Suite A: the live journey on the official Testnet deployment (plan 000
     complete: false,
   }
 
-  const server = () => createRpcServer(manifest.rpcUrl)
-  const reader = () => createRpcReader(manifest)
+  /** The SDK's server and the app's reader, each read and simulation retried while the RPC is overloaded (`tests/live/rpc.ts`). */
+  const server = () => liveRpcServer(manifest.rpcUrl, log)
+  const reader = () => liveReader(manifest, log)
   const accountState = (account: string): Promise<AccountState> =>
     fetchAccountState(reader(), createHorizon(manifest.horizonUrl), manifest, market.marketId, account, kind)
   const sequenceOf = async (account: string) => (await server().getAccount(account)).sequenceNumber()
@@ -271,16 +265,26 @@ describe("Suite A: the live journey on the official Testnet deployment (plan 000
     const prepared = withResourceFeeHeadroom(fromRpc)
     assertPreparedMatches(built, prepared)
     const signedXdr = await trader.sign(prepared.toXDR(), manifest.networkPassphrase, trader.publicKey)
-    const { hash } = await submitSignedTransaction({ rpcUrl: manifest.rpcUrl, networkPassphrase: manifest.networkPassphrase, signedXdr })
-    const polled = await pollTransactionStatus({ rpcUrl: manifest.rpcUrl, hash, attempts: 30, intervalMs: 2_000 })
+    // Sent once and polled, even when the RPC did not answer the send; never sent twice.
+    const polled = await submitAndPoll({ rpcUrl: manifest.rpcUrl, networkPassphrase: manifest.networkPassphrase, signedXdr, what: `${token} transfer`, log })
+    const { hash } = polled
     expect(polled.status, `${token} transfer ${hash}: ${json(polled)}`).toBe("SUCCESS")
     return { hash, ledger: await ledgerOf(hash) }
   }
 
-  /** What the app shows `account` for `draft`: every gate with its own reads and the simulation as that account. */
+  /**
+   * What the app shows `account` for `draft`: every gate with its own reads and the simulation as
+   * that account (the hook's `simulate`: `simulateInvocation` as the user, through `server()`).
+   */
   async function gatesFor(account: string, draft: ActionInput): Promise<{ blockers: Blocker[]; simulation: SimulationOutcome }> {
     const [clock, ms, acc] = await Promise.all([ledgerClock(manifest), fetchMarketState(reader(), manifest, market.marketId), accountState(account)])
-    const simulation = await simulate(manifest, draft)
+    const simulation = await simulateInvocation({
+      rpcUrl: manifest.rpcUrl,
+      networkPassphrase: manifest.networkPassphrase,
+      source: draft.source,
+      invocation: invocationFor(manifest, draft),
+      server: server(),
+    })
     const blockers = evaluateGates(draft, {
       findings,
       wallet: { status: "connected", publicKey: account, networkPassphrase: manifest.networkPassphrase },
@@ -370,7 +374,7 @@ describe("Suite A: the live journey on the official Testnet deployment (plan 000
           `(${who.onboarding.faucetAnswers.length} answer(s)); ${showBalances(b)}; deposit cap ${cap}`,
       )
     }
-    r = createRunner({ manifest, market, findings, kind, signer: trader, log, record: (s) => sent.push(s), readAfterLanded: true })
+    r = createRunner({ manifest, market, findings, kind, signer: trader, log, record: (s) => sent.push(s), readAfterLanded: true, rpc: server(), reader: reader() })
   }, 12 * MINUTE)
 
   it("Deposit: USDY to SY (quick action)", async () => {
@@ -619,6 +623,7 @@ describe("Suite A: the live journey on the official Testnet deployment (plan 000
     const toOutsider = await simulateInvocation({
       rpcUrl: manifest.rpcUrl,
       networkPassphrase: manifest.networkPassphrase,
+      server: server(),
       source: trader.publicKey,
       invocation: {
         contractId: market.contracts.pt,

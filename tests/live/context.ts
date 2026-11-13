@@ -15,14 +15,15 @@ import { readFileSync } from "node:fs"
 import { isAbsolute, join } from "node:path"
 import { Keypair, StrKey } from "@stellar/stellar-sdk"
 import { fetchAccountState, type ComplianceKind } from "@/lib/protocol/account-state"
+import { errorMessage } from "@/lib/protocol/errors"
 import { createHorizon } from "@/lib/protocol/horizon"
 import { parseManifest } from "@/lib/protocol/manifest"
 import { addTrustline, fundWithFriendbot, requestTestTokens, type FaucetResponse, type FaucetStep } from "@/lib/protocol/onboarding"
 import { createRpcReader } from "@/lib/protocol/reader"
-import { createRpcServer } from "@/lib/protocol/stellar"
 import type { Manifest, Market } from "@/lib/protocol/types"
 import { keypairSigner, type KeypairSigner } from "../integration/keypair-signer"
 import { isExternalFailure, retryOnce } from "./retry"
+import { liveRpcServer } from "./rpc"
 import { eventually, json, redact, sleep } from "./util"
 
 export type LiveNetwork = "local" | "testnet"
@@ -154,10 +155,11 @@ export function liveContext(options: LiveContextOptions): LiveContext {
     onboard: onboardImpl,
     async unreachableReason() {
       try {
-        const health = await createRpcServer(manifest.rpcUrl).getHealth()
+        // Asked again while the RPC is overloaded for a moment (`tests/live/rpc.ts`).
+        const health = await liveRpcServer(manifest.rpcUrl).getHealth()
         return health.status === "healthy" ? null : `the ${network} RPC reports "${health.status}"`
       } catch (error) {
-        return `the ${network} RPC does not answer (${redact(error instanceof Error ? error.message : String(error))})`
+        return `the ${network} RPC does not answer (${redact(errorMessage(error))})`
       }
     },
     redact,

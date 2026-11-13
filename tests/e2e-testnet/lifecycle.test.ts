@@ -28,8 +28,11 @@
  *    PT and YT (`redeem_at_maturity`), which settles the market. `finalize_record` settles the seized
  *    PT and YT into the underlying, read back from `get_record`.
  *
- * Testnet is shared and rate-limited: an external failure is retried once at the step level, and
- * only when the signer's sequence number shows nothing of it landed (`tests/live/retry.ts`). A deploy
+ * Testnet is shared and rate-limited. Every read and simulation the run makes waits out an RPC that
+ * is overloaded or unreachable for a moment (-32004 "preflight queue full", 429/502/503/504, resets,
+ * timeouts), for up to 75 s (`tests/live/rpc.ts`); a contract's answer is never retried. A signed
+ * step is sent once; after an external failure it runs once more, and only when the signer's
+ * sequence number shows nothing of it landed (`tests/live/retry.ts`). A deploy
  * that fails, a Testnet that cannot be reached, or a market left too little time before maturity
  * fails the run with the reason: it never passes empty. `afterAll` removes the run's keys, whatever
  * happened, and writes the record (public keys, contract ids, hashes, refusals, the recovery record)
@@ -48,6 +51,7 @@ import { derive, ratesFrom } from "@/hooks/use-simulation"
 import { fetchAccountState, type AccountState, type ComplianceKind } from "@/lib/protocol/account-state"
 import { invocationFor, type ActionInput } from "@/lib/protocol/actions"
 import { evaluateAccountCompliance } from "@/lib/protocol/compliance"
+import { errorMessage } from "@/lib/protocol/errors"
 import { evaluateGates, type Blocker } from "@/lib/protocol/gates"
 import { openGuards, type ActionOutput } from "@/lib/protocol/guards"
 import { createHorizon } from "@/lib/protocol/horizon"
@@ -55,10 +59,9 @@ import { parseManifest, validateManifest } from "@/lib/protocol/manifest"
 import { fetchMarketState } from "@/lib/protocol/market-state"
 import { SCALE } from "@/lib/protocol/math"
 import { previewDeposit } from "@/lib/protocol/previews"
-import { createRpcReader } from "@/lib/protocol/reader"
 import { executeReview, prepareReview } from "@/lib/protocol/review"
 import { planRoute, type RouteRequest, type StepPlan } from "@/lib/protocol/routes"
-import { createRpcServer, simulateInvocation, type SimulationOutcome } from "@/lib/protocol/stellar"
+import { simulateInvocation, type SimulationOutcome } from "@/lib/protocol/stellar"
 import type { TradeRequest } from "@/lib/protocol/trade-adapter"
 import type { Finding, Live, Manifest, Market } from "@/lib/protocol/types"
 import { pendingYield } from "@/lib/protocol/yield"
@@ -91,7 +94,8 @@ import {
   runKeySecret,
   type KeyNames,
 } from "../live/ephemeral"
-import { retryOnce } from "../live/retry"
+import { isTransientRpcError, retryOnce } from "../live/retry"
+import { liveReader, liveRpcServer } from "../live/rpc"
 import { eventually, json, redact, sleep } from "../live/util"
 
 const DAPP = join(__dirname, "..", "..")
@@ -223,17 +227,21 @@ describe("Suite B: the ephemeral lifecycle on a throwaway Testnet market (plan 0
   const runners = {} as Record<Who, Runner>
   /** The ledger time of the last value the oracle accepted. */
   let lastTickTimestamp = 0
+  /** The tick after maturity, once the oracle accepted it: the redemption needs it fresh. */
+  let maturityTick: { timestamp: number } | undefined
   let recordId: bigint | undefined
   /** The ledger at which the market was seen matured and the oracle stale, with the margin: the floor of the refusals' reads. */
   let maturedLedger = 0
   /** Onboards a fresh keypair with the run's own issuer; set once the market is deployed. */
   let onboard: () => Promise<OnboardedSigner> = () => Promise.reject(new Error("the market was not deployed"))
 
-  const reader = () => createRpcReader(manifest)
+  /** The app's reader and the SDK's server, each read and simulation retried while the RPC is overloaded (`tests/live/rpc.ts`). */
+  const reader = () => liveReader(manifest, log)
+  const server = () => liveRpcServer(manifest.rpcUrl, log)
   const accountOf = (who: Who) => signers[who].publicKey
   const accountState = (account: string): Promise<AccountState> =>
     fetchAccountState(reader(), createHorizon(manifest.horizonUrl), manifest, market.marketId, account, kind)
-  const sequenceOf = async (account: string) => (await createRpcServer(manifest.rpcUrl).getAccount(account)).sequenceNumber()
+  const sequenceOf = async (account: string) => (await server().getAccount(account)).sequenceNumber()
   /** The latest ledger any transaction of the run landed in: later reads must be from it or after. */
   const lastLedger = () => Math.max(0, ...landed.map((l) => l.ledger))
   /** Every read is live and from `minLedger` or later (Testnet's RPC is several nodes, some a ledger behind). */
@@ -325,8 +333,9 @@ describe("Suite B: the ephemeral lifecycle on a throwaway Testnet market (plan 0
       const { output: simulated, guards } = derive(draft, outcome, SLIPPAGE_BPS, ratesFrom({ data: s.ms, stale: false }))
       if (!simulated || !guards?.ok) throw new Error(`${action}: no exact quote: ${json({ outcome, guards })}`)
       expect(guards.guards, `${action} takes no floor`).toEqual({})
-      const review = await prepareReview({ manifest, input: { ...draft, guards: guards.guards } })
-      const result = await executeReview({ review, manifest, sign: signer.sign })
+      // Prepared and confirmed through the retrying server; it never sends a transaction twice.
+      const review = await prepareReview({ manifest, input: { ...draft, guards: guards.guards }, rpc: server() })
+      const result = await executeReview({ review, manifest, sign: signer.sign, rpc: server() })
       expect(result.status, `${action}: ${json(result)}`).toBe("SUCCESS")
       expect(result.decodeError).toBeUndefined()
       const decoded = result.output
@@ -341,7 +350,7 @@ describe("Suite B: the ephemeral lifecycle on a throwaway Testnet market (plan 0
 
   /** The ledger a confirmed transaction landed in. */
   async function ledgerOf(hash: string): Promise<number> {
-    const tx = await eventually(() => createRpcServer(manifest.rpcUrl).getTransaction(hash), (t) => t.status !== "NOT_FOUND", `transaction ${hash} on the RPC`, 60_000)
+    const tx = await eventually(() => server().getTransaction(hash), (t) => t.status !== "NOT_FOUND", `transaction ${hash} on the RPC`, 60_000)
     if (tx.status === "NOT_FOUND") throw new Error(`transaction ${hash} not found`)
     return tx.ledger
   }
@@ -357,35 +366,48 @@ describe("Suite B: the ephemeral lifecycle on a throwaway Testnet market (plan 0
   /**
    * The oracle admin pushes a value stamped with the latest ledger time: `next(current)`, or by
    * default the keeper's growth (`nextReferenceValue`, 5 % a year), never below the current value.
-   * The oracle must accept it.
+   * The oracle must accept it. The time is read in the step, so a second run (after an external
+   * failure that left nothing on chain) is stamped when it is sent, and the oracle's freshness
+   * window counts from then. A failure names the step and its cause, such as the RPC's last answer.
    */
   async function tick(step: string, next?: (current: bigint) => bigint): Promise<{ value: bigint; timestamp: number; hash: string }> {
     const oracle = manifest.shared.oracle
-    const current = BigInt(String((await reader()({ contractId: oracle, functionName: "get_reference_value" })).value))
-    const last = Number((await reader()({ contractId: oracle, functionName: "get_reference_timestamp" })).value)
-    let now = (await ledgerClock(manifest)).closeTime
-    while (now <= last) {
-      await sleep(2_000)
-      now = (await ledgerClock(manifest)).closeTime
+    let stamped = { current: 0n, value: 0n, timestamp: 0 }
+    let sent: Sent & { accepted: boolean }
+    try {
+      const current = BigInt(String((await reader()({ contractId: oracle, functionName: "get_reference_value" })).value))
+      const last = Number((await reader()({ contractId: oracle, functionName: "get_reference_timestamp" })).value)
+      sent = await adminStep("oracle", step, "oracle.set_reference_value", async () => {
+        let now = (await ledgerClock(manifest)).closeTime
+        while (now <= last) {
+          await sleep(2_000)
+          now = (await ledgerClock(manifest)).closeTime
+        }
+        const value = next ? next(current) : (nextReferenceValue({ current, lastTimestamp: last, now }) ?? current)
+        stamped = { current, value, timestamp: now }
+        return oracleSetValue({ manifest, oracleAdmin, value, timestamp: now })
+      })
+    } catch (error) {
+      throw new Error(`${step} failed: ${errorMessage(error)}`, { cause: error })
     }
-    const value = next ? next(current) : (nextReferenceValue({ current, lastTimestamp: last, now }) ?? current)
-    const sent = await adminStep("oracle", step, "oracle.set_reference_value", () => oracleSetValue({ manifest, oracleAdmin, value, timestamp: now }))
-    expect(sent.accepted, `${step}: the oracle accepted ${value} at ${now}`).toBe(true)
-    lastTickTimestamp = now
-    log(`${step}: oracle ${current} -> ${value} at ledger time ${now}, tx ${sent.hash} (ledger ${sent.ledger})`)
-    return { value, timestamp: now, hash: sent.hash }
+    const { current, value, timestamp } = stamped
+    expect(sent.accepted, `${step}: the oracle accepted ${value} at ${timestamp}`).toBe(true)
+    lastTickTimestamp = timestamp
+    log(`${step}: oracle ${current} -> ${value} at ledger time ${timestamp}, tx ${sent.hash} (ledger ${sent.ledger})`)
+    return { value, timestamp, hash: sent.hash }
   }
 
   /**
    * `draft` simulated as the app simulates it (the hook's `simulate`: `invocationFor`, then
    * `simulateInvocation` as the user), asked again while the node that answers is before `minLedger`:
    * a node a ledger behind would simulate a market not yet matured, or an oracle not yet ticked. The
-   * node's ledger comes from the simulation response itself, refused or not.
+   * node's ledger comes from the simulation response itself, refused or not. An overloaded RPC is
+   * asked again (`liveRpcServer`); one that stays so past the retries fails with its answer.
    */
   async function simulateFrom(draft: ActionInput, minLedger: number): Promise<{ outcome: SimulationOutcome; ledger: number }> {
     return eventually(
       async () => {
-        const node = createRpcServer(manifest.rpcUrl)
+        const node = liveRpcServer(manifest.rpcUrl, log)
         let ledger = 0
         const server = {
           getAccount: (account: string) => node.getAccount(account),
@@ -402,6 +424,9 @@ describe("Suite B: the ephemeral lifecycle on a throwaway Testnet market (plan 0
           invocation: invocationFor(manifest, draft),
           server,
         })
+        if (!outcome.ok && outcome.kind === "rpc_error" && isTransientRpcError(outcome.message)) {
+          throw new Error(`the ${draft.action} could not be simulated: ${outcome.message}`)
+        }
         return { outcome, ledger }
       },
       (r) => r.ledger >= minLedger,
@@ -582,7 +607,7 @@ describe("Suite B: the ephemeral lifecycle on a throwaway Testnet market (plan 0
         ["perm_yt", "ok"],
       ])
       expect(balancesOf(acc), `${who} balances`).toEqual({ underlying: 100_000n * U, sy: 0n, pt: 0n, yt: 0n, lp: 0n })
-      runners[who] = createRunner({ manifest, market, findings, kind, signer: signers[who], log, readAfterLanded: true })
+      runners[who] = createRunner({ manifest, market, findings, kind, signer: signers[who], log, readAfterLanded: true, rpc: server(), reader: reader() })
       log(`${who} ${signers[who].publicKey} onboarded: ${showBalances(balancesOf(acc))}`)
     }
     mark("onboarding")
@@ -816,7 +841,7 @@ describe("Suite B: the ephemeral lifecycle on a throwaway Testnet market (plan 0
 
   it("After a tick, a trade is refused as matured, by the app and by the pool", async () => {
     if (maturedLedger === 0) throw new Error("maturity was not observed: the stale check did not run")
-    await tick("oracle tick (maturity)")
+    maturityTick = await tick("oracle tick (maturity)")
     // From the tick's ledger (after the one where maturity was observed, with its margin) or later.
     const floor = Math.max(lastLedger(), maturedLedger)
     await eventually(
@@ -849,6 +874,10 @@ describe("Suite B: the ephemeral lifecycle on a throwaway Testnet market (plan 0
   }, 4 * MINUTE)
 
   it("redeem_at_maturity: the holder redeems all its PT and YT, settling the market; exact on its balances", async () => {
+    // The first redemption settles the market at the oracle price, which must be fresh: it needs the tick.
+    if (maturityTick === undefined) throw new Error("the oracle was not ticked after maturity (see the test before): the first redemption needs a fresh oracle")
+    const age = (await ledgerClock(manifest)).closeTime - maturityTick.timestamp
+    if (age >= STALE_WINDOW_SECONDS) throw new Error(`the tick after maturity is ${age} s old, past the oracle's ${STALE_WINDOW_SECONDS} s window: the redemption would be refused as stale`)
     const s = await eventually(
       () => runners.holder.snapshot(),
       (snap) => snap.ms.oracleFresh.status === "live" && snap.ms.oracleFresh.value === true,
@@ -895,13 +924,14 @@ describe("Suite B: the ephemeral lifecycle on a throwaway Testnet market (plan 0
     if (recordId === undefined || !record.recovery?.recordAfterSeize) throw new Error("no recovery record: the seizure did not run")
     const seizedRec = record.recovery.recordAfterSeize
     const escrow = market.contracts.recoveryEscrow
+    // The PT leg is checked against the rate the redemption settled the market at: no rate, no transaction.
+    const settled = record.redeem?.settledRate
+    if (settled === undefined) throw new Error("no settlement rate from the redemption (see the test before): finalize_record is checked against it, so it is not sent")
     const escrowBefore = (await positionsOf(reader(), market, escrow, lastLedger())).positions
     const id = recordId
     const fin = await adminStep("admin", "finalize the record", "escrow.finalize_record", () => finalizeRecord({ manifest, market, admin, id }))
     const { record: rec } = await readRecord(reader(), market, id, fin.ledger)
     expect(rec).toEqual({ ...seizedRec, finalized: true, underlying_from_pt: fin.fromPt, underlying_from_yt: fin.fromYt })
-    const settled = record.redeem?.settledRate
-    if (settled === undefined) throw new Error("the market was not settled by the redemption")
     const ptTotal = seizedRec.pt_amount + seizedRec.lp_pt
     const ptLeg = (ptTotal * SCALE) / settled
     expect(fin.fromPt <= ptLeg && ptLeg - fin.fromPt <= 1n, `PT leg ${fin.fromPt} vs ${ptLeg}`).toBe(true)

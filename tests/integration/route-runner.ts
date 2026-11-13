@@ -11,11 +11,15 @@
  * as the hook passes it: the USDY flash's budget is capped in SY, R5-3), `prepareReview`; then, as
  * `sign` does it, `executeReview` (R31 checks, sign, submit, poll, decode). The open guards take the
  * same rate (R5-3: the USDY flash is simulated with its whole budget in SY as `max_net_cost`).
+ *
+ * The Testnet suites hand the runner their RPC access (`tests/live/rpc.ts`: `rpc` and `reader`),
+ * whose reads, simulations and polls wait out an overloaded RPC and never send a transaction twice;
+ * the local suites give none, and the runner uses the app's own (`createRpcServer`, `createRpcReader`).
  */
 import { expect } from "vitest"
 import { derive, ratesFrom, simulate } from "@/hooks/use-simulation"
 import { fetchAccountState, type AccountState, type ComplianceKind } from "@/lib/protocol/account-state"
-import { ACTION_META, type ActionInput, type GuardValues } from "@/lib/protocol/actions"
+import { ACTION_META, invocationFor, type ActionInput, type GuardValues } from "@/lib/protocol/actions"
 import { evaluateAccountCompliance, type ComplianceItem } from "@/lib/protocol/compliance"
 import { impliedRate, type CurveState } from "@/lib/protocol/curve"
 import { evaluateGates, type Blocker, type GateContext } from "@/lib/protocol/gates"
@@ -23,11 +27,11 @@ import { openGuards, type ActionOutput } from "@/lib/protocol/guards"
 import { createHorizon } from "@/lib/protocol/horizon"
 import { fetchMarketState, type MarketState, type PoolStateView } from "@/lib/protocol/market-state"
 import { BPS, ceilDiv } from "@/lib/protocol/math"
-import { createRpcReader } from "@/lib/protocol/reader"
+import { createRpcReader, type ContractReader } from "@/lib/protocol/reader"
 import { executeReview, prepareReview, type Review } from "@/lib/protocol/review"
 import { preStartDraft, routePreStartBlockers } from "@/lib/protocol/route-gates"
 import { resolveStep, type RouteRequest, type StepPlan } from "@/lib/protocol/routes"
-import { createRpcServer, type SimulationOutcome } from "@/lib/protocol/stellar"
+import { createRpcServer, simulateInvocation, type SimulationOutcome } from "@/lib/protocol/stellar"
 import { currentContractsAdapter, toRouteRequest, type PlanContext, type TradeQuote, type TradeRequest } from "@/lib/protocol/trade-adapter"
 import type { Finding, Live, Manifest, Market } from "@/lib/protocol/types"
 import { balancesOf, ledgerClock, showBalances, units, type Balances } from "../live/chain"
@@ -138,10 +142,14 @@ export function createRunner(p: {
    * or later. Off by default: the local stack is one node, and its suites run as they always have.
    */
   readAfterLanded?: boolean
+  /** The RPC server every simulation, preparation, submission and poll goes through; `createRpcServer` by default. */
+  rpc?: ReturnType<typeof createRpcServer>
+  /** The contract reader of the snapshots; `createRpcReader` by default. */
+  reader?: ContractReader
 }) {
   const { manifest, market, findings, kind, signer, log } = p
   const account = signer.publicKey
-  const reader = () => createRpcReader(manifest)
+  const reader = () => p.reader ?? createRpcReader(manifest)
   const horizon = () => createHorizon(manifest.horizonUrl)
   /** The ledger of the latest confirmed step (`readAfterLanded` only; 0 otherwise). */
   let landed = 0
@@ -149,7 +157,7 @@ export function createRunner(p: {
   /** The ledger a confirmed transaction landed in, read again while the node asked does not know it yet. */
   async function landedLedger(hash: string): Promise<number> {
     for (let attempt = 1; ; attempt++) {
-      const tx = await createRpcServer(manifest.rpcUrl).getTransaction(hash)
+      const tx = await (p.rpc ?? createRpcServer(manifest.rpcUrl)).getTransaction(hash)
       if (tx.status !== "NOT_FOUND") return tx.ledger
       if (attempt === LANDED_ATTEMPTS) throw new Error(`transaction ${hash} confirmed, then not found by the RPC ${attempt} times`)
       await sleep(1_000)
@@ -187,6 +195,25 @@ export function createRunner(p: {
     }
   }
 
+  /**
+   * The hook's `simulate` (`simulateInvocation` as the user, a failure an `rpc_error`), through `p.rpc`
+   * when the suite gives one: the hook's own function otherwise.
+   */
+  async function simulateAsUser(input: ActionInput): Promise<SimulationOutcome> {
+    if (!p.rpc) return simulate(manifest, input)
+    try {
+      return await simulateInvocation({
+        rpcUrl: manifest.rpcUrl,
+        networkPassphrase: manifest.networkPassphrase,
+        source: input.source,
+        invocation: invocationFor(manifest, input),
+        server: p.rpc,
+      })
+    } catch (error) {
+      return { ok: false, kind: "rpc_error", message: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
   /** The SY exchange rate the open guards and the floors may need (R5-3), from reads that are fresh: `useRoute`'s `ratesFrom`. */
   const rates = (s: Snapshot) => ratesFrom({ data: s.ms, stale: false })
 
@@ -213,7 +240,7 @@ export function createRunner(p: {
     const first = preStartDraft(plans[0], req).input
     // The USDY flash's open max_net_cost is its budget in SY, which needs the exchange rate (R5-3).
     const simInput: ActionInput = { ...first, guards: openGuards(first.action, first.amount, rates(s)), deadline: BigInt(Math.floor(s.ledgerTime) + DEADLINE_SECONDS) }
-    const outcome = await simulate(manifest, simInput)
+    const outcome = await simulateAsUser(simInput)
     const { output, guards } = derive(simInput, outcome, SLIPPAGE_BPS, rates(s))
     const blockers = routePreStartBlockers({
       plans,
@@ -243,7 +270,7 @@ export function createRunner(p: {
       guards: openGuards(plan.action, amounts.amount, rates(s)),
       deadline: BigInt(ledgerAt + DEADLINE_SECONDS),
     }
-    const outcome: SimulationOutcome = await simulate(manifest, draft)
+    const outcome: SimulationOutcome = await simulateAsUser(draft)
     const blockers = evaluateGates(draft, { ...base(s), simulation: outcome })
     expect(blockers, `${label}: gates`).toEqual([])
     const { output: simulated, guards } = derive(draft, outcome, SLIPPAGE_BPS, rates(s))
@@ -254,9 +281,9 @@ export function createRunner(p: {
     expect(ACTION_META[plan.action].slippageSensitive, `${label} is slippage-sensitive`).toBe(true)
     expectFloors({ ...draft, guards: g }, simulated, g, `${label} (simulated)`)
 
-    const review: Review = await prepareReview({ manifest, input: { ...draft, guards: g } })
+    const review: Review = await prepareReview({ manifest, input: { ...draft, guards: g }, rpc: p.rpc })
     expect(review.input.guards).toEqual(g)
-    const result = await executeReview({ review, manifest, sign: signer.sign })
+    const result = await executeReview({ review, manifest, sign: signer.sign, rpc: p.rpc })
     expect(result.status, `${label}: ${json(result)}`).toBe("SUCCESS")
     expect(result.decodeError).toBeUndefined()
     const decoded = result.output
