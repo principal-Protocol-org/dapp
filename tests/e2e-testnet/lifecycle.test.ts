@@ -20,8 +20,10 @@
  * 5. The oracle admin shortens the freshness window to `STALE_WINDOW_SECONDS`
  *    (`set_safety_params`). The deploy keeps 3,600 s: its own seeding mints about ten minutes after
  *    the genesis value, so a shorter window would refuse it. Then no tick until the market has
- *    matured and the value is stale: the holder's redemption, the first one, which settles the
- *    market at the oracle price, is refused as stale by the app and by the contracts.
+ *    matured and the value is stale, plus `MATURITY_MARGIN_SECONDS`; every read and simulation of
+ *    the refusals is from the ledger where that was observed or later. The holder's redemption, the
+ *    first one, which settles the market at the oracle price, is refused as stale by the app and by
+ *    the contracts.
  * 6. One tick. A trade is refused as matured, by the app and by the pool. The holder redeems all its
  *    PT and YT (`redeem_at_maturity`), which settles the market. `finalize_record` settles the seized
  *    PT and YT into the underlying, read back from `get_record`.
@@ -36,15 +38,15 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { isAbsolute, join, resolve } from "node:path"
-import { Keypair } from "@stellar/stellar-sdk"
+import { Keypair, type Transaction } from "@stellar/stellar-sdk"
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
 
 // `keys` mode runs the faucet in-process, and the keeper's growth rule is imported: both are `server-only`.
 vi.mock("server-only", () => ({}))
 
-import { derive, ratesFrom, simulate } from "@/hooks/use-simulation"
+import { derive, ratesFrom } from "@/hooks/use-simulation"
 import { fetchAccountState, type AccountState, type ComplianceKind } from "@/lib/protocol/account-state"
-import type { ActionInput } from "@/lib/protocol/actions"
+import { invocationFor, type ActionInput } from "@/lib/protocol/actions"
 import { evaluateAccountCompliance } from "@/lib/protocol/compliance"
 import { evaluateGates, type Blocker } from "@/lib/protocol/gates"
 import { openGuards, type ActionOutput } from "@/lib/protocol/guards"
@@ -56,7 +58,7 @@ import { previewDeposit } from "@/lib/protocol/previews"
 import { createRpcReader } from "@/lib/protocol/reader"
 import { executeReview, prepareReview } from "@/lib/protocol/review"
 import { planRoute, type RouteRequest, type StepPlan } from "@/lib/protocol/routes"
-import { createRpcServer, type SimulationOutcome } from "@/lib/protocol/stellar"
+import { createRpcServer, simulateInvocation, type SimulationOutcome } from "@/lib/protocol/stellar"
 import type { TradeRequest } from "@/lib/protocol/trade-adapter"
 import type { Finding, Live, Manifest, Market } from "@/lib/protocol/types"
 import { pendingYield } from "@/lib/protocol/yield"
@@ -108,6 +110,12 @@ const MIN_RUNWAY_SECONDS = 360
 const DEPLOY_STALE_SECONDS = 3_600
 /** The window the oracle admin sets before the wait: the stale check waits this long after the last tick. */
 const STALE_WINDOW_SECONDS = 300
+/**
+ * How far past maturity (and past the point the oracle goes stale) the refusals are read: about four
+ * ledgers, so a node a ledger or two behind is past both too. The reads and the simulation are also
+ * floored at the ledger where both were observed (`maturedLedger`).
+ */
+const MATURITY_MARGIN_SECONDS = 20
 /** The oracle's deviation bound, as deployed (deploy.sh): kept when the window changes. */
 const MAX_DEVIATION_BPS = 1_000
 /** The deploy builds the contracts if they are not cached, then sends about seventy transactions. */
@@ -132,7 +140,8 @@ type Who = "trader" | "holder"
 type Signer = Who | "admin" | "oracle"
 /** One transaction of the run, in the order it landed. */
 type Landed = { step: string; signer: Signer; action: string; hash: string; ledger: number }
-type Refusal = { what: string; account: string; ledger: number; ledgerTime: number; blockers: Blocker[]; simulation: SimulationOutcome }
+/** A refusal as the app shows it: `ledger`/`ledgerTime` from the clock the gates used; `simulatedLedger` the node's ledger for the simulation. */
+type Refusal = { what: string; account: string; ledger: number; ledgerTime: number; simulatedLedger: number; blockers: Blocker[]; simulation: SimulationOutcome }
 
 /** What `e2e-artifacts/lifecycle.json` records: public data only, through `redact`. */
 type LifecycleRecord = {
@@ -173,7 +182,7 @@ type LifecycleRecord = {
     recordAfterFinalize?: RecoveryRecord
     deauthorizedBlockers?: Blocker[]
   }
-  staleWindow?: { seconds: number; lastTickTimestamp: number; waitedSeconds: number }
+  staleWindow?: { seconds: number; lastTickTimestamp: number; waitedSeconds: number; observedLedger: number; observedTime: number; marginPastMaturity: number }
   refusals: Refusal[]
   redeem?: { pt: bigint; yt: bigint; underlyingFromPt: bigint; underlyingFromYt: bigint; settledRate: bigint }
   keysRemoved?: string[]
@@ -215,6 +224,8 @@ describe("Suite B: the ephemeral lifecycle on a throwaway Testnet market (plan 0
   /** The ledger time of the last value the oracle accepted. */
   let lastTickTimestamp = 0
   let recordId: bigint | undefined
+  /** The ledger at which the market was seen matured and the oracle stale, with the margin: the floor of the refusals' reads. */
+  let maturedLedger = 0
   /** Onboards a fresh keypair with the run's own issuer; set once the market is deployed. */
   let onboard: () => Promise<OnboardedSigner> = () => Promise.reject(new Error("the market was not deployed"))
 
@@ -309,12 +320,7 @@ describe("Suite B: the ephemeral lifecycle on a throwaway Testnet market (plan 0
         guards: openGuards(action, amount),
         deadline: BigInt(Math.floor(s.ledgerTime) + DEADLINE_SECONDS),
       }
-      const outcome = await eventually(
-        () => simulate(manifest, draft),
-        (o) => !o.ok || o.latestLedger >= minLedger,
-        `the ${action} simulated at ledger ${minLedger} or later`,
-        60_000,
-      )
+      const { outcome } = await simulateFrom(draft, minLedger)
       expect(evaluateGates(draft, { ...r.base(s), simulation: outcome }), `${action}: gates`).toEqual([])
       const { output: simulated, guards } = derive(draft, outcome, SLIPPAGE_BPS, ratesFrom({ data: s.ms, stale: false }))
       if (!simulated || !guards?.ok) throw new Error(`${action}: no exact quote: ${json({ outcome, guards })}`)
@@ -371,8 +377,42 @@ describe("Suite B: the ephemeral lifecycle on a throwaway Testnet market (plan 0
   }
 
   /**
-   * What the app shows `account` for `draft`: every gate with fresh reads (from the run's last
-   * transaction or later), and the simulation as that account.
+   * `draft` simulated as the app simulates it (the hook's `simulate`: `invocationFor`, then
+   * `simulateInvocation` as the user), asked again while the node that answers is before `minLedger`:
+   * a node a ledger behind would simulate a market not yet matured, or an oracle not yet ticked. The
+   * node's ledger comes from the simulation response itself, refused or not.
+   */
+  async function simulateFrom(draft: ActionInput, minLedger: number): Promise<{ outcome: SimulationOutcome; ledger: number }> {
+    return eventually(
+      async () => {
+        const node = createRpcServer(manifest.rpcUrl)
+        let ledger = 0
+        const server = {
+          getAccount: (account: string) => node.getAccount(account),
+          simulateTransaction: async (tx: Transaction) => {
+            const response = await node.simulateTransaction(tx)
+            ledger = response.latestLedger
+            return response
+          },
+        }
+        const outcome = await simulateInvocation({
+          rpcUrl: manifest.rpcUrl,
+          networkPassphrase: manifest.networkPassphrase,
+          source: draft.source,
+          invocation: invocationFor(manifest, draft),
+          server,
+        })
+        return { outcome, ledger }
+      },
+      (r) => r.ledger >= minLedger,
+      `the ${draft.action} simulated at ledger ${minLedger} or later`,
+      60_000,
+    )
+  }
+
+  /**
+   * What the app shows `account` for `draft`: every gate with fresh reads and the ledger clock, and
+   * the simulation as that account, all from `minLedger` or later (the run's last transaction by default).
    */
   async function gatesFor(account: string, draft: ActionInput, minLedger = lastLedger()): Promise<Refusal> {
     const { clock, ms, acc } = await eventually(
@@ -380,11 +420,11 @@ describe("Suite B: the ephemeral lifecycle on a throwaway Testnet market (plan 0
         const [clock, ms, acc] = await Promise.all([ledgerClock(manifest), fetchMarketState(reader(), manifest, market.marketId), accountState(account)])
         return { clock, ms, acc }
       },
-      (r) => readFrom(minLedger, r.ms.oracleFresh, r.ms.settledRate, r.ms.poolState, r.acc.underlying, r.acc.pt),
+      (r) => r.clock.sequence >= minLedger && readFrom(minLedger, r.ms.oracleFresh, r.ms.settledRate, r.ms.poolState, r.acc.underlying, r.acc.pt),
       `the reads for ${draft.action} at ledger ${minLedger} or later`,
       60_000,
     )
-    const simulation = await simulate(manifest, draft)
+    const { outcome: simulation, ledger: simulatedLedger } = await simulateFrom(draft, minLedger)
     const blockers = evaluateGates(draft, {
       findings,
       wallet: { status: "connected", publicKey: account, networkPassphrase: manifest.networkPassphrase },
@@ -395,7 +435,7 @@ describe("Suite B: the ephemeral lifecycle on a throwaway Testnet market (plan 0
       managerId: market.contracts.manager,
       simulation,
     })
-    return { what: draft.action, account, ledger: clock.sequence, ledgerTime: Math.floor(clock.now()), blockers, simulation }
+    return { what: draft.action, account, ledger: clock.sequence, ledgerTime: Math.floor(clock.now()), simulatedLedger, blockers, simulation }
   }
 
   const draftFor = async (who: Who, action: ActionInput["action"], amount: bigint, secondaryAmount?: bigint): Promise<ActionInput> => {
@@ -718,19 +758,31 @@ describe("Suite B: the ephemeral lifecycle on a throwaway Testnet market (plan 0
     )
     log(`oracle window set to ${STALE_WINDOW_SECONDS} s: tx ${window.hash}`)
     const waitFrom = Date.now()
-    const due = Math.max(market.maturity, lastTickTimestamp + STALE_WINDOW_SECONDS + 1)
+    const due = Math.max(market.maturity, lastTickTimestamp + STALE_WINDOW_SECONDS + 1) + MATURITY_MARGIN_SECONDS
     let clock = await ledgerClock(manifest)
-    log(`waiting ${Math.max(0, Math.ceil(due - clock.now()))} s: maturity at ${market.maturity}, the last tick (${lastTickTimestamp}) stale after ${lastTickTimestamp + STALE_WINDOW_SECONDS}`)
+    log(
+      `waiting ${Math.max(0, Math.ceil(due - clock.now()))} s: maturity at ${market.maturity}, the last tick (${lastTickTimestamp}) stale after ` +
+        `${lastTickTimestamp + STALE_WINDOW_SECONDS}, then ${MATURITY_MARGIN_SECONDS} s more`,
+    )
     while (clock.closeTime < due) {
       await sleep(Math.min(30_000, Math.max(5_000, (due - clock.now()) * 1_000)))
       clock = await ledgerClock(manifest)
     }
-    record.staleWindow = { seconds: STALE_WINDOW_SECONDS, lastTickTimestamp, waitedSeconds: Math.round((Date.now() - waitFrom) / 1_000) }
+    // Every read and simulation of the refusals is from this ledger or later: a lagging node is read again.
+    maturedLedger = Math.max(lastLedger(), clock.sequence)
+    record.staleWindow = {
+      seconds: STALE_WINDOW_SECONDS,
+      lastTickTimestamp,
+      waitedSeconds: Math.round((Date.now() - waitFrom) / 1_000),
+      observedLedger: clock.sequence,
+      observedTime: clock.closeTime,
+      marginPastMaturity: clock.closeTime - market.maturity,
+    }
 
     const ms = await eventually(
       () => fetchMarketState(reader(), manifest, market.marketId),
-      (m) => m.oracleFresh.status === "live" && m.oracleFresh.value === false,
-      "the oracle read as stale",
+      (m) => readFrom(maturedLedger, m.oracleFresh) && m.oracleFresh.status === "live" && m.oracleFresh.value === false,
+      `the oracle read as stale at ledger ${maturedLedger} or later`,
       60_000,
     )
     expect(live(ms.oracleMaxStaleSeconds, "window")).toBe(BigInt(STALE_WINDOW_SECONDS))
@@ -739,7 +791,8 @@ describe("Suite B: the ephemeral lifecycle on a throwaway Testnet market (plan 0
 
     const holder = await balancesFrom("holder", lastLedger())
     expect(holder.pt > 0n && holder.yt > 0n).toBe(true)
-    const refusal = await gatesFor(accountOf("holder"), await draftFor("holder", "redeem", holder.pt, holder.yt))
+    const refusal = await gatesFor(accountOf("holder"), await draftFor("holder", "redeem", holder.pt, holder.yt), maturedLedger)
+    expect(refusal.ledgerTime - market.maturity >= MATURITY_MARGIN_SECONDS, `read ${refusal.ledgerTime - market.maturity} s past maturity`).toBe(true)
     expect(refusal.blockers).toEqual([
       {
         code: "oracle",
@@ -754,19 +807,26 @@ describe("Suite B: the ephemeral lifecycle on a throwaway Testnet market (plan 0
     // PrincipalManager.OracleStale (#7), raised by the manager under the Router's redeem_at_maturity.
     expect(refusal.simulation).toMatchObject({ ok: false, kind: "contract_error", contractId: market.contracts.manager, code: 7 })
     record.refusals.push({ ...refusal, what: "redeem_at_maturity with a stale oracle (the first redemption settles the market)" })
-    log(`stale: the holder's redemption is refused at ledger ${refusal.ledger} (time ${refusal.ledgerTime}, last tick ${lastTickTimestamp}): ${refusal.blockers.map((b) => b.code).join(", ")}; contract error #7 from the manager`)
+    log(
+      `stale: the holder's redemption is refused at ledger ${refusal.ledger} (time ${refusal.ledgerTime}, ${refusal.ledgerTime - market.maturity} s past maturity, ` +
+        `last tick ${lastTickTimestamp}; simulated at ledger ${refusal.simulatedLedger}): ${refusal.blockers.map((b) => b.code).join(", ")}; contract error #7 from the manager`,
+    )
     mark("stale refusal")
   }, 30 * MINUTE)
 
   it("After a tick, a trade is refused as matured, by the app and by the pool", async () => {
+    if (maturedLedger === 0) throw new Error("maturity was not observed: the stale check did not run")
     await tick("oracle tick (maturity)")
+    // From the tick's ledger (after the one where maturity was observed, with its margin) or later.
+    const floor = Math.max(lastLedger(), maturedLedger)
     await eventually(
       () => fetchMarketState(reader(), manifest, market.marketId),
-      (m) => m.oracleFresh.status === "live" && m.oracleFresh.value === true,
-      "the oracle read as fresh",
+      (m) => readFrom(floor, m.oracleFresh) && m.oracleFresh.status === "live" && m.oracleFresh.value === true,
+      `the oracle read as fresh at ledger ${floor} or later`,
       60_000,
     )
-    const refusal = await gatesFor(accountOf("holder"), await draftFor("holder", "buy_pt", MATURED_TRADE))
+    const refusal = await gatesFor(accountOf("holder"), await draftFor("holder", "buy_pt", MATURED_TRADE), floor)
+    expect(refusal.ledgerTime - market.maturity >= MATURITY_MARGIN_SECONDS, `read ${refusal.ledgerTime - market.maturity} s past maturity`).toBe(true)
     expect(refusal.blockers).toEqual([
       {
         code: "maturity",
@@ -781,7 +841,10 @@ describe("Suite B: the ephemeral lifecycle on a throwaway Testnet market (plan 0
     // MarketPool.Expired (#6): `assert_active` refuses a swap at or after maturity.
     expect(refusal.simulation).toMatchObject({ ok: false, kind: "contract_error", contractId: market.contracts.pool, code: 6 })
     record.refusals.push({ ...refusal, what: "buy_pt after maturity (the oracle fresh)" })
-    log(`matured: a Buy PT is refused at ledger ${refusal.ledger} (time ${refusal.ledgerTime}, maturity ${market.maturity}); contract error #6 from the pool`)
+    log(
+      `matured: a Buy PT is refused at ledger ${refusal.ledger} (time ${refusal.ledgerTime}, ${refusal.ledgerTime - market.maturity} s past maturity ${market.maturity}; ` +
+        `simulated at ledger ${refusal.simulatedLedger}); contract error #6 from the pool`,
+    )
     mark("matured refusal")
   }, 4 * MINUTE)
 
