@@ -33,6 +33,7 @@ import {
 } from "@stellar/stellar-sdk"
 import { ACTION_META, invocationFor, type ActionId, type ActionInput, type GuardValues } from "./actions"
 import { bytesToHex } from "./bytes"
+import { failureSentence, userErrorMessage } from "./errors"
 import { formatAmount, shorten } from "./format"
 import { parseOutput, type ActionOutput } from "./guards"
 import { hashLike } from "./hash"
@@ -232,8 +233,9 @@ function assertNoZeroFloor(input: ActionInput): void {
   }
 }
 
+/** Readable, never "[object Object]"; an overloaded RPC reads as `RPC_BUSY_MESSAGE`. */
 function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
+  return userErrorMessage(error)
 }
 
 function invokedContractArgs(transaction: Transaction): xdr.InvokeContractArgs | undefined {
@@ -795,7 +797,11 @@ async function buildAndPrepare(
     return { built, prepared: await server.prepareTransaction(built) }
   } catch (error) {
     throw new Error(
-      `The transaction could not be prepared (${errorText(error)}). Nothing was signed; check the reasons shown and try again.`,
+      failureSentence(
+        error,
+        (message) => `The transaction could not be prepared (${message}). Nothing was signed; check the reasons shown and try again.`,
+        "Nothing was signed.",
+      ),
     )
   }
 }

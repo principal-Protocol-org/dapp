@@ -5,6 +5,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query"
 import { MARKET_REFETCH_MS, useMarketState } from "@/hooks/use-market-state"
 import { useSettings } from "@/hooks/use-settings"
 import { invocationFor, type ActionInput } from "@/lib/protocol/actions"
+import { userErrorMessage } from "@/lib/protocol/errors"
 import { guardsFrom, openGuards, parseOutput, type ActionOutput, type GuardRates, type GuardResult } from "@/lib/protocol/guards"
 import { useManifest } from "@/components/app/manifest-provider"
 import type { MarketState } from "@/lib/protocol/market-state"
@@ -75,7 +76,7 @@ export async function simulate(m: Manifest, input: ActionInput): Promise<Simulat
       invocation: invocationFor(m, input),
     })
   } catch (error) {
-    return { ok: false, kind: "rpc_error", message: error instanceof Error ? error.message : String(error) }
+    return { ok: false, kind: "rpc_error", message: userErrorMessage(error) }
   }
 }
 

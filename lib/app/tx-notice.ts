@@ -1,3 +1,4 @@
+import { userErrorMessage } from "@/lib/protocol/errors"
 import type { TxResult } from "@/lib/protocol/review"
 import { SubmissionRejectedError } from "@/lib/protocol/stellar"
 import type { Network } from "@/lib/protocol/types"
@@ -52,7 +53,7 @@ export function noticeForResult(label: string, result: TxResult, network: Networ
 
 /** An attempt that threw: refused by the network (with its hash), or stopped before submission. */
 export function noticeForError(label: string, error: unknown, network: Network): TxNotice {
-  const detail = error instanceof Error ? error.message : String(error)
+  const detail = userErrorMessage(error)
   if (error instanceof SubmissionRejectedError && error.hash) {
     return { tone: "error", title: `${label} was not accepted by the network.`, detail, hash: error.hash, url: explorerTxUrl(network, error.hash) }
   }

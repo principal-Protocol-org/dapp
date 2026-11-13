@@ -17,6 +17,7 @@
  *
  * Pure and reader-injected; the RPC's ledger entries tell whether a contract exists (`wasm.ts`).
  */
+import { userErrorMessage } from "./errors"
 import { deriveMarketContracts } from "./factory"
 import { shorten } from "./format"
 import { isContractError, readLive, toAddress, toBigint, toBool, type ContractReader } from "./reader"
@@ -158,7 +159,7 @@ export async function marketProgress(reader: ContractReader, rpc: LedgerEntriesR
   try {
     hashes = await contractWasmHashesSettled(rpc, KINDS.map((kind) => predicted[kind]))
   } catch (error) {
-    throw new Error(`Could not read whether the new market's contracts exist: ${error instanceof Error ? error.message : String(error)}`)
+    throw new Error(`Could not read whether the new market's contracts exist: ${userErrorMessage(error)}`)
   }
   const found = KINDS.map((kind, i) => exists(predicted[kind], kind, manifest.wasmHashes[kind], hashes[i]))
   const deployed = Object.fromEntries(KINDS.map((kind, i) => [kind, found[i]])) as Record<MarketContractName, boolean>

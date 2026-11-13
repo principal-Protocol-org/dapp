@@ -7,6 +7,7 @@ import { ReviewDialog } from "@/components/app/actions/review-dialog"
 import { showTxToast } from "@/components/app/actions/tx-feedback"
 import { useExecute } from "@/hooks/use-execute"
 import { noticeForError, noticeForResult } from "@/lib/app/tx-notice"
+import { userErrorMessage } from "@/lib/protocol/errors"
 import type { Blocker } from "@/lib/protocol/gates"
 import type { ManagerCall } from "@/lib/protocol/manager-calls"
 import { isExpired, SIGN_MARGIN_MS, type ManagerReview } from "@/lib/protocol/review"
@@ -44,7 +45,7 @@ export type ManagerSignFlowProps = {
   network: Network
 }
 
-const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error))
+const errorText = (error: unknown) => userErrorMessage(error)
 
 /**
  * Review → sign for manager calls (0002 §5), the manager view's counterpart of `SignFlow`. Each

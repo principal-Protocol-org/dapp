@@ -14,6 +14,7 @@
 import type { AccountState } from "./account-state"
 import type { ActionId, ActionInput } from "./actions"
 import type { ComplianceItem } from "./compliance"
+import { failureSentence } from "./errors"
 import { formatAmount, formatWindow } from "./format"
 import type { MarketState } from "./market-state"
 import { SCALE } from "./math"
@@ -778,7 +779,7 @@ function simulationGate(input: ActionInput, ctx: GateContext, g: Gates): void {
       )
       return
     case "rpc_error":
-      g.block("quote", `The simulation could not run (${s.message}), so there is no exact quote. Try again in a moment.`)
+      g.block("quote", failureSentence(s.message, (message) => `The simulation could not run (${message}), so there is no exact quote. Try again in a moment.`))
       return
     default: {
       // A new failure kind fails typecheck here and still refuses at runtime.

@@ -13,6 +13,7 @@ import {
 } from "@stellar/stellar-sdk";
 import { NULL_ACCOUNT } from "@stellar/stellar-sdk/contract";
 import { bytesToHex } from "./bytes";
+import { userErrorMessage } from "./errors";
 import { hashLike } from "./hash";
 
 export type ScArg =
@@ -582,7 +583,8 @@ export async function simulateInvocation(params: {
       minResourceFee: simulation.minResourceFee,
     };
   } catch (error) {
-    return { ok: false, kind: "rpc_error", message: error instanceof Error ? error.message : String(error) };
+    // Readable, never "[object Object]" (the SDK rejects with a plain JSON-RPC error object); an overloaded RPC reads as such.
+    return { ok: false, kind: "rpc_error", message: userErrorMessage(error) };
   }
 }
 

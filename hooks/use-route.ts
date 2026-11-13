@@ -37,6 +37,7 @@ import {
   type StepPlan,
   type Unwind,
 } from "@/lib/protocol/routes"
+import { userErrorMessage } from "@/lib/protocol/errors"
 import {
   createRpcServer,
   failedTransactionReason,
@@ -164,7 +165,7 @@ const IDLE: View = { phase: "idle", index: 0 }
 /** Slack for the interpolated ledger clock when deciding a step cannot have landed before `sentAt`. */
 const CLOCK_SLACK_S = 60
 
-const text = (error: unknown) => (error instanceof Error ? error.message : String(error))
+const text = (error: unknown) => userErrorMessage(error)
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0))
 const newId = () => globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`
 

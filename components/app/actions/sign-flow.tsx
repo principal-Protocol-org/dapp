@@ -8,6 +8,7 @@ import { showTxToast } from "@/components/app/actions/tx-feedback"
 import { useExecute } from "@/hooks/use-execute"
 import { noticeForError, noticeForResult, type TxNotice } from "@/lib/app/tx-notice"
 import type { ActionInput } from "@/lib/protocol/actions"
+import { userErrorMessage } from "@/lib/protocol/errors"
 import type { ActionOutput } from "@/lib/protocol/guards"
 import type { Blocker } from "@/lib/protocol/gates"
 import { isExpired, SIGN_MARGIN_MS, type RestoreReview, type Review } from "@/lib/protocol/review"
@@ -40,7 +41,7 @@ export type SignFlowProps = {
   network: Network
 }
 
-const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error))
+const errorText = (error: unknown) => userErrorMessage(error)
 const NOT_READY = "The checks no longer all pass, so this was not prepared. Close this and review again once they do."
 
 /**

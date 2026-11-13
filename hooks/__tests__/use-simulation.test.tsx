@@ -40,7 +40,10 @@ vi.mock("@/lib/protocol/reader", () => ({ createRpcReader: () => ({}) }))
 vi.mock("@/lib/protocol/market-state", async (orig) => ({ ...(await orig<object>()), fetchMarketState: mocks.fetchMarketState }))
 vi.mock("@/lib/protocol/stellar", async (orig) => ({ ...(await orig<object>()), simulateInvocation: mocks.simulateInvocation }))
 
-import { derive, useSimulation } from "@/hooks/use-simulation"
+import { derive, simulate, useSimulation } from "@/hooks/use-simulation"
+import { useManifest } from "@/components/app/manifest-provider"
+import { openGuards } from "@/lib/protocol/guards"
+import type { Manifest } from "@/lib/protocol/types"
 
 let client: QueryClient
 const wrapper = ({ children }: { children: React.ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>
@@ -63,6 +66,20 @@ beforeEach(() => {
   client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   mocks.fetchMarketState.mockReset().mockResolvedValue(marketState())
   mocks.simulateInvocation.mockReset().mockResolvedValue(simulated)
+})
+
+describe("simulate: a rejection becomes an rpc_error the user can read", () => {
+  const manifest = useManifest() as unknown as Manifest
+  // Open guards, as the hook simulates it (the flash's budget in SY at the exchange rate, R5-3).
+  const input: ActionInput = { ...buyYt, guards: openGuards(buyYt.action, buyYt.amount, { exchangeRate: S }) }
+  it("an overloaded RPC (the SDK's plain -32004 object) reads as the busy message, never [object Object]", async () => {
+    mocks.simulateInvocation.mockRejectedValueOnce({ code: -32004, message: "preflight queue full; retry later" })
+    expect(await simulate(manifest, input)).toEqual({ ok: false, kind: "rpc_error", message: "The Stellar network is busy. Try again in a moment." })
+  })
+  it("a plain Error keeps its message", async () => {
+    mocks.simulateInvocation.mockRejectedValueOnce(new Error("boom"))
+    expect(await simulate(manifest, input)).toEqual({ ok: false, kind: "rpc_error", message: "boom" })
+  })
 })
 
 describe("derive (R5-3)", () => {

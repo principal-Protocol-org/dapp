@@ -792,6 +792,17 @@ describe("simulateInvocation", () => {
     expect(down).toEqual({ ok: false, kind: "rpc_error", message: "network down" });
   });
 
+  it("shows an overloaded RPC (the SDK's plain -32004 object) as the busy message, never [object Object]", async () => {
+    const busy = await run(() => {
+      throw { code: -32004, message: "preflight queue full; retry later" };
+    });
+    expect(busy).toEqual({ ok: false, kind: "rpc_error", message: "The Stellar network is busy. Try again in a moment." });
+    const other = await run(() => {
+      throw { code: -32602, message: "invalid params" };
+    });
+    expect(other).toEqual({ ok: false, kind: "rpc_error", message: "invalid params (code -32602)" });
+  });
+
   it("uses the user's sequence and never prepares the transaction", async () => {
     let seen: Transaction | undefined;
     await simulateInvocation({

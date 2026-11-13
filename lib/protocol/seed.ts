@@ -23,6 +23,7 @@
  */
 import { WAD, impliedRate, isqrt, MathError, MIN_EXPONENT, pow, spotPrice, type CurveState } from "./curve"
 import { Gates, type Blocker } from "./gates"
+import { failureSentence } from "./errors"
 import { minAfterSlippage, parseOutput } from "./guards"
 import { seedCall, seedInvocation, type ManagerCall, type NewMarket, type SeedCallKind, type SeedCallParams } from "./manager-calls"
 import { parsePoolState, type PoolStateView } from "./market-state"
@@ -342,7 +343,7 @@ function simulationRefusal(kind: SeedCallKind, outcome: Exclude<SimulationOutcom
     case "restore_required":
       return `${what} needs archived contract data restored first, which the wizard does not do. Nothing was signed.`
     case "rpc_error":
-      return `${what} could not be simulated (${outcome.message}). Nothing was signed; try again in a moment.`
+      return failureSentence(outcome.message, (message) => `${what} could not be simulated (${message}). Nothing was signed; try again in a moment.`, "Nothing was signed.")
   }
 }
 

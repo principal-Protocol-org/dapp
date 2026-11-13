@@ -370,6 +370,16 @@ describe("prepareReview", () => {
     )
   })
 
+  it("says the network is busy when the RPC is overloaded (the SDK's plain -32004 object), never [object Object]", async () => {
+    const server = fakeRpc({
+      async prepareTransaction() {
+        throw { code: -32004, message: "preflight queue full; retry later" }
+      },
+    })
+    const error = await review("mint", {}, server).catch((e: unknown) => e)
+    expect((error as Error).message).toBe("The Stellar network is busy. Try again in a moment. Nothing was signed.")
+  })
+
   it("refuses a prepared transaction that calls something else", async () => {
     const server = fakeRpc({
       async prepareTransaction(tx) {

@@ -10,6 +10,7 @@ import { useAccountState } from "@/hooks/use-account-state"
 import { useMarketPermissions } from "@/hooks/use-market-permissions"
 import { useWallet } from "@/hooks/use-wallet"
 import { useManifest } from "@/components/app/manifest-provider"
+import { userErrorMessage } from "@/lib/protocol/errors"
 import {
   addTrustline,
   fundWithFriendbot,
@@ -72,7 +73,7 @@ type Run =
   | { phase: "finished"; sent: OnboardingStepId[] }
 
 function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
+  return userErrorMessage(error)
 }
 
 const thousands = (n: bigint) => n.toLocaleString("en-US")

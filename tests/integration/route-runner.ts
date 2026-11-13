@@ -21,6 +21,7 @@ import { derive, ratesFrom, simulate } from "@/hooks/use-simulation"
 import { fetchAccountState, type AccountState, type ComplianceKind } from "@/lib/protocol/account-state"
 import { ACTION_META, invocationFor, type ActionInput, type GuardValues } from "@/lib/protocol/actions"
 import { evaluateAccountCompliance, type ComplianceItem } from "@/lib/protocol/compliance"
+import { userErrorMessage } from "@/lib/protocol/errors"
 import { impliedRate, type CurveState } from "@/lib/protocol/curve"
 import { evaluateGates, type Blocker, type GateContext } from "@/lib/protocol/gates"
 import { openGuards, type ActionOutput } from "@/lib/protocol/guards"
@@ -210,7 +211,7 @@ export function createRunner(p: {
         server: p.rpc,
       })
     } catch (error) {
-      return { ok: false, kind: "rpc_error", message: error instanceof Error ? error.message : String(error) }
+      return { ok: false, kind: "rpc_error", message: userErrorMessage(error) }
     }
   }
 

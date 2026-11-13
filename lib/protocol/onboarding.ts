@@ -7,6 +7,7 @@
  */
 import { Account, Asset, BASE_FEE, Operation, TransactionBuilder } from "@stellar/stellar-sdk"
 import type { AccountState } from "./account-state"
+import { failureSentence } from "./errors"
 import { readLive, toBool, type ContractReader } from "./reader"
 import {
   assertSignedTransactionMatchesReview,
@@ -181,9 +182,7 @@ async function sequenceOf(server: TrustlineServer, account: string, wait: (ms: n
       return (await server.getAccount(account)).sequenceNumber()
     } catch (error) {
       if (attempt >= attempts) {
-        throw new Error(
-          `Your account could not be read from the network (${error instanceof Error ? error.message : String(error)}). Fund it first, then try again.`,
-        )
+        throw new Error(failureSentence(error, (message) => `Your account could not be read from the network (${message}). Fund it first, then try again.`))
       }
       await wait(2_000)
     }

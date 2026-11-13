@@ -17,6 +17,7 @@ import type { Blocker } from "@/lib/protocol/gates"
 import type { ManagerCall, NewMarket } from "@/lib/protocol/manager-calls"
 import { evaluateManagerGates } from "@/lib/protocol/manager-gates"
 import { aprToApy } from "@/lib/protocol/math"
+import { failureSentence } from "@/lib/protocol/errors"
 import { createRpcReader, liveValue, unavailable } from "@/lib/protocol/reader"
 import type { Role } from "@/lib/protocol/roles"
 import {
@@ -132,7 +133,9 @@ export function StepSeed({ salt, progress, account, ledgerTime }: ChainStepProps
       const clock = await getLedgerClock(createRpcServer(manifest.rpcUrl))
       return BigInt(clock.closeTime + deadlineSeconds)
     } catch (error) {
-      throw new Error(`The ledger time could not be read (${error instanceof Error ? error.message : String(error)}), so the call's deadline cannot be set. Nothing was signed; try again in a moment.`)
+      throw new Error(
+        failureSentence(error, (message) => `The ledger time could not be read (${message}), so the call's deadline cannot be set. Nothing was signed; try again in a moment.`, "Nothing was signed."),
+      )
     }
   }
   const built = (source: string, params: Parameters<typeof simulatedSeedCall>[0]["params"]) =>

@@ -825,6 +825,15 @@ const MATRIX: Row[] = [
     message: /socket hang up/,
     blocks: ALL,
   },
+  {
+    rule: "an overloaded RPC during simulation blocks with the plain busy message, not the RPC's text",
+    mutate: (c) => {
+      c.simulation = { ok: false, kind: "rpc_error", message: "The Stellar network is busy. Try again in a moment." }
+    },
+    code: "quote",
+    message: /^The Stellar network is busy\. Try again in a moment\.$/,
+    blocks: ALL,
+  },
 ]
 
 describe("healthy context", () => {

@@ -10,37 +10,34 @@
  *   and a second failure, is the result. No assertion is skipped: the second run makes every check
  *   of the first again.
  */
-import { errorMessage } from "@/lib/protocol/errors"
+import { errorMessage, isRpcBusy } from "@/lib/protocol/errors"
 import { redact, sleep } from "./util"
 
-/** JSON-RPC error codes of an RPC too busy to answer: stellar-rpc's "preflight queue full; retry later". */
-const TRANSIENT_RPC_CODES = new Set([-32004])
-/** HTTP answers of a busy or restarting RPC (or the gateway in front of it). */
-const TRANSIENT_HTTP_STATUSES = new Set([429, 502, 503, 504])
+/** HTTP answers of a restarting RPC or of the gateway in front of it (429 and 503 are `isRpcBusy`'s). */
+const TRANSIENT_HTTP_STATUSES = new Set([502, 504])
 /** A connection reset or a timeout, as Node or undici name it (on the error, or on its `cause`). */
 const TRANSIENT_SOCKET_CODE = /^(ECONNRESET|ECONNABORTED|ETIMEDOUT|EPIPE|EAI_AGAIN|UND_ERR_(SOCKET|CONNECT_TIMEOUT|HEADERS_TIMEOUT|BODY_TIMEOUT))$/
 const TRANSIENT_TEXT = [
-  // stellar-rpc's overload answer, with or without its code.
-  /preflight queue full|retry later/i,
-  // The SDK's HTTP client: "Request failed with status code 503".
-  /status code (429|502|503|504)\b/,
+  // The SDK's HTTP client: "Request failed with status code 502".
+  /status code (502|504)\b/,
   // The SDK's timeout, Node's fetch and sockets.
   /timeout of \d+ms exceeded|fetch failed|socket hang up|network error/i,
   /\b(ECONNRESET|ECONNABORTED|ETIMEDOUT|EPIPE|EAI_AGAIN|UND_ERR_(SOCKET|CONNECT_TIMEOUT|HEADERS_TIMEOUT|BODY_TIMEOUT))\b/,
 ]
 
 /**
- * True for an RPC that did not answer because it was busy or unreachable for a moment: the JSON-RPC
- * error -32004 ("preflight queue full; retry later", which the SDK rejects with as a plain
- * `{ code, message }` object), an HTTP 429, 502, 503 or 504, a connection reset or a timeout. Never
+ * True for an RPC that did not answer because it was busy or unreachable for a moment: overloaded
+ * (the app's own `isRpcBusy`: JSON-RPC -32004 "preflight queue full; retry later", which the SDK
+ * rejects with as a plain `{ code, message }` object, or HTTP 429 or 503), an HTTP 502 or 504, a
+ * connection reset or a timeout. Never
  * for an answer: a contract error, an invalid request (-32602), a 4xx or a 500. Node's fetch reports
  * every network failure as "fetch failed" (the code on `cause`), a refused connection or an unknown
  * host included: that counts as transient, so an RPC that is down fails after the budget, with it.
  */
 export function isTransientRpcError(error: unknown, depth = 0): boolean {
+  if (isRpcBusy(error)) return true
   if (error !== null && typeof error === "object") {
     const e = error as { code?: unknown; name?: unknown; response?: { status?: unknown }; cause?: unknown }
-    if (typeof e.code === "number" && TRANSIENT_RPC_CODES.has(e.code)) return true
     if (typeof e.code === "string" && TRANSIENT_SOCKET_CODE.test(e.code)) return true
     if (typeof e.response?.status === "number" && TRANSIENT_HTTP_STATUSES.has(e.response.status)) return true
     if (e.name === "TimeoutError") return true
@@ -88,7 +85,10 @@ export async function retryTransient<T>(p: {
       const delay = RPC_BACKOFF_MS[Math.min(attempt, RPC_BACKOFF_MS.length) - 1]
       const spent = now() - started
       if (spent + delay > budget) {
-        throw new Error(`${p.what}: the RPC still answered "${answer}" after ${attempt} attempts over ${Math.round(spent / 1_000)} s`, { cause: error })
+        const exhausted = `${p.what}: the RPC still answered "${answer}" after ${attempt} attempts over ${Math.round(spent / 1_000)} s`
+        // Logged too: an app layer may show the user's wording ("The Stellar network is busy…") in its place.
+        p.log?.(exhausted)
+        throw new Error(exhausted, { cause: error })
       }
       p.log?.(`${p.what}: the RPC answered "${answer}" (attempt ${attempt}); asking again in ${delay / 1_000} s`)
       await (p.wait ?? sleep)(delay)
@@ -107,8 +107,9 @@ const EXTERNAL = [
   // The network did not take the transaction, or took another one from the account first.
   /TRY_AGAIN_LATER|network is busy and did not accept/i,
   /txBadSeq|tx_bad_seq|sequence number changed/i,
-  // The app's gates, when a read or the simulation could not reach the RPC.
+  // The app's gates, when a read or the simulation could not reach the RPC, or found it overloaded.
   /The simulation could not run/,
+  /The Stellar network is busy/,
   /could not be checked right now/,
   /Could not read .+\(.+\)\. Signing stays off/,
 ]
