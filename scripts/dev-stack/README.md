@@ -71,25 +71,25 @@ and the roles are split so the server never holds the protocol admin:
   `stellar keys secret <name>` into the testnet environment of the hosting.
 - The oracle is kept fresh by the app's `/api/cron/oracle` schedule (see the main README);
   `PRINCIPAL_NETWORK=testnet scripts/dev-stack/oracle-tick.sh` does it by hand.
-- Every run deploys a new market and overwrites `testnet.json`.
+- Every run deploys a new market and overwrites `testnet.json` (or writes `MANIFEST_OUT` when set).
 
 ### Ephemeral deploy (end-to-end suites, local experiments)
 
-Extra variables, all optional except where marked:
+Extra variables, all optional:
 
 | Variable | Effect |
 |---|---|
 | `MANIFEST_OUT=<path>` | Writes the manifest there instead of `config/manifests/<network>.json`, and writes no `.env.*` (locally it also skips the database migration). |
-| `EPHEMERAL=1` | Throwaway market on Testnet. Requires `MANIFEST_OUT` and `PRINCIPAL_NETWORK=testnet`; never writes `config/manifests/*`, `.env.*` or touches a database; prints no cron/QStash notes. Refuses any key name matching `principal-testnet-*` and needs four distinct names, so a local run can never sign with the official keys. |
-| `ADMIN_KEY`, `TREASURY_KEY`, `ISSUER_KEY`, `ORACLE_KEY` | Keystore names for the four roles on Testnet (defaults `principal-testnet-*`). Use run-unique names, e.g. `e2e-<runid>-admin`. |
+| `EPHEMERAL=1` | Throwaway market on Testnet. Requires `MANIFEST_OUT` and `PRINCIPAL_NETWORK=testnet`; never writes `config/manifests/*`, `.env.*` or touches a database; prints no cron/QStash notes. `MANIFEST_OUT` must be a new (or empty) file outside the dApp repository, not a symlink or directory. Refuses key names starting with `principal-` (any letter case), names that already exist in the keystore, and repeated names, so a local run can never sign with, or delete, the official keys. |
+| `ADMIN_KEY`, `TREASURY_KEY`, `ISSUER_KEY`, `ORACLE_KEY` | Keystore names for the four roles on Testnet (defaults `principal-testnet-*`). Use run-unique names, e.g. `e2e-<runid>-admin`. They also apply to `oracle-tick.sh` (`ORACLE_KEY`). A non-ephemeral Testnet deploy that rewrites `testnet.json` refuses non-default names and a non-3600 `ORACLE_MAX_STALE_SECONDS` unless `ALLOW_TESTNET_OVERRIDES=1`. |
 | `ORACLE_MAX_STALE_SECONDS` | Oracle freshness window passed to `initialize` (default `3600`). |
 
 Missing names are generated and funded by the script itself (`stellar keys generate <name>`, then Friendbot
 through `ensure_funded_key`). Afterwards remove them, since the secrets live in the local keystore:
 
 ```bash
-RUNID=$(date +%s)
-EPHEMERAL=1 MANIFEST_OUT=/tmp/e2e-market.json PRINCIPAL_NETWORK=testnet \
+RUNID=${GITHUB_RUN_ID:-$(date +%s)}-${GITHUB_RUN_ATTEMPT:-0}-$$
+EPHEMERAL=1 MANIFEST_OUT="$(mktemp -d)/manifest.json" PRINCIPAL_NETWORK=testnet \
   ADMIN_KEY=e2e-$RUNID-admin TREASURY_KEY=e2e-$RUNID-treasury ISSUER_KEY=e2e-$RUNID-issuer ORACLE_KEY=e2e-$RUNID-oracle \
   ORACLE_MAX_STALE_SECONDS=300 scripts/dev-stack/deploy.sh
 # cleanup afterwards (--force skips the confirmation prompt):
