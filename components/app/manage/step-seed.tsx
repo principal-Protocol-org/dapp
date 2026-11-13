@@ -212,7 +212,7 @@ export function StepSeed({ salt, progress, account, ledgerTime }: ChainStepProps
 
       {!isIssuer ? (
         <p role="alert" className="rounded-lg border border-line bg-surface p-4 text-sm break-words text-ink">
-          Only the {code} issuer seeds this pool: step 5 granted this market&apos;s PT and YT to the asset contract&apos;s admin, which is{" "}
+          Only the {code} issuer seeds this pool: step 5 gave this market&apos;s PT and YT permissions to the asset contract&apos;s admin, which is{" "}
           <span className="font-mono">{live.admin}</span>.{" "}
           {account ? (
             <>

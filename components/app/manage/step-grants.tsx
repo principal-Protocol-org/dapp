@@ -40,7 +40,7 @@ export function StepGrants({ progress, account, ledgerTime }: ChainStepProps) {
       case "authorized":
         return `${HOLDER[g.holder]} is authorized to hold ${code}`
       case "account":
-        return `${HOLDER[g.holder]} has a Principal permissioning grant`
+        return `${HOLDER[g.holder]} has a Principal permission`
       case "asset":
         return `${HOLDER[g.holder]} may hold ${ptYt(g.asset as string)}`
     }
@@ -62,7 +62,7 @@ export function StepGrants({ progress, account, ledgerTime }: ChainStepProps) {
     <section aria-labelledby={`${id}-heading`} className="grid gap-5">
       <div className="grid gap-1">
         <h2 id={`${id}-heading`} className="font-serif text-2xl text-ink">
-          Step 5 of 7: Grants
+          Step 5 of 7: Permissions
         </h2>
         <p className="text-sm text-ink-muted">
           The market&apos;s contracts and its treasury need {code} authorization and Principal permissioning before the pool can be
@@ -70,7 +70,7 @@ export function StepGrants({ progress, account, ledgerTime }: ChainStepProps) {
           what is still missing is offered.
         </p>
       </div>
-      <RoleCalls listLabel="Grants" items={items} label="Sign the grants" account={account} ledgerTime={ledgerTime} network={manifest.network} />
+      <RoleCalls listLabel="Permissions" items={items} label="Sign the permissions" account={account} ledgerTime={ledgerTime} network={manifest.network} />
     </section>
   )
 }

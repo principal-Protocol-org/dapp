@@ -612,15 +612,15 @@ describe("steps 4 and 5: wire and grants (R5-10, spec 0002 §5)", () => {
     mocks.reads[`${permissioning}.get_admin`] = PERM_ADMIN
     connect(ISSUER)
     show()
-    const heading = await screen.findByRole("heading", { name: /Step 5 of 7: Grants/ })
-    const list = within(heading.closest("section") as HTMLElement).getByRole("list", { name: "Grants" })
+    const heading = await screen.findByRole("heading", { name: /Step 5 of 7: Permissions/ })
+    const list = within(heading.closest("section") as HTMLElement).getByRole("list", { name: "Permissions" })
     const rows = within(list).getAllByRole("listitem")
     expect(rows).toHaveLength(17)
     expect(rows.filter((r) => /To do/.test(r.textContent ?? ""))).toHaveLength(2)
     // The issuer holds the SAC admin role only: Permissioning's admin is named for the other grant.
     expect((await screen.findAllByText(PERM_ADMIN, { exact: false })).length).toBeGreaterThan(0)
     const user = userEvent.setup()
-    await signAllNow(user, "Sign the grants", 1)
+    await signAllNow(user, "Sign the permissions", 1)
     expect(kinds()).toEqual(["set_authorized"])
     const call = mocks.prepareManager.mock.calls[0][0] as ManagerCall
     expect(call.invocation.contractId).toBe(SAC)
@@ -637,7 +637,7 @@ describe("steps 4 and 5: wire and grants (R5-10, spec 0002 §5)", () => {
     connect(PERM_ADMIN)
     const user = userEvent.setup()
     show()
-    await signAllNow(user, "Sign the grants", 2)
+    await signAllNow(user, "Sign the permissions", 2)
     expect(kinds()).toEqual(["grant_account", "grant_asset"])
     const calls = mocks.prepareManager.mock.calls.map(([c]) => c as ManagerCall)
     expect(calls[0].invocation.args[1]).toEqual({ type: "address", value: predicted.manager })
@@ -652,9 +652,9 @@ describe("steps 4 and 5: wire and grants (R5-10, spec 0002 §5)", () => {
     mocks.reads[`${SAC}.admin`] = ISSUER
     connect(OTHER)
     show()
-    await screen.findByRole("heading", { name: /Step 5 of 7: Grants/ })
+    await screen.findByRole("heading", { name: /Step 5 of 7: Permissions/ })
     expect((await screen.findAllByText(ISSUER, { exact: false })).length).toBeGreaterThan(0)
-    const button = screen.queryByRole("button", { name: "Sign the grants" }) as HTMLButtonElement | null
+    const button = screen.queryByRole("button", { name: "Sign the permissions" }) as HTMLButtonElement | null
     expect(button === null || button.disabled).toBe(true)
   })
 
@@ -688,7 +688,7 @@ describe("steps 4 and 5: wire and grants (R5-10, spec 0002 §5)", () => {
       await signAllNow(user, "Wire the market", 1)
       await waitFor(() => expect(settled).toBe(true))
       expect(wireShownWhileOpen).toBe(true)
-      expect(await screen.findByRole("heading", { name: /Step 5 of 7: Grants/ })).toBeTruthy()
+      expect(await screen.findByRole("heading", { name: /Step 5 of 7: Permissions/ })).toBeTruthy()
       expect(screen.queryByRole("heading", { name: /Step 4 of 7/ })).toBeNull()
       expect(kinds()).toEqual(["register_market"])
     })
@@ -712,7 +712,7 @@ describe("steps 4 and 5: wire and grants (R5-10, spec 0002 §5)", () => {
       expect(mocks.execute).not.toHaveBeenCalled()
       // Closing it lets the wizard move to the chain's step.
       await user.click(within(dialog).getByRole("button", { name: "Cancel" }))
-      expect(await screen.findByRole("heading", { name: /Step 5 of 7: Grants/ })).toBeTruthy()
+      expect(await screen.findByRole("heading", { name: /Step 5 of 7: Permissions/ })).toBeTruthy()
     })
 
     it("(c) the last deployment signature moves the chain to step 4: the deploy step stays until its flow is closed", async () => {

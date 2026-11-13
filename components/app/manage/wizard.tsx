@@ -39,7 +39,7 @@ export const STEP_TITLES: Record<WizardStep, string> = {
   2: "Addresses",
   3: "Deploy",
   4: "Wire",
-  5: "Grants",
+  5: "Permissions",
   6: "Seed the pool",
   7: "Publish",
 }
@@ -63,8 +63,8 @@ export const CHAIN_STEPS: Partial<Record<ChainStep, ComponentType<ChainStepProps
 
 const NEXT_STEP: Record<ChainStep, string> = {
   4: "Every contract of the market is deployed. Next, RiskControl lists the SY wrapper and the PrincipalManager as consumers, and the Router registers the pool. Their admins sign these.",
-  5: "The market is wired. Next, the SY wrapper, PrincipalManager, pool, recovery escrow and treasury get their asset authorization and Permissioning grants, signed by whoever holds those roles.",
-  6: "Every grant holds. Next, the pool is seeded from a starting fixed APY and an amount.",
+  5: "The market is wired. Next, the SY wrapper, PrincipalManager, pool, recovery escrow and treasury get their asset authorization and Permissioning permissions, signed by whoever holds those roles.",
+  6: "Every permission holds. Next, the pool is seeded from a starting fixed APY and an amount.",
   7: "The pool holds liquidity. Next, the market is published to the registry, so it appears in the market list.",
 }
 
