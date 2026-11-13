@@ -27,11 +27,12 @@ import { createRpcReader } from "@/lib/protocol/reader"
 import { executeReview, prepareReview, type Review } from "@/lib/protocol/review"
 import { preStartDraft, routePreStartBlockers } from "@/lib/protocol/route-gates"
 import { resolveStep, type RouteRequest, type StepPlan } from "@/lib/protocol/routes"
-import type { SimulationOutcome } from "@/lib/protocol/stellar"
+import { createRpcServer, type SimulationOutcome } from "@/lib/protocol/stellar"
 import { currentContractsAdapter, toRouteRequest, type PlanContext, type TradeQuote, type TradeRequest } from "@/lib/protocol/trade-adapter"
 import type { Finding, Live, Manifest, Market } from "@/lib/protocol/types"
+import { balancesOf, ledgerClock, showBalances, units, type Balances } from "../live/chain"
+import { json, sleep } from "../live/util"
 import type { KeypairSigner } from "./keypair-signer"
-import { balancesOf, json, ledgerClock, showBalances, sleep, units, type Balances } from "./local-stack"
 
 /** The app's defaults (`hooks/use-settings.ts`): 50 bps slippage, a 300 s deadline. */
 export const SLIPPAGE_BPS = 50n
@@ -42,6 +43,8 @@ export type Snapshot = { ms: MarketState; acc: AccountState; compliance: Complia
 /** The account's balances a snapshot reads again when the RPC fails one (`snapshot`). */
 const BALANCES = ["underlying", "sy", "pt", "yt", "lp"] as const
 const SNAPSHOT_ATTEMPTS = 4
+/** With `readAfterLanded`, how often a snapshot behind the last confirmed step is read again (1 s apart). */
+const LANDED_ATTEMPTS = 20
 
 /** One confirmed step: what it was signed with and what it returned. */
 export type StepRecord = {
@@ -54,6 +57,8 @@ export type StepRecord = {
   simulated: ActionOutput
   decoded: ActionOutput
   hash: string
+  /** The ledger it landed in (`readAfterLanded` only, set once it is looked up). */
+  ledger?: number
 }
 
 const abs = (v: bigint) => (v < 0n ? -v : v)
@@ -126,11 +131,30 @@ export function createRunner(p: {
   log: (line: string) => void
   /** Called with every confirmed step, in the order they landed (the history check's list). */
   record?: (step: StepRecord) => void
+  /**
+   * For an RPC served by several nodes (Testnet): a read right after a confirmed step may come from
+   * a node a ledger behind the one that confirmed it. When set, each confirmed step's ledger is
+   * looked up, and a snapshot is read again until its balances and pool state are from that ledger
+   * or later. Off by default: the local stack is one node, and its suites run as they always have.
+   */
+  readAfterLanded?: boolean
 }) {
   const { manifest, market, findings, kind, signer, log } = p
   const account = signer.publicKey
   const reader = () => createRpcReader(manifest)
   const horizon = () => createHorizon(manifest.horizonUrl)
+  /** The ledger of the latest confirmed step (`readAfterLanded` only; 0 otherwise). */
+  let landed = 0
+
+  /** The ledger a confirmed transaction landed in, read again while the node asked does not know it yet. */
+  async function landedLedger(hash: string): Promise<number> {
+    for (let attempt = 1; ; attempt++) {
+      const tx = await createRpcServer(manifest.rpcUrl).getTransaction(hash)
+      if (tx.status !== "NOT_FOUND") return tx.ledger
+      if (attempt === LANDED_ATTEMPTS) throw new Error(`transaction ${hash} confirmed, then not found by the RPC ${attempt} times`)
+      await sleep(1_000)
+    }
+  }
 
   /**
    * Fresh reads, as the panels refresh them. The local RPC now and then fails a read's preflight
@@ -146,7 +170,16 @@ export function createRunner(p: {
         fetchAccountState(reader(), horizon(), manifest, market.marketId, account, kind),
       ])
       const unread = BALANCES.flatMap((k) => (acc[k].status === "unavailable" ? [`${k}: ${acc[k].error}`] : []))
-      if (unread.length === 0 || attempt === SNAPSHOT_ATTEMPTS) {
+      // Reads from before the last confirmed step (never with `readAfterLanded` off: `landed` stays 0).
+      const reads = [...BALANCES.map((k) => [k, acc[k]] as const), ["pool state", ms.poolState] as const]
+      const behind = reads.flatMap(([k, v]) => (v.status === "live" && v.ledger < landed ? [`${k} at ledger ${v.ledger}`] : []))
+      if (behind.length > 0) {
+        if (attempt >= LANDED_ATTEMPTS) throw new Error(`snapshot: reads still behind ledger ${landed} after ${attempt} attempts: ${behind.join(", ")}`)
+        log(`snapshot attempt ${attempt}: read again, the RPC answered from before ledger ${landed} (${behind.join(", ")})`)
+        await sleep(1_000)
+        continue
+      }
+      if (unread.length === 0 || attempt >= SNAPSHOT_ATTEMPTS) {
         return { ms, acc, compliance: evaluateAccountCompliance(acc, kind), ledgerTime: clock.now() }
       }
       log(`snapshot attempt ${attempt}: read again, the RPC did not answer ${unread.join("; ")}`)
@@ -244,6 +277,10 @@ export function createRunner(p: {
     log(`${label}: amount ${amounts.amount}${amounts.secondaryAmount !== undefined ? ` + ${amounts.secondaryAmount}` : ""}, signed with ${floors}; tx ${result.hash.slice(0, 12)} simulated ${showOutput(simulated)} | decoded ${showOutput(decoded)}`)
     const record: StepRecord = { index: i, action: plan.action, ...amounts, guards: g, simulated, decoded, hash: result.hash }
     p.record?.(record)
+    if (p.readAfterLanded) {
+      record.ledger = await landedLedger(result.hash)
+      landed = Math.max(landed, record.ledger)
+    }
     return record
   }
 

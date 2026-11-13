@@ -1,7 +1,8 @@
 /**
  * What the live suites share on the local stack (`scripts/dev-stack`): the manifest, why a suite
- * cannot run, the dev stack's oracle tick and faucet key, onboarding a fresh keypair, and the log
- * each suite prints again at the end.
+ * cannot run, the dev stack's oracle tick and faucet key, and onboarding a fresh keypair. The chain
+ * helpers every network shares (units, balances, the ledger clock, the log) live in `tests/live/`
+ * and are re-exported here.
  *
  * Nothing here deploys or rewrites `config/manifests/local.json`: the developer may be testing on
  * that market (R2-68). Only the lifecycle suite may deploy, and only when asked to.
@@ -10,10 +11,7 @@ import { execFile } from "node:child_process"
 import { existsSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { promisify } from "node:util"
-import { fetchAccountState, type AccountState, type ComplianceKind } from "@/lib/protocol/account-state"
-import type { ActionId } from "@/lib/protocol/actions"
-import { fetchMarketCompliance } from "@/lib/protocol/compliance"
-import type { HistoryKind } from "@/lib/protocol/events"
+import { fetchAccountState, type ComplianceKind } from "@/lib/protocol/account-state"
 import { createHorizon } from "@/lib/protocol/horizon"
 import { parseManifest } from "@/lib/protocol/manifest"
 import { addTrustline } from "@/lib/protocol/onboarding"
@@ -25,16 +23,24 @@ import { eventually, json, redact } from "../live/util"
 import { fundedKeypairSigner, type KeypairSigner } from "./keypair-signer"
 
 export { eventually, json, redact, sleep } from "../live/util"
+export {
+  balancesOf,
+  complianceKind,
+  createLog,
+  HISTORY_KIND,
+  ledgerClock,
+  MINUTE,
+  showBalances,
+  U,
+  units,
+  type Balances,
+} from "../live/chain"
 
 export const run = promisify(execFile)
 
 export const DAPP = join(__dirname, "..", "..")
 export const MANIFEST_PATH = join(DAPP, "config", "manifests", "local.json")
 export const DEV_STACK = join(DAPP, "scripts", "dev-stack")
-
-/** One whole token at 7 decimals. */
-export const U = 10_000_000n
-export const MINUTE = 60_000
 
 export function readManifest(): Manifest {
   return parseManifest(JSON.parse(readFileSync(MANIFEST_PATH, "utf8")))
@@ -87,67 +93,10 @@ export function loadDatabaseUrl(): void {
   }
 }
 
-/** A log whose lines are printed as they come and again, all together, at the end of the suite. */
-export function createLog(prefix = "integration") {
-  const lines: string[] = []
-  return {
-    lines,
-    log(line: string) {
-      const safe = redact(line)
-      lines.push(safe)
-      console.info(`[${prefix}] ${safe}`)
-    },
-    summary() {
-      console.info(`[${prefix}] summary\n${lines.join("\n")}`)
-    },
-  }
-}
-
-/** History kind each action's transaction is listed as (T19; R4-10 for the one-transaction Router actions). */
-export const HISTORY_KIND: Record<ActionId, HistoryKind> = {
-  deposit: "deposit",
-  withdraw: "withdraw",
-  mint: "mint",
-  buy_pt: "buy_pt",
-  sell_pt: "sell_pt",
-  buy_yt: "buy_yt",
-  sell_yt: "sell_yt",
-  add_liquidity: "add_liquidity",
-  add_liquidity_sy: "add_liquidity",
-  remove_liquidity: "remove_liquidity",
-  recombine: "recombine",
-  claim_yield: "claim",
-  redeem: "redeem",
-  // R4-10: deposit + buy_pt, sell_pt + withdraw, deposit + mint + sell_pt + withdraw, sell_yt +
-  // withdraw, deposit + mint + add_liq, each in one transaction.
-  buy_pt_underlying: "buy_pt",
-  sell_pt_underlying: "sell_pt",
-  // R5: the flash is a Buy YT; LP in and out of USDY are one transaction each.
-  buy_yt_flash: "buy_yt",
-  buy_yt_flash_underlying: "buy_yt",
-  add_liquidity_underlying: "add_liquidity",
-  remove_liquidity_underlying: "remove_liquidity",
-  sell_yt_underlying: "sell_yt",
-  add_liquidity_keep_yt: "add_liquidity",
-}
-
 /** `scripts/dev-stack/oracle-tick.sh` (admin key): default growth from the last reference time, or `rate`. */
 export async function oracleTick(rate?: bigint): Promise<string> {
   const { stdout } = await run(join(DEV_STACK, "oracle-tick.sh"), rate === undefined ? [] : [rate.toString()], { cwd: DAPP })
   return redact(stdout.trim())
-}
-
-/** The live ledger clock, interpolated between reads. */
-export async function ledgerClock(manifest: Manifest) {
-  const clock = await getLedgerClock(createRpcServer(manifest.rpcUrl))
-  return { ...clock, now: () => clock.closeTime + (Date.now() - clock.readAtMs) / 1000 }
-}
-
-/** The market's compliance model kind (`sac` for the dev stack's USDY). */
-export async function complianceKind(manifest: Manifest, market: Market): Promise<ComplianceKind> {
-  const model = await fetchMarketCompliance(createHorizon(manifest.horizonUrl), createRpcReader(manifest), market)
-  if (model.status !== "live") throw new Error(`compliance model: ${model.error}`)
-  return model.value.kind
 }
 
 /**
@@ -189,25 +138,3 @@ export async function onboardFreshAccount(
   await eventually(read, (a) => a.trustline.status === "live" && a.trustline.value === "authorized", "the authorized trustline on Horizon")
   return signer
 }
-
-/** Balances of `account` in this market, raw: USDY, SY, PT, YT, LP. */
-export type Balances = Record<"underlying" | "sy" | "pt" | "yt" | "lp", bigint>
-
-export function balancesOf(acc: AccountState): Balances {
-  const v = (l: AccountState["underlying"], what: string) => {
-    if (l.status !== "live") throw new Error(`${what}: ${l.error}`)
-    return l.value
-  }
-  return { underlying: v(acc.underlying, "USDY"), sy: v(acc.sy, "SY"), pt: v(acc.pt, "PT"), yt: v(acc.yt, "YT"), lp: v(acc.lp, "LP") }
-}
-
-/** `1234567890n` at 7 decimals as "123.4567890". */
-export function units(v: bigint, decimals = 7): string {
-  const neg = v < 0n
-  const a = neg ? -v : v
-  const base = 10n ** BigInt(decimals)
-  return `${neg ? "-" : ""}${a / base}.${(a % base).toString().padStart(decimals, "0")}`
-}
-
-export const showBalances = (b: Balances) =>
-  `USDY ${units(b.underlying)}, SY ${units(b.sy)}, PT ${units(b.pt)}, YT ${units(b.yt)}, LP ${units(b.lp)}`
