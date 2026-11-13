@@ -82,7 +82,7 @@ Extra variables, all optional:
 | `MANIFEST_OUT=<path>` | Writes the manifest there instead of `config/manifests/<network>.json`, and writes no `.env.*` (locally it also skips the database migration). |
 | `EPHEMERAL=1` | Throwaway market on Testnet. Requires `MANIFEST_OUT` and `PRINCIPAL_NETWORK=testnet`; never writes `config/manifests/*`, `.env.*` or touches a database; prints no cron/QStash notes. `MANIFEST_OUT` must be a new (or empty) file outside the dApp repository, not a symlink or directory. Refuses key names starting with `principal-` or `principal_` (any letter case), names that already exist in the keystore, and repeated names, so a local run can never sign with, or delete, the official keys. |
 | `ADMIN_KEY`, `TREASURY_KEY`, `ISSUER_KEY`, `ORACLE_KEY` | Keystore names for the four roles on Testnet (defaults `principal-testnet-*`). Use run-unique names, e.g. `e2e-<runid>-admin`. They also apply to `oracle-tick.sh` (`ORACLE_KEY`). A non-ephemeral Testnet deploy that rewrites `testnet.json` refuses non-default names and a non-3600 `ORACLE_MAX_STALE_SECONDS` unless `ALLOW_TESTNET_OVERRIDES=1`; the same applies when `MANIFEST_OUT` points at `config/manifests/testnet.json`, and any other `MANIFEST_OUT` inside the repository is refused. Names must be plain keystore names (letters, digits, `-`, `_`), never a secret or address. |
-| `ORACLE_MAX_STALE_SECONDS` | Oracle freshness window passed to `initialize` (default `3600`). |
+| `ORACLE_MAX_STALE_SECONDS` | Oracle freshness window passed to `initialize` (default `3600`). It must outlast the deploy: the genesis value is pushed at step 1 and the seeding mints at the end, 5 to 10 minutes later on Testnet. To test a stale oracle, shorten the window afterwards with the oracle admin's `set_safety_params` (Suite B does). |
 
 Missing names are generated and funded by the script itself (`stellar keys generate <name>`, then Friendbot
 through `ensure_funded_key`). Afterwards remove them, since the secrets live in the local keystore:
@@ -91,7 +91,7 @@ through `ensure_funded_key`). Afterwards remove them, since the secrets live in 
 RUNID=${GITHUB_RUN_ID:-$(date +%s)}-${GITHUB_RUN_ATTEMPT:-0}-$$
 EPHEMERAL=1 MANIFEST_OUT="$(mktemp -d)/manifest.json" PRINCIPAL_NETWORK=testnet \
   ADMIN_KEY=e2e-$RUNID-admin TREASURY_KEY=e2e-$RUNID-treasury ISSUER_KEY=e2e-$RUNID-issuer ORACLE_KEY=e2e-$RUNID-oracle \
-  ORACLE_MAX_STALE_SECONDS=300 scripts/dev-stack/deploy.sh
+  scripts/dev-stack/deploy.sh
 # cleanup afterwards (--force skips the confirmation prompt):
 for r in admin treasury issuer oracle; do stellar keys rm "e2e-$RUNID-$r" --force; done
 ```
