@@ -5,7 +5,8 @@ quotes the description and the success criteria as the submission words them. Th
 criteria, it gives numbered steps to check it yourself (where to click, what to run, what you should see) and a status.
 
 The evidence the steps point to (addresses, transaction hashes, run records, screenshots and dates) is in
-[TRANCHE_2_EVIDENCE.md](TRANCHE_2_EVIDENCE.md). Both files were written on 13 November 2026. All times are UTC.
+[TRANCHE_2_EVIDENCE.md](TRANCHE_2_EVIDENCE.md). Both files were written on 13 November 2026 and updated on 14 November
+2026. All times are UTC.
 
 Each status is one of:
 - **Met**, with the evidence in these files;
@@ -38,10 +39,10 @@ Each status is one of:
 | Deliverable | Success criterion (part) | Status |
 |---|---|---|
 | 1 | All protocol contracts are deployed on Stellar Testnet and publicly visible | Met ([1.1](#11-all-protocol-contracts-are-deployed-and-publicly-visible)) |
-| 1 | deployment is scripted and repeatable | Met ([1.2](#12-deployment-is-scripted-and-repeatable)); some pipeline details of the description are open ([1.6](#16-the-description-item-by-item)) |
+| 1 | deployment is scripted and repeatable | Met here and in the contracts repository ([1.2](#12-deployment-is-scripted-and-repeatable)); the description's pipeline items are met in the contracts repository, with stated caveats, except RiskControl limits ([1.6](#16-the-description-item-by-item)) |
 | 1 | the complete PT/YT and AMM flows are operational | Met ([1.3](#13-the-complete-ptyt-and-amm-flows-are-operational)) |
 | 1 | SAC compliance controls and RecoveryEscrow are active on-chain | Met ([1.4](#14-sac-compliance-controls-and-recoveryescrow-are-active-on-chain)) |
-| 1 | oracle safety guards are working | Met: staleness on this deployment, deviation guard in the contracts repository ([1.5](#15-oracle-safety-guards-are-working)) |
+| 1 | oracle safety guards are working | Met: staleness on this deployment; deviation guard and availability block in the contracts repository, live on the contracts team's oracle ([1.5](#15-oracle-safety-guards-are-working)) |
 | 2 | dApp is live at a public Testnet URL | Met ([2.1](#21-the-dapp-is-live-at-a-public-testnet-url)) |
 | 2 | all user flows work end-to-end | Met on the live site; redeem in the browser only after maturity ([2.2](#22-all-user-flows-work-end-to-end)) |
 | 2 | compliance, oracle, and maturity restrictions are enforced in the interface | Met ([2.3](#23-compliance-oracle-and-maturity-restrictions-are-enforced-in-the-interface)) |
@@ -78,13 +79,22 @@ The tranche's objective, as submitted:
 > scripted and repeatable; the complete PT/YT and AMM flows are operational; SAC compliance controls and RecoveryEscrow
 > are active on-chain; and oracle safety guards are working.
 
-**Who delivered what.** The official Testnet deployment is the app team's market `testnet-usdy-1802336344`, deployed
-on 13 November 2026 from the contracts at commit
-[`665bb67`](https://github.com/principal-Protocol-org/principal/tree/665bb6760372d30307a1a035da24e51776f727e8) with
-the dApp repository's [`scripts/dev-stack/deploy.sh`](https://github.com/principal-Protocol-org/dapp/blob/testnet/scripts/dev-stack/deploy.sh).
-The app at <https://testnet.principalmarket.fi> runs on it. The OracleAdapter safety extension is contract code in the
-contracts repository. The contracts team also ran Testnet deployments of its own, documented in that repository; this
-review does not depend on them.
+**Who delivered what: two deployments.**
+- **The official Testnet deployment** is the app team's market `testnet-usdy-1802336344`, deployed on 13 November 2026
+  from the contracts at commit
+  [`665bb67`](https://github.com/principal-Protocol-org/principal/tree/665bb6760372d30307a1a035da24e51776f727e8) with
+  the dApp repository's [`scripts/dev-stack/deploy.sh`](https://github.com/principal-Protocol-org/dapp/blob/testnet/scripts/dev-stack/deploy.sh).
+  The app at <https://testnet.principalmarket.fi>, the walkthrough and the CI suites run on it.
+- **The contracts team's pipeline proof.** At contracts `main` =
+  [`aae6cf8`](https://github.com/principal-Protocol-org/principal/commit/aae6cf81346a51f600393e4267be45e65524ae4e)
+  (14 November 2026), the contracts team added the scripted pipeline the description names and ran it on Testnet. The
+  result is a throwaway market, `testnet-CD2A2J-89d-CDO7S4YP` (test asset TR2), documented in
+  [docs/TRANCHE_2_TESTNET_ACCEPTANCE.md](https://github.com/principal-Protocol-org/principal/blob/aae6cf81346a51f600393e4267be45e65524ae4e/docs/TRANCHE_2_TESTNET_ACCEPTANCE.md). That doc says it "supersedes nothing", and nothing runs on that market.
+- **The same source.** Both markets come from principal `665bb67`, except the OracleAdapter. According to the
+  contracts team, `aae6cf8` only adds optional OracleAdapter functions (`set_feed_source`, `sync_from_feed`, the SEP-40
+  pull path), and nothing the app calls changed ([evidence §8](TRANCHE_2_EVIDENCE.md#8-the-contracts-teams-deployment-pipeline-at-aae6cf8)).
+
+The OracleAdapter safety extension is contract code in the contracts repository.
 
 ### 1.1 All protocol contracts are deployed and publicly visible
 
@@ -139,8 +149,23 @@ review does not depend on them.
    seeded; the oracle is fresh. Suite A checks the official deployment the same way before its journey (manifest,
    Router functions, oracle available, pool seeded).
 
-**Status: Met** for "scripted and repeatable". The description asks for more pipeline details than the success
-criterion; [1.6](#16-the-description-item-by-item) maps them one by one, including what is not done.
+4. **The contracts team's pipeline** ([evidence §8](TRANCHE_2_EVIDENCE.md#8-the-contracts-teams-deployment-pipeline-at-aae6cf8)), at `aae6cf8`:
+   - [`scripts/deploy/deploy.sh`](https://github.com/principal-Protocol-org/principal/blob/aae6cf81346a51f600393e4267be45e65524ae4e/scripts/deploy/deploy.sh) reads one `.env` and is idempotent. Two back-to-back
+     full runs created no new contracts.
+   - [`scripts/deploy/verify-deployment.sh`](https://github.com/principal-Protocol-org/principal/blob/aae6cf81346a51f600393e4267be45e65524ae4e/scripts/deploy/verify-deployment.sh) checks the deployment against
+     its manifest and the chain. It passes 64 of 65 checks.
+   - [`deployments/testnet/deployment-manifest.json`](https://github.com/principal-Protocol-org/principal/blob/aae6cf81346a51f600393e4267be45e65524ae4e/deployments/testnet/deployment-manifest.json) records the
+     addresses, the wasm SHA-256 and the deploy and init transaction IDs.
+
+   The doc states its caveats:
+   - the one failing check is `git_tree_dirty`, because the deploy ran on an uncommitted tree on top of `665bb67`;
+   - the 5 shared contracts' `deploy_tx` were not captured;
+   - the market-creation transactions are not in the manifest;
+   - `RISK_CB_LIMIT=0`.
+
+**Status: Met** for "scripted and repeatable": here (the app team's `deploy.sh`, which made the official deployment),
+and in the contracts repository (the contracts team's pipeline, with the caveats above).
+[1.6](#16-the-description-item-by-item) maps the description's pipeline details one by one.
 
 ### 1.3 The complete PT/YT and AMM flows are operational
 
@@ -224,7 +249,17 @@ never held by the app's server ([evidence §1.3](TRANCHE_2_EVIDENCE.md#13-test-a
      `fallback_cannot_move_the_value_even_within_the_deviation_bound`, `fallback_never_hides_a_stale_timestamp`;
    - availability: `is_available_follows_the_contract_s_own_configured_staleness`,
      `assert_available_panics_oracle_unavailable_when_stale`.
-5. **Ongoing freshness.** Open the official oracle on stellar.expert,
+5. **Live on the contracts team's oracle at `aae6cf8`.** Its acceptance doc
+   ([§5](https://github.com/principal-Protocol-org/principal/blob/aae6cf81346a51f600393e4267be45e65524ae4e/docs/TRANCHE_2_TESTNET_ACCEPTANCE.md#5-oracle-safety-guards-demonstrated-live)) shows, with transactions:
+   - a +17.4% update rejected, not reverted: the call returns `false` and `last_rejection()` reads `deviate`;
+   - with the window narrowed to 1 s, `is_available()` reads `false` and `assert_available()` reverts #8,
+     `OracleUnavailable`;
+   - the new SEP-40 pull path, which has its own deviation reject.
+
+   That oracle is a different build (wasm `f5c8a129…`, with the pull path) from ours (`adb87f76…`). On our deployment
+   the evidence remains Suite B's stale refusal (step 3). The transactions are listed in
+   [evidence §7.1](TRANCHE_2_EVIDENCE.md#71-live-on-the-contracts-teams-oracle-at-aae6cf8).
+6. **Ongoing freshness.** Open the official oracle on stellar.expert,
    <https://stellar.expert/explorer/testnet/contract/CDYGBFGO7KD446CDTGJ7M4OWUXC7UPBGPVM5CUWP2NSNX2CKK2TYYIPS>. Its calls
    show a `set_reference_value` every 30 minutes, sent by the app's scheduled keeper (`/api/cron/oracle`) from the
    oracle admin account; Horizon lists them too:
@@ -233,39 +268,38 @@ never held by the app's server ([evidence §1.3](TRANCHE_2_EVIDENCE.md#13-test-a
    does the same by hand.
 
 **Status: Met.** The staleness guard is shown by Suite B, whose local run deployed wasm byte-identical to the official
-deployment's. The deviation guard is
-**met in the contracts repository**: unit tests on the deployed code at `665bb67`, and live transactions on an earlier
-build of the oracle. It has not fired on the official oracle, whose `last_rejection` is `null`. The official oracle has one primary source and no
+deployment's. The deviation guard and the
+availability block are **met in the contracts repository**: unit tests on the deployed code at `665bb67`, live
+transactions on an earlier build of the oracle, and live transactions on the contracts team's oracle at `aae6cf8`. It has not fired on the official oracle, whose `last_rejection` is `null`. The official oracle has one primary source and no
 fallback configured.
 
 ### 1.6 The description, item by item
 
 The success criteria are covered above. This table maps each part of the description to what exists, so nothing is
-claimed by omission. "Open" items are owned by the app team, whose script became the official pipeline (13 November
-2026); they were not built.
+claimed by omission. Each row says where the item is met: here, in the app team's deployment, or in the contracts
+repository, in the contracts team's pipeline at `aae6cf8` ([evidence §8](TRANCHE_2_EVIDENCE.md#8-the-contracts-teams-deployment-pipeline-at-aae6cf8)). The one item not met in either,
+RiskControl limits, is set to 0 on Testnet in both.
 
 | Description item | What exists | Status |
 |---|---|---|
-| a deploy.sh script | [`scripts/dev-stack/deploy.sh`](https://github.com/principal-Protocol-org/dapp/blob/testnet/scripts/dev-stack/deploy.sh) | Done |
-| reading from a single .env file | It reads environment variables with defaults (`PRINCIPAL_NETWORK`, `PRINCIPAL_REF`, `MATURITY_SECONDS`, `ASSET_CODE`, the four key names, `ORACLE_MAX_STALE_SECONDS`). It reads no `.env` file. | Not as described |
-| producing a deployment-manifest.json with contract addresses, WASM hashes | `config/manifests/testnet.json`: addresses, wasm hashes, source commit, generation time, Router functions | Done, under another file name |
-| and deployment transaction IDs | Not in the manifest. Each contract's stellar.expert page shows when and by which account it was created. | Open |
-| a post-deploy verification script asserting expected initial state | No standalone script. The same assertions run at the start of Suites A and B on every CI run ([1.2](#12-deployment-is-scripted-and-repeatable) step 3). | Partly |
-| idempotent re-deploy logic | Not idempotent: every run deploys a new market and writes a new manifest. A rerun reuses the build (cached per commit), the asset's contract and the funded keys, and guards refuse to rewrite the official manifest with other keys or settings. | Open |
+| a deploy.sh script | The app team's [`scripts/dev-stack/deploy.sh`](https://github.com/principal-Protocol-org/dapp/blob/testnet/scripts/dev-stack/deploy.sh), which made the official deployment; the contracts team's [`scripts/deploy/deploy.sh`](https://github.com/principal-Protocol-org/principal/blob/aae6cf81346a51f600393e4267be45e65524ae4e/scripts/deploy/deploy.sh) | Met here and in the contracts repository |
+| reading from a single .env file | The contracts team's `deploy.sh` reads one `.env` (`ENV_FILE`, default `.env`). The app team's reads environment variables with defaults, and no `.env` file. | Met in the contracts repository |
+| producing a deployment-manifest.json with contract addresses, WASM hashes | The contracts team's [`deployments/testnet/deployment-manifest.json`](https://github.com/principal-Protocol-org/principal/blob/aae6cf81346a51f600393e4267be45e65524ae4e/deployments/testnet/deployment-manifest.json): addresses and wasm SHA-256. Here, `config/manifests/testnet.json`: addresses, wasm hashes, source commit, Router functions. | Met in the contracts repository, and here under another file name |
+| and deployment transaction IDs | The contracts team's manifest records deploy and init transaction IDs. Its doc states two gaps: the 5 shared contracts' `deploy_tx` were not captured, and the market-creation transactions are not in the manifest. `testnet.json` here has none. | Met in the contracts repository, with those gaps |
+| a post-deploy verification script asserting expected initial state | [`scripts/deploy/verify-deployment.sh`](https://github.com/principal-Protocol-org/principal/blob/aae6cf81346a51f600393e4267be45e65524ae4e/scripts/deploy/verify-deployment.sh) passes 64 of 65 checks. The one FAIL is `git_tree_dirty`: the deploy ran on an uncommitted tree on top of `665bb67`. Here, the same kind of assertions run at the start of Suites A and B ([1.2](#12-deployment-is-scripted-and-repeatable) step 3). | Met in the contracts repository, 64 of 65 |
+| idempotent re-deploy logic | The contracts team's `deploy.sh` reuses existing contracts unless `FORCE_REDEPLOY=true`: two back-to-back full runs created no new contracts. The app team's is not idempotent: every run deploys a new market. | Met in the contracts repository |
 | a testnet oracle rate submitted via set_reference_value | Genesis value 1.0 at deploy, signed by the oracle key | Done |
-| RiskControl limits | RiskControl is deployed and wired to SY and PrincipalManager, but its circuit breaker is off: `get_cb_limit` returns 0 (window 17,280 ledgers). The app's Safety tab shows "No limit (disabled)". | Open |
+| RiskControl limits | RiskControl is deployed and wired to SY and PrincipalManager in both deployments, but the circuit breaker is off: `get_cb_limit` returns 0 here (window 17,280 ledgers; the app's Safety tab shows "No limit (disabled)"), and the contracts team's `.env` sets `RISK_CB_LIMIT=0`. | Open: set to 0 on Testnet |
 | a 90-day maturity for the first yield market | Maturity 1802336344 = 11 February 2027 08:59:04 UTC, 7,776,000 s (90 days) after the deploy's ledger time | Done |
-| Ongoing oracle freshness via manual/scripted rate updates | The app's keeper every 30 minutes, and `oracle-tick.sh` by hand ([1.5](#15-oracle-safety-guards-are-working) step 5) | Done |
+| Ongoing oracle freshness via manual/scripted rate updates | The app's keeper every 30 minutes, and `oracle-tick.sh` by hand ([1.5](#15-oracle-safety-guards-are-working) step 6) | Done |
 | OracleAdapter: configurable primary and fallback price sources | `set_sources` in the contract; the official oracle has a primary source and no fallback | Done in the contracts; fallback not configured here |
 | automatic protocol-wide block when no fresh price is available (OracleUnavailable on mint/deposit) | `is_available()` / `assert_available()` (error #8 `OracleUnavailable`) in the oracle; mint, trades, single-sided liquidity and redemption revert `OracleStale` in their own contracts. Deposit into SY is not blocked: SY wraps the asset 1:1 and does not read the oracle. | Done for mint; deposit differs from the text |
 | price-deviation guard rejecting updates that move more than ±10% | `max_deviation_bps` 1000 on the official oracle. A rise above 10% is rejected; any decrease is refused outright (`ValueDecreased`). | Done in the contracts ([1.5](#15-oracle-safety-guards-are-working) step 4) |
 
-The contracts repository's [ORACLE_SAFETY_EXTENSION.md §7](https://github.com/principal-Protocol-org/principal/blob/665bb6760372d30307a1a035da24e51776f727e8/docs/ORACLE_SAFETY_EXTENSION.md#7-what-is-still-open)
-leaves the scripted pipeline "out of scope for this change", and its technical specification lists it as a separate
-work package ([TRANCHE_2_3_TECHNICAL_SPECIFICATION.md §14.2](https://github.com/principal-Protocol-org/principal/blob/665bb6760372d30307a1a035da24e51776f727e8/docs/TRANCHE_2_3_TECHNICAL_SPECIFICATION.md#142-deployment-automation-package):
-`scripts/deploy/deploy.sh`, `verify-deployment.sh`, an `env.example`, idempotent resume, deployment transaction capture).
-That package was not built in the contracts repository. The official deployment uses the app team's `deploy.sh`
-instead, and the open items above are the app team's.
+At `665bb67`, the contracts repository's [ORACLE_SAFETY_EXTENSION.md §7](https://github.com/principal-Protocol-org/principal/blob/665bb6760372d30307a1a035da24e51776f727e8/docs/ORACLE_SAFETY_EXTENSION.md#7-what-is-still-open)
+left the scripted pipeline "out of scope for this change". Its technical specification lists that pipeline as a
+separate work package ([TRANCHE_2_3_TECHNICAL_SPECIFICATION.md §14.2](https://github.com/principal-Protocol-org/principal/blob/665bb6760372d30307a1a035da24e51776f727e8/docs/TRANCHE_2_3_TECHNICAL_SPECIFICATION.md#142-deployment-automation-package)),
+which landed at `aae6cf8` with its acceptance doc, [docs/TRANCHE_2_TESTNET_ACCEPTANCE.md](https://github.com/principal-Protocol-org/principal/blob/aae6cf81346a51f600393e4267be45e65524ae4e/docs/TRANCHE_2_TESTNET_ACCEPTANCE.md).
 
 ---
 
@@ -411,6 +445,14 @@ to 20:59:05 UTC). Suite A passed 13 of 13 tests in 168 s with 12 transactions; S
 14 transactions and removed its run keys. Its records, with every transaction hash, are in
 [evidence §2](TRANCHE_2_EVIDENCE.md#2-ci), [§3](TRANCHE_2_EVIDENCE.md#3-suite-a-the-live-journey-on-the-official-market)
 and [§4](TRANCHE_2_EVIDENCE.md#4-suite-b-the-ephemeral-lifecycle), next to an earlier local run of both suites.
+
+The next run did not pass. The first manual run from `main`
+([run 43511581261](https://github.com/principal-Protocol-org/dapp/actions/runs/43511581261), 13 November 2026, 21:32
+to 21:56 UTC) checked out `testnet` as the nightly run does. Suite A passed 13 of 13. Suite B failed 3 of its 10
+tests: the public Testnet RPC was overloaded (`-32004`, "preflight queue full") for about a minute, and the read in
+the maturity oracle tick was not retried. Commit `625b722` makes the harness wait out an overloaded RPC, and a local
+Suite B run with it passed 10 of 10. The pull request that ships the fix runs both suites again
+([evidence §2.2](TRANCHE_2_EVIDENCE.md#22-the-manual-run-from-main-and-its-fix)).
 
 "The live Testnet deployment": Suite A runs on the official deployment. Suite B runs on live Testnet too, on a market
 it deploys from the same source, because its admin-only steps cannot run on the official market without its

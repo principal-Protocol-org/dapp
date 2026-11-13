@@ -2,7 +2,8 @@
 
 The facts behind [TRANCHE_2_REVIEW.md](TRANCHE_2_REVIEW.md): deployed addresses, wasm hashes, transaction hashes, CI
 runs, screenshots and dates. Each section says where its data comes from. Written on 13 November 2026 and updated the
-same evening with the first green CI run and the live walkthrough run; all times are UTC.
+same evening with the first green CI run and the live walkthrough run, then on 14 November 2026 with the contracts
+team's deployment pipeline and the first manual run from `main`; all times are UTC.
 
 Every address here is public. No secret key, and no name of a key in a keystore, appears in this file.
 
@@ -117,7 +118,10 @@ and the [README's CI section](https://github.com/principal-Protocol-org/dapp/blo
 | First green CI run (pull request) | [E2E Testnet run 43503140770](https://github.com/principal-Protocol-org/dapp/actions/runs/43503140770) on [pull request #1](https://github.com/principal-Protocol-org/dapp/pull/1), commit `a965753`, `ubuntu-24.04`, 13 November 2026 20:36:58 to 20:59:05 UTC. Suite A: 13 of 13 tests in 168 s, 12 transactions. Suite B: 10 of 10 tests in 1,294 s, 14 transactions, its four run keys removed. Details in [§3](#3-suite-a-the-live-journey-on-the-official-market) and [§4](#4-suite-b-the-ephemeral-lifecycle). |
 | The regular CI on the same pull request | [CI run 43503140838](https://github.com/principal-Protocol-org/dapp/actions/runs/43503140838): lint, typecheck, unit tests, build and the server-secret bundle check, green |
 | Merge | pull request #1 was fast-forwarded into `testnet` at `a965753` on 13 November 2026 at 21:01:03 UTC (no merge commit) |
-| First manual run from `main` | [E2E Testnet run 43511581261](https://github.com/principal-Protocol-org/dapp/actions/runs/43511581261), started at 21:32:23 UTC from `main` (`f6bf73c`), testing `testnet`: running |
+| First manual run from `main` | [E2E Testnet run 43511581261](https://github.com/principal-Protocol-org/dapp/actions/runs/43511581261), `workflow_dispatch` from `main` (`f6bf73c`), 13 November 2026 21:32:23 to 21:55:57 UTC: **failed**. Both jobs checked out `testnet` (log: `ref: testnet`), the path the nightly run takes. Suite A passed 13 of 13 tests in 162 s; Suite B passed 7 of 10 while the public RPC was overloaded ([§2.2](#22-the-manual-run-from-main-and-its-fix)). |
+| Fix | commits `625b722` (the test harness retries reads and simulations, within bounds, and never resends a transaction except through the sequence-number proof), `3f96e77` and `b1bd606` (the app shows "The Stellar network is busy. Try again in a moment." instead of the RPC's raw text or "[object Object]") |
+| Suite B with the fix, run locally | 13 November 2026 22:21:48 to 22:43:35 UTC: 10 of 10 tests in 1,307 s, 14 transactions, its four run keys removed ([§2.2](#22-the-manual-run-from-main-and-its-fix)) |
+| Fix pull request | run link added after it runs |
 
 ### 2.1 The Linux wasm comparison
 
@@ -126,6 +130,34 @@ The workflow's informational step "Compare the wasm with the official deployment
 The bytes depend on the machine that builds them. In the developer's build, ten of the twelve wasm files embed the builder's home directory, through the absolute path of the cargo registry (three times in `principal_recovery_escrow.wasm`); a build on the runner carries the runner's home directory instead. Permissioning and RiskControl carry no such path in the developer's build; why their Linux bytes differ too was not established. So the same source and the same Rust 1.95.0 do not give the same bytes on another machine.
 
 The official hashes still reproduce 12 of 12 on the developer's machine, and the code on chain matches them 12 of 12 ([§1.2](#12-contracts)). Suite B's CI run deployed its throwaway market from the runner's build, so its wasm hashes differ from the official ones; its local run deployed byte-identical wasm ([§4.1](#41-the-deploy)).
+
+### 2.2 The manual run from `main`, and its fix
+
+Run 43511581261 is stated in full because it failed.
+
+- **Suite A** passed 13 of 13 tests in 162 s, with 12 transactions. It met the overloaded RPC too, and its reads
+  retried.
+- **Suite B** deployed its market (`testnet-usdy-1794606869`) and passed its first 7 tests, with 11 transactions, up to
+  the stale-oracle refusal. For about a minute the public Testnet RPC then answered JSON-RPC `-32004` "preflight queue
+  full; retry later". The read inside the maturity oracle tick had no retry, so the tick never landed. Three tests
+  failed:
+  - "After a tick, a trade is refused as matured, by the app and by the pool": `preflight queue full; retry later`
+    (code `-32004`);
+  - `redeem_at_maturity`, in cascade: "timed out waiting for a fresh oracle in the holder's reads";
+  - `finalize_record`, in cascade: `Error(Contract, #7)`, the oracle still stale.
+
+  Its four run keys were removed (`keysNotRemoved: []`). All 23 transactions of the run are successful on Horizon.
+- **The fix.** Commit `625b722` gives the harness bounded retries for reads and simulations. It never resends a
+  transaction except through the sequence-number proof. Commits `3f96e77` and `b1bd606` make the app show "The
+  Stellar network is busy. Try again in a moment." on an overloaded RPC, in place of its raw text or
+  "[object Object]".
+- **Suite B with the fix**, run locally on 13 November 2026 from 22:21:48 to 22:43:35 UTC, passed 10 of 10 in 1,307 s
+  on market `testnet-usdy-1794609769`, with 14 transactions. It rode out two `-32004` answers: this is from the run's
+  console output, which its record does not keep. The steps that failed above landed:
+  - the maturity tick, ledger 5717231, [57068ef4…c911](https://stellar.expert/explorer/testnet/tx/57068ef4c86f60b2c648de92598c3b2b42670a32a3a50c339389e12789e7c911);
+  - the redemption, ledger 5717233, [cb83348b…5406](https://stellar.expert/explorer/testnet/tx/cb83348b5151eed777d8bde9677ba2eb752cebf127de7efc950add5159b75406);
+  - `finalize_record`, ledger 5717234, [eddc82f6…1d28](https://stellar.expert/explorer/testnet/tx/eddc82f6db2e28ac9c3dc0ca0d45876245f7770944d52dc616a278bf24da1d28).
+- **The pull request that ships the fix** runs both suites again. Its run is added to the table above after it runs.
 
 ## 3. Suite A: the live journey on the official market
 
@@ -188,7 +220,7 @@ Two runs of [tests/e2e-testnet/lifecycle.test.ts](https://github.com/principal-P
 | Run | Record | Started, finished | Result | Transactions | Keys |
 |---|---|---|---|---|---|
 | CI: [run 43503140770](https://github.com/principal-Protocol-org/dapp/actions/runs/43503140770), job "Suite B: ephemeral lifecycle" | artifact `e2e-lifecycle-1` (kept until 13 December 2026) | 20:37:27 UTC, 20:59:01 UTC (1,294 s) | 10 of 10 tests passed | 14, all successful | all four removed (`keysNotRemoved: []`) |
-| Local: `pnpm test:e2e:testnet tests/e2e-testnet/lifecycle.test.ts` | `e2e-artifacts/lifecycle.json`, not committed | 15:29:54 UTC, 15:51:35 UTC (1,301 s) | 10 of 10 tests passed | 14, all successful | all four removed (`keysNotRemoved: []`) |
+| Local: `pnpm test:e2e:testnet tests/e2e-testnet/lifecycle.test.ts` | a local record, not committed (its hashes are on the public ledger) | 15:29:54 UTC, 15:51:35 UTC (1,301 s) | 10 of 10 tests passed | 14, all successful | all four removed (`keysNotRemoved: []`) |
 
 ### 4.1 The deploy
 
@@ -406,12 +438,61 @@ Unit tests at `665bb67`, in [contracts/oracle_adapter/src/test.rs](https://githu
 The contracts repository's [CI](https://github.com/principal-Protocol-org/principal/blob/665bb6760372d30307a1a035da24e51776f727e8/.github/workflows/ci.yml) runs them with `cargo test --workspace --locked`. The contracts team's own Testnet deployments, including a recovery and a settlement, are in
 [docs/TESTNET_DEPLOYMENT_EVIDENCE_2026_11_05.md](https://github.com/principal-Protocol-org/principal/blob/665bb6760372d30307a1a035da24e51776f727e8/docs/TESTNET_DEPLOYMENT_EVIDENCE_2026_11_05.md).
 
-## 8. Open items
+### 7.1 Live on the contracts team's oracle at `aae6cf8`
+
+The contracts team's acceptance doc ([§5](https://github.com/principal-Protocol-org/principal/blob/aae6cf81346a51f600393e4267be45e65524ae4e/docs/TRANCHE_2_TESTNET_ACCEPTANCE.md#5-oracle-safety-guards-demonstrated-live)) shows the guards live on
+the OracleAdapter of its own deployment ([CCP6U5…JP6P](https://stellar.expert/explorer/testnet/contract/CCP6U5FLJW6ZUUFLJOQLQ2SYRVA2ENQVGZ5YMRRJTJIBMFOCOI7PJP6P), [§8](#8-the-contracts-teams-deployment-pipeline-at-aae6cf8)).
+That oracle is a different build from ours: wasm `f5c8a129…`, with the new pull path, against our `adb87f76…`. On our
+deployment the evidence remains Suite B's stale refusal ([§4.6](#46-refusals-at-maturity)).
+
+| What it shows | Transaction |
+|---|---|
+| Push path: an update of +6.5%, inside the 10% cap, is accepted | [157d9beb…cca3](https://stellar.expert/explorer/testnet/tx/157d9beb934e89962710a4ceb7af75175a9f9c853450492d680b73b62c44cca3) |
+| Push path: +17.4% is rejected, not reverted: the call returns `false`, the value stays, and `last_rejection()` reads reason `deviate` | [2d189f03…bcd8](https://stellar.expert/explorer/testnet/tx/2d189f03e9a87dd26f987a5e0bfe4359f11d6d7b7496eced98597b699b62bcd8) |
+| The window is narrowed to 1 s: `is_available()` then reads `false`, and an `assert_available()` simulation reverts `Error(Contract, #8)`, `OracleUnavailable` (a simulation, so it has no transaction) | [7ab72841…de46](https://stellar.expert/explorer/testnet/tx/7ab7284151f4b89e9d7d193b2ff3b4a2e32317f95e0e6c9cce42e51681b7de46) |
+| The window and the value are restored | [e130b157…acf5](https://stellar.expert/explorer/testnet/tx/e130b157ed9ea9c7c07c6b733c6f3b7032c0c7447c212515df077c673a75acf5), [93a3f980…1352](https://stellar.expert/explorer/testnet/tx/93a3f980a6cf298d8e9eaffa5caef37a1db3046663c2176fa6350393a6f71352) |
+| Pull path (SEP-40, against a mock feed): `set_feed_source` wires the feed | [70e8e0be…8955](https://stellar.expert/explorer/testnet/tx/70e8e0be5fe710a177a929a5052c47f785771a61590fc3591c93e67266528955) |
+| Pull path: `sync_from_feed` accepts an equal value, then +8% | [09b687f7…feaf](https://stellar.expert/explorer/testnet/tx/09b687f780e2908d8d783f12d989b6a5afcbee5e5ca04f09851f58544748feaf), [39f33f56…e461](https://stellar.expert/explorer/testnet/tx/39f33f5682d4cd2f2a92c0d1a379358cc22ccfbe7b937f8131afb7d35f03e461) |
+| Pull path: +15.7% is rejected, not reverted, with reason `deviate` | [0eff8aae…155f](https://stellar.expert/explorer/testnet/tx/0eff8aae6fa20c728c8e93c765b789ff45735619f823deca175a9717a933155f) |
+
+## 8. The contracts team's deployment pipeline at `aae6cf8`
+
+Source: the contracts repository at `main` = [`aae6cf8`](https://github.com/principal-Protocol-org/principal/commit/aae6cf81346a51f600393e4267be45e65524ae4e)
+(14 November 2026) and its acceptance doc [docs/TRANCHE_2_TESTNET_ACCEPTANCE.md](https://github.com/principal-Protocol-org/principal/blob/aae6cf81346a51f600393e4267be45e65524ae4e/docs/TRANCHE_2_TESTNET_ACCEPTANCE.md).
+
+| Item | Value |
+|---|---|
+| Deploy script | [`scripts/deploy/deploy.sh`](https://github.com/principal-Protocol-org/principal/blob/aae6cf81346a51f600393e4267be45e65524ae4e/scripts/deploy/deploy.sh): reads one `.env` (`ENV_FILE`, default `.env`); idempotent, it reuses existing contracts unless `FORCE_REDEPLOY=true`. Two back-to-back full runs created no new contracts (doc [§6](https://github.com/principal-Protocol-org/principal/blob/aae6cf81346a51f600393e4267be45e65524ae4e/docs/TRANCHE_2_TESTNET_ACCEPTANCE.md#6-findings-from-the-first-live-runs-and-what-was-fixed), finding 4). |
+| Verification script | [`scripts/deploy/verify-deployment.sh`](https://github.com/principal-Protocol-org/principal/blob/aae6cf81346a51f600393e4267be45e65524ae4e/scripts/deploy/verify-deployment.sh): **64 of 65** checks pass (doc [§4](https://github.com/principal-Protocol-org/principal/blob/aae6cf81346a51f600393e4267be45e65524ae4e/docs/TRANCHE_2_TESTNET_ACCEPTANCE.md#4-verification-script-output)): the five shared contracts alive with their on-chain code hash matching the manifest, the market's contracts alive, the topology, the Router registration, the RiskControl consumers and the compliance standing. |
+| Manifest | [`deployments/testnet/deployment-manifest.json`](https://github.com/principal-Protocol-org/principal/blob/aae6cf81346a51f600393e4267be45e65524ae4e/deployments/testnet/deployment-manifest.json): addresses, wasm SHA-256, deploy and init transaction IDs, `source_commit` `665bb67`, `git_tree_dirty: true` |
+| Market | `testnet-CD2A2J-89d-CDO7S4YP`, test asset `TR2`, maturity `1802381857`; pool [CDFKUE…EGCY](https://stellar.expert/explorer/testnet/contract/CDFKUEQHX32XOHV6K2VHYUDEKZFHRCRSNVNH3KBYBBVEQM2KM2CFEGCY), SYWrapper [CDO7S4…G4S5](https://stellar.expert/explorer/testnet/contract/CDO7S4YPV36NFC5CHMSBGUVRZSKHPHIX35RBL33R4RLALVUK4YQSG4S5), OracleAdapter [CCP6U5…JP6P](https://stellar.expert/explorer/testnet/contract/CCP6U5FLJW6ZUUFLJOQLQ2SYRVA2ENQVGZ5YMRRJTJIBMFOCOI7PJP6P) |
+| Init transactions (examples) | OracleAdapter [1955050f…1b45](https://stellar.expert/explorer/testnet/tx/1955050f4dc388219616bca2beefbd75fa1b0dc3f65b7c93e4f67223fc541b45), Permissioning [e9ed37b9…784d](https://stellar.expert/explorer/testnet/tx/e9ed37b9a1a348798da90fd2a54d71fe126275d786ee77c5a0f385327d37784d), RiskControl [f0ba774a…e0e0](https://stellar.expert/explorer/testnet/tx/f0ba774a87336c8bd5993ae3dc800e35c50161150dc908487ba32e3d3054e0e0), Router [c6d5b869…5b1c](https://stellar.expert/explorer/testnet/tx/c6d5b8691c9b5e7c3f08cd614cadf9776ca416f637c01d593a56ebc7468c5b1c) |
+| Market creation | `create_tokens` [5fa11388…3094](https://stellar.expert/explorer/testnet/tx/5fa113887a4ca2f70e35f92c1fc32ba58833ee7418526df5fb64f3c0b7dc3094), `create_engine` [27f3a2dc…c9e2](https://stellar.expert/explorer/testnet/tx/27f3a2dc4db00216e802a46a8040a9c87819b6beab12cc60bca3c6f23590c9e2), `create_pool_and_escrow` [6d84844d…ecb0](https://stellar.expert/explorer/testnet/tx/6d84844d00b806f783f85696d4f9241b04f13d86e057b1b6cc46ed39fa7becb0) (from the doc's run logs, not the manifest) |
+
+Caveats the doc states itself:
+- **verify passes 64 of 65.** The one FAIL is `git_tree_dirty`: the deploy ran on an uncommitted working tree on top of
+  `665bb67`. The doc calls it the one expected non-acceptance condition, to be resolved before the deployment is cited
+  as a clean acceptance artifact.
+- **5 `deploy_tx` were not captured**, those of the shared contracts (OracleAdapter, Permissioning, RiskControl,
+  Router, MarketFactory). An earlier run of the script lost them before its fix, and later runs reused the contracts.
+- **The market-creation transactions are not in the manifest's `transactions[]`.** The doc lists them from its run logs.
+- **`RISK_CB_LIMIT=0`**: the circuit breaker is disabled on Testnet, as on our deployment.
+
+**Two deployments.** This market is a throwaway proof of the pipeline. The doc says it "supersedes nothing", and
+nothing runs on it. The app, the walkthrough and the CI suites run on our market `testnet-usdy-1802336344`
+([§1](#1-official-deployment)). Both come from the same contract source, principal `665bb67`, except the
+OracleAdapter. According to the contracts team, `aae6cf8` only adds optional OracleAdapter functions (`set_feed_source`,
+`sync_from_feed`, the SEP-40 pull path), and nothing the app calls changed. The diff from `665bb67` to `aae6cf8` under
+`contracts/` touches only `contracts/oracle_adapter/src/` and test snapshots. Its wasm bytes differ from ours anyway:
+the doc built them with Rust 1.94.1 on another machine, and the bytes depend on the builder ([§2.1](#21-the-linux-wasm-comparison)).
+
+## 9. Open items
 
 | Item | Owner | Reason |
 |---|---|---|
-| Deploy pipeline details of Deliverable 1: a single `.env` file, deployment transaction IDs in the manifest, a standalone post-deploy verification script, idempotent re-deploy | app team | Not built; the review's §1.6 maps each one. |
-| RiskControl limits on the official market | app team | Deployed with the circuit breaker off (`get_cb_limit` 0). |
+| The pipeline deployment's own caveats: `git_tree_dirty`, 5 shared-contract `deploy_tx` not captured, market-creation transactions not in the manifest | contracts team | Stated in its acceptance doc ([§8](#8-the-contracts-teams-deployment-pipeline-at-aae6cf8)). |
+| RiskControl limits | app team and contracts team | Set to 0 on Testnet in both deployments: the circuit breaker is off (`get_cb_limit` 0 here, `RISK_CB_LIMIT=0` there). |
+| The fix pull request's CI run ([§2.2](#22-the-manual-run-from-main-and-its-fix)) | app team | Added after it runs. |
 | The deviation guard on the official oracle | none needed | It has not fired: no update was rejected (`last_rejection` is `null`). Its live proof is in the contracts repository ([§7](#7-oracle-safety-in-the-contracts-repository)). |
 | Redeem in the browser, and its screenshots | app team | Possible only after 11 February 2027 08:59:04 UTC. |
 | Nested transfers whose amounts come from the pool's reserves can fail with `Error(Auth, InvalidAction)` when another trade moves the pool between simulation and inclusion | contracts team | A known contract-level limit; only the network fee is lost, and a retry works. |

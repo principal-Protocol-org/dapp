@@ -53,7 +53,8 @@ Outputs (both git-ignored; never commit them):
 ## Testnet
 
 `PRINCIPAL_NETWORK=testnet scripts/dev-stack/deploy.sh` runs the same deployment on Stellar
-Testnet, as an interim market until the contract team's Deliverable 1 manifest replaces it. There
+Testnet. It made the official Testnet market, `testnet-usdy-1802336344`; the contracts team's own pipeline
+(`principal` `scripts/deploy/`) deployed a separate proof market that the app does not use. There
 is no `up.sh` step: the script creates and funds (friendbot) four keys in the Stellar CLI keystore,
 and the roles are split so the server never holds the protocol admin:
 
