@@ -37,7 +37,7 @@ import {
   type StepPlan,
   type Unwind,
 } from "@/lib/protocol/routes"
-import { userErrorMessage } from "@/lib/protocol/errors"
+import { errorReason, userErrorMessage } from "@/lib/protocol/errors"
 import {
   createRpcServer,
   failedTransactionReason,
@@ -549,7 +549,7 @@ export function useRoute(opts: UseRouteOptions): RouteControls {
         return show(g, {
           phase: "waiting",
           index: i,
-          error: `Step ${i + 1}'s result could not be checked (${text(error)}). Check again in a moment.`,
+          error: `Step ${i + 1}'s result could not be checked (${errorReason(error)}). Check again in a moment.`,
           // One failed look does not undo what an earlier one established.
           ...(lost ? { lost } : {}),
         })

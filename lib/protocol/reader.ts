@@ -1,5 +1,5 @@
 import { StrKey } from "@stellar/stellar-sdk"
-import { errorMessage } from "./errors"
+import { userErrorMessage } from "./errors"
 import { createRpcServer, simulateContractRead, type ContractReadResult, type ScArg } from "./stellar"
 import type { Live, Manifest } from "./types"
 
@@ -30,10 +30,11 @@ const MAX_ERROR_LENGTH = 160
  * The failure as shown to the user: its first line, capped. A Soroban simulation error carries the
  * whole diagnostic event log after its `HostError: Error(...)` line; that log is for debugging and,
  * shown in a panel, floods it with long unbreakable contract IDs. `isContractError` reads only the
- * first line, so it still works on the summary.
+ * first line, so it still works on the summary. An overloaded RPC reads `RPC_BUSY_MESSAGE`, never
+ * its raw text (`userErrorMessage`); it is no contract error.
  */
 function summarizeError(error: unknown): string {
-  const text = errorMessage(error)
+  const text = userErrorMessage(error)
   const first = text.split("\n").map((line) => line.trim()).find((line) => line !== "") ?? "unknown error"
   return first.length <= MAX_ERROR_LENGTH ? first : `${first.slice(0, MAX_ERROR_LENGTH - 1)}…`
 }

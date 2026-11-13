@@ -7,6 +7,7 @@ import { ManagerSignFlow } from "@/components/app/manage/manager-sign-flow"
 import { useManifestFindings } from "@/hooks/use-manifest-findings"
 import { useSacAdmin } from "@/hooks/use-wizard"
 import { useWallet } from "@/hooks/use-wallet"
+import { errorReason, userErrorMessage } from "@/lib/protocol/errors"
 import { knownUnderlyings, PARAM_LABEL, type MarketParams, type ParamErrors } from "@/lib/protocol/factory"
 import type { Blocker } from "@/lib/protocol/gates"
 import { createEngineCall, createPoolAndEscrowCall, createTokensCall, type ManagerCall } from "@/lib/protocol/manager-calls"
@@ -52,7 +53,7 @@ export function StepDeploy({ manifest, salt, progress, underlying, params, error
   const code = underlying ? (knownUnderlyings(manifest).get(underlying)?.code ?? "asset") : "asset"
   const resumed = progress.phases.tokens
 
-  const adminRead: Live<string> | undefined = admin.data ?? (admin.isError ? { status: "unavailable", error: admin.error.message } : undefined)
+  const adminRead: Live<string> | undefined = admin.data ?? (admin.isError ? { status: "unavailable", error: userErrorMessage(admin.error) } : undefined)
   const roles: Live<Role[]> = !adminRead
     ? { status: "unavailable", error: "the asset's admin is still being read" }
     : adminRead.status === "unavailable"
@@ -117,7 +118,7 @@ export function StepDeploy({ manifest, salt, progress, underlying, params, error
 
       {adminRead?.status === "unavailable" ? (
         <p role="alert" className="text-sm text-negative">
-          {UNAVAILABLE}: who may deploy on {code} could not be read ({adminRead.error}). Deploying stays off until it can.
+          {UNAVAILABLE}: who may deploy on {code} could not be read ({errorReason(adminRead.error)}). Deploying stays off until it can.
         </p>
       ) : null}
       {adminRead?.status === "live" && !isIssuer ? (

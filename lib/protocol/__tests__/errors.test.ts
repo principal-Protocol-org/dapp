@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { errorMessage, failureSentence, isRpcBusy, RPC_BUSY_MESSAGE, userErrorMessage } from "../errors"
+import { errorMessage, errorReason, failureSentence, isRpcBusy, RPC_BUSY_MESSAGE, RPC_BUSY_REASON, saysRpcBusy, userErrorMessage } from "../errors"
 
 describe("errorMessage", () => {
   it("reads an Error, a string and an object message", () => {
@@ -75,5 +75,36 @@ describe("failureSentence", () => {
     expect(failureSentence(new Error("HostError: Error(Contract, #9)"), prepared, "Nothing was signed.")).toBe(
       "The transaction could not be prepared (HostError: Error(Contract, #9)). Nothing was signed; check the reasons shown and try again.",
     )
+  })
+})
+
+describe("wrapping twice", () => {
+  const prepared = (message: string) => `The transaction could not be prepared (${message}). Nothing was signed; check the reasons shown and try again.`
+  it("keeps a message that already says the network is busy, and what the first wrap added", () => {
+    const once = new Error(failureSentence(PREFLIGHT_QUEUE_FULL, prepared, "Nothing was signed."))
+    expect(once.message).toBe("The Stellar network is busy. Try again in a moment. Nothing was signed.")
+    // The sign flows and the route show a prepare error with userErrorMessage: it stays whole.
+    expect(userErrorMessage(once)).toBe(once.message)
+    expect(failureSentence(once, prepared, "Nothing was signed.")).toBe(once.message)
+    expect(`Step 2 was not sent: ${userErrorMessage(once)}`).toBe("Step 2 was not sent: The Stellar network is busy. Try again in a moment. Nothing was signed.")
+  })
+  it("recognizes the app's own wording, derived from one sentence", () => {
+    expect(saysRpcBusy(RPC_BUSY_MESSAGE)).toBe(true)
+    expect(saysRpcBusy(`Could not read the pool state (${RPC_BUSY_REASON}).`)).toBe(true)
+    expect(saysRpcBusy("boom")).toBe(false)
+  })
+})
+
+describe("errorReason", () => {
+  it("is the short reason for an overloaded RPC, for a sentence that already says what to do", () => {
+    expect(errorReason(PREFLIGHT_QUEUE_FULL)).toBe("the Stellar network is busy")
+    expect(errorReason(RPC_BUSY_MESSAGE)).toBe(RPC_BUSY_REASON)
+    expect(`Step 2's result could not be checked (${errorReason(PREFLIGHT_QUEUE_FULL)}). Check again in a moment.`).toBe(
+      "Step 2's result could not be checked (the Stellar network is busy). Check again in a moment.",
+    )
+  })
+  it("keeps any other message", () => {
+    expect(errorReason(new Error("boom"))).toBe("boom")
+    expect(errorReason({ code: -32600, message: "start is before oldest ledger" })).toBe("start is before oldest ledger (code -32600)")
   })
 })

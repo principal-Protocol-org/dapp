@@ -8,6 +8,7 @@ import { useMarketState } from "@/hooks/use-market-state"
 import { useWallet } from "@/hooks/use-wallet"
 import type { AccountState } from "@/lib/protocol/account-state"
 import { evaluateAccountCompliance } from "@/lib/protocol/compliance"
+import { errorReason } from "@/lib/protocol/errors"
 import type { Blocker, GateContext } from "@/lib/protocol/gates"
 import { getMarket } from "@/lib/protocol/manifest"
 import { useManifest } from "@/components/app/manifest-provider"
@@ -72,7 +73,7 @@ export function useGateContext(marketId: string): GateInputs {
     unavailable.push({
       code: "unavailable",
       message: market.isError
-        ? `This market's on-chain data could not be read (${market.error?.message ?? "unknown error"}). Signing stays off until it loads.`
+        ? `This market's on-chain data could not be read (${market.error ? errorReason(market.error) : "unknown error"}). Signing stays off until it loads.`
         : "Loading this market's on-chain data. Signing turns on once it has loaded.",
     })
   }

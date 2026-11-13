@@ -12,6 +12,18 @@ const SIMULATION_ERROR = [
 ].join("\n")
 
 describe("unavailable", () => {
+  it("shows an overloaded RPC (the SDK's plain -32004 object) as the busy message, never its raw text", async () => {
+    const busy = { code: -32004, message: "preflight queue full; retry later" }
+    expect(unavailable(busy)).toEqual({ status: "unavailable", error: "The Stellar network is busy. Try again in a moment." })
+    // Through a read, as every panel and gate gets it; and it is no contract error (it was not refused).
+    const reader: ContractReader = async () => {
+      throw busy
+    }
+    const live = await readLive(reader, { contractId: "C", functionName: "pool_state" })
+    expect(live).toEqual({ status: "unavailable", error: "The Stellar network is busy. Try again in a moment." })
+    expect(live.status === "unavailable" && isContractError(live.error)).toBe(false)
+  })
+
   it("summarizes a JSON-RPC error object rather than [object Object]", () => {
     expect(unavailable({ code: -32600, message: "rpc refused" })).toEqual({ status: "unavailable", error: "rpc refused (code -32600)" })
   })

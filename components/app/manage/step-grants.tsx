@@ -5,6 +5,7 @@ import { useManifest } from "@/components/app/manifest-provider"
 import { RoleCalls, type RoleItem } from "@/components/app/manage/role-calls"
 import type { ChainStepProps } from "@/components/app/manage/wizard"
 import { useContractAdmin } from "@/hooks/use-wizard"
+import { userErrorMessage } from "@/lib/protocol/errors"
 import { grantAccountCall, grantAssetCall, setAuthorizedCall } from "@/lib/protocol/manager-calls"
 import type { Grant, GrantHolder } from "@/lib/protocol/market-progress"
 import { knownUnderlyings } from "@/lib/protocol/factory"
@@ -29,7 +30,7 @@ export function StepGrants({ progress, account, ledgerTime }: ChainStepProps) {
   const manifest = useManifest()
   const permissioningAdmin = useContractAdmin(manifest.shared.permissioning)
   const { live, predicted } = progress
-  const perm = permissioningAdmin.data ?? (permissioningAdmin.isError ? { status: "unavailable" as const, error: permissioningAdmin.error.message } : undefined)
+  const perm = permissioningAdmin.data ?? (permissioningAdmin.isError ? { status: "unavailable" as const, error: userErrorMessage(permissioningAdmin.error) } : undefined)
   // The asset's admin is read with the progress (`live.admin`, the SAC's own `admin()`).
   const sacAdmin = { status: "live" as const, value: live.admin, ledger: 0 }
   const code = knownUnderlyings(manifest).get(live.underlying)?.code ?? "the asset"

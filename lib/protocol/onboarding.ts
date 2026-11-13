@@ -7,12 +7,13 @@
  */
 import { Account, Asset, BASE_FEE, Operation, TransactionBuilder } from "@stellar/stellar-sdk"
 import type { AccountState } from "./account-state"
-import { failureSentence } from "./errors"
+import { errorReason, failureSentence } from "./errors"
 import { readLive, toBool, type ContractReader } from "./reader"
 import {
   assertSignedTransactionMatchesReview,
   createRpcServer,
   pollTransactionStatus,
+  SubmissionRejectedError,
   submitSignedTransaction,
   transactionEnvelopeHash,
 } from "./stellar"
@@ -215,16 +216,31 @@ export async function addTrustline(p: {
     expectedSigner: account,
   })
   const hash = transactionEnvelopeHash(signedXdr, manifest.networkPassphrase)
-  const submitted = await submitSignedTransaction({
-    rpcUrl: manifest.rpcUrl,
-    networkPassphrase: manifest.networkPassphrase,
-    signedXdr,
-    server,
-  })
+  // Once sent, it may be on the network: a failure from here on says to look it up by its hash
+  // before trying again, as a review's send and poll do (`signAndSubmit`). Nothing is sent twice.
+  const lookItUp = `Look it up by its hash (${hash}) before trying again.`
+  let submitted: Awaited<ReturnType<typeof submitSignedTransaction>>
+  try {
+    submitted = await submitSignedTransaction({
+      rpcUrl: manifest.rpcUrl,
+      networkPassphrase: manifest.networkPassphrase,
+      signedXdr,
+      server,
+    })
+  } catch (error) {
+    // Refused by the network (status ERROR): nothing was executed, and its message says so.
+    if (error instanceof SubmissionRejectedError) throw error
+    throw new Error(`Sending the trustline transaction failed (${errorReason(error)}), and it may still land. ${lookItUp}`)
+  }
   if (submitted.status === "TRY_AGAIN_LATER") {
     throw new Error("The network is busy and did not accept the trustline transaction. Try again in a moment.")
   }
-  const polled = await pollTransactionStatus({ rpcUrl: manifest.rpcUrl, hash, server, attempts: 15, wait: p.wait })
+  let polled: Awaited<ReturnType<typeof pollTransactionStatus>>
+  try {
+    polled = await pollTransactionStatus({ rpcUrl: manifest.rpcUrl, hash, server, attempts: 15, wait: p.wait })
+  } catch (error) {
+    throw new Error(`The trustline transaction was submitted, but its status could not be read (${errorReason(error)}). ${lookItUp}`)
+  }
   if (polled.status === "FAILED") throw new Error("The trustline transaction failed on the network. Nothing changed; try again.")
   if (polled.status !== "SUCCESS") {
     throw new Error(`The trustline transaction was sent but is not confirmed yet (hash ${hash}). Wait a moment, then try again.`)

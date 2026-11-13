@@ -14,7 +14,7 @@
 import type { AccountState } from "./account-state"
 import type { ActionId, ActionInput } from "./actions"
 import type { ComplianceItem } from "./compliance"
-import { failureSentence } from "./errors"
+import { errorReason, failureSentence } from "./errors"
 import { formatAmount, formatWindow } from "./format"
 import type { MarketState } from "./market-state"
 import { SCALE } from "./math"
@@ -218,7 +218,7 @@ export class Gates {
   /** The value of a read this action needs, or `undefined` after recording why it is missing. */
   need<T>(value: Live<T>, what: string): T | undefined {
     if (value.status === "live") return value.value
-    this.unverified(what, `Could not read ${what} (${value.error}). Signing stays off until it can be checked; try again in a moment.`)
+    this.unverified(what, `Could not read ${what} (${errorReason(value.error)}). Signing stays off until it can be checked; try again in a moment.`)
     return undefined
   }
 

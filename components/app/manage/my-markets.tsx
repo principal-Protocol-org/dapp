@@ -15,6 +15,7 @@ import { useMarketStates } from "@/hooks/use-market-state"
 import { useAccruedFees, useMyRoles } from "@/hooks/use-manage"
 import { useMarketsInProgress, type RegistrySalt } from "@/hooks/use-wizard"
 import { useWallet } from "@/hooks/use-wallet"
+import { errorReason } from "@/lib/protocol/errors"
 import type { Blocker } from "@/lib/protocol/gates"
 import { formatAmount, shorten } from "@/lib/protocol/format"
 import {
@@ -64,7 +65,7 @@ const ROLE_NAME: Record<Role, string> = {
 const CONTRACT_NAME: Record<AdminContract, string> = { pool: "pool", sy: "SY wrapper", manager: "manager" }
 
 function unavailableText(error: string) {
-  return `${UNAVAILABLE} (${error})`
+  return `${UNAVAILABLE} (${errorReason(error)})`
 }
 
 function Fact({ label, children }: { label: string; children: React.ReactNode }) {
@@ -268,7 +269,7 @@ function MarketsInProgress({ markets, listedPools, registryDown }: { markets: In
             <li key={salt} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-line bg-surface p-3 text-sm">
               <span className="grid min-w-0 gap-0.5">
                 <span className="text-ink">{p ? <>Pool <span className="font-mono">{shorten(p.predicted.pool)}</span></> : "A market in progress"}</span>
-                {progress.isError ? <span className="text-ink-muted">{unavailableText(progress.error?.message ?? "unknown error")}</span> : null}
+                {progress.isError ? <span className="text-ink-muted">{unavailableText(progress.error ? errorReason(progress.error) : "unknown error")}</span> : null}
               </span>
               <Button asChild variant="secondary" size="toggle">
                 <Link href={href}>{p ? `Resume at step ${p.step}` : "Open"}</Link>

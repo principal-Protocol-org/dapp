@@ -4,6 +4,7 @@ import { UNAVAILABLE } from "@/components/app/live"
 import { ManagerSignFlow } from "@/components/app/manage/manager-sign-flow"
 import { useManifestFindings } from "@/hooks/use-manifest-findings"
 import { useWallet } from "@/hooks/use-wallet"
+import { errorReason } from "@/lib/protocol/errors"
 import type { Blocker } from "@/lib/protocol/gates"
 import type { ManagerCall } from "@/lib/protocol/manager-calls"
 import { evaluateManagerGates, REQUIRED_ROLE } from "@/lib/protocol/manager-gates"
@@ -120,7 +121,7 @@ function Signer({ admin, account }: { admin: Live<string> | undefined; account: 
   if (admin.status === "unavailable") {
     return (
       <p role="alert" className="text-sm text-negative">
-        {UNAVAILABLE}: who must sign this could not be read ({admin.error}). Signing it stays off until it can.
+        {UNAVAILABLE}: who must sign this could not be read ({errorReason(admin.error)}). Signing it stays off until it can.
       </p>
     )
   }

@@ -33,7 +33,7 @@ import {
 } from "@stellar/stellar-sdk"
 import { ACTION_META, invocationFor, type ActionId, type ActionInput, type GuardValues } from "./actions"
 import { bytesToHex } from "./bytes"
-import { failureSentence, userErrorMessage } from "./errors"
+import { errorReason, failureSentence } from "./errors"
 import { formatAmount, shorten } from "./format"
 import { parseOutput, type ActionOutput } from "./guards"
 import { hashLike } from "./hash"
@@ -233,9 +233,9 @@ function assertNoZeroFloor(input: ActionInput): void {
   }
 }
 
-/** Readable, never "[object Object]"; an overloaded RPC reads as `RPC_BUSY_MESSAGE`. */
+/** The reason inside a sentence: readable, never "[object Object]"; an overloaded RPC reads `RPC_BUSY_REASON`. */
 function errorText(error: unknown): string {
-  return userErrorMessage(error)
+  return errorReason(error)
 }
 
 function invokedContractArgs(transaction: Transaction): xdr.InvokeContractArgs | undefined {

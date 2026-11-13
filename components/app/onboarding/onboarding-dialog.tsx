@@ -10,7 +10,7 @@ import { useAccountState } from "@/hooks/use-account-state"
 import { useMarketPermissions } from "@/hooks/use-market-permissions"
 import { useWallet } from "@/hooks/use-wallet"
 import { useManifest } from "@/components/app/manifest-provider"
-import { userErrorMessage } from "@/lib/protocol/errors"
+import { errorReason, userErrorMessage } from "@/lib/protocol/errors"
 import {
   addTrustline,
   fundWithFriendbot,
@@ -186,9 +186,9 @@ function AccountChecklist({ marketId, address, asset }: { marketId: string; addr
   if (!data || account.stale || data.accountExists.status === "unavailable" || data.trustline.status === "unavailable") {
     const cause =
       data?.accountExists.status === "unavailable"
-        ? ` (${data.accountExists.error})`
+        ? ` (${errorReason(data.accountExists.error)})`
         : data?.trustline.status === "unavailable"
-          ? ` (${data.trustline.error})`
+          ? ` (${errorReason(data.trustline.error)})`
           : ""
     return <p className="text-sm text-ink wrap-anywhere">Your account could not be read right now{cause}. Try again in a moment.</p>
   }

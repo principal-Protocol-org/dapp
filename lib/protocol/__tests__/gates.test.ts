@@ -842,6 +842,17 @@ describe("healthy context", () => {
   })
 })
 
+describe("a read the overloaded RPC did not answer", () => {
+  it("names the read and the busy network once, in one sentence that says what to do (no doubled 'try again')", () => {
+    const blockers = gates("buy_pt", (c) => {
+      c.market.topology = { status: "unavailable", error: "The Stellar network is busy. Try again in a moment." }
+    })
+    const [unread] = blockers.filter((b) => b.code === "unavailable")
+    expect(unread.message).toMatch(/^Could not read .+ \(the Stellar network is busy\)\. Signing stays off until it can be checked; try again in a moment\.$/)
+    expect(unread.message.match(/try again in a moment/gi)).toHaveLength(1)
+  })
+})
+
 describe("gate matrix", () => {
   for (const row of MATRIX) {
     describe(row.rule, () => {

@@ -5,6 +5,7 @@ import { useManifest } from "@/components/app/manifest-provider"
 import { RoleCalls, type RoleItem } from "@/components/app/manage/role-calls"
 import type { ChainStepProps } from "@/components/app/manage/wizard"
 import { useContractAdmin } from "@/hooks/use-wizard"
+import { userErrorMessage } from "@/lib/protocol/errors"
 import { addConsumerCall, registerMarketCall } from "@/lib/protocol/manager-calls"
 
 /**
@@ -19,8 +20,8 @@ export function StepWire({ progress, account, ledgerTime }: ChainStepProps) {
   const riskControlAdmin = useContractAdmin(manifest.shared.riskControl)
   const routerAdmin = useContractAdmin(manifest.shared.router)
   const { predicted, live } = progress
-  const rc = riskControlAdmin.data ?? (riskControlAdmin.isError ? { status: "unavailable" as const, error: riskControlAdmin.error.message } : undefined)
-  const router = routerAdmin.data ?? (routerAdmin.isError ? { status: "unavailable" as const, error: routerAdmin.error.message } : undefined)
+  const rc = riskControlAdmin.data ?? (riskControlAdmin.isError ? { status: "unavailable" as const, error: userErrorMessage(riskControlAdmin.error) } : undefined)
+  const router = routerAdmin.data ?? (routerAdmin.isError ? { status: "unavailable" as const, error: userErrorMessage(routerAdmin.error) } : undefined)
 
   const items: RoleItem[] = [
     {

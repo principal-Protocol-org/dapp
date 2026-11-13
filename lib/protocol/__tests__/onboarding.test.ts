@@ -205,6 +205,22 @@ describe("addTrustline", () => {
     expect(server.sendTransaction).not.toHaveBeenCalled()
   })
 
+  it("after an unanswered send or poll, says to look it up by its hash before trying again (it may have landed)", async () => {
+    const kp = Keypair.random()
+    const busy = { code: -32004, message: "preflight queue full; retry later" }
+    const sendFailed = fakeServer()
+    sendFailed.sendTransaction.mockRejectedValue(busy)
+    const sent = (await addTrustline({ manifest, account: kp.publicKey(), asset, sign: keySigner(kp), server: sendFailed, wait: async () => {} }).catch((e: unknown) => e)) as Error
+    expect(sent.message).toMatch(/^Sending the trustline transaction failed \(the Stellar network is busy\), and it may still land\. Look it up by its hash \([0-9a-f]{64}\) before trying again\.$/)
+    expect(sendFailed.sendTransaction).toHaveBeenCalledTimes(1)
+
+    const pollFailed = fakeServer()
+    pollFailed.getTransaction.mockRejectedValue(busy)
+    const polled = (await addTrustline({ manifest, account: kp.publicKey(), asset, sign: keySigner(kp), server: pollFailed, wait: async () => {} }).catch((e: unknown) => e)) as Error
+    expect(polled.message).toMatch(/^The trustline transaction was submitted, but its status could not be read \(the Stellar network is busy\)\. Look it up by its hash \([0-9a-f]{64}\) before trying again\.$/)
+    expect(pollFailed.sendTransaction).toHaveBeenCalledTimes(1)
+  })
+
   it("fails with the cause when the network does not confirm it", async () => {
     const kp = Keypair.random()
     const server = fakeServer()

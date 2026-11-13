@@ -393,6 +393,19 @@ describe("useRoute", () => {
     expect(result.current.state).toMatchObject({ phase: "waiting", canDismiss: true })
   })
 
+  it("a re-check the overloaded RPC did not answer says so once, without its raw text or a doubled 'again'", async () => {
+    mocks.exec.execute.mockImplementation(async (review: Review): Promise<TxResult> => ({ hash: hashOf(review), status: "NOT_FOUND" }))
+    const { result } = setup()
+    act(() => result.current.start(buyPt, plansFor(buyPt)))
+    await untilReview(result, 1)
+    act(() => result.current.sign())
+    await waitFor(() => expect(result.current.state.phase).toBe("waiting"))
+    mocks.getTransaction.mockRejectedValueOnce({ code: -32004, message: "preflight queue full; retry later" })
+    act(() => result.current.continue())
+    await waitFor(() => expect(result.current.state.error).toMatch(/could not be checked/))
+    expect(result.current.state.error).toMatch(/^Step \d+'s result could not be checked \(the Stellar network is busy\)\. Check again in a moment\.$/)
+  })
+
   it("while waiting, says what the confirmed steps had left before the unknown step (M3)", async () => {
     mocks.exec.execute.mockImplementation(async (review: Review): Promise<TxResult> =>
       review.input.action === "deposit" ? success(review, amountOut(998n * S)) : { hash: hashOf(review), status: "NOT_FOUND" },

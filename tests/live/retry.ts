@@ -107,9 +107,8 @@ const EXTERNAL = [
   // The network did not take the transaction, or took another one from the account first.
   /TRY_AGAIN_LATER|network is busy and did not accept/i,
   /txBadSeq|tx_bad_seq|sequence number changed/i,
-  // The app's gates, when a read or the simulation could not reach the RPC, or found it overloaded.
+  // The app's gates, when a read or the simulation could not reach the RPC (an overloaded one is `isRpcBusy`).
   /The simulation could not run/,
-  /The Stellar network is busy/,
   /could not be checked right now/,
   /Could not read .+\(.+\)\. Signing stays off/,
 ]
@@ -133,7 +132,8 @@ function failureText(error: unknown): string {
 export function isExternalFailure(error: unknown): boolean {
   if (isTransientRpcError(error)) return true
   const text = failureText(error)
-  return EXTERNAL.some((pattern) => pattern.test(text))
+  // The app's own wording for an overloaded RPC, in a message or an assertion's received value too.
+  return isRpcBusy(text) || EXTERNAL.some((pattern) => pattern.test(text))
 }
 
 /**
