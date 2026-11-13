@@ -9,7 +9,7 @@
     "lint": "eslint",
     "test": "node scripts/ensure-local-manifest.mjs && vitest run",
     "test:watch": "node scripts/ensure-local-manifest.mjs && vitest",
-    "typecheck": "node scripts/ensure-local-manifest.mjs && tsc --noEmit",
+    "typecheck": "node scripts/ensure-local-manifest.mjs && next typegen && tsc --noEmit",
     "test:integration": "node scripts/ensure-local-manifest.mjs && vitest run --config vitest.integration.config.mts",
     "test:e2e:testnet": "node scripts/ensure-local-manifest.mjs && vitest run --config vitest.e2e-testnet.config.mts",
     "walkthrough:shots": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON tests/e2e-testnet/walkthrough-shots.ts",
