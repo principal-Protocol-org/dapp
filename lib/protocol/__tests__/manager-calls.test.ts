@@ -134,7 +134,7 @@ describe("manager call builders encode each call as the contract declares it", (
       kind: "grant_account",
       source: SIGNER,
       invocation: { contractId: permissioning, functionName: "grant_account", args: [address(SIGNER), address(ACCOUNT)] },
-      label: `Grant ${short(ACCOUNT)} Principal permissioning`,
+      label: `Give ${short(ACCOUNT)} Principal permission`,
     })
     expect(encodedTypes(call)).toEqual(["scvAddress", "scvAddress"])
   })
@@ -145,7 +145,7 @@ describe("manager call builders encode each call as the contract declares it", (
       kind: "grant_asset",
       source: SIGNER,
       invocation: { contractId: permissioning, functionName: "grant_asset", args: [address(SIGNER), address(ACCOUNT), address(pt)] },
-      label: `Grant ${short(ACCOUNT)} permissioning for the PT of ${NAME}`,
+      label: `Give ${short(ACCOUNT)} permission for the PT of ${NAME}`,
     })
     expect(encodedTypes(call)).toEqual(["scvAddress", "scvAddress", "scvAddress"])
   })

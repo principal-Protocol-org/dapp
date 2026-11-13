@@ -213,7 +213,7 @@ export function grantAccountCall(manifest: Manifest, p: { source: string; accoun
     kind: "grant_account",
     source,
     invocation: { contractId: manifest.shared.permissioning, functionName: "grant_account", args: [address(source), address(account)] },
-    label: `Grant ${nameOf(manifest, account)} Principal permissioning`,
+    label: `Give ${nameOf(manifest, account)} Principal permission`,
   }
 }
 
@@ -230,7 +230,7 @@ export function grantAssetCall(manifest: Manifest, p: { source: string; account:
       functionName: "grant_asset",
       args: [address(source), address(account), address(asset)],
     },
-    label: `Grant ${nameOf(manifest, account)} permissioning for ${nameOf(manifest, asset)}`,
+    label: `Give ${nameOf(manifest, account)} permission for ${nameOf(manifest, asset)}`,
   }
 }
 
