@@ -62,7 +62,7 @@ and the roles are split so the server never holds the protocol admin:
 | `principal-testnet-admin` | Admin of every market contract, the Router and the factory; SAC admin of the test asset (every Principal contract requires its admin to be the SAC admin) | This machine only |
 | `principal-testnet-treasury` | Receives the fee shares | This machine only |
 | `principal-testnet-issuer` | Classic issuer of the test asset and Permissioning admin: the faucet's key | Server: `FAUCET_ISSUER_SECRET` |
-| `principal-testnet-oracle` | OracleAdapter admin: can only push the value | Server: `ORACLE_ADMIN_SECRET` |
+| `principal-testnet-oracle` | OracleAdapter admin: pushes the value, and can also change the oracle's window, deviation cap, sources and value bounds | Server: `ORACLE_ADMIN_SECRET` |
 
 - `MATURITY_SECONDS` defaults to 90 days on testnet. The market id is `testnet-usdy-<maturity>`.
 - It writes `config/manifests/testnet.json` (committed: public addresses and hashes only), no env

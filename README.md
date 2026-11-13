@@ -46,8 +46,8 @@ by `lib/protocol/manifest-source.ts`. The app refuses to sign when the wallet is
 
 Every contract address comes from a manifest, never from code. Each network has one file in
 `config/manifests/`, validated with zod (`lib/protocol/manifest.ts`) at build time and again at
-runtime. The format is described in
-the Tranche 2 spec ("Scope 1"): network settings,
+runtime. Its format is `manifestSchema` in
+[`lib/protocol/manifest.ts`](lib/protocol/manifest.ts): network settings,
 `shared` contracts, and a `markets[]` list with the underlying, maturity and nine contract IDs per
 market.
 
@@ -108,7 +108,7 @@ Copy `.env.example` to `.env.local`. Never commit real keys.
 | `DATABASE_URL_UNPOOLED` | Server only | Optional. Direct connection for migrations; else `DATABASE_URL` with `-pooler` removed from the host. |
 | `CRON_SECRET` | Server only | Optional. Bearer secret Vercel Cron sends to `GET /api/cron/record`. Unset, the route refuses every Bearer call. |
 | `QSTASH_CURRENT_SIGNING_KEY`, `QSTASH_NEXT_SIGNING_KEY` | Server only | Verify Upstash QStash signatures on the cron routes. |
-| `ORACLE_ADMIN_SECRET` | Server only | Testnet and local only. The oracle admin key `GET`/`POST /api/cron/oracle` signs with (see Scheduler). It can only push the oracle value. Never set on mainnet: the route refuses to run there. |
+| `ORACLE_ADMIN_SECRET` | Server only | Testnet and local only. The oracle admin key `GET`/`POST /api/cron/oracle` signs with (see Scheduler). It is the OracleAdapter's admin: besides pushing the value, it can change the oracle's window, deviation cap, sources and value bounds, and hand the role over. Never set on mainnet: the route refuses to run there. |
 
 `pnpm db:migrate [--env-file .env.testnet]` applies `db/migrations/*.sql` over a direct connection and
 never prints the connection string. Run it on each Neon branch (testnet, mainnet) before you deploy
@@ -269,8 +269,11 @@ Two workflows run on pull requests:
 - The two jobs run in parallel, so a run takes about 25 minutes. Suite A stops at 20 minutes and
   Suite B at 55 (room for a cold build and a failed deploy, with the record still uploaded).
 - Suite B builds the contracts with cargo and Rust 1.95.0, the toolchain that built the official
-  deployment, and deploys them with the Stellar CLI 28.1.0. On macOS that toolchain reproduces the
-  deployment's `wasmHashes` byte for byte; each run's job summary compares the Linux build with them.
+  deployment, and deploys them with the Stellar CLI 28.1.0. On the developer's machine that toolchain
+  reproduces the deployment's `wasmHashes` byte for byte; each run's job summary compares the Linux
+  build with them. That build is not byte-identical (0 of 12 on the first run): ten of the twelve
+  wasm files embed the builder's home directory, through the path of the cargo registry, so the bytes
+  depend on the machine that builds them.
 - The build (a few minutes) is cached by `sourceCommit` and Rust version. It runs again when either
   changes, when the cache has not been used for 7 days, and on a pull request's first run until the
   nightly run on `main` has warmed the cache (a pull request's cache is its own).

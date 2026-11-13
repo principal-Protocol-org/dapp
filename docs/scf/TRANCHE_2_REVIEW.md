@@ -27,7 +27,7 @@ Each status is one of:
 |---|---|
 | Public app (Stellar Testnet) | <https://testnet.principalmarket.fi> |
 | The walkthrough (end-user docs) | <https://principalmarket.fi/docs/using-the-app/testnet-walkthrough> |
-| dApp repository, branch `testnet` (the dApp work; `main` is behind it) | <https://github.com/principal-Protocol-org/dapp/tree/testnet> |
+| dApp repository, branch `testnet` (the dApp work; `main` is the production landing site, with no app code) | <https://github.com/principal-Protocol-org/dapp/tree/testnet> |
 | Contracts repository at the deployed commit `665bb67` | <https://github.com/principal-Protocol-org/principal/tree/665bb6760372d30307a1a035da24e51776f727e8> |
 | Official deployment manifest | [config/manifests/testnet.json](https://github.com/principal-Protocol-org/dapp/blob/testnet/config/manifests/testnet.json) |
 | End-to-end workflow | [.github/workflows/e2e-testnet.yml](https://github.com/principal-Protocol-org/dapp/blob/testnet/.github/workflows/e2e-testnet.yml) |
@@ -43,9 +43,9 @@ Each status is one of:
 | 1 | SAC compliance controls and RecoveryEscrow are active on-chain | Met ([1.4](#14-sac-compliance-controls-and-recoveryescrow-are-active-on-chain)) |
 | 1 | oracle safety guards are working | Met: staleness on this deployment, deviation guard in the contracts repository ([1.5](#15-oracle-safety-guards-are-working)) |
 | 2 | dApp is live at a public Testnet URL | Met ([2.1](#21-the-dapp-is-live-at-a-public-testnet-url)) |
-| 2 | all user flows work end-to-end | Met on branch `testnet`; redeem in the browser only after maturity ([2.2](#22-all-user-flows-work-end-to-end)) |
+| 2 | all user flows work end-to-end | Met on the live site; redeem in the browser only after maturity ([2.2](#22-all-user-flows-work-end-to-end)) |
 | 2 | compliance, oracle, and maturity restrictions are enforced in the interface | Met ([2.3](#23-compliance-oracle-and-maturity-restrictions-are-enforced-in-the-interface)) |
-| 3 | E2E tests pass in CI against the live Testnet deployment | Open until the first green CI run is linked ([3.1](#31-e2e-tests-pass-in-ci-against-the-live-testnet-deployment)) |
+| 3 | E2E tests pass in CI against the live Testnet deployment | Met: first green CI run on pull request #1 ([3.1](#31-e2e-tests-pass-in-ci-against-the-live-testnet-deployment)) |
 | 3 | the walkthrough is reproducible by an independent reviewer | Met ([3.2](#32-the-walkthrough-is-reproducible-by-an-independent-reviewer)) |
 
 The tranche's objective, as submitted:
@@ -122,12 +122,18 @@ review does not depend on them.
      (steps 1 to 11), including the compliance standing of each protocol contract;
    - seeds the pool and writes the manifest.
 2. Check that it repeats. The end-to-end Suite B runs the same script on every CI run and deploys a complete
-   throwaway market from scratch, with four keys generated in the run. On 13 November 2026 that deploy took 376 s, and
-   its 12 wasm hashes are byte-identical to the official manifest's ([evidence §4.1](TRANCHE_2_EVIDENCE.md#41-the-deploy)). Each CI
-   run's job summary also compares a Linux build of the same commit and Rust version (the cached build, on a cache hit) with the official hashes (step "Compare the wasm with the
-   official deployment's" in the [workflow](https://github.com/principal-Protocol-org/dapp/blob/testnet/.github/workflows/e2e-testnet.yml)).
+   throwaway market from scratch, with four keys generated in the run. On 13 November 2026 it did so twice
+   ([evidence §4.1](TRANCHE_2_EVIDENCE.md#41-the-deploy)): locally in 376 s, with 12 wasm hashes byte-identical to
+   the official manifest's, and in the first green CI run in 333 s, from a build made on the runner.
+   - The runner's build is not byte-identical: 0 of 12 match, as the first CI run's job summary shows (step "Compare the
+     wasm with the official deployment's" in the
+     [workflow](https://github.com/principal-Protocol-org/dapp/blob/testnet/.github/workflows/e2e-testnet.yml)). The
+     bytes depend on the machine: ten of the twelve wasm files embed the builder's home directory, through the path
+     of the cargo registry ([evidence §2.1](TRANCHE_2_EVIDENCE.md#21-the-linux-wasm-comparison)).
+   - The official hashes reproduce 12 of 12 on the developer's machine, and the code on chain matches them 12 of 12
+     ([1.1](#11-all-protocol-contracts-are-deployed-and-publicly-visible) step 3).
 3. Check the post-deploy assertions. Right after its deploy, Suite B asserts
-   ([tests/e2e-testnet/lifecycle.test.ts, lines 486 to 538](https://github.com/principal-Protocol-org/dapp/blob/testnet/tests/e2e-testnet/lifecycle.test.ts#L486-L538)):
+   ([tests/e2e-testnet/lifecycle.test.ts, lines 486 to 538](https://github.com/principal-Protocol-org/dapp/blob/a96575305678948b66146eef7e968149006f3cf9/tests/e2e-testnet/lifecycle.test.ts#L486-L538)):
    the manifest validates with no error; the Router lists the one-step functions; the asset's SAC admin is the admin
    key; the oracle admin is the oracle key; the contracts are wired to each other as the manifest says; the pool is
    seeded; the oracle is fresh. Suite A checks the official deployment the same way before its journey (manifest,
@@ -138,15 +144,16 @@ criterion; [1.6](#16-the-description-item-by-item) maps them one by one, includi
 
 ### 1.3 The complete PT/YT and AMM flows are operational
 
-1. Open [evidence §3.2](TRANCHE_2_EVIDENCE.md#32-transactions): the 12 transactions of Suite A on the official market, 13 November 2026,
-   15:04 to 15:08 UTC: deposit, split into PT + YT, buy and sell PT, buy and sell YT, two liquidity deposits, a
+1. Open [evidence §3.2](TRANCHE_2_EVIDENCE.md#32-transactions): the 12 transactions of Suite A on the official market, from
+   the first green CI run (13 November 2026, 20:37 to 20:40 UTC) and from an earlier local run (15:04 to 15:08 UTC):
+   deposit, split into PT + YT, buy and sell PT, buy and sell YT, two liquidity deposits, a
    liquidity withdrawal, a PT transfer, a YT transfer, and the trustline of a third account kept off the allow-list for
    the compliance check. Open any hash on stellar.expert: it is successful, and its
    invocation names the contract function.
-2. Open [evidence §6.2](TRANCHE_2_EVIDENCE.md#62-browser-runs-on-the-official-market): the same journey done in a browser on the official market, with a yield
-   claim.
+2. Open [evidence §6.2](TRANCHE_2_EVIDENCE.md#62-the-browser-run-on-the-live-site): the same journey done in a browser on the
+   live site and the official market, with a yield claim.
 3. Open [evidence §4](TRANCHE_2_EVIDENCE.md#4-suite-b-the-ephemeral-lifecycle): Suite B's oracle tick, yield claim and redemption at maturity, on its own
-   market built from the same contract code.
+   market built from the same source (`665bb67`, Rust 1.95.0).
 4. Or run the flows yourself in the app: follow the walkthrough ([3.2](#32-the-walkthrough-is-reproducible-by-an-independent-reviewer)).
 
 **Status: Met.** Redemption at maturity is shown on Suite B's 20-minute market. The official market matures on
@@ -179,9 +186,9 @@ criterion; [1.6](#16-the-description-item-by-item) maps them one by one, includi
    maturity `finalize_record` settles the seized PT and YT into USDY. The record reads back `finalized: true`. Each step
    has its transaction hash.
 
-**Status: Met.** The recovery sequence ran on Suite B's market, with the same contract code as the official one. It
-needs the market admin key, which stays on the developer's machine and is never held by the app's server
-([evidence §1.3](TRANCHE_2_EVIDENCE.md#13-test-asset-and-roles)), so it is not run on the official market.
+**Status: Met.** The recovery sequence ran on Suite B's markets, built from the same source as the official one (in the
+local run, from byte-identical wasm). It needs the market admin key, which stays on the developer's machine and is
+never held by the app's server ([evidence §1.3](TRANCHE_2_EVIDENCE.md#13-test-asset-and-roles)), so it is not run on the official market.
 
 ### 1.5 Oracle safety guards are working
 
@@ -225,7 +232,8 @@ needs the market admin key, which stays on the developer's machine and is never 
    [`scripts/dev-stack/oracle-tick.sh`](https://github.com/principal-Protocol-org/dapp/blob/testnet/scripts/dev-stack/oracle-tick.sh)
    does the same by hand.
 
-**Status: Met.** The staleness guard is shown on this deployment's contract code (Suite B). The deviation guard is
+**Status: Met.** The staleness guard is shown by Suite B, whose local run deployed wasm byte-identical to the official
+deployment's. The deviation guard is
 **met in the contracts repository**: unit tests on the deployed code at `665bb67`, and live transactions on an earlier
 build of the oracle. It has not fired on the official oracle, whose `last_rejection` is `null`. The official oracle has one primary source and no
 fallback configured.
@@ -305,16 +313,15 @@ instead, and the open items above are the app team's.
 
 3. Compare with the recorded runs: Suite A ([evidence §3](TRANCHE_2_EVIDENCE.md#3-suite-a-the-live-journey-on-the-official-market)) runs every user flow on the official
    market through the app's own protocol layer (`lib/protocol/`: the same previews, gates, transaction building and
-   History reads the pages use). Two browser runs of the walkthrough on the official market are recorded with their
-   transaction hashes, one of them complete ([evidence §6.2](TRANCHE_2_EVIDENCE.md#62-browser-runs-on-the-official-market)).
+   History reads the pages use). A browser run of the whole walkthrough on the live site, every step landed, is
+   recorded with its transaction hashes ([evidence §6.2](TRANCHE_2_EVIDENCE.md#62-the-browser-run-on-the-live-site)).
 
-**Status: Met on branch `testnet`**, with two limits:
-- **Redeem in the browser** is possible only after the official market matures (11 February 2027). Redemption is shown
-  on Suite B's market through the same protocol layer ([evidence §4.7](TRANCHE_2_EVIDENCE.md#47-redemption-at-maturity)), and the redeem panel is
-  covered by [components/app/\_\_tests\_\_/redeem-tab.test.tsx](https://github.com/principal-Protocol-org/dapp/blob/testnet/components/app/__tests__/redeem-tab.test.tsx).
-- **The deployed build.** The site must serve a build that includes commit `df52bc7` (13 November 2026). The build it
-  served before that failed some sales and the liquidity withdrawal with "its refundable fee is too low"
-  ([evidence §6](TRANCHE_2_EVIDENCE.md#6-walkthrough)).
+**Status: Met.** The live site serves commit `a965753` of branch `testnet` (Vercel deployment
+`dpl_HZhpg6UfJY98m6vPigSiVrHoseDS`, 13 November 2026), the commit the first green CI run tested. One limit:
+**redeem in the browser** is possible only after the official market matures (11 February 2027). Redemption is shown
+on Suite B's markets through the same protocol layer ([evidence §4.7](TRANCHE_2_EVIDENCE.md#47-redemption-at-maturity)),
+and the redeem panel is covered by
+[components/app/\_\_tests\_\_/redeem-tab.test.tsx](https://github.com/principal-Protocol-org/dapp/blob/testnet/components/app/__tests__/redeem-tab.test.tsx).
 
 ### 2.3 Compliance, oracle and maturity restrictions are enforced in the interface
 
@@ -335,12 +342,12 @@ headed **Signing is off** that lists the reasons, and its review button stays of
    a reviewer cannot make it stale. Suite B let its own oracle go stale. For the redemption, the app's gate logic (`evaluateGates`, run by the suite
    without a browser) returned "The oracle price is stale: it has not been updated in the last 5 minutes. …", and the
    contract refused it too (error #7). The app's rules for a stale oracle are pinned in
-   [lib/protocol/\_\_tests\_\_/gates.test.ts](https://github.com/principal-Protocol-org/dapp/blob/testnet/lib/protocol/__tests__/gates.test.ts#L372-L435).
+   [lib/protocol/\_\_tests\_\_/gates.test.ts](https://github.com/principal-Protocol-org/dapp/blob/a96575305678948b66146eef7e968149006f3cf9/lib/protocol/__tests__/gates.test.ts#L372-L435).
 4. **Maturity (recorded; on the official market after 11 February 2027).** On Suite B's market after maturity, the app's
    gate logic returned, for a PT purchase, "Trading closed at maturity: this market has matured, so PT and YT can no
    longer be bought or sold in the pool. …", and the pool refused it too (error #6,
    [`Expired`](https://github.com/principal-Protocol-org/principal/blob/665bb6760372d30307a1a035da24e51776f727e8/contracts/market_pool/src/lib.rs#L162)).
-   The rules are pinned in the same [gates.test.ts](https://github.com/principal-Protocol-org/dapp/blob/testnet/lib/protocol/__tests__/gates.test.ts#L313-L369).
+   The rules are pinned in the same [gates.test.ts](https://github.com/principal-Protocol-org/dapp/blob/a96575305678948b66146eef7e968149006f3cf9/lib/protocol/__tests__/gates.test.ts#L313-L369).
 
 **Status: Met.**
 
@@ -362,7 +369,8 @@ headed **Signing is off** that lists the reasons, and its review button stays of
 ### 3.1 E2E tests pass in CI against the live Testnet deployment
 
 1. Open the workflow [.github/workflows/e2e-testnet.yml](https://github.com/principal-Protocol-org/dapp/blob/testnet/.github/workflows/e2e-testnet.yml).
-   It runs on every pull request to `testnet`, by hand and nightly (the nightly tests branch `testnet`). It has two jobs, run in parallel:
+   It runs on every pull request to `testnet`, nightly at 03:17 UTC and by hand; the nightly run and a manual run started
+   from `main` test branch `testnet`. It has two jobs, run in parallel:
    - **Suite A: live journey**, on the official deployment, with fresh accounts onboarded through the app's public
      faucet;
    - **Suite B: ephemeral lifecycle**, on a market it deploys on Testnet with `deploy.sh`, for the steps that need admin
@@ -371,11 +379,15 @@ headed **Signing is off** that lists the reasons, and its review button stays of
    It uses no repository secret: both suites make their keys in the run. The [README's CI section](https://github.com/principal-Protocol-org/dapp/blob/testnet/README.md#ci)
    explains it.
 2. Find the runs: the repository's **Actions** tab, workflow **E2E Testnet**,
-   <https://github.com/principal-Protocol-org/dapp/actions/workflows/e2e-testnet.yml>. Pull-request runs appear there.
-   Nightly and manual runs start once the workflow file is on `main`, the default branch.
+   <https://github.com/principal-Protocol-org/dapp/actions/workflows/e2e-testnet.yml>. Pull-request, nightly and manual
+   runs all appear there. `main`, the default branch, is the production landing site: it holds no app code, only a copy
+   of this workflow file so that the nightly and manual runs can start
+   ([pull request #2](https://github.com/principal-Protocol-org/dapp/pull/2)). Pull requests to `main` do not run the
+   suites.
 3. Open a run. Both jobs should be green. Each uploads its run record as an artifact (`e2e-journey-<attempt>`,
    `e2e-lifecycle-<attempt>`): a JSON file with the public keys, the transaction hashes and the refusals. Suite B's job
-   summary lists the wasm it built and whether each matches the official deployment's.
+   summary lists the wasm it built and whether each matches the official deployment's (none does on the runner; see
+   [1.2](#12-deployment-is-scripted-and-repeatable) step 2).
 4. Check that the suites cover the description's list:
 
    | Description item | Suite and test |
@@ -392,13 +404,16 @@ headed **Signing is off** that lists the reasons, and its review button stays of
 
    Plus, in Suite A: the History reads list every transaction once, and an account that was not onboarded is refused.
 
-**Status: Open until the first green CI run is linked** in [evidence §2](TRANCHE_2_EVIDENCE.md#2-ci), row "First green CI
-run". Owner: the app team. Both suites passed against live Testnet on 13 November 2026, run locally with the same
-command the workflow uses (records in [evidence §3](TRANCHE_2_EVIDENCE.md#3-suite-a-the-live-journey-on-the-official-market) and [§4](TRANCHE_2_EVIDENCE.md#4-suite-b-the-ephemeral-lifecycle)); the workflow
-had not run on GitHub yet when this file was written. If that row holds a link to a green run, this criterion is met.
+**Status: Met.** The first green CI run is
+[E2E Testnet run 43503140770](https://github.com/principal-Protocol-org/dapp/actions/runs/43503140770), on
+[pull request #1](https://github.com/principal-Protocol-org/dapp/pull/1) (commit `a965753`, 13 November 2026, 20:36:58
+to 20:59:05 UTC). Suite A passed 13 of 13 tests in 168 s with 12 transactions; Suite B passed 10 of 10 in 1,294 s with
+14 transactions and removed its run keys. Its records, with every transaction hash, are in
+[evidence §2](TRANCHE_2_EVIDENCE.md#2-ci), [§3](TRANCHE_2_EVIDENCE.md#3-suite-a-the-live-journey-on-the-official-market)
+and [§4](TRANCHE_2_EVIDENCE.md#4-suite-b-the-ephemeral-lifecycle), next to an earlier local run of both suites.
 
 "The live Testnet deployment": Suite A runs on the official deployment. Suite B runs on live Testnet too, on a market
-it deploys from the same contract code, because its admin-only steps cannot run on the official market without its
+it deploys from the same source, because its admin-only steps cannot run on the official market without its
 admin key leaving the developer's machine.
 
 ### 3.2 The walkthrough is reproducible by an independent reviewer
@@ -415,9 +430,10 @@ admin key leaving the developer's machine.
 5. Step 11 (redeem) can be done only after the market matures on 11 February 2027. Before that, the page shows the
    Portfolio's **Fixed return if held to maturity** block.
 
-**Status: Met.** The page's journey was run in a browser on the official market: in full on a production build of
-branch `testnet`, and on the live site except Sell YT and the withdrawal, which the site's older build failed (see
-[2.2](#22-all-user-flows-work-end-to-end), "The deployed build"). Every transaction is recorded ([evidence §6.2](TRANCHE_2_EVIDENCE.md#62-browser-runs-on-the-official-market)). Varial's own pop-ups and the screens after maturity are described in
+**Status: Met.** The page's journey was run in a browser on the live site and the official market, 13 November 2026,
+21:12 to 21:31 UTC, with one account: every step from Get test tokens to Claim yield landed, and all 22 screenshots
+come from that run ([evidence §6.2](TRANCHE_2_EVIDENCE.md#62-the-browser-run-on-the-live-site)). That run signs with a
+test-only wallet injected in place of Varial. Varial's own pop-ups and the screens after maturity are described in
 text, not shown ([evidence §6.4](TRANCHE_2_EVIDENCE.md#64-screens-not-captured)).
 
 ---
