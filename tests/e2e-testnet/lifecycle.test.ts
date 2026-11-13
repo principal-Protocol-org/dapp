@@ -676,7 +676,7 @@ describe("Suite B: the ephemeral lifecycle on a throwaway Testnet market (plan 0
     const b1 = await balancesFrom("trader", claim.ledger)
     expect(b1.underlying - b0.underlying, "the claim pays USDY").toBe(expected.net)
     for (const k of ["sy", "pt", "yt", "lp"] as const) expect(b1[k] - b0[k], `claim: ${k} moved`).toBe(0n)
-    record.claim = { expected: expected.net, paid: expected.net, oracleBefore: before, oracleAfter: ticked.value }
+    record.claim = { expected: expected.net, paid: b1.underlying - b0.underlying, oracleBefore: before, oracleAfter: ticked.value }
     log(`claim_yield: ${units(expected.net)} USDY (gross ${units(expected.gross)}, YT fee ${units(expected.fee)}), tx ${claim.hash}`)
     mark("tick and claim")
   }, 4 * MINUTE)
