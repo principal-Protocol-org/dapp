@@ -16,7 +16,7 @@ scripts/dev-stack/oracle-tick.sh                          # run this every 30 mi
 ```
 
 - `up.sh` starts the existing Podman machine if it is stopped (it never creates one), points the
-  Stellar CLI at the Podman socket through `DOCKER_HOST`, starts (or reuses) a `postgres:17` container named `principal-pg` on port 5432 (user, password and
+  Stellar CLI at the Podman socket through `DOCKER_HOST`, starts (or reuses) a `postgres:17` container named `principal-pg` on `127.0.0.1:5432`, loopback only (user, password and
   database `principal`; safe to re-run), runs `stellar container start local`
   (the first run pulls the `stellar/quickstart` image), waits for `getHealth`, and creates and
   funds two dev-only keys in the Stellar CLI keystore, `principal-localdev-admin` and
@@ -103,7 +103,7 @@ The oracle goes stale after about 1 h. A stale oracle refuses most writes and th
 
 ## Postgres: `principal-pg`
 
-`up.sh` starts a `postgres:17` container named `principal-pg` on port 5432 and `deploy.sh` writes its
+`up.sh` starts a `postgres:17` container named `principal-pg` on `127.0.0.1:5432` (loopback only) and `deploy.sh` writes its
 `DATABASE_URL` to `.env.local`. It holds the recorder's tables (`pnpm db:migrate` creates them; `deploy.sh`
 runs it for you). Call `GET /api/cron/record` with `Authorization: Bearer $CRON_SECRET` (set a throwaway
 `CRON_SECRET` in `.env.local`) to record a snapshot by hand. `podman rm -f principal-pg` drops the data.
