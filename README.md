@@ -224,6 +224,7 @@ Use `pnpm`.
 | `pnpm build` | Production build. |
 | `pnpm test` | Unit and component tests (Vitest, jsdom). |
 | `pnpm test:integration` | Live run of the protocol layer against the local network (see below). |
+| `pnpm test:e2e:testnet` | The live end-to-end suites on Stellar Testnet (see [CI](#ci)). |
 | `pnpm lint` | ESLint. |
 | `pnpm typecheck` | `tsc --noEmit`. |
 
@@ -250,8 +251,42 @@ LIFECYCLE_REDEPLOY=1 pnpm test:integration
 WIZARD_LIVE=1 pnpm test:integration
 ```
 
-CI (`.github/workflows/ci.yml`) runs lint, typecheck, test and build on pull requests, then the
-server-secret bundle check.
+## CI
+
+Two workflows run on pull requests:
+
+- `.github/workflows/ci.yml` runs lint, typecheck, test and build on every pull request, then the
+  server-secret bundle check.
+- `.github/workflows/e2e-testnet.yml` runs the live end-to-end suites on Stellar Testnet on every
+  pull request to `testnet` and `main`, every night, and by hand. They sign real Testnet
+  transactions with keypairs made in the run. The workflow uses no repository secret, and no key
+  is set in its environment.
+
+| Job | Suite | What it covers | Time |
+|---|---|---|---|
+| Suite A: live journey | `tests/e2e-testnet/journey.test.ts` | The user journey on the official deployment (`config/manifests/testnet.json`). Two fresh accounts are onboarded through the public faucet, then: deposit, split, Buy and Sell PT and YT in USDY, liquidity in and out, a PT and a YT transfer, the History page's reads, and the refusal of an account that was not onboarded. | about 5 min |
+| Suite B: ephemeral lifecycle | `tests/e2e-testnet/lifecycle.test.ts` | A throwaway market with a 20-minute maturity, deployed by `scripts/dev-stack/deploy.sh` (`EPHEMERAL=1`) with four keys generated in the run, from `principal` at the manifest's `sourceCommit`. It covers an oracle tick, a yield claim, compliance recovery (deauthorize, seize, settle the record), the stale-oracle and post-maturity refusals, and redemption at maturity. The keys are removed at the end. | about 22 min |
+
+- The two jobs run in parallel, so a run takes about 25 minutes. Each job stops at 45 minutes.
+- Suite B builds the contracts with the Stellar CLI 28.1.0 and Rust 1.95.0, the versions that built
+  the official deployment (they reproduce its `wasmHashes`; the job summary compares them). The
+  build is cached by commit: it runs again, in a few minutes, only when `sourceCommit` changes.
+- Each job uploads its run record (`e2e-artifacts/journey.json` or `lifecycle.json`: public keys,
+  transaction hashes, the refusals) as an artifact, kept 30 days, also when the run fails.
+- A newer push to a pull request cancels its older run. The nightly run uses the copy of the
+  workflow and of `testnet.json` on `main`, the default branch.
+
+Run it by hand from the Actions tab ("E2E Testnet", then "Run workflow"), or:
+
+```bash
+gh workflow run e2e-testnet.yml --ref testnet
+```
+
+Locally, `pnpm test:e2e:testnet` runs both suites, one after the other (about 26 minutes), and
+`pnpm test:e2e:testnet tests/e2e-testnet/journey.test.ts` runs one. Suite B needs the Stellar CLI,
+Rust with the `wasm32v1-none` target, `jq`, and a clone of `principal` at `../principal` (or
+`PRINCIPAL_REPO=<path>`). It creates its keys (`e2e-*`) in the local keystore and removes them at
+the end. A run killed midway can leave them: `stellar keys rm <name> --force`.
 
 ## Design system
 
