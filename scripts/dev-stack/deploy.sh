@@ -9,8 +9,11 @@
 #        [ASSET_CODE=USDY] scripts/dev-stack/deploy.sh
 # Options: MANIFEST_OUT=<path> writes the manifest there instead of config/manifests/<network>.json and
 #          writes no .env file. ORACLE_MAX_STALE_SECONDS=<n> sets the oracle freshness window (default 3600).
-#          EPHEMERAL=1 (testnet, needs MANIFEST_OUT and run-unique ADMIN_KEY/TREASURY_KEY/ISSUER_KEY/ORACLE_KEY
-#          names, never principal-testnet-*) deploys a throwaway market: no database, no env file, no notes.
+#          EPHEMERAL=1 (testnet, needs MANIFEST_OUT outside the repo and run-unique ADMIN_KEY/TREASURY_KEY/
+#          ISSUER_KEY/ORACLE_KEY names) deploys a throwaway market: no database, no env file, no notes.
+#          Key names must not start with principal- or principal_ (any letter case) and must not exist in the
+#          keystore yet. A deploy that rewrites config/manifests/testnet.json refuses non-default key names and
+#          a non-3600 stale window unless ALLOW_TESTNET_OVERRIDES=1.
 set -euo pipefail
 # shellcheck source=common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
@@ -30,26 +33,52 @@ case "$ORACLE_MAX_STALE_SECONDS" in '' | *[!0-9]*) die "ORACLE_MAX_STALE_SECONDS
 [ "${#ORACLE_MAX_STALE_SECONDS}" -le 9 ] || die "ORACLE_MAX_STALE_SECONDS is too large (at most 9 digits)"
 [ "$ORACLE_MAX_STALE_SECONDS" -gt 0 ] || die "ORACLE_MAX_STALE_SECONDS must be positive"
 
-# check_manifest_out: resolve MANIFEST_OUT and refuse every target that could reach the app's files.
-# Run once up front and again right before the write. The repository test walks the ancestors with
-# `-ef` (same inode), so letter case, `..` and symlinks cannot fool it.
+# Key names (testnet): plain keystore names only. A raw secret or address is also accepted by the Stellar CLI
+# as a "name", so secret-shaped values are refused. No message below ever prints a name's value.
+if [ "$NETWORK" = testnet ]; then
+  for var in ADMIN_KEY TREASURY_KEY ISSUER_KEY ORACLE_KEY; do
+    name="${!var}"
+    [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || die "$var is not a plain keystore name (letters, digits, - and _, starting with a letter or digit)"
+    [[ "$name" =~ ^[GS][A-Z2-7]{55}$ ]] && die "$var looks like a Stellar address or secret, not a keystore name"
+  done
+fi
+
+# inside_repo <dir>: true if <dir> or any ancestor is the dApp repository. `-ef` compares inodes, so letter
+# case, `..` and symlinks cannot fool it.
+inside_repo() {
+  local d="$1"
+  while :; do
+    [ ! "$d" -ef "$DAPP_DIR" ] || return 0
+    [ "$d" != / ] || return 1
+    d="$(dirname "$d")"
+  done
+}
+
+# check_manifest_out: resolve MANIFEST_OUT and refuse every target that could reach the app's files. Sets
+# OFFICIAL_MANIFEST=1 when it is exactly the default config/manifests/<network>.json. Run once up front and
+# again right before the write.
+OFFICIAL_MANIFEST=""
 check_manifest_out() {
-  local out_dir d
+  local out_dir
   case "$MANIFEST_OUT" in /*) ;; *) MANIFEST_OUT="$PWD/$MANIFEST_OUT" ;; esac
   out_dir="$(cd "$(dirname "$MANIFEST_OUT")" 2>/dev/null && pwd -P)" || die "the directory of MANIFEST_OUT does not exist"
   MANIFEST_OUT="$out_dir/$(basename "$MANIFEST_OUT")"
   [ ! -d "$MANIFEST_OUT" ] || die "MANIFEST_OUT '$MANIFEST_OUT' is a directory: give a file path"
-  [ -n "$EPHEMERAL" ] || return 0
-  [ ! -L "$MANIFEST_OUT" ] || die "EPHEMERAL=1: MANIFEST_OUT '$MANIFEST_OUT' is a symlink"
-  [ ! -s "$MANIFEST_OUT" ] || die "EPHEMERAL=1: MANIFEST_OUT '$MANIFEST_OUT' already exists and is not empty: it would be overwritten"
-  d="$out_dir"
-  while :; do
-    [ ! "$d" -ef "$DAPP_DIR" ] || die "EPHEMERAL=1: MANIFEST_OUT must be outside the dApp repository (it would point the app at a throwaway market): use a path under a temporary directory"
-    [ "$d" != / ] || break
-    d="$(dirname "$d")"
-  done
+  [ ! -L "$MANIFEST_OUT" ] || die "MANIFEST_OUT '$MANIFEST_OUT' is a symlink"
+  OFFICIAL_MANIFEST=""
+  if [ -n "$EPHEMERAL" ]; then
+    [ ! -s "$MANIFEST_OUT" ] || die "EPHEMERAL=1: MANIFEST_OUT '$MANIFEST_OUT' already exists and is not empty: it would be overwritten"
+    ! inside_repo "$out_dir" || die "EPHEMERAL=1: MANIFEST_OUT must be outside the dApp repository (it would point the app at a throwaway market): use a path under a temporary directory"
+  elif inside_repo "$out_dir"; then
+    if [ "$out_dir" -ef "$DAPP_DIR/config/manifests" ] && [ "$(basename "$MANIFEST_OUT")" = "$NETWORK.json" ]; then
+      OFFICIAL_MANIFEST=1
+    else
+      die "MANIFEST_OUT '$MANIFEST_OUT' is inside the dApp repository and is not config/manifests/$NETWORK.json: use a path outside it"
+    fi
+  fi
 }
 [ -z "$MANIFEST_OUT" ] || check_manifest_out
+[ -n "$MANIFEST_OUT" ] || OFFICIAL_MANIFEST=1
 
 if [ -n "$EPHEMERAL" ]; then
   [ "$EPHEMERAL" = 1 ] || die "EPHEMERAL must be 1 when set"
@@ -57,23 +86,23 @@ if [ -n "$EPHEMERAL" ]; then
   [ "$NETWORK" = testnet ] || die "EPHEMERAL=1 needs PRINCIPAL_NETWORK=testnet"
   seen=""
   for var in ADMIN_KEY TREASURY_KEY ISSUER_KEY ORACLE_KEY; do
-    name="${!var}"
-    lower="$(tr '[:upper:]' '[:lower:]' <<<"$name")"
+    lower="$(tr '[:upper:]' '[:lower:]' <<<"${!var}")"
     role="$(tr '[:upper:]' '[:lower:]' <<<"${var%_KEY}")"
     case "$lower" in
-      principal-* | principal_*) die "EPHEMERAL=1 refuses the key name '$name' ($var): names starting with principal- are reserved for the official keys. Set $var to a run-unique name, e.g. e2e-<runid>-$role" ;;
+      principal-* | principal_*) die "EPHEMERAL=1 refuses $var: names starting with principal- or principal_ are reserved for the official keys. Set $var to a run-unique name, e.g. e2e-<runid>-$role" ;;
     esac
-    case " $seen " in *" $lower "*) die "EPHEMERAL=1 needs four distinct key names (ADMIN_KEY, TREASURY_KEY, ISSUER_KEY, ORACLE_KEY); '$name' is repeated" ;; esac
+    case " $seen " in *" $lower "*) die "EPHEMERAL=1 needs four distinct key names (ADMIN_KEY, TREASURY_KEY, ISSUER_KEY, ORACLE_KEY); $var repeats an earlier one (compared in lower case)" ;; esac
     seen="$seen $lower"
   done
   # Last, and the only guard that reads the keystore (local read, no network): the script must generate
   # every key itself, so a cleanup can never delete a key that existed before the run.
   for var in ADMIN_KEY TREASURY_KEY ISSUER_KEY ORACLE_KEY; do
     ! stellar keys address "${!var}" >/dev/null 2>&1 ||
-      die "EPHEMERAL=1 refuses '${!var}' ($var): that key already exists in the keystore. Use a name that does not exist yet; the script generates and funds it"
+      die "EPHEMERAL=1 refuses $var: that key already exists in the keystore. Use a name that does not exist yet; the script generates and funds it"
   done
-elif [ "$NETWORK" = testnet ] && [ -z "$MANIFEST_OUT" ] && [ "${ALLOW_TESTNET_OVERRIDES:-}" != 1 ]; then
-  # The official manifest is the target: leftover variables must not rewrite it with throwaway keys.
+elif [ "$NETWORK" = testnet ] && [ -n "$OFFICIAL_MANIFEST" ] && [ "${ALLOW_TESTNET_OVERRIDES:-}" != 1 ]; then
+  # The official manifest is the target (by default or by an explicit MANIFEST_OUT pointing at it): leftover
+  # variables must not rewrite it with throwaway keys.
   [ "$ADMIN_KEY" = principal-testnet-admin ] && [ "$TREASURY_KEY" = principal-testnet-treasury ] &&
     [ "$ISSUER_KEY" = principal-testnet-issuer ] && [ "$ORACLE_KEY" = principal-testnet-oracle ] ||
     die "this deploy rewrites config/manifests/testnet.json but ADMIN_KEY/TREASURY_KEY/ISSUER_KEY/ORACLE_KEY are not the official names. Unset them, or set ALLOW_TESTNET_OVERRIDES=1 on purpose"
@@ -339,6 +368,8 @@ else
   MANIFEST="$DAPP_DIR/config/manifests/$NETWORK.json"
   mkdir -p "$(dirname "$MANIFEST")"
 fi
+# Write to a sibling temp file, then rename: a symlink or hard link at $MANIFEST is replaced, never followed.
+MANIFEST_TMP="$(mktemp "$(dirname "$MANIFEST")/.manifest.XXXXXX")"
 
 jq -n \
   --arg passphrase "$NETWORK_PASSPHRASE" --arg rpc "$RPC_URL" --arg horizon "$HORIZON_URL" \
@@ -363,7 +394,8 @@ jq -n \
       contracts: { router: $router, oracle: $oracle, sy: $sy, pt: $pt, yt: $yt, config: $config,
                    manager: $manager, pool: $pool, recoveryEscrow: $escrow }
     }]
-  }' >"$MANIFEST"
+  }' >"$MANIFEST_TMP" || { rm -f "$MANIFEST_TMP"; die "could not write the manifest"; }
+mv -f "$MANIFEST_TMP" "$MANIFEST" || { rm -f "$MANIFEST_TMP"; die "could not move the manifest into place"; }
 
 if [ -n "$EPHEMERAL" ]; then
   log "Wrote $MANIFEST (ephemeral: no env file, no database, nothing points the app at this market)"
