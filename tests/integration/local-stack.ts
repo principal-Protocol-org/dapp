@@ -11,6 +11,7 @@ import { execFile } from "node:child_process"
 import { existsSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { promisify } from "node:util"
+import { Keypair } from "@stellar/stellar-sdk"
 import { fetchAccountState, type ComplianceKind } from "@/lib/protocol/account-state"
 import { createHorizon } from "@/lib/protocol/horizon"
 import { parseManifest } from "@/lib/protocol/manifest"
@@ -19,8 +20,10 @@ import { createRpcReader } from "@/lib/protocol/reader"
 import { createRpcServer, getLedgerClock } from "@/lib/protocol/stellar"
 import type { Manifest, Market } from "@/lib/protocol/types"
 import { createStellarFaucetChain, resetFaucetStateForTests, runFaucet } from "@/lib/server/faucet"
+import { fundOnce } from "../live/context"
+import { retryOnce } from "../live/retry"
 import { eventually, json, redact } from "../live/util"
-import { fundedKeypairSigner, type KeypairSigner } from "./keypair-signer"
+import { keypairSigner, type KeypairSigner } from "./keypair-signer"
 
 export { eventually, json, redact, sleep } from "../live/util"
 export {
@@ -115,15 +118,31 @@ export async function onboardFreshAccount(
   /** The Permissioning admin's secret, when it is not the issuer. */
   permissioningAdminSecret?: string,
 ): Promise<KeypairSigner> {
-  const signer = await fundedKeypairSigner(manifest)
+  const signer = keypairSigner(Keypair.random(), manifest.networkPassphrase)
   const account = signer.publicKey
   const read = () => fetchAccountState(createRpcReader(manifest), createHorizon(manifest.horizonUrl), manifest, market.marketId, account, kind)
+  // Friendbot and the trustline are retried once after an external failure (a run on Testnet: plan
+  // 0007), as the endpoint mode does; locally the first try succeeds.
+  const exists = async () => {
+    const a = await read()
+    return a.accountExists.status === "live" && a.accountExists.value
+  }
+  await fundOnce({ manifest, account, exists })
   await eventually(read, (a) => a.accountExists.status === "live" && a.accountExists.value, "the funded account on Horizon")
-  await addTrustline({
-    manifest,
-    account,
-    asset: { code: market.underlying.code, issuer: market.underlying.issuer },
-    sign: (xdr) => signer.sign(xdr, manifest.networkPassphrase, account),
+  await retryOnce({
+    what: `the trustline of ${account}`,
+    run: () =>
+      addTrustline({
+        manifest,
+        account,
+        asset: { code: market.underlying.code, issuer: market.underlying.issuer },
+        sign: (xdr) => signer.sign(xdr, manifest.networkPassphrase, account),
+      }),
+    nothingLanded: async () => {
+      const a = await read()
+      return a.trustline.status === "live" && a.trustline.value === "none"
+    },
+    log: (line) => console.info(`[live] ${line}`),
   })
   await eventually(read, (a) => a.trustline.status === "live" && a.trustline.value !== "none", "the trustline on Horizon")
   resetFaucetStateForTests()
