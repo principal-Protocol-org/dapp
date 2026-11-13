@@ -9,6 +9,8 @@
 #        [ASSET_CODE=USDY] scripts/dev-stack/deploy.sh
 # Options: MANIFEST_OUT=<path> writes the manifest there instead of config/manifests/<network>.json and
 #          writes no .env file. ORACLE_MAX_STALE_SECONDS=<n> sets the oracle freshness window (default 3600).
+#          The window must outlast the deploy itself (genesis value at step 1, seeding mints 5 to 10 minutes
+#          later on Testnet); to test a stale oracle, shorten it afterwards with set_safety_params.
 #          EPHEMERAL=1 (testnet, needs MANIFEST_OUT outside the repo and run-unique ADMIN_KEY/TREASURY_KEY/
 #          ISSUER_KEY/ORACLE_KEY names) deploys a throwaway market: no database, no env file, no notes.
 #          Key names must not start with principal- or principal_ (any letter case) and must not exist in the

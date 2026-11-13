@@ -124,7 +124,7 @@ review does not depend on them.
 2. Check that it repeats. The end-to-end Suite B runs the same script on every CI run and deploys a complete
    throwaway market from scratch, with four keys generated in the run. On 13 November 2026 that deploy took 376 s, and
    its 12 wasm hashes are byte-identical to the official manifest's ([evidence §4.1](TRANCHE_2_EVIDENCE.md#41-the-deploy)). Each CI
-   run's job summary also compares a fresh Linux build with the official hashes (step "Compare the wasm with the
+   run's job summary also compares a Linux build of the same commit and Rust version (the cached build, on a cache hit) with the official hashes (step "Compare the wasm with the
    official deployment's" in the [workflow](https://github.com/principal-Protocol-org/dapp/blob/testnet/.github/workflows/e2e-testnet.yml)).
 3. Check the post-deploy assertions. Right after its deploy, Suite B asserts
    ([tests/e2e-testnet/lifecycle.test.ts, lines 486 to 538](https://github.com/principal-Protocol-org/dapp/blob/testnet/tests/e2e-testnet/lifecycle.test.ts#L486-L538)):
@@ -442,7 +442,8 @@ The unit tests (`pnpm test`) need no network.
 ## Known limits
 
 - Testnet is shared. The faucet serves each account, and each connection, once a minute; a suite that hits the limit
-  waits and retries once.
+  (a `busy` or `rate_limited` answer, 503 or 429) waits the server's `retryAfterSeconds` (60 s when absent, at most
+  120 s) and asks again, up to 4 attempts in all. Only a transient `failed` answer is retried, and only once.
 - A trade whose amounts are derived from the pool's reserves can fail with `Error(Auth, InvalidAction)` if another
   trade moves the pool between the simulation and the inclusion. Only the network fee is spent; trying again works.
   This is a contract-level limit, known to the contracts team, that only matters on a busy pool.

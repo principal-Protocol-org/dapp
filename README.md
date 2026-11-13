@@ -5,9 +5,6 @@ wallet (formerly Freighter) you can split a yield-bearing asset into a principal
 trade them, provide liquidity, claim yield and redeem at maturity. It runs on Stellar Testnet and
 on a local network. It is Deliverable 2 of Tranche 2 of SCF #45.
 
-Design and scope: [`.rness/specs/0001-dapp-testnet-tranche-2.md`](../../.rness/specs/0001-dapp-testnet-tranche-2.md).
-Current state and known limits in full: [`.rness/docs/dapp.md`](../../.rness/docs/dapp.md).
-
 ## Routes
 
 | Route | What it shows |
@@ -50,7 +47,7 @@ by `lib/protocol/manifest-source.ts`. The app refuses to sign when the wallet is
 Every contract address comes from a manifest, never from code. Each network has one file in
 `config/manifests/`, validated with zod (`lib/protocol/manifest.ts`) at build time and again at
 runtime. The format is described in
-[spec section "Scope 1"](../../.rness/specs/0001-dapp-testnet-tranche-2.md): network settings,
+the Tranche 2 spec ("Scope 1"): network settings,
 `shared` contracts, and a `markets[]` list with the underlying, maturity and nine contract IDs per
 market.
 
@@ -267,6 +264,9 @@ Two workflows run on pull requests:
 | Suite A: live journey | `tests/e2e-testnet/journey.test.ts` | The user journey on the official deployment (`config/manifests/testnet.json`). Two fresh accounts are onboarded through the public faucet, then: deposit, split, Buy and Sell PT and YT in USDY, liquidity in and out, a PT and a YT transfer, the History page's reads, and the refusal of an account that was not onboarded. | about 5 min |
 | Suite B: ephemeral lifecycle | `tests/e2e-testnet/lifecycle.test.ts` | A throwaway market with a 20-minute maturity, deployed by `scripts/dev-stack/deploy.sh` (`EPHEMERAL=1`) with four keys generated in the run, from `principal` at the manifest's `sourceCommit`. It covers an oracle tick, a yield claim, compliance recovery (deauthorize, seize, settle the record), the stale-oracle and post-maturity refusals, and redemption at maturity. The keys are removed at the end. | about 22 min |
 
+- Suite A runs on the official market, so it needs at least 6 hours (`MIN_RUNWAY_SECONDS` in
+  `journey.test.ts`) before that market's maturity. Near maturity (February 2027),
+  `config/manifests/testnet.json` must move to a new market.
 - The two jobs run in parallel, so a run takes about 25 minutes. Suite A stops at 20 minutes and
   Suite B at 55 (room for a cold build and a failed deploy, with the record still uploaded).
 - Suite B builds the contracts with cargo and Rust 1.95.0, the toolchain that built the official
@@ -304,6 +304,8 @@ Hanken Grotesk and figures IBM Plex Mono. The app works from 375 px wide and bot
 ## For SCF reviewers
 
 Where each funded Tranche 2 item lives in the final interface. Open a market from `/app`.
+To verify the work, follow the guide in [`docs/scf/TRANCHE_2_REVIEW.md`](docs/scf/TRANCHE_2_REVIEW.md); the
+evidence it points to is in [`docs/scf/TRANCHE_2_EVIDENCE.md`](docs/scf/TRANCHE_2_EVIDENCE.md).
 
 | Funded item | Where to find it |
 |---|---|
@@ -321,11 +323,11 @@ Where each funded Tranche 2 item lives in the final interface. Open a market fro
 
 ## Known limits
 
-Short list. The long form is in [`.rness/docs/dapp.md`](../../.rness/docs/dapp.md). The requests to the
-contract team are in [`.rness/docs/requests-arthur-0002.md`](../../.rness/docs/requests-arthur-0002.md).
+Short list.
 
-- **The Testnet v1 seed stays hidden or refused** until Arthur's v2 manifest with `wasmHashes`
-  arrives. It pins no Wasm hashes, so the recorder's validation marks it invalid.
+- **The official Testnet deployment is the app team's market `testnet-usdy-1802336344`.** The older
+  Testnet v1 seed pins no Wasm hashes, so the recorder's validation marks it invalid and it stays
+  hidden or refused.
 - **A PrincipalManager older than `665bb67` has no `is_paused`.** The dApp reads it, so on an older
   manager mint, YT and claim actions read "unavailable" and are blocked (fail closed). Ship the dApp
   together with a deployment from `665bb67` or later. The committed Testnet market was made at `665bb67`.
