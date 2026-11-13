@@ -39,8 +39,8 @@ export type RoleRequirement = { role: Role; who: string; can: string }
  */
 export const REQUIRED_ROLE: Record<ManagerCallKind, RoleRequirement | null> = {
   set_authorized: { role: "issuer", who: "the asset's issuer", can: "change who is authorized to hold it" },
-  grant_account: { role: "permissioningAdmin", who: "the Permissioning admin", can: "grant this" },
-  grant_asset: { role: "permissioningAdmin", who: "the Permissioning admin", can: "grant this" },
+  grant_account: { role: "permissioningAdmin", who: "the Permissioning admin", can: "give this permission" },
+  grant_asset: { role: "permissioningAdmin", who: "the Permissioning admin", can: "give this permission" },
   set_paused: { role: "contractAdmin", who: "this contract's admin", can: "pause or unpause it" },
   register_market: { role: "routerAdmin", who: "the Router admin", can: "register a market on the Router" },
   add_consumer: { role: "riskControlAdmin", who: "the RiskControl admin", can: "add a risk control consumer" },

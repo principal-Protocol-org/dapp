@@ -324,7 +324,7 @@ const WHAT: Record<SeedCallKind, string> = {
 const POOL_ERRORS: Record<number, string> = {
   5: "the pool is paused",
   6: "the market has matured",
-  11: "this wallet lacks the PT or SY permission step 5 grants",
+  11: "this wallet lacks the PT or SY permission step 5 gives",
   13: "the oracle price is stale",
   15: "the PT and SY would price PT at or above par",
   21: "the PT and SY are too small for the pool's minimum liquidity",

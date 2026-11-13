@@ -1804,7 +1804,7 @@ describe("manager reviews (0002 §5): the same review → sign pipeline as an ac
       expect(evaluateManagerGates(grant(), { ...ok, wallet: connected(), roles: holds("issuer", "creator") })).toEqual([
         {
           code: "wallet",
-          message: `Only the Permissioning admin can grant this. You are connected as ${short(SOURCE)}, which is not the Permissioning admin. Connect the Permissioning admin's wallet to sign this.`,
+          message: `Only the Permissioning admin can give this permission. You are connected as ${short(SOURCE)}, which is not the Permissioning admin. Connect the Permissioning admin's wallet to sign this.`,
         },
       ])
       const messageFor = (call: ManagerCall) => evaluateManagerGates(call, { ...ok, wallet: connected(), roles: holds() }).map((b) => b.message)
