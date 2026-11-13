@@ -25,6 +25,7 @@ const REJECTION_WORDS: Record<string, string> = {
   deviate: "Moved more than the cap",
   decrease: "Lower than the current value",
   stale_ts: "Not newer than the current value",
+  oob: "Outside the value bounds",
   fb_value: "Fallback tried to change the value",
 }
 

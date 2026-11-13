@@ -102,10 +102,10 @@ type CardProps = {
   account: string | null
 }
 
-const PAUSE_STATE: Record<AdminContract, keyof Pick<MarketState, "poolPaused" | "syPaused"> | null> = {
+const PAUSE_STATE: Record<AdminContract, keyof Pick<MarketState, "poolPaused" | "syPaused" | "managerPaused">> = {
   pool: "poolPaused",
   sy: "syPaused",
-  manager: null,
+  manager: "managerPaused",
 }
 
 function MarketCard({ market, ms, ledgerTime, readOnly, roles, shared, account }: CardProps) {
@@ -162,7 +162,6 @@ function MarketCard({ market, ms, ledgerTime, readOnly, roles, shared, account }
   if (!readOnly && account && held && roles) {
     for (const contract of held.contractAdminOf) {
       const key = PAUSE_STATE[contract]
-      if (key === null) continue // the manager has no view of its pause flag
       const flag: Live<boolean> | undefined = ms?.[key]
       const paused = flag?.status === "live" ? flag.value : undefined
       const name = CONTRACT_NAME[contract]
@@ -184,9 +183,8 @@ function MarketCard({ market, ms, ledgerTime, readOnly, roles, shared, account }
   }
 
   const pauseFacts = held?.contractAdminOf
-    .filter((c) => PAUSE_STATE[c] !== null)
     .map((c) => {
-      const flag = ms?.[PAUSE_STATE[c] as "poolPaused" | "syPaused"]
+      const flag = ms?.[PAUSE_STATE[c]]
       const text = !flag ? "Loading" : flag.status === "unavailable" ? unavailableText(flag.error) : flag.value ? "Paused" : "Running"
       return (
         <Fact key={c} label={`${CONTRACT_NAME[c][0].toUpperCase()}${CONTRACT_NAME[c].slice(1)}`}>
@@ -224,11 +222,6 @@ function MarketCard({ market, ms, ledgerTime, readOnly, roles, shared, account }
         {!readOnly && isProtocolAdmin ? feeLine("protocol", "Protocol fees to claim (treasury)") : null}
       </dl>
       {buttons.length > 0 ? <div className="flex flex-wrap gap-2">{buttons}</div> : null}
-      {!readOnly && held?.contractAdminOf.includes("manager") ? (
-        <p className="text-xs text-ink-muted">
-          You also administer the manager. It has no readable pause flag, so it is not offered here.
-        </p>
-      ) : null}
     </article>
   )
 }

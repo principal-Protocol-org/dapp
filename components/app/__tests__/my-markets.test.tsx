@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react"
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { Keypair, StrKey } from "@stellar/stellar-sdk"
 import { beforeEach, describe, expect, it, vi } from "vitest"
@@ -158,6 +158,35 @@ describe("actions per role", () => {
     mocks.ms[A.marketId] = marketState({ poolPaused: live(true) })
     show()
     expect(screen.getByRole("button", { name: "Unpause pool" })).toBeTruthy()
+  })
+
+  it("Pause manager for the manager's admin, Unpause manager when it is paused, and no sentence about a missing flag", () => {
+    setRoles(marketRoles(A, { manager: yes }), marketRoles(B))
+    show()
+    expect(screen.getByRole("button", { name: "Pause manager" })).toBeTruthy()
+    expect(screen.queryByText(/no readable pause flag/)).toBeNull()
+    cleanup()
+    mocks.ms[A.marketId] = marketState({ managerPaused: live(true) })
+    show()
+    expect(screen.getByRole("button", { name: "Unpause manager" })).toBeTruthy()
+  })
+
+  it("the manager switch is off, with the reason, when its flag cannot be read", () => {
+    setRoles(marketRoles(A, { manager: yes }), marketRoles(B))
+    mocks.ms[A.marketId] = marketState({ managerPaused: down("rpc 429") })
+    show()
+    expect((screen.getByRole("button", { name: "Pause manager" }) as HTMLButtonElement).disabled).toBe(true)
+    expect(screen.getAllByText(/Unavailable/).length).toBeGreaterThan(0)
+  })
+
+  it("Pause manager reviews a set_paused call on the manager contract", async () => {
+    setRoles(marketRoles(A, { manager: yes }), marketRoles(B))
+    show()
+    await userEvent.click(screen.getByRole("button", { name: "Pause manager" }))
+    await screen.findByRole("dialog")
+    const call = mocks.prepareManager.mock.calls[0][0] as ManagerCall
+    expect(call).toMatchObject({ kind: "set_paused", source: ME })
+    expect(call.invocation.contractId).toBe(A.contracts.manager)
   })
 
   it("a flag that cannot be read turns the switch off and says why", () => {

@@ -58,7 +58,7 @@ fi
 SOURCE="$(invoke "$ORACLE_KEY" "$ORACLE" get_primary_source | tr -d '"[:space:]')"
 [[ "$SOURCE" =~ ^[0-9a-f]{64}$ ]] || die "the oracle has no primary source (not initialized with set_sources, or a v1 oracle)"
 RESULT="$(invoke "$ORACLE_KEY" "$ORACLE" set_reference_value --caller "$ORACLE_ADMIN" --source "$SOURCE" --value "$NEW" --timestamp "$TS" | tr -d '"[:space:]')" ||
-  die "set_reference_value failed (a second tick within the same ledger second is rejected as TimestampTooOld)"
-# A rejection is a successful transaction that returns false.
+  die "set_reference_value failed (the transaction reverted)"
+# A rejection is a successful transaction that returns false (a second tick within the same ledger second returns false with reason stale_ts).
 [ "$RESULT" = "true" ] || die "the oracle rejected the value (returned '$RESULT'): $(invoke "$ORACLE_KEY" "$ORACLE" last_rejection)"
 echo "oracle rate $CURRENT -> $NEW at ledger time $TS"

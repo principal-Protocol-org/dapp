@@ -497,6 +497,7 @@ describe("SafetyContent", () => {
     const words: Record<string, string> = {
       decrease: "Lower than the current value",
       stale_ts: "Not newer than the current value",
+      oob: "Outside the value bounds",
       fb_value: "Fallback tried to change the value",
       other: "other",
     }

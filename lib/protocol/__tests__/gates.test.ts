@@ -493,7 +493,7 @@ const MATRIX: Row[] = [
       c.market.riskPaused = live(true)
     },
     code: "pause",
-    message: /risk control is paused: anything that deposits or mints is stopped \(deposits, minting, buying PT or YT in USDY, and adding liquidity in USDY\)/i,
+    message: /risk control is paused: anything that deposits or mints is stopped \(deposits, minting, buying YT, buying PT in USDY, and adding liquidity in USDY\)/i,
     blocks: ["deposit", "mint", "buy_yt", ...MINTS_ONLY, ...DEPOSITS],
     allows: except("deposit", "mint", "buy_yt", ...MINTS_ONLY, ...DEPOSITS),
   },
