@@ -42,8 +42,11 @@ const TRANSIENT_STATUSES = new Set([502, 504])
 /** When the last faucet request of a context was sent; shared by its onboardings (`requestFaucetWithRetry`). */
 export type FaucetPacer = { lastAt?: number }
 
-/** What onboarding through the faucet endpoint did, for the run's record (public data only). */
-export type Onboarding = { trustlineHash: string; faucet: FaucetStep[] }
+/**
+ * What onboarding through the faucet endpoint did, for the run's record (public data only): the
+ * trustline's hash, the faucet steps done across its attempts (`faucetStepsDone`), and every answer.
+ */
+export type Onboarding = { trustlineHash: string; faucet: FaucetStep[]; faucetAnswers: FaucetResponse[] }
 
 /** An onboarded keypair; `onboarding` is set in `endpoint` mode. */
 export type OnboardedSigner = KeypairSigner & { onboarding?: Onboarding }
@@ -163,6 +166,25 @@ export function liveContext(options: LiveContextOptions): LiveContext {
   }
 }
 
+/** The faucet's steps in the order it runs them (`lib/server/faucet.ts`, for one market). */
+const FAUCET_ORDER: readonly FaucetStep[] = ["authorize", "grant_account", "grant_pt", "grant_yt", "pay"]
+
+/**
+ * The faucet steps done across a request's answers, once each, in the faucet's order: those an
+ * answer reports performed, and, for a run that failed (its answer names the step it stopped at),
+ * the steps before that one: the faucet plans only the missing steps, in this order, so they are on
+ * chain, and a retry reports only the rest. An answer that names no step (no answer at all, `busy`)
+ * adds nothing: the account's end state is what proves onboarding.
+ */
+export function faucetStepsDone(answers: readonly FaucetResponse[]): FaucetStep[] {
+  const done = new Set<FaucetStep>()
+  for (const answer of answers) {
+    if ("performed" in answer) answer.performed.forEach((step) => done.add(step))
+    else if (answer.error === "failed" && answer.step) FAUCET_ORDER.slice(0, FAUCET_ORDER.indexOf(answer.step)).forEach((step) => done.add(step))
+  }
+  return FAUCET_ORDER.filter((step) => done.has(step))
+}
+
 /** `busy` and `rate_limited` mean "later", not "no": everything else is final, but for one transient `failed`. */
 const WAIT_ERRORS = new Set(["busy", "rate_limited"])
 
@@ -177,7 +199,8 @@ const retryAfter = (seconds: number | undefined) =>
  * a network error or the timeout) is asked again once, a faucet minute later: a run that failed
  * after a transaction keeps its address slot that long, and the steps it did are kept. At most
  * `attempts` requests, then the last answer. With a `pacer` shared across calls, every request
- * waits until a faucet minute after the one before it. Never throws on a refusal; the answer is typed.
+ * waits until a faucet minute after the one before it. `onAnswer` sees every answer, in order. Never
+ * throws on a refusal; the answer is typed.
  */
 export async function requestFaucetWithRetry(p: {
   origin: string
@@ -188,6 +211,7 @@ export async function requestFaucetWithRetry(p: {
   timeoutMs?: number
   pacer?: FaucetPacer
   now?: () => number
+  onAnswer?: (answer: FaucetResponse) => void
 }): Promise<FaucetResponse> {
   const fetchImpl = p.fetchImpl ?? fetch
   const wait = p.sleep ?? sleep
@@ -219,6 +243,7 @@ export async function requestFaucetWithRetry(p: {
       account: p.account,
       fetchImpl: viaOrigin,
     })
+    p.onAnswer?.(answer)
     if (!("error" in answer) || attempt === attempts) return answer
     if (WAIT_ERRORS.has(answer.error)) {
       await wait(retryAfter(answer.retryAfterSeconds) * 1_000 + 1_000)
@@ -298,10 +323,12 @@ async function onboardViaEndpoint(p: {
     log: (line) => console.info(`[live] ${line}`),
   })
   await eventually(read, (a) => a.trustline.status === "live" && a.trustline.value !== "none", "the trustline on Horizon")
+  const answers: FaucetResponse[] = []
   const outcome = await requestFaucetWithRetry({
     origin: p.origin,
     account,
     pacer: p.pacer,
+    onAnswer: (answer) => answers.push(answer),
     ...(p.fetchImpl ? { fetchImpl: p.fetchImpl } : {}),
     ...(p.attempts ? { attempts: p.attempts } : {}),
     ...(p.timeoutMs ? { timeoutMs: p.timeoutMs } : {}),
@@ -313,5 +340,6 @@ async function onboardViaEndpoint(p: {
     "the authorized trustline on Horizon",
     60_000,
   )
-  return { ...signer, onboarding: { trustlineHash, faucet: outcome.performed } }
+  // A retry after a partial run reports only the rest: the record merges every answer.
+  return { ...signer, onboarding: { trustlineHash, faucet: faucetStepsDone(answers), faucetAnswers: answers } }
 }

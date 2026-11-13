@@ -45,7 +45,7 @@ import { createHorizon } from "@/lib/protocol/horizon"
 import { validateManifest } from "@/lib/protocol/manifest"
 import { fetchMarketState, type MarketState } from "@/lib/protocol/market-state"
 import { BPS } from "@/lib/protocol/math"
-import { addTrustline, type FaucetStep } from "@/lib/protocol/onboarding"
+import { addTrustline } from "@/lib/protocol/onboarding"
 import { previewDeposit, previewWithdraw } from "@/lib/protocol/previews"
 import { createRpcReader } from "@/lib/protocol/reader"
 import { assertPreparedMatches, withResourceFeeHeadroom } from "@/lib/protocol/review"
@@ -65,7 +65,7 @@ import { solveBuyYt } from "@/lib/protocol/yt-solver"
 import { keypairSigner, type KeypairSigner } from "../integration/keypair-signer"
 import { createRunner, live, runTrade, SLIPPAGE_BPS, type Runner, type Snapshot, type StepRecord, type TradeRun } from "../integration/route-runner"
 import { balancesOf, complianceKind, createLog, HISTORY_KIND, ledgerClock, MINUTE, showBalances, U, units, type Balances } from "../live/chain"
-import { fundOnce, liveContext, type OnboardedSigner } from "../live/context"
+import { fundOnce, liveContext, type OnboardedSigner, type Onboarding } from "../live/context"
 import { retryOnce } from "../live/retry"
 import { eventually, json, redact } from "../live/util"
 
@@ -125,7 +125,7 @@ type JourneyRecord = {
   finishedAt?: string
   durationSeconds?: number
   accounts: Partial<Record<"trader" | "recipient" | "outsider", string>>
-  onboarding: Partial<Record<"trader" | "recipient", { trustlineHash: string; faucet: FaucetStep[]; balances: string }>>
+  onboarding: Partial<Record<"trader" | "recipient", Onboarding & { balances: string }>>
   transactions: (Landed & { explorer: string })[]
   history?: { trader: [string, HistoryKind][]; recipient: [string, HistoryKind][] }
   compliance?: { account: string; trustlineHash?: string; refusals: Refusal[]; transferToOutsider?: SimulationOutcome }
@@ -358,13 +358,17 @@ describe("Suite A: the live journey on the official Testnet deployment (plan 000
         ["perm_pt", "ok"],
         ["perm_yt", "ok"],
       ])
+      // The faucet's end state is the proof (a retried partial run reports only its rest): the six items
+      // above, and exactly the faucet's payment, nothing else.
       const b = balancesOf(acc)
       expect(b, `${name} balances`).toEqual({ underlying: FAUCET_PAYMENT, sy: 0n, pt: 0n, yt: 0n, lp: 0n })
-      // A fresh account: the faucet performed every step it has.
-      expect(who.onboarding?.faucet, `${name} faucet steps`).toEqual(["authorize", "grant_account", "grant_pt", "grant_yt", "pay"])
-      record.onboarding[name] = { trustlineHash: who.onboarding!.trustlineHash, faucet: who.onboarding!.faucet, balances: showBalances(b) }
+      if (!who.onboarding) throw new Error(`${name}: no onboarding record (endpoint mode)`)
+      record.onboarding[name] = { ...who.onboarding, balances: showBalances(b) }
       const cap = acc.depositCap.status === "live" ? units(acc.depositCap.value) : acc.depositCap.error
-      log(`${name} ${who.publicKey} onboarded: trustline tx ${who.onboarding!.trustlineHash}, faucet ${who.onboarding!.faucet.join(", ")}; ${showBalances(b)}; deposit cap ${cap}`)
+      log(
+        `${name} ${who.publicKey} onboarded: trustline tx ${who.onboarding.trustlineHash}, faucet ${who.onboarding.faucet.join(", ")} ` +
+          `(${who.onboarding.faucetAnswers.length} answer(s)); ${showBalances(b)}; deposit cap ${cap}`,
+      )
     }
     r = createRunner({ manifest, market, findings, kind, signer: trader, log, record: (s) => sent.push(s), readAfterLanded: true })
   }, 12 * MINUTE)

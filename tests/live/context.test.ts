@@ -1,6 +1,7 @@
 import { Keypair } from "@stellar/stellar-sdk"
 import { describe, expect, it, vi } from "vitest"
-import { FAUCET_PACE_MS, FAUCET_TIMEOUT_MS, fundOnce, liveContext, requestFaucetWithRetry, TESTNET_ORIGIN } from "./context"
+import { FAUCET_PACE_MS, FAUCET_TIMEOUT_MS, faucetStepsDone, fundOnce, liveContext, requestFaucetWithRetry, TESTNET_ORIGIN } from "./context"
+import type { FaucetResponse } from "@/lib/protocol/onboarding"
 
 const secret = Keypair.random().secret()
 const account = Keypair.random().publicKey()
@@ -189,6 +190,25 @@ describe("requestFaucetWithRetry", () => {
       expect(fetchImpl).toHaveBeenCalledTimes(2)
     })
 
+    it("records every step a partial run and its retry did: 502 after authorize and grant_account, then the rest", async () => {
+      // The faucet stopped at grant_pt (its 502 names the step); the retry re-plans only what is missing.
+      const answers = [
+        res(502, { ...failed, step: "grant_pt" }),
+        res(200, { performed: ["grant_pt", "grant_yt", "pay"] }),
+      ]
+      const seen: FaucetResponse[] = []
+      const out = await requestFaucetWithRetry({
+        origin: "https://x.test",
+        account,
+        fetchImpl: async () => answers.shift()!,
+        sleep: async () => {},
+        onAnswer: (a) => seen.push(a),
+      })
+      expect(out).toEqual({ performed: ["grant_pt", "grant_yt", "pay"] })
+      expect(seen).toEqual([{ ...failed, step: "grant_pt" }, { performed: ["grant_pt", "grant_yt", "pay"] }])
+      expect(faucetStepsDone(seen)).toEqual(["authorize", "grant_account", "grant_pt", "grant_yt", "pay"])
+    })
+
     it("paces requests that share a pacer a faucet minute apart (one request per IP per minute)", async () => {
       let t = 1_000_000
       const now = () => t
@@ -243,5 +263,20 @@ describe("fundOnce (Friendbot, retried once)", () => {
     const failing = vi.fn(async () => answer(503))
     await expect(fundOnce({ manifest, account, exists: async () => false, fetchImpl: failing, wait: async () => {} })).rejects.toThrow(/503/)
     expect(failing).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe("faucetStepsDone", () => {
+  it("merges the steps every answer reports, once each, in the faucet's order", () => {
+    expect(faucetStepsDone([{ performed: ["authorize", "pay"] }, { performed: ["authorize", "grant_account"] }])).toEqual(["authorize", "grant_account", "pay"])
+  })
+
+  it("counts the steps before the one a failed run stopped at as done, and not that step", () => {
+    expect(faucetStepsDone([{ error: "failed", step: "grant_yt" }])).toEqual(["authorize", "grant_account", "grant_pt"])
+  })
+
+  it("infers nothing from an answer that names no step: the account's end state is the proof", () => {
+    expect(faucetStepsDone([{ error: "failed", message: "The faucet could not be reached." }, { performed: [] }])).toEqual([])
+    expect(faucetStepsDone([{ error: "busy", retryAfterSeconds: 60 }])).toEqual([])
   })
 })
