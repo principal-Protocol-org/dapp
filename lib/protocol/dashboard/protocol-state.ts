@@ -73,8 +73,12 @@ async function fetchMarketDashboard(reader: ContractReader, manifest: Manifest, 
   }
 }
 
-/** Sums one figure over the markets; unavailable, naming the market, when any is. */
+/**
+ * Sums one figure over the markets; unavailable, naming the market, when any is. No markets is
+ * unavailable too: an empty sum has no read behind it, so it is no live 0.
+ */
 function total(markets: [string, Live<bigint>][], refuse?: string): Live<bigint> {
+  if (markets.length === 0) return unavailable("no markets")
   if (refuse) return unavailable(refuse)
   for (const [id, live] of markets) if (live.status === "unavailable") return unavailable(`${id}: ${live.error}`)
   return allLive(

@@ -9,7 +9,7 @@ import type { Manifest, Market } from "../../types"
 import { indexFor, pendingYield } from "../../yield"
 import { TVL_LABEL, fetchProtocolState, pendingClaim } from "../protocol-state"
 import { verifyCommand } from "../verify"
-import { fakeReader, type Handler } from "./fake-reader"
+import { fakeReader, type Calls, type Handler } from "./fake-reader"
 
 const base = parseManifest(testnetJson)
 const m1 = base.markets[0]
@@ -149,7 +149,28 @@ describe("fetchProtocolState", () => {
     // Both escrows hold the same SAC in this fake, so each reads 5_000_000.
     expect(state.totals.tvl).toMatchObject({ status: "live", value: 2_230_113_029_038n + 5_000_000n + 1_000n + 5_000_000n })
     expect(state.totals.escrowUnderlying).toMatchObject({ status: "live", value: 10_000_000n })
-    expect(state.totals.liquidity).toMatchObject({ status: "live" })
+    // Both pools read the same reserves here: 600 SY at rate 1.0 + 500 PT at 0.95 / 1.05, floored.
+    const pool = 600n + (500n * 9_500_000n) / 10_500_000n
+    expect(pool).toBe(1052n)
+    expect(state.totals.liquidity).toMatchObject({ status: "live", value: 2n * pool })
+  })
+
+  it("the reference total adds each market's tvl × oracle / SCALE (two markets)", async () => {
+    const reader = fakeReader({ ...marketTable(m1, two), ...marketTable(m2, two, { totalUnderlying: 1_000n, escrow: 5_000_000n }) })
+    const state = await fetchProtocolState(reader, two, [m1.marketId, m2.marketId])
+    const ref1 = ((2_230_113_029_038n + 5_000_000n) * 10_500_000n) / SCALE // 2_341_623_930_489
+    const ref2 = ((1_000n + 5_000_000n) * 10_500_000n) / SCALE // 5_251_050
+    expect(ref1).toBe(2_341_623_930_489n)
+    expect(ref2).toBe(5_251_050n)
+    expect(state.markets[m1.marketId].tvlReference).toMatchObject({ status: "live", value: ref1 })
+    expect(state.markets[m2.marketId].tvlReference).toMatchObject({ status: "live", value: ref2 })
+    expect(state.totals.tvlReference).toMatchObject({ status: "live", value: 2_341_629_181_539n })
+  })
+
+  it("no markets: every total is unavailable, never a live 0", async () => {
+    const state = await fetchProtocolState(fakeReader({}), base, [])
+    expect(state.markets).toEqual({})
+    for (const t of Object.values(state.totals)) expect(t).toEqual({ status: "unavailable", error: "no markets" })
   })
 
   it("the protocol total is unavailable when any market's is", async () => {
@@ -189,21 +210,23 @@ describe("pendingClaim", () => {
     ...over,
   })
 
+  /** What `claim_yield` pays for the `ytTable` reads, whichever account asks (the fake keys by contract only). */
+  const expected = pendingYield({
+    balance: 1_000_0000000n,
+    lastClaimedIndex: indexFor(10_000_000n),
+    pendingClaim: 7_0000000n,
+    liveOracleRate: 10_500_000n,
+    ytFrozen: false,
+    accruedYieldIndex: indexFor(10_500_000n),
+    ytFeeBps: 20n,
+    exchangeRate: 10_000_000n,
+  })
+
   it("is net of the YT fee, the same way /app shows it (pendingOf)", async () => {
     const reader = fakeReader(ytTable())
     const state = await fetchProtocolState(reader, base, [m1.marketId])
     const ms = state.markets[m1.marketId]
     const live = await pendingClaim(reader, m1, ACCOUNT, ms)
-    const expected = pendingYield({
-      balance: 1_000_0000000n,
-      lastClaimedIndex: indexFor(10_000_000n),
-      pendingClaim: 7_0000000n,
-      liveOracleRate: 10_500_000n,
-      ytFrozen: false,
-      accruedYieldIndex: indexFor(10_500_000n),
-      ytFeeBps: 20n,
-      exchangeRate: 10_000_000n,
-    })
     expect(expected.fee).toBeGreaterThan(0n)
     expect(live).toMatchObject({ status: "live", value: expected.net })
     const app = pendingOf(ms, {
@@ -226,8 +249,10 @@ describe("pendingClaim", () => {
   it("accepts a contract address", async () => {
     const reader = fakeReader(ytTable())
     const ms = (await fetchProtocolState(reader, base, [m1.marketId])).markets[m1.marketId]
-    const live = await pendingClaim(reader, m1, c.router, ms)
-    expect(live.status).toBe("live")
+    const calls: Calls = []
+    const live = await pendingClaim(fakeReader(ytTable(), calls), m1, c.router, ms)
+    expect(live).toMatchObject({ status: "live", value: expected.net })
+    expect(calls.filter((x) => x.key.startsWith(`${c.yt}.`)).every((x) => x.args[0]?.value === c.router)).toBe(true)
   })
 
   it("an invalid address is unavailable and reads nothing", async () => {

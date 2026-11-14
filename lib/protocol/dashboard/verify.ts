@@ -2,6 +2,8 @@
  * "How to verify" helpers (D-7): the `stellar contract invoke` command that re-reads a figure, and
  * the evidence table with the TRANCHE_2_3 §15.2 (l.1824) columns.
  */
+import { scValToNative, xdr } from "@stellar/stellar-sdk"
+import { bytesToHex } from "../bytes"
 import type { Live, Network, ReadSource } from "../types"
 
 /**
@@ -128,6 +130,25 @@ export function verifyCommand(network: Network, source: ReadSource | Omit<ReadSo
 
 export type VerifiableFigure = { label: string; display: string; live: Live<unknown> }
 
+/**
+ * One figure's evidence: the nine l.1824 cells, unescaped, plus each read's base64 XDR for the
+ * drawer. The table shows the decoded value (what the CLI command prints), not the XDR.
+ */
+export type FigureEvidence = {
+  metric: string
+  contract: string
+  call: string
+  /** The decoded return value; `fn=value; …` for a figure built from several reads. */
+  raw: string
+  display: string
+  ledger: string
+  coverage: string
+  status: string
+  verified: string
+  /** Base64 XDR of each read's return value, in read order. Not a table column. */
+  rawXdr: string[]
+}
+
 const COLUMNS = [
   "Dashboard metric",
   "Contract ID / source",
@@ -139,6 +160,9 @@ const COLUMNS = [
   "Cache/stale status",
   "Verified",
 ]
+
+/** The separator row: Ledger right-aligned. */
+const ALIGN = COLUMNS.map((c) => (c === "Ledger" ? "---:" : "---"))
 
 const NONE = "—"
 
@@ -161,42 +185,86 @@ function call(source: Pick<ReadSource, "fn" | "args">): string {
   return `${source.fn}(${params.join(", ")})`
 }
 
+/** Compact JSON for a decoded struct, vec or map: integers bare (exact, any size), bytes as hex. */
+function compactJson(value: unknown): string {
+  if (typeof value === "bigint") return value.toString()
+  if (value instanceof Uint8Array) return JSON.stringify(bytesToHex(value))
+  if (value === undefined || value === null) return "null"
+  if (Array.isArray(value)) return `[${value.map(compactJson).join(",")}]`
+  if (value instanceof Map) return `{${[...value].map(([k, v]) => `${JSON.stringify(String(k))}:${compactJson(v)}`).join(",")}}`
+  if (typeof value === "object") return `{${Object.entries(value).map(([k, v]) => `${JSON.stringify(k)}:${compactJson(v)}`).join(",")}}`
+  return JSON.stringify(value)
+}
+
+/**
+ * A read's return value decoded from its XDR, as the CLI prints it: an integer as plain digits, a
+ * bool, an address or symbol as it is, bytes as hex, `null` for void or `None`, a struct as
+ * compact JSON. XDR that does not decode is shown as `(undecoded) <base64>`.
+ */
+export function decodedValue(rawXdr: string): string {
+  let native: unknown
+  try {
+    native = scValToNative(xdr.ScVal.fromXDR(rawXdr, "base64"))
+  } catch {
+    return `(undecoded) ${rawXdr}`
+  }
+  if (typeof native === "string") return native
+  if (typeof native === "bigint" || typeof native === "number" || typeof native === "boolean") return String(native)
+  if (native instanceof Uint8Array) return bytesToHex(native)
+  return compactJson(native)
+}
+
+/** Each read's decoded value; a figure of several reads names each by its function (with arguments when a function repeats). */
+function rawValues(reads: ReadSource[]): string {
+  if (reads.length === 1) return decodedValue(reads[0].rawXdr)
+  const counts = new Map<string, number>()
+  for (const r of reads) counts.set(r.fn, (counts.get(r.fn) ?? 0) + 1)
+  return reads.map((r) => `${(counts.get(r.fn) ?? 0) > 1 ? call(r) : r.fn}=${decodedValue(r.rawXdr)}`).join("; ")
+}
+
 const unique = (xs: string[]) => [...new Set(xs.filter((x) => x !== ""))]
 const orNone = (xs: string[], sep: string) => (xs.length > 0 ? xs.join(sep) : NONE)
 
-function row(f: VerifiableFigure): string[] {
+/** The evidence for one figure, as the drawer and the evidence table read it. */
+export function figureEvidence(f: VerifiableFigure): FigureEvidence {
   const { live } = f
   if (live.status === "unavailable") {
     const s = live.source
-    return [
-      f.label,
-      s ? s.contractId : NONE,
-      s ? call(s) : NONE,
-      NONE,
-      f.display,
-      NONE,
-      s?.rpcUrl || NONE,
-      `Unavailable: ${live.error}`,
-      "",
-    ]
+    return {
+      metric: f.label,
+      contract: s ? s.contractId : NONE,
+      call: s ? call(s) : NONE,
+      raw: NONE,
+      display: f.display,
+      ledger: NONE,
+      coverage: s?.rpcUrl || NONE,
+      status: `Unavailable: ${live.error}`,
+      verified: "",
+      rawXdr: [],
+    }
   }
   const reads = live.sources ?? (live.source ? [live.source] : [])
   const spread = live.ledgerSpread
-  return [
-    f.label,
-    orNone(unique(reads.map((s) => s.contractId)), ", "),
-    orNone(reads.map(call), "; "),
-    orNone(reads.map((s) => s.rawXdr), "; "),
-    f.display,
-    spread ? `${spread.min}–${spread.max}` : String(live.ledger),
-    orNone(unique(reads.map((s) => s.rpcUrl)), ", "),
-    spread ? `Read across ledgers ${spread.min}–${spread.max}` : "Live",
-    "",
-  ]
+  return {
+    metric: f.label,
+    contract: orNone(unique(reads.map((s) => s.contractId)), ", "),
+    call: orNone(reads.map(call), "; "),
+    raw: reads.length > 0 ? rawValues(reads) : NONE,
+    display: f.display,
+    ledger: spread ? `${spread.min}–${spread.max}` : String(live.ledger),
+    coverage: orNone(unique(reads.map((s) => s.rpcUrl)), ", "),
+    status: spread ? `Read across ledgers ${spread.min}–${spread.max}` : "Live",
+    verified: "",
+    rawXdr: reads.map((s) => s.rawXdr),
+  }
 }
 
 /** The page's figures as a Markdown table with the TRANCHE_2_3 l.1824 columns; "Verified" is left for the reviewer. */
 export function evidenceRows(figures: VerifiableFigure[]): string {
   const line = (cells: string[]) => `| ${cells.map(cell).join(" | ")} |`.replace(/ {2}\|/g, " |")
-  return [line(COLUMNS), `|${COLUMNS.map(() => "---").join("|")}|`, ...figures.map((f) => line(row(f)))].join("\n") + "\n"
+  const rows = figures.map((f) => {
+    const e = figureEvidence(f)
+    return line([e.metric, e.contract, e.call, e.raw, e.display, e.ledger, e.coverage, e.status, e.verified])
+  })
+  return [line(COLUMNS), `|${ALIGN.join("|")}|`, ...rows].join("\n") + "\n"
 }

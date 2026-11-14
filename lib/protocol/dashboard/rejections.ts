@@ -29,6 +29,16 @@ export function isSignificantRejection(reason: string): boolean {
   return SIGNIFICANT.has(reason)
 }
 
+export type OracleWasmRejections = {
+  commit: string
+  keeps: "every" | "significant"
+  /** The routine (not significant) reasons this code can record; the note names them. */
+  routine: readonly string[]
+}
+
+const PUSH_ROUTINE = ["stale_ts"] as const
+const PULL_ROUTINE = ["stale_ts", "no_data", "bad_price", "rescale", "future_ts"] as const
+
 /**
  * What `last_rejection()` holds, by the oracle's wasm hash (sha256 of the uploaded wasm, as in
  * `manifest.wasmHashes.oracle`). Before principal 24d980d the contract writes the slot on every
@@ -42,23 +52,31 @@ export function isSignificantRejection(reason: string): boolean {
  * - `cf58bbd8…`: principal 24d980d built with the same app-team toolchain as `adb87f76…`. No
  *   oracle runs it yet: it is the hash our deploy would produce at 24d980d. A build by another
  *   toolchain hashes differently and falls to the unknown-hash note.
+ *
+ * 665bb67 is push only (`set_reference_value`: `oob`, `stale_ts`, `fb_value`, `decrease`,
+ * `deviate`); aae6cf8 adds the feed path (`sync_from_feed`) and its four reasons.
  */
-export const ORACLE_WASM_LAST_REJECTION: Record<string, { commit: string; keeps: "every" | "significant" }> = {
-  adb87f76c1bafd93c67489645fe49df771ede639edc0d1919233563ffae86bce: { commit: "665bb67", keeps: "every" },
-  f5c8a129c5aad53aff733b325a9949926a4fd4abf185a4dd0aec53476bf45253: { commit: "aae6cf8", keeps: "every" },
-  cf58bbd831957b817f8bfa7bf52313a8e9ba6256344ad34ab0c69916c8b1f85d: { commit: "24d980d", keeps: "significant" },
+export const ORACLE_WASM_LAST_REJECTION: Record<string, OracleWasmRejections> = {
+  adb87f76c1bafd93c67489645fe49df771ede639edc0d1919233563ffae86bce: { commit: "665bb67", keeps: "every", routine: PUSH_ROUTINE },
+  f5c8a129c5aad53aff733b325a9949926a4fd4abf185a4dd0aec53476bf45253: { commit: "aae6cf8", keeps: "every", routine: PULL_ROUTINE },
+  cf58bbd831957b817f8bfa7bf52313a8e9ba6256344ad34ab0c69916c8b1f85d: { commit: "24d980d", keeps: "significant", routine: PULL_ROUTINE },
 }
 
-const EVERY =
-  "This oracle runs code from before principal 24d980d: its last rejection is the latest of every rejection, routine ones included (not newer, no feed data, a malformed feed price). A routine rejection can replace a significant one here; the rejection history keeps them all."
-const SIGNIFICANT_ONLY =
-  "This oracle runs principal 24d980d or later: its last rejection keeps only significant ones (outside the bounds, lower than the current value, moved more than the cap, a fallback changing the value). Routine rejections appear only in the rejection history."
-const UNKNOWN =
-  "This oracle's code is not one the dashboard recognizes. Code from principal 24d980d or later may keep only significant rejections here (outside the bounds, lower than the current value, moved more than the cap, a fallback changing the value); the rejection history keeps them all."
+const lower = (text: string) => text.charAt(0).toLowerCase() + text.slice(1)
+const SIGNIFICANT_WORDS = "outside the bounds, lower than the current value, moved more than the cap, a fallback changing the value"
+
+function everyNote(routine: readonly string[]): string {
+  const words = routine.map((r) => lower(rejectionText(r))).join("; ")
+  const kind = routine.length === 1 ? "the routine one" : "routine ones"
+  return `This oracle runs code from before principal 24d980d: its last rejection is the latest of every rejection, ${kind} included (${words}). A routine rejection can replace a significant one here; the rejection history keeps them all.`
+}
+
+const SIGNIFICANT_ONLY = `This oracle runs principal 24d980d or later: its last rejection keeps only significant ones (${SIGNIFICANT_WORDS}). Routine rejections appear only in the rejection history.`
+const UNKNOWN = `This oracle's code is not one the dashboard recognizes. Code from principal 24d980d or later may keep only significant rejections here (${SIGNIFICANT_WORDS}); the rejection history keeps them all.`
 
 /** States whether `last_rejection()` keeps every reason or only significant ones, for the oracle's wasm hash. */
 export function lastRejectionNote(oracleWasmHash: string): string {
   const known = ORACLE_WASM_LAST_REJECTION[oracleWasmHash.trim().toLowerCase()]
   if (!known) return UNKNOWN
-  return known.keeps === "every" ? EVERY : SIGNIFICANT_ONLY
+  return known.keeps === "every" ? everyNote(known.routine) : SIGNIFICANT_ONLY
 }

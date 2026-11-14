@@ -1,8 +1,9 @@
 // @vitest-environment node
+import { Address, nativeToScVal, xdr } from "@stellar/stellar-sdk"
 import { describe, expect, it } from "vitest"
 import { allLive, liveValue, readLive, unavailable } from "../../reader"
 import type { Live, ReadSource } from "../../types"
-import { ARG_NAMES, NULL_ACCOUNT, evidenceRows, nameArgs, verifyCommand, type VerifiableFigure } from "../verify"
+import { ARG_NAMES, NULL_ACCOUNT, decodedValue, evidenceRows, figureEvidence, nameArgs, verifyCommand, type VerifiableFigure } from "../verify"
 import { fakeReader } from "./fake-reader"
 
 const ORACLE = "CDYGBFGO7KD446CDTGJ7M4OWUXC7UPBGPVM5CUWP2NSNX2CKK2TYYIPS"
@@ -108,10 +109,49 @@ describe("evidenceRows", () => {
     const md = evidenceRows([{ label: "Max stale", display: "1 h", live: live("max_stale_seconds") }])
     const [h, sep, row] = md.trim().split("\n")
     expect(h).toBe(header)
-    expect(sep).toBe("|---|---|---|---|---|---|---|---|---|")
-    expect(row).toBe(
-      `| Max stale | ${ORACLE} | max_stale_seconds() | AAAABQAAAAAAAA4Q | 1 h | 5719947 | https://soroban-testnet.stellar.org | Live | |`,
+    // Ledger is right-aligned.
+    expect(sep).toBe("|---|---|---|---|---|---:|---|---|---|")
+    // Raw value is the decoded return (u64 3600), as `stellar contract invoke` prints it, not the XDR.
+    expect(row).toBe(`| Max stale | ${ORACLE} | max_stale_seconds() | 3600 | 1 h | 5719947 | https://soroban-testnet.stellar.org | Live | |`)
+  })
+
+  it("keeps the base64 XDR for the drawer, out of the table", () => {
+    const f = { label: "Max stale", display: "1 h", live: live("max_stale_seconds") }
+    expect(figureEvidence(f)).toMatchObject({ raw: "3600", rawXdr: ["AAAABQAAAAAAAA4Q"], ledger: "5719947", status: "Live" })
+    expect(evidenceRows([f])).not.toContain("AAAABQAAAAAAAA4Q")
+  })
+
+  it("a composite such as TVL lists each input's decoded value", () => {
+    const at = (fn: string, rawXdr: string, contractId: string, args: unknown[] = []): Live<bigint> => ({
+      status: "live",
+      value: 0n,
+      ledger: 5719947,
+      source: { ...source(fn, args, contractId), rawXdr },
+    })
+    const i128 = (v: bigint) => nativeToScVal(v, { type: "i128" }).toXDR("base64")
+    const tvl = allLive(
+      [
+        at("total_underlying", i128(2_230_113_029_038n), "CA62ACRTFADKNOP37CS7DPQ5DNJML4TFHIX6LZG5IBEHJM3PED2V7F2I"),
+        at("balance", i128(0n), SAC, [{ type: "address", value: ESCROW, name: "id" }]),
+      ] as const,
+      ([a, b]) => a + b,
     )
+    const e = figureEvidence({ label: "TVL", display: "223,011.30 USDY", live: tvl })
+    expect(e.raw).toBe("total_underlying=2230113029038; balance=0")
+    expect(e.rawXdr).toEqual([i128(2_230_113_029_038n), i128(0n)])
+    expect(evidenceRows([{ label: "TVL", display: "223,011.30 USDY", live: tvl }])).toContain("| total_underlying=2230113029038; balance=0 |")
+  })
+
+  it("a function read twice in one figure is named with its arguments", () => {
+    const yes = xdr.ScVal.scvBool(true).toXDR("base64")
+    const read = (who: string): Live<boolean> => ({
+      status: "live",
+      value: true,
+      ledger: 1,
+      source: { ...source("is_consumer", [{ type: "address", value: who }]), rawXdr: yes, ledger: 1 },
+    })
+    const both = allLive([read(YT), read(ESCROW)] as const, ([a, b]) => a && b)
+    expect(figureEvidence({ label: "x", display: "y", live: both }).raw).toBe(`is_consumer(account=${YT})=true; is_consumer(account=${ESCROW})=true`)
   })
 
   it("names the arguments in Function + params", () => {
@@ -133,6 +173,7 @@ describe("evidenceRows", () => {
     const both = allLive([live("get_cb_limit", [], 10), live("get_cb_volume", [], 12)] as const, ([a, b]) => a - b)
     const row = evidenceRows([{ label: "Remaining", display: "0", live: both }]).trim().split("\n")[2]
     expect(row).toContain("get_cb_limit(); get_cb_volume()")
+    expect(row).toContain("| get_cb_limit=3600; get_cb_volume=3600 |")
     expect(row).toContain("| 10–12 |")
     expect(row).toContain("Read across ledgers 10–12")
   })
@@ -155,5 +196,36 @@ describe("evidenceRows", () => {
   it("accepts VerifiableFigure", () => {
     const f: VerifiableFigure = { label: "l", display: "d", live: liveValue("x", 1) }
     expect(evidenceRows([f])).toContain("| l |")
+  })
+})
+
+describe("decodedValue", () => {
+  const b64 = (v: xdr.ScVal) => v.toXDR("base64")
+
+  it("an integer as plain digits, any size", () => {
+    expect(decodedValue(b64(nativeToScVal(100_000_000_000_000n, { type: "i128" })))).toBe("100000000000000")
+    expect(decodedValue(b64(nativeToScVal(17_280, { type: "u32" })))).toBe("17280")
+  })
+
+  it("a bool, an address and a symbol as they are", () => {
+    expect(decodedValue(b64(xdr.ScVal.scvBool(false)))).toBe("false")
+    expect(decodedValue(b64(Address.fromString(ACCOUNT).toScVal()))).toBe(ACCOUNT)
+    expect(decodedValue(b64(xdr.ScVal.scvSymbol("deviate")))).toBe("deviate")
+  })
+
+  it("void (None) as null, bytes as hex", () => {
+    expect(decodedValue(b64(xdr.ScVal.scvVoid()))).toBe("null")
+    expect(decodedValue(b64(xdr.ScVal.scvBytes(Buffer.from("8f157e8d", "hex"))))).toBe("8f157e8d")
+  })
+
+  it("a struct as compact JSON with bare integers", () => {
+    const struct = nativeToScVal({ reason: xdr.ScVal.scvSymbol("deviate"), timestamp: nativeToScVal(5n, { type: "u64" }), value: nativeToScVal(99n, { type: "i128" }) })
+    expect(decodedValue(b64(struct))).toBe('{"reason":"deviate","timestamp":5,"value":99}')
+    const pair = xdr.ScVal.scvVec([nativeToScVal(9n, { type: "i128" }), nativeToScVal(20n, { type: "i128" })])
+    expect(decodedValue(b64(pair))).toBe("[9,20]")
+  })
+
+  it("XDR that does not decode is shown as it is, marked", () => {
+    expect(decodedValue("not-xdr")).toBe("(undecoded) not-xdr")
   })
 })

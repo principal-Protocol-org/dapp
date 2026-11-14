@@ -47,6 +47,21 @@ describe("lastRejectionNote", () => {
     expect(note).toMatch(/every rejection/)
   })
 
+  // Lowercased words of the feed-only reasons (no_data, bad_price, rescale, future_ts).
+  const FEED_WORDS = ["the feed had no price", "the feed's price was zero or negative", "converted to 7 decimals", "dated after the current ledger time"]
+
+  it("the 665bb67 oracle (push only) names only the push routine reason, no feed reason", () => {
+    const note = lastRejectionNote(OURS)
+    expect(note).toContain("not newer than the current value")
+    for (const w of FEED_WORDS) expect(note).not.toContain(w)
+  })
+
+  it("the aae6cf8 oracle (push and feed) names every routine reason, the feed ones included", () => {
+    const note = lastRejectionNote("f5c8a129c5aad53aff733b325a9949926a4fd4abf185a4dd0aec53476bf45253")
+    expect(note).toContain("not newer than the current value")
+    for (const w of FEED_WORDS) expect(note).toContain(w)
+  })
+
   it("a 24d980d build keeps only significant reasons", () => {
     const note = lastRejectionNote("cf58bbd831957b817f8bfa7bf52313a8e9ba6256344ad34ab0c69916c8b1f85d")
     expect(note).toMatch(/only significant/)

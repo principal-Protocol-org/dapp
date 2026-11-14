@@ -3,7 +3,8 @@ import { describe, expect, it } from "vitest"
 import testnetJson from "@/config/manifests/testnet.json"
 import { parseManifest } from "../../manifest"
 import type { ScArg } from "../../stellar"
-import { fetchRiskView } from "../risk"
+import type { Manifest, Market } from "../../types"
+import { EFFECTIVE_WRAP_AND_MINT_LABEL, fetchRiskView } from "../risk"
 import { fakeReader, type Handler } from "./fake-reader"
 
 const manifest = parseManifest(testnetJson)
@@ -11,6 +12,10 @@ const R = manifest.shared.riskControl
 const market = manifest.markets[0]
 const { sy, manager } = market.contracts
 const SAC = market.underlying.sac
+
+/** A second market on the same RiskControl, with its own SY and manager. */
+const m2: Market = { ...market, marketId: "second", contracts: { ...market.contracts, sy: "SY2", manager: "MANAGER2" } }
+const two: Manifest = { ...manifest, markets: [market, m2] }
 
 const consumer = (yes: Record<string, boolean | Error>) => (args: ScArg[]) => {
   const who = String(args[0]?.value)
@@ -66,6 +71,48 @@ describe("fetchRiskView", () => {
   it("an unreadable is_consumer makes the effective capacity unavailable, never null", async () => {
     const view = await fetchRiskView(fakeReader(table({ [`${R}.is_consumer`]: consumer({ [sy]: true, [manager]: new Error("down") }) })), manifest, 5_710_000)
     expect(view.effectiveWrapAndMint?.status).toBe("unavailable")
+    expect(view.effectiveWrapAndMint?.status === "unavailable" && view.effectiveWrapAndMint.error).toMatch(/down/)
+  })
+
+  it("a failed read in a market already ruled out (a false read) is not needed: null", async () => {
+    const view = await fetchRiskView(fakeReader(table({ [`${R}.is_consumer`]: consumer({ [sy]: false, [manager]: new Error("down") }) })), manifest, 5_710_000)
+    expect(view.effectiveWrapAndMint).toBeNull()
+  })
+
+  it("two markets, one double-reports: shown for that market, labelled", async () => {
+    const view = await fetchRiskView(
+      fakeReader(table({ [`${R}.is_consumer`]: consumer({ [sy]: true, [manager]: true, SY2: true, MANAGER2: false }) })),
+      two,
+      5_710_000,
+    )
+    expect(view.effectiveWrapAndMint).toMatchObject({ status: "live", value: 70_000_000_000_000n / 2n })
+    expect(view.doubleReporting).toEqual([market.marketId])
+    expect(view.consumers.second).toMatchObject({ sy: { value: true }, manager: { value: false } })
+    // Only the double-reporting market's reads back the figure.
+    const args = view.effectiveWrapAndMint?.status === "live" ? view.effectiveWrapAndMint.sources?.filter((s) => s.fn === "is_consumer").map((s) => (s.args[0] as { value: string }).value) : []
+    expect(args).toEqual([sy, manager])
+    expect(EFFECTIVE_WRAP_AND_MINT_LABEL).toMatch(/for markets whose SY and manager both report/)
+  })
+
+  it("two markets, one double-reports, the other's read fails: still shown (that read is not needed)", async () => {
+    const view = await fetchRiskView(
+      fakeReader(table({ [`${R}.is_consumer`]: consumer({ [sy]: true, [manager]: true, SY2: true, MANAGER2: new Error("down") }) })),
+      two,
+      5_710_000,
+    )
+    expect(view.effectiveWrapAndMint).toMatchObject({ status: "live", value: 35_000_000_000_000n })
+    expect(view.doubleReporting).toEqual([market.marketId])
+  })
+
+  it("two markets, neither double-reports, one read fails where it could: unavailable", async () => {
+    const view = await fetchRiskView(
+      fakeReader(table({ [`${R}.is_consumer`]: consumer({ [sy]: false, SY2: true, MANAGER2: new Error("down") }) })),
+      two,
+      5_710_000,
+    )
+    expect(view.effectiveWrapAndMint).toMatchObject({ status: "unavailable" })
+    expect(view.effectiveWrapAndMint?.status === "unavailable" && view.effectiveWrapAndMint.error).toMatch(/second.*down/)
+    expect(view.doubleReporting).toEqual([])
   })
 
   it("the effective capacity is null (no limit) when the limit is off", async () => {
