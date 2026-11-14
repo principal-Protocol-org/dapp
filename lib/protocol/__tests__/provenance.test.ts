@@ -46,6 +46,14 @@ describe("provenance", () => {
     expect(both.status === "live" && both.sources).toHaveLength(1)
   })
 
+  it("nested allLive keeps an inner spread", async () => {
+    const a = await readLive(reader(10), call)
+    const b = await readLive(reader(12), { ...call, functionName: "other" })
+    const inner = allLive([a, b] as const, ([x]) => x)
+    const outer = allLive([inner, liveValue(1n, 12)] as const, ([x]) => x)
+    expect(outer).toMatchObject({ ledger: 12, ledgerSpread: { min: 10, max: 12 } })
+  })
+
   it("showLiveReason(unavailable('x')) gives Unavailable with its reason", () => {
     expect(showLiveReason(unavailable("x"), String)).toEqual({ text: "Unavailable", reason: "x" })
     expect(showLiveReason(liveValue(3, 1), (v) => `n${v}`)).toEqual({ text: "n3" })

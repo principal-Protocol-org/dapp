@@ -95,16 +95,17 @@ export function allLive<T extends readonly Live<unknown>[], U>(
   for (const input of inputs) {
     if (input.status === "unavailable") return input
     values.push(input.value)
-    min = Math.min(min, input.ledger)
-    max = Math.max(max, input.ledger)
+    // A combined input is already at its max ledger; its spread says where it started.
+    min = Math.min(min, input.ledgerSpread?.min ?? input.ledger)
+    max = Math.max(max, input.ledgerSpread?.max ?? input.ledger)
     // An input that is itself a combination already lists its reads.
     if (input.sources) sources.push(...input.sources)
-    else if (input.source) sources.push(input.source as ReadSource)
+    else if (input.source) sources.push(input.source)
   }
   try {
     const live = liveValue(combine(values as never), max)
     if (sources.length > 0) live.sources = sources
-    if (min !== max && inputs.length > 0) live.ledgerSpread = { min, max }
+    if (min !== max) live.ledgerSpread = { min, max }
     return live
   } catch (error) {
     return unavailable(error)

@@ -159,6 +159,8 @@ describe("simulateContractRead", () => {
       value: 123n,
       latestLedger: 77,
       minResourceFee: "321",
+      rawXdr: nativeToScVal(123n, { type: "i128" }).toXDR("base64"),
+      rpcUrl: testnetMarket.rpcUrl,
     });
   });
 

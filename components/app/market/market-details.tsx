@@ -6,7 +6,7 @@ import { formatAmount, formatBps, formatFeeRate, formatRate } from "@/lib/protoc
 import { getMarket } from "@/lib/protocol/manifest"
 import { useManifest } from "@/components/app/manifest-provider"
 import { Skeleton } from "@/components/ui/skeleton"
-import { InfoTip, LiveFigure } from "@/components/app/info-tip"
+import { Figure, InfoTip, LiveFigure } from "@/components/app/info-tip"
 import { formatDuration, UNAVAILABLE } from "@/components/app/live"
 import { MATURITY_DATE } from "@/components/app/market/market-header"
 
@@ -27,20 +27,24 @@ export function MarketDetails({ marketId }: { marketId: string }) {
     )
   }
   const amount = (v: bigint) => formatAmount(v, market.underlying.decimals, 4, { group: true })
-  const oracleAge =
-    ledgerTime === null || ms.oracleTimestamp.status === "unavailable"
-      ? UNAVAILABLE
-      : `${formatDuration(ledgerTime - Number(ms.oracleTimestamp.value))} ago`
+  const oracleAge: { text: string; reason?: string } =
+    ms.oracleTimestamp.status === "unavailable"
+      ? { text: UNAVAILABLE, reason: ms.oracleTimestamp.error }
+      : ledgerTime === null
+        ? { text: UNAVAILABLE }
+        : { text: `${formatDuration(ledgerTime - Number(ms.oracleTimestamp.value))} ago` }
   return (
     <div className="grid grid-cols-1 gap-x-10 gap-y-6 sm:grid-cols-2">
       <Group title="Oracle & maturity">
         <Row label="Oracle rate" tip="Notional per SY share, read from the market oracle. PT and YT are counted in notional units.">
           <LiveFigure label="Oracle rate" live={ms.oracleRate} format={formatRate} />
         </Row>
-        <Row label="Oracle updated">{oracleAge}</Row>
+        <Row label="Oracle updated"><Figure label="Oracle updated" figure={oracleAge} /></Row>
         <Row label="Maturity"><LiveFigure label="Maturity" live={ms.maturity} format={(v) => MATURITY_DATE.format(new Date(Number(v) * 1000))} /></Row>
-        {ms.settledRate.status === "live" && ms.settledRate.value !== null ? (
-          <Row label="Settlement rate">{formatRate(ms.settledRate.value)}</Row>
+        {ms.settledRate.status === "unavailable" || ms.settledRate.value !== null ? (
+          <Row label="Settlement rate">
+            <LiveFigure label="Settlement rate" live={ms.settledRate} format={(v) => (v === null ? UNAVAILABLE : formatRate(v))} />
+          </Row>
         ) : null}
       </Group>
       <Group title="Pool & fees">

@@ -447,6 +447,42 @@ describe("SafetyContent manager pause", () => {
   })
 })
 
+describe("composite rows give the reason of the first unavailable input (D-27)", () => {
+  const reasonOf = async (name: string, label: string) => {
+    const el = screen.getByText(name)
+    const row = (el.closest("dt")?.nextSibling ?? el.nextSibling) as HTMLElement
+    expect(row.textContent).toBe("Unavailable")
+    await userEvent.click(within(row).getByRole("button", { name: `More about ${label} (unavailable)` }))
+    return (await screen.findByRole("tooltip")).textContent
+  }
+  it("oracle", async () => {
+    mocks.ms = marketState({ oracleFresh: down("oracle fresh down") })
+    wrap(<SafetyContent marketId="m1" />)
+    expect(await reasonOf("Oracle", "Oracle")).toBe("oracle fresh down")
+  })
+  it("circuit breaker", async () => {
+    mocks.ms = marketState({ cb: { limit: live(1n), volume: down("volume down"), assetLimit: live(0n), assetVolume: live(0n) } })
+    wrap(<SafetyContent marketId="m1" />)
+    expect(await reasonOf("Circuit breaker, protocol-wide", "Circuit breaker, protocol-wide")).toBe("volume down")
+  })
+  it("deposit cap", async () => {
+    mocks.wallet = { status: "connected", publicKey: "GABC", networkPassphrase: "x" }
+    mocks.account = accountState({ netDeposited: down("net down") })
+    wrap(<SafetyContent marketId="m1" />)
+    expect(await reasonOf("Your deposit cap", "Your deposit cap")).toBe("net down")
+  })
+  it("oracle age", async () => {
+    mocks.ms = marketState({ oracleTimestamp: down("ts down") })
+    wrap(<MarketDetails marketId="m1" />)
+    expect(await reasonOf("Oracle updated", "Oracle updated")).toBe("ts down")
+  })
+  it("settlement rate", async () => {
+    mocks.ms = marketState({ settledRate: down("settle down") })
+    wrap(<MarketDetails marketId="m1" />)
+    expect(await reasonOf("Settlement rate", "Settlement rate")).toBe("settle down")
+  })
+})
+
 describe("SafetyContent unavailable reason", () => {
   it("shows the reason of an unavailable row in an UnavailableTip", async () => {
     mocks.ms = marketState({ managerPaused: down("HostError: Error(Contract, #7)") })

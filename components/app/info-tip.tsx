@@ -81,3 +81,8 @@ export function LiveFigure<T>({ label, live, format }: { label: string; live: Li
   const { text, reason } = showLiveReason(live, format)
   return reason ? <UnavailableTip label={label} reason={reason} /> : <>{text}</>
 }
+
+/** A figure built by a helper: its text, or "Unavailable" with the reason behind an info tip. */
+export function Figure({ label, figure }: { label: string; figure: { text: string; reason?: string } }) {
+  return figure.reason ? <UnavailableTip label={label} reason={figure.reason} text={figure.text} /> : <>{figure.text}</>
+}
