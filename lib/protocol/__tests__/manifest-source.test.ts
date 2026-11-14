@@ -53,3 +53,21 @@ describe("the Mainnet branch (D-24)", () => {
     expect(manifestPending()).toBe(false)
   })
 })
+
+describe("the file matches the network asked for (fix round 1)", () => {
+  afterEach(() => {
+    vi.doUnmock("@/config/manifests/mainnet.json")
+    vi.resetModules()
+  })
+
+  it("refuses a manifest whose network is not NEXT_PUBLIC_PRINCIPAL_NETWORK: never testnet data under mainnet", async () => {
+    vi.resetModules()
+    vi.doMock("@/config/manifests/mainnet.json", () => ({ default: structuredClone(testnetJson) }))
+    const source = await import("../manifest-source")
+    vi.stubEnv("NEXT_PUBLIC_PRINCIPAL_NETWORK", "mainnet")
+    expect(() => source.activeManifest()).toThrow('config/manifests/mainnet.json is for "testnet", not "mainnet"')
+    // Every time: the refusal is never cached as a manifest.
+    expect(() => source.activeManifest()).toThrow("is for")
+    expect(() => source.manifestPending()).toThrow("is for")
+  })
+})

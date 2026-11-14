@@ -69,7 +69,7 @@ scripts/dev-stack/oracle-tick.sh                          # run this every 30 mi
 
 Outputs (both git-ignored; never commit them):
 
-- `config/manifests/local.json`: a v2 manifest (shared contracts, factory, `wasmHashes`, `routerFunctions` (every Router function the wasm exposes except the `quote_*` views), `testAsset`, one market).
+- `config/manifests/local.json`: a v2 manifest (shared contracts, factory, `wasmHashes`, `routerFunctions` (every Router function the wasm exposes except the `quote_*` views), `testAsset`, one market, and `deployLedger`).
 - `.env.local`: `NEXT_PUBLIC_PRINCIPAL_NETWORK=local`, `FAUCET_ISSUER_SECRET` (the
   `principal-localdev-admin` secret, valid on this throwaway network only) and `DATABASE_URL` for `principal-pg`.
 
@@ -96,6 +96,9 @@ and the roles are split so the server never holds the protocol admin:
 - The oracle is kept fresh by the app's `/api/cron/oracle` schedule (see the main README);
   `PRINCIPAL_NETWORK=testnet scripts/dev-stack/oracle-tick.sh` does it by hand.
 - Every run deploys a new market and overwrites `testnet.json` (or writes `MANIFEST_OUT` when set).
+- On every network the manifest's `deployLedger` is the latest ledger RPC `getLatestLedger` reports
+  before the deploy's first transaction: the event indexer starts there. The app's schema requires
+  it on Testnet and Mainnet.
 
 ### Ephemeral deploy (end-to-end suites, local experiments)
 

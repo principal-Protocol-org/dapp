@@ -63,6 +63,11 @@ rpc_healthy() {
   rpc_call getHealth 2>/dev/null | grep -q '"status":"healthy"'
 }
 
+# Sequence of the latest ledger the RPC knows (getLatestLedger); fails on anything else.
+latest_ledger() {
+  rpc_call getLatestLedger 2>/dev/null | jq -er '.result.sequence | select(type == "number" and . > 0)'
+}
+
 # Close time (unix seconds) of the latest ledger, so the oracle never sees a future timestamp.
 # Read from the RPC itself: Horizon can lag the RPC by a ledger.
 ledger_close_time() {

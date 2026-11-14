@@ -26,13 +26,16 @@ export function activeNetwork(): Network {
 /**
  * The active network's manifest. Every file is imported statically so the bundler includes it; only
  * the active one is parsed. While `mainnet.json` is the pending stub this throws
- * `MainnetPendingError` (D-24), every time: a failure is never cached.
+ * `MainnetPendingError` (D-24), every time: a failure is never cached. A file whose `network` is not
+ * the one asked for is refused, so a wrong file under `mainnet` never shows another network's data
+ * without its banner.
  */
 export function activeManifest(): Manifest {
   const network = activeNetwork()
   const cached = parsed.get(network)
   if (cached) return cached
   const manifest = parseManifest(FILES[network])
+  if (manifest.network !== network) throw new Error(`config/manifests/${network}.json is for "${manifest.network}", not "${network}"`)
   parsed.set(network, manifest)
   return manifest
 }

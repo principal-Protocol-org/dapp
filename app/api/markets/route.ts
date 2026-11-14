@@ -100,6 +100,8 @@ export async function GET(): Promise<Response> {
   await connection()
   const manifest = deployedManifest()
   if (manifest instanceof Response) return manifest
+  // Defensive: `listedMarkets` already answers the seeds on any database failure, so only a bug can
+  // land here. It is kept so such a bug answers a fixed 500 that is never cached, without its text.
   try {
     const { markets, fromRegistry } = await listedMarkets({ store: sqlRegistryStore(sql), manifest })
     return json({ markets }, 200, fromRegistry ? { "cache-control": CACHED } : {})
