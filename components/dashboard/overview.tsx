@@ -20,6 +20,7 @@ import {
   useRiskView,
 } from "@/hooks/use-dashboard"
 import { useLedgerClock } from "@/hooks/use-ledger-clock"
+import { alertTitle, type Alert } from "@/lib/app/alert-types"
 import type { OracleView } from "@/lib/protocol/dashboard/oracle"
 import { TVL_LABEL } from "@/lib/protocol/dashboard/protocol-state"
 import type { Remaining } from "@/lib/protocol/dashboard/risk"
@@ -172,13 +173,32 @@ function IndexStatus({ ledgerTime }: { ledgerTime: number | null }) {
   )
 }
 
+/** The open alerts' kinds in words, critical first, each with its count when it has several subjects. */
+function openKinds(open: readonly Alert[]): string {
+  const counts = new Map<string, { n: number; critical: boolean }>()
+  for (const a of open) {
+    const c = counts.get(a.kind) ?? { n: 0, critical: false }
+    counts.set(a.kind, { n: c.n + 1, critical: c.critical || a.severity === "critical" })
+  }
+  return [...counts.entries()]
+    .sort(([, a], [, b]) => Number(b.critical) - Number(a.critical))
+    .map(([kind, c]) => (c.n > 1 ? `${alertTitle(kind)} (${c.n})` : alertTitle(kind)))
+    .join(", ")
+}
+
 function OpenAlerts() {
   const q = useOpenAlerts()
   if (q.isError) return <UnavailableTip label="Open alerts" reason={q.error?.message ?? "the alerts could not be read"} />
   if (!q.data) return <Skeleton className="inline-block h-5 w-24 align-middle" />
   const n = q.data.open.length
   const critical = q.data.open.filter((a) => a.severity === "critical").length
-  return <>{n === 0 ? "None open" : `${n} open${critical > 0 ? ` · ${critical} critical` : ""}`}</>
+  if (n === 0) return <>None open</>
+  return (
+    <>
+      <span className="block">{`${n} open${critical > 0 ? ` · ${critical} critical` : ""}`}</span>
+      <span className="block font-sans text-xs/5 text-ink-muted">{openKinds(q.data.open)}</span>
+    </>
+  )
 }
 
 /**

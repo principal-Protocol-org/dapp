@@ -92,8 +92,18 @@ const RISK_ALERTS: Record<string, string> = {
   risk_exhausted: "Exhausted: volume at or above the limit",
 }
 
+/** Which limit a risk alert is about: the protocol-wide window, or one asset's (its subject is `asset:<SAC>`). */
+function limitName(m: Manifest, a: RecentAlert): string {
+  if (a.payload.scope === "asset" || a.subject.startsWith("asset:")) {
+    const asset = typeof a.payload.asset === "string" ? a.payload.asset : a.subject.slice("asset:".length)
+    return `${assetName(m, asset)} asset limit`
+  }
+  return "Protocol-wide limit"
+}
+
 /** The exhaustion history (D-12): the alert check's `risk_warning` and `risk_exhausted` alerts, open and closed. */
 function ExhaustionHistory() {
+  const m = useManifest()
   const q = useOpenAlerts()
   let body: ReactNode
   if (q.isError && q.error?.message === ALERTS_NOT_AVAILABLE) body = <p className="text-sm text-ink-muted">No alert data yet</p>
@@ -120,6 +130,7 @@ function ExhaustionHistory() {
             {risk.map((a) => (
               <li key={`${a.kind}-${a.subject}-${a.openedAt}`} className="grid gap-0.5 border-t border-line pt-3 first:border-t-0 first:pt-0">
                 <span className="text-sm text-ink">{RISK_ALERTS[a.kind]}</span>
+                <span className="text-xs/5 text-ink-muted">{limitName(m, a)}</span>
                 <span className="flex flex-wrap gap-x-2 font-mono text-xs/5 text-ink-muted">
                   <span>Opened</span>
                   <span>{closeTimeText(a.openedAt)}</span>

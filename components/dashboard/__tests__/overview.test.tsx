@@ -316,6 +316,24 @@ describe("the overview (/dashboard)", () => {
     )
     render(wrap(<Overview />))
     expect(await region("Safety").findByText("1 open · 1 critical")).toBeTruthy()
+    expect(region("Safety").getByText("Oracle stale")).toBeTruthy()
+  })
+
+  it("names the open alerts in words, critical first, counting a kind with several subjects", async () => {
+    const lag = (subject: string) => ({ kind: "indexer_lag", subject, severity: "warning", openedAt: "2026-11-14T02:00:00.000Z", payload: {} })
+    mocks.fetch.mockImplementation(async (url: string) =>
+      url.startsWith("/api/dashboard/alerts") ? Response.json({ open: [lag("oracle"), lag("market"), ALERT], recent: [], lastTest: null }) : answer(url),
+    )
+    render(wrap(<Overview />))
+    const safety = region("Safety")
+    expect(await safety.findByText("3 open · 1 critical")).toBeTruthy()
+    expect(safety.getByText("Oracle stale, Event index lagging (2)")).toBeTruthy()
+  })
+
+  it("no open alert reads None open", async () => {
+    mocks.fetch.mockImplementation(async (url: string) => (url.startsWith("/api/dashboard/alerts") ? Response.json({ open: [], recent: [], lastTest: null }) : answer(url)))
+    render(wrap(<Overview />))
+    expect(await region("Safety").findByText("None open")).toBeTruthy()
   })
 
   it("below 520 px a compliance event folds its ledger and transaction under it, and the meta line can wrap", async () => {

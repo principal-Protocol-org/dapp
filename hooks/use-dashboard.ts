@@ -165,7 +165,7 @@ const INDEX_REASONS: Reasons = {
 /** Why the alerts cannot be read while their route does not exist (404): a page may say there is no alert data yet. */
 export const ALERTS_NOT_AVAILABLE = "alerts not available yet"
 
-const ALERT_REASONS: Reasons = {
+const ALERTS_REASONS: Reasons = {
   notFound: ALERTS_NOT_AVAILABLE,
   notConfigured: "alerts are not configured on this server",
   unavailable: "the alerts could not be read",
@@ -244,8 +244,8 @@ export function useComplianceEvents(limit = 5) {
 }
 
 /**
- * The open alerts, from `GET /api/dashboard/alerts` (`{ open: Alert[], recent? }`, `lib/app/alert-types`),
- * every 60 s, with the recent (closed) ones when the answer lists them. Until that route exists it
+ * The open alerts, from `GET /api/dashboard/alerts` (`{ open, recent, lastTest }`, `lib/app/alert-types`),
+ * every 60 s, with the last 7 days of alerts (open and closed) in `recent`. A server without the route
  * answers 404: an error worded `ALERTS_NOT_AVAILABLE`, not retried. An answer not in that shape is
  * refused, never read as zero.
  */
@@ -255,7 +255,7 @@ export function useOpenAlerts() {
     useQuery({
       queryKey: ["dashboard", "alerts", m.network],
       queryFn: async (): Promise<OpenAlertsAnswer> => {
-        const body = await getJson<unknown>("/api/dashboard/alerts", ALERT_REASONS)
+        const body = await getJson<unknown>("/api/dashboard/alerts", ALERTS_REASONS)
         try {
           return parseOpenAlerts(body)
         } catch (error) {

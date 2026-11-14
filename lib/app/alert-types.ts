@@ -1,6 +1,6 @@
 /**
  * Client-visible alert types (no `server-only`), shared by the alerts API (spec 0004 D-20, Task 9) and
- * the dashboard. The API answers `GET /api/dashboard/alerts` with at least `{ open: Alert[] }`.
+ * the dashboard. The API answers `GET /api/dashboard/alerts` with `{ open, recent, lastTest }`.
  */
 
 export type AlertSeverity = "warning" | "critical"
@@ -16,6 +16,28 @@ export type Alert = {
   openedAt: string
   payload: Record<string, unknown>
 }
+
+/**
+ * Each alert kind in words (the alert check's kinds, `lib/server/alerts`), for the dashboard and the
+ * webhook's line. An unknown kind is shown as it is.
+ */
+const KIND_WORDS: Readonly<Record<string, string>> = {
+  oracle_warning: "Oracle value aging",
+  oracle_stale: "Oracle stale",
+  oracle_unavailable: "Oracle unavailable",
+  oracle_rejection: "Oracle rejected an update",
+  feed_broken: "Oracle feed broken",
+  keeper_unhealthy: "Oracle keeper unhealthy",
+  paused: "Contract paused",
+  risk_warning: "Circuit breaker near its limit",
+  risk_exhausted: "Circuit breaker exhausted",
+  signer_low: "Keeper signer low on XLM",
+  indexer_lag: "Event index lagging",
+  indexer_gap: "Event index gap",
+  test: "Test alert",
+}
+
+export const alertTitle = (kind: string): string => (Object.hasOwn(KIND_WORDS, kind) ? KIND_WORDS[kind] : kind)
 
 /** An alert from the history (`recent`): one that opened, with its close time (null while still open). */
 export type RecentAlert = Alert & { resolvedAt: string | null }

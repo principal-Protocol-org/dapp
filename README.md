@@ -21,6 +21,9 @@ on a local network. It is Deliverable 2 of Tranche 2 of SCF #45.
 | `GET` or `POST /api/cron/index` | The event indexer, called by a scheduler. Same checks as the recorder. See "Event indexer". |
 | `GET /api/dashboard/events` | The indexed protocol events, public and read-only. See "Event indexer". |
 | `GET /api/dashboard/oracle-ticks` | The oracle keeper's recorded runs and its health, public and read-only. See "Scheduler". |
+| `GET` or `POST /api/cron/alerts` | The alert check, called by a scheduler. Same checks as the recorder. See "Alerts". |
+| `GET /api/dashboard/alerts` | The open alerts, the last 7 days of alerts and the last webhook test, public and read-only. See "Alerts". |
+| `GET /api/health` | What the server sees (latest ledger, index, keeper, open alerts), public, for uptime monitors. See "Alerts". |
 
 ## Trade flows
 
@@ -113,6 +116,10 @@ Copy `.env.example` to `.env.local`. Never commit real keys.
 | `CRON_SECRET` | Server only | Optional. Bearer secret Vercel Cron sends to `GET /api/cron/record`. Unset, the route refuses every Bearer call. |
 | `QSTASH_CURRENT_SIGNING_KEY`, `QSTASH_NEXT_SIGNING_KEY` | Server only | Verify Upstash QStash signatures on the cron routes. |
 | `ORACLE_ADMIN_SECRET` | Server only | Testnet and local only. The oracle admin key `GET`/`POST /api/cron/oracle` signs with (see Scheduler). It is the OracleAdapter's admin: besides pushing the value, it can change the oracle's window, deviation cap, sources and value bounds, and hand the role over. Never set on mainnet: the route refuses to run there. |
+| `ORACLE_KEEPER_MODE` | Server only | `push` (default) or `feed`: how `cron/oracle` keeps the oracle fresh. Until the feed mode ships, the route runs push only. |
+| `ORACLE_KEEPER_SECRET` | Server only | Feed mode's key: funded, with no protocol role. The alert check watches its XLM when it is set. |
+| `ALERT_WEBHOOK_URL` | Server only | Where `cron/alerts` posts each alert it opens or closes (Slack or Discord incoming webhook, or any http(s) endpoint). Never logged or answered. Unset, the check answers 503 `not_configured`. |
+| `ALERT_SIGNER_MIN_XLM` | Server only | Optional. The keeper signer's XLM floor for `signer_low` (default 20). |
 
 `pnpm db:migrate [--env-file .env.testnet]` applies `db/migrations/*.sql` over a direct connection and
 never prints the connection string. Run it on each Neon branch (testnet, mainnet) before you deploy
@@ -123,9 +130,10 @@ pnpm db:migrate --env-file .env.testnet
 pnpm db:migrate --env-file .env.mainnet
 ```
 
-The `FAUCET_*`, `DATABASE_URL`, `CRON_SECRET`, `QSTASH_*` and `ORACLE_ADMIN_SECRET` secrets are read
-only in files that start with `import "server-only"` (a unit test checks it). CI fails the build if
-`FAUCET_`, `DATABASE_URL`, `CRON_SECRET`, `QSTASH_` or `ORACLE_ADMIN_` appears in `.next/static`. The local stack writes its own throwaway secret to
+The `FAUCET_*`, `DATABASE_URL`, `CRON_SECRET`, `QSTASH_*`, `ORACLE_ADMIN_SECRET`, `ORACLE_KEEPER_*` and
+`ALERT_*` variables are read only in files that start with `import "server-only"` (a unit test checks
+it). CI fails the build if `FAUCET_`, `DATABASE_URL`, `CRON_SECRET`, `QSTASH_`, `ORACLE_ADMIN_`,
+`ORACLE_KEEPER_` or `ALERT_` appears in `.next/static`. The local stack writes its own throwaway secret to
 `.env.local`, which is git-ignored.
 
 ## Rate recorder and database
@@ -325,6 +333,108 @@ them to the RPC's oldest ledger. Each run resumes from the local cursors and rew
 
 If the schedule already ran before the import, the import fills the history and keeps the newer
 cursors.
+
+## Alerts
+
+A scheduled job calls `/api/cron/alerts` (GET or POST) every 5 minutes. Each run reads the protocol's
+state, opens the alerts whose condition holds and closes those whose condition has passed, in the
+`alerts` table (migrations 0004 and 0007). Each alert opens once and closes once: a condition that
+lasts many runs keeps one open alert, and one that comes back after its close opens a new one. The
+table is also the evidence store: every alert's open and close times, and every webhook test.
+
+| Kind | Severity | Opens when | Source |
+|---|---|---|---|
+| `oracle_warning` | warning | The oracle value's age is at least 75% of `max_stale_seconds`. | The OracleAdapter's views at the latest ledger time (age in ledger time). |
+| `oracle_stale` | critical | The age is over `max_stale_seconds`, or the contract's own `is_available()` is false. It replaces the warning. | The same. |
+| `oracle_unavailable` | critical | The oracle, or the latest ledger, cannot be read. | The same. |
+| `oracle_rejection` | warning | A significant rejection (`oob`, `decrease`, `deviate`, `fb_value`) in the last 24 h, one alert per reason and value. It closes 24 h after its last occurrence. | The indexed `ref_rej` events, and the keeper's `rejected` runs in `oracle_ticks`. |
+| `feed_broken` | warning | A keeper run with reason `bad_price`, `rescale` or `future_ts` in the last 2 × the keeper interval (3,600 s). | `oracle_ticks` (feed mode). |
+| `keeper_unhealthy` | critical | Keeper runs are recorded and the last success (`pushed` or `synced`) is 2 × the interval (3,600 s) old or more. No run recorded is unknown: no alert. | `oracle_ticks`. |
+| `paused` | warning | A contract is paused. One alert per contract; the subject is its role and short id (`sy:CA62…7F2I`). | `is_paused` of RiskControl and of each market's SY wrapper, pool and manager. |
+| `risk_warning` | warning | The circuit breaker's window volume is at least 90% of its limit, protocol-wide or for one asset. | RiskControl `get_cb_limit`, `get_cb_volume`, `get_asset_limit`, `get_asset_volume`. |
+| `risk_exhausted` | critical | The volume is at or over the limit. It replaces the warning. A limit of 0 is off: neither opens. A per-asset limit and the protocol-wide one are two breakers, so the same deposits can open an alert on each. | The same. |
+| `signer_low` | warning | The keeper signer holds less than `ALERT_SIGNER_MIN_XLM` (default 20) XLM, or its account does not exist. | Horizon. The signer is `ORACLE_KEEPER_SECRET`'s public key when set, else `ORACLE_ADMIN_SECRET`'s. With neither set, there is no check. |
+| `indexer_lag` | warning | An index group's cursor is more than 3,600 s behind (the close time of its ledger). One alert per group. | `ingest_cursor`. |
+| `indexer_gap` | critical | An index group has a stored gap (`gap_from is not null`). One alert per group, with `{ from, to }`. | `ingest_cursor`. |
+
+- A source the check cannot read (the RPC, Horizon, the database) keeps its kinds' alerts as they
+  were: nothing of that kind closes, so a flaky read never closes an alert and opens it again. The
+  run's answer names those sources (`unread`) and kinds (`held`). Not being able to read the oracle
+  itself opens `oracle_unavailable`.
+- A circuit-breaker trip rolls its transaction back and leaves no event, so the risk page's
+  exhaustion history is the open and close times of these `risk_*` alerts.
+
+**Webhook.** Every opening and every close is posted once to `ALERT_WEBHOOK_URL` as JSON:
+
+```json
+{ "text": "[Principal testnet] Critical alert opened: Oracle stale (CDYG…YIPS). Value age 3,700 s, over the 3,600 s allowed: …",
+  "content": "(the same line)", "kind": "oracle_stale", "subject": "CDYG…", "severity": "critical",
+  "network": "testnet", "at": "2026-11-14T12:00:00.000Z", "status": "opened", "test": false, "details": { … } }
+```
+
+- `text` (Slack) and `content` (Discord) carry the same line, so either incoming webhook takes the
+  payload as is. A close reads "Resolved: Oracle stale (…), open since …".
+- Each post waits at most 5 s. A post that fails or times out keeps the alert's state, and the notice
+  stays undelivered (`opened_posted`, `resolved_posted`, migration 0007): the next run sends it again,
+  an opening before its close. After an outage, the openings it missed are still sent, before their
+  closes, so the channel gets the whole history, late. A run starts no post after 25 s and sends the notices of at most 25
+  alerts; the rest wait for the next run. Delivery is at least once: a webhook that took a post but
+  answered after 5 s gets it again.
+- The URL is never logged, stored or answered. A failed post is logged with the webhook's status or
+  the error's name only; the answer counts failures (`postFailures`).
+- Payloads hold contract ids, public keys and figures. Every stored or posted string is scrubbed of
+  URLs and secret-shaped text.
+
+The route answers:
+
+| Status | Body | When |
+|---|---|---|
+| 200 | `{ network, opened, resolved, open, posted, postFailures, held, unread, critical: false }` | No critical alert is open. |
+| 500 | The same body with `critical: true`, or `{ error: "failed" }` | A critical alert is open (`oracle_stale`, `oracle_unavailable`, `keeper_unhealthy`, `risk_exhausted`, `indexer_gap`), so the scheduler's own failure alert fires too; or an unexpected error. |
+| 401 | | The caller sent neither a valid `Authorization: Bearer $CRON_SECRET` nor a valid QStash signature. |
+| 503 | `{ error: "not_configured" }` | `ALERT_WEBHOOK_URL` (an http or https URL) or `DATABASE_URL` is missing. |
+
+Schedule (ops, with the developer's go): a QStash schedule with cron `*/5 * * * *` to
+`https://<domain>/api/cron/alerts`, as for the recorder. Apply migration 0007 to the network's
+database first (`pnpm db:migrate --env-file .env.testnet`), and set `ALERT_WEBHOOK_URL` in that
+environment only. Create it after the history import and after the first `cron/index` run has
+completed: before that, the cursors are old or missing, and the first check would open (and post)
+`indexer_lag` for every group. Until the deployed keeper has written a run, `keeper_unhealthy` stays
+quiet (no run recorded is unknown). Who owns the channel, the escalation and the paging is for ops
+to decide.
+
+**Send a test alert** (the alert-test evidence). `?test=1` sends one clearly marked test alert
+("[Principal testnet] TEST alert: This is a test of the alert webhook…"), stores it (`test = true`,
+resolved at once) and runs nothing else:
+
+```bash
+curl -X POST -H "Authorization: Bearer $CRON_SECRET" "https://<domain>/api/cron/alerts?test=1"
+```
+
+It answers 200 `{ "test": { "openedAt": "…", "delivered": true } }`, or 502 with `delivered: false`
+when the webhook did not take it. `GET /api/dashboard/alerts` then shows it as `lastTest`.
+
+**Alerts API.** `GET /api/dashboard/alerts` answers `{ open, recent, lastTest }`, public and without a
+wallet: `open` lists the open alerts (`kind`, `subject`, `severity`, `openedAt`, `payload`), `recent`
+every alert open at some time in the last 7 days (with `resolvedAt`, null while open), and `lastTest`
+the last test and whether it was delivered. Test alerts are never in `open` or `recent`. It is cached
+30 s at the edge; errors never are (503 `not_configured` or `unavailable`). The overview's "Open
+alerts" line and the risk page's exhaustion history read it.
+
+**Health.** `GET /api/health` is public, cached 15 s, and always answers 200:
+
+```json
+{ "network": "testnet",
+  "ledger": { "status": "ok", "sequence": 5720000, "closeTime": "2026-11-14T12:00:00.000Z" },
+  "indexer": { "status": "ok", "indexedThrough": 5719940, "indexedThroughCloseTime": "…", "lagSeconds": 300, "gaps": [] },
+  "keeper": { "status": "ok", "healthy": true, "lastSuccessAt": "…", "lastTickAt": "…" },
+  "openAlerts": { "status": "ok", "count": 1, "critical": 0 } }
+```
+
+Each part is read on its own, within 4 s. A part that fails or hangs reads
+`{ "status": "unavailable", "reason": "…" }` and the others still answer. `keeper.healthy` is null
+while no keeper run is recorded. An uptime monitor can watch `ledger.status`, `indexer.lagSeconds` or
+`openAlerts.critical`.
 
 ## Local network
 

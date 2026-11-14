@@ -392,18 +392,28 @@ describe("the risk page (/dashboard/risk)", () => {
   it("exhaustion history lists the risk alerts, open and closed, once the route answers", async () => {
     answers.alerts = () =>
       Response.json({
-        open: [{ kind: "risk_warning", subject: "CRISK", severity: "warning", openedAt: "2026-11-14T03:00:00.000Z", payload: {} }],
+        open: [{ kind: "risk_warning", subject: "CRISK", severity: "warning", openedAt: "2026-11-14T03:00:00.000Z", payload: { scope: "protocol" } }],
         recent: [
           { kind: "risk_exhausted", subject: "CRISK", severity: "critical", openedAt: "2026-11-13T03:00:00.000Z", resolvedAt: "2026-11-13T04:10:00.000Z", payload: {} },
+          {
+            kind: "risk_warning",
+            subject: "asset:CSAC",
+            severity: "warning",
+            openedAt: "2026-11-12T03:00:00.000Z",
+            resolvedAt: "2026-11-12T05:00:00.000Z",
+            payload: { scope: "asset", asset: "CSAC" },
+          },
           { kind: "oracle_stale", subject: "CORACLE", severity: "critical", openedAt: "2026-11-13T01:00:00.000Z", resolvedAt: null, payload: {} },
         ],
       })
     render(wrap(<RiskPanel />))
     const x = region("Exhaustion history")
-    expect(await x.findByText("Warning: volume at 90% or more of the limit")).toBeTruthy()
+    expect(await x.findAllByText("Warning: volume at 90% or more of the limit")).toHaveLength(2)
     expect(x.getByText("Exhausted: volume at or above the limit")).toBeTruthy()
     expect(x.getByText("2026-11-13 04:10:00 UTC")).toBeTruthy()
     expect(x.getByText("Open")).toBeTruthy()
+    expect(x.getAllByText("Protocol-wide limit")).toHaveLength(2)
+    expect(x.getByText("USDY asset limit")).toBeTruthy()
     expect(x.queryByText(/oracle/i)).toBeNull()
   })
 
