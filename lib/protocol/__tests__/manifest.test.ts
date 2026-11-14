@@ -197,11 +197,11 @@ describe("manifest monitoring fields", () => {
   it("accepts deployLedger, oracleSources and rpcFallbackUrls", () => {
     const m = parseManifest({
       ...base(),
-      deployLedger: 5707351,
+      deployLedger: 5707342,
       oracleSources: [{ hash: HASH, preimage: "principal-oracle-source:testnet:USDY:app-team:keeper" }],
       rpcFallbackUrls: ["https://rpc.example.org"],
     })
-    expect(m.deployLedger).toBe(5707351)
+    expect(m.deployLedger).toBe(5707342)
     expect(m.oracleSources?.[0].hash).toBe(HASH)
     expect(m.rpcFallbackUrls).toEqual(["https://rpc.example.org"])
     expect(errors(m)).toEqual([])
