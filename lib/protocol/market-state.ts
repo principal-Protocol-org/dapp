@@ -1,7 +1,6 @@
 import { allLive, readLive, toBigint, toBool, unavailable, type ContractReader } from "./reader"
 import { getMarket } from "./manifest"
 import { bytesToHex } from "./bytes"
-import { nameArgs } from "./dashboard/verify"
 import type { Live, Manifest, Market } from "./types"
 
 export type PoolStateView = {
@@ -59,7 +58,7 @@ export type MarketState = {
    * `/app` and the dashboard share (D-8, `tvlOf`).
    */
   syUnderlying: Live<bigint>
-  /** The underlying SAC's `balance(recoveryEscrow)` (its argument named `id`): underlying RecoveryEscrow holds after unwrapping seized positions. */
+  /** The underlying SAC's `balance(recoveryEscrow)`: underlying RecoveryEscrow holds after unwrapping seized positions. */
   escrowUnderlying: Live<bigint>
   syPaused: Live<boolean>
   poolPaused: Live<boolean>
@@ -240,9 +239,9 @@ export async function fetchMarketState(reader: ContractReader, m: Manifest, mark
     swapFeeChain,
     routerInfo,
     maturity,
-    // TVL (D-8): what the SY wrapper holds plus what RecoveryEscrow holds. The SAC names its argument `id`.
+    // TVL (D-8): what the SY wrapper holds plus what RecoveryEscrow holds.
     big(c.sy, "total_underlying"),
-    big(market.underlying.sac, "balance", [{ type: "address", value: c.recoveryEscrow }]).then((live) => nameArgs(live, ["id"])),
+    big(market.underlying.sac, "balance", [{ type: "address", value: c.recoveryEscrow }]),
   ])
 
   return {

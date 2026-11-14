@@ -49,6 +49,8 @@ export type MarketSpecs = {
   lpSupply: FigureSpec<bigint>
   liquidity: FigureSpec<bigint>
   tvl: FigureSpec<bigint>
+  /** TVL × the oracle value (D-8's reference value), in US dollars (oracle units). */
+  tvlReference: FigureSpec<bigint>
   protocolSy: FigureSpec<bigint>
   protocolUnderlying: FigureSpec<bigint>
   creatorSy: FigureSpec<bigint>
@@ -76,6 +78,14 @@ function marketSpecs(market: Market, q: QueryLike<ProtocolState>, read: FigureSp
     lpSupply: { label: label("LP supply"), live: pick((x) => x.lpTotalSupply), format: amount("LP"), scale: scale("LP"), read },
     liquidity: { label: label("Liquidity"), live: pick((x) => x.liquidity), format: (v) => (unseeded ? NO_LIQUIDITY : amount(code)(v)), scale: scale(code), read },
     tvl: { label: label("TVL"), live: pick((x) => x.tvl), format: amount(code), scale: scale(code), read },
+    // "USD" alone keeps the row to two lines; the drawer's scale says these are oracle units, as the totals do.
+    tvlReference: {
+      label: label("TVL in USD"),
+      live: pick((x) => x.tvlReference),
+      format: amount("USD"),
+      scale: `${decimals} decimals; TVL × the oracle value ÷ 10,000,000, in US dollars (oracle units)`,
+      read,
+    },
     protocolSy: { label: label("Protocol fees (SY)"), live: pick((x) => x.feeBuckets.protocol.sy), format: fee("SY"), scale: scale("SY"), read },
     protocolUnderlying: {
       label: label(`Protocol fees (${code})`),
@@ -149,6 +159,9 @@ function MarketRow({ market, specs, status, left }: { market: Market; specs: Mar
       </Cell>
       <Cell label="TVL">
         <Shown {...s.tvl} />
+        <span className="text-ink-muted">
+          <Shown {...s.tvlReference} />
+        </span>
       </Cell>
       <Cell label="Protocol fees">
         <Shown {...s.protocolSy} />

@@ -38,7 +38,8 @@ function plainArgs(args: ScArg[] | undefined): unknown[] {
 export function dedupeReads(reader: ContractReader): ContractReader {
   const answers = new Map<string, Promise<ContractReadResult<unknown>>>()
   const read = <T>(call: { contractId: string; functionName: string; args?: ScArg[] }) => {
-    const key = JSON.stringify([call.contractId, call.functionName, plainArgs(call.args)])
+    // Bigints at any depth (a struct argument's fields) as tagged text: plain JSON would throw on them.
+    const key = JSON.stringify([call.contractId, call.functionName, call.args ?? []], (_k, v: unknown) => (typeof v === "bigint" ? `${v}n` : v))
     let answer = answers.get(key)
     if (!answer) {
       answer = reader<unknown>(call)

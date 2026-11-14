@@ -22,6 +22,8 @@ const mocks = vi.hoisted(() => ({
   table: {} as Record<string, unknown>,
   calls: [] as { key: string; args: unknown[] }[],
   clock: { ledgerTime: 0 as number | null, sequence: 5_720_087 as number | null, isError: false },
+  /** When set, the detail page's market query fails (its refresh throws), as an RPC outage between refreshes would. */
+  failMarket: null as Error | null,
   resolvedManifest: vi.fn(),
   notFound: vi.fn(() => {
     throw new Error("NEXT_NOT_FOUND")
@@ -36,6 +38,14 @@ vi.mock("@/lib/protocol/reader", async (importActual) => {
   return { ...(await importActual<object>()), createRpcReader: () => fakeReader(mocks.table as never, mocks.calls as never, 5_721_241) }
 })
 vi.mock("@/hooks/use-ledger-clock", () => ({ useLedgerClock: () => mocks.clock }))
+vi.mock("@/lib/protocol/dashboard/protocol-state", async (importActual) => {
+  const actual = await importActual<typeof import("@/lib/protocol/dashboard/protocol-state")>()
+  return {
+    ...actual,
+    fetchMarketDashboard: (...args: Parameters<typeof actual.fetchMarketDashboard>) =>
+      mocks.failMarket ? Promise.reject(mocks.failMarket) : actual.fetchMarketDashboard(...args),
+  }
+})
 vi.mock("@/lib/server/manifest", () => ({ resolvedManifest: mocks.resolvedManifest }))
 vi.mock("next/navigation", async (importActual) => ({ ...(await importActual<object>()), notFound: mocks.notFound }))
 // No wallet provider anywhere: a view that read the wallet would throw.
@@ -84,6 +94,7 @@ beforeEach(() => {
   mocks.calls.length = 0
   mocks.clock = { ledgerTime: LEDGER_TIME, sequence: 5_721_241, isError: false }
   mocks.notFound.mockClear()
+  mocks.failMarket = null
 })
 
 afterEach(() => {
@@ -114,15 +125,16 @@ describe("/dashboard/markets", () => {
       oracleRate: 10_500_000n,
     })!
     expect(t.getByText(`${formatAmountFixed(liquidity, 7)} USDY`)).toBeTruthy()
-    // TVL: total_underlying + RecoveryEscrow's balance (0 here).
+    // TVL: total_underlying + RecoveryEscrow's balance (0 here); under it the reference value (× the oracle's 1.05, D-8).
     expect(t.getByText("223,011.30 USDY")).toBeTruthy()
+    expect(t.getByText("234,161.86 USD")).toBeTruthy()
     // Protocol bucket 7,150,331 + 112,374,969 SY shares; creator 28,601,503 + 449,499,977; USDY at the 1.05 exchange rate.
     expect(t.getByText("11.9525 SY")).toBeTruthy()
     expect(t.getByText("12.5501 USDY")).toBeTruthy()
     expect(t.getByText("47.8101 SY")).toBeTruthy()
     expect(t.getByText("50.2006 USDY")).toBeTruthy()
     // Every figure opens its How-to-verify drawer, named for its market.
-    for (const label of ["Maturity", "Settlement", "PT supply", "YT supply", "PT reserve", "SY reserve", "LP supply", "Liquidity", "TVL", "Protocol fees (SY)", "Protocol fees (USDY)", "Creator fees (SY)", "Creator fees (USDY)"])
+    for (const label of ["Maturity", "Settlement", "PT supply", "YT supply", "PT reserve", "SY reserve", "LP supply", "Liquidity", "TVL", "TVL in USD", "Protocol fees (SY)", "Protocol fees (USDY)", "Creator fees (SY)", "Creator fees (USDY)"])
       expect(t.getByRole("button", { name: `How to verify ${label} · ${market.marketId}` })).toBeTruthy()
     // Each value is labelled for assistive tech, also where the column header carries it visually.
     for (const label of ["Supply", "Reserves", "LP supply", "Liquidity", "TVL", "Protocol fees", "Creator fees"]) expect(t.getByText(label)).toBeTruthy()
@@ -318,6 +330,50 @@ describe("/dashboard/markets/[marketId]", () => {
       const yt = calls().filter((x) => x.key === `${c.yt}.pending_claim`)
       expect(yt.map((x) => x.args[0])).toEqual([{ type: "address", value: c.router }])
     })
+
+    it("turns Unavailable, never the last answer, when the market's refresh fails after a lookup", async () => {
+      const user = userEvent.setup()
+      mocks.table = { ...mocks.table, ...ytReads() }
+      wrap(<MarketPanel marketId={market.marketId} />)
+      const input = await screen.findByLabelText("Account or contract address")
+      await waitFor(() => expect(screen.getByRole("region", { name: "Market figures" }).textContent).toContain("223,011.30 USDY"))
+      await user.type(input, `${CREATOR}{Enter}`)
+      const shown = `${formatAmountFixed(net, 7, 7)} USDY`
+      expect(await screen.findByText(shown)).toBeTruthy()
+
+      mocks.failMarket = new Error("rpc down")
+      await act(() => client.refetchQueries({ queryKey: ["dashboard", "market"] }))
+      const why = await screen.findByRole("button", { name: "Why Pending yield is unavailable, and how to verify it" })
+      expect(screen.queryByText(shown)).toBeNull()
+      await user.click(why)
+      expect(within(await screen.findByRole("dialog")).getByText(/the market's last refresh failed: rpc down/)).toBeTruthy()
+    })
+  })
+
+  describe("375 px (class-level)", () => {
+    it("the markets page column may shrink below its content, and each market is a one-column card until the 1280 px grid", async () => {
+      wrap(<MarketsView />)
+      const section = screen.getByRole("heading", { level: 1, name: "Markets" }).closest("section")
+      expect(section?.className).toContain("grid-cols-[minmax(0,1fr)]")
+      const r = await waitFor(() => row(new RegExp(market.marketId)))
+      expect(r.className).toMatch(/(^| )grid-cols-1( |$)/)
+      expect(r.className).toContain("xl:grid-cols-[")
+      // The column header is a desktop-only row; on a card each group keeps its own label.
+      const header = screen.getByText("Protocol fees", { selector: "[aria-hidden] span" }).parentElement
+      expect(header?.className).toMatch(/(^| )hidden( |$)/)
+      expect(header?.className).toContain("xl:grid")
+    })
+
+    it("the market page column may shrink below its content, and the lookup's field wraps under its label", async () => {
+      wrap(<MarketPanel marketId={market.marketId} />)
+      const section = screen.getByRole("heading", { level: 1, name: market.displayName }).closest("section")
+      expect(section?.className).toContain("grid-cols-[minmax(0,1fr)]")
+      const panels = screen.getByRole("region", { name: "Market figures" }).parentElement
+      expect(panels?.className).toContain("grid-cols-[minmax(0,1fr)]")
+      const input = await screen.findByLabelText("Account or contract address")
+      expect(input.className).toContain("min-w-0")
+      expect(input.parentElement?.className).toContain("flex-wrap")
+    })
   })
 
   describe("the route", () => {
@@ -333,6 +389,8 @@ describe("/dashboard/markets/[marketId]", () => {
     it("the dashboard's not-found page points back to the markets", () => {
       render(<DashboardNotFound />)
       expect(screen.getByRole("heading", { level: 1, name: "This page was not found" })).toBeTruthy()
+      // Only the market route calls notFound() under /dashboard, so the page speaks of a market.
+      expect(screen.getByText(/^No market at this address\./)).toBeTruthy()
       expect(screen.getByRole("link", { name: "See all markets" }).getAttribute("href")).toBe("/dashboard/markets")
     })
   })

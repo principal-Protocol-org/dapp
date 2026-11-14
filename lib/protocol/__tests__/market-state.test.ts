@@ -2,6 +2,7 @@
 import { describe, expect, it } from "vitest"
 import testnetJson from "@/lib/protocol/__tests__/fixtures/testnet-interim.json"
 import { parseManifest } from "../manifest"
+import { verifyCommand } from "../dashboard/verify"
 import { fetchMarketState } from "../market-state"
 import type { ContractReader } from "../reader"
 import type { ScArg } from "../stellar"
@@ -127,15 +128,19 @@ describe("fetchMarketState", () => {
     expect(s.managerPaused.status).toBe("unavailable")
   })
 
-  it("reads TVL's two views once each: SY total_underlying() and the SAC's balance(escrow), named id (D-8)", async () => {
+  it("reads TVL's two views once each: SY total_underlying() and the SAC's balance(escrow), which verifies with --id (D-8)", async () => {
     const calls: Calls = []
     const s = await fetchMarketState(fakeReader(healthy(), calls), manifest, market.marketId)
     expect(s.syUnderlying).toMatchObject({ status: "live", value: 2_230_113_029_038n, source: { contractId: c.sy, fn: "total_underlying", args: [] } })
     expect(s.escrowUnderlying).toMatchObject({
       status: "live",
       value: 5_000_000n,
-      source: { contractId: sac, fn: "balance", args: [{ type: "address", value: c.recoveryEscrow, name: "id" }] },
+      source: { contractId: sac, fn: "balance", args: [{ type: "address", value: c.recoveryEscrow }] },
     })
+    // The SAC names its argument `id`: ARG_NAMES gives it, so the read itself records no name.
+    expect(s.escrowUnderlying.status === "live" && verifyCommand("testnet", s.escrowUnderlying.source!)).toMatch(
+      new RegExp(`-- balance --id ${c.recoveryEscrow}$`),
+    )
     expect(calls.filter((x) => x.key === `${c.sy}.total_underlying`)).toHaveLength(1)
     expect(calls.filter((x) => x.key === `${sac}.balance`).map((x) => x.args)).toEqual([[{ type: "address", value: c.recoveryEscrow }]])
   })

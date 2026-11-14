@@ -12,7 +12,7 @@ export default function DashboardNotFound() {
       <h1 id="dashboard-not-found-heading" className="font-serif text-3xl text-ink">
         This page was not found
       </h1>
-      <p className="text-ink-muted">There is no market or dashboard page at this address. Check the link, or pick a market from the list.</p>
+      <p className="text-ink-muted">No market at this address. Check the link, or pick a market from the list.</p>
       <div>
         <Link href="/dashboard/markets" className={buttonVariants()}>
           See all markets

@@ -1,6 +1,7 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest"
 import { dedupeReads, isContractError, readLive, unavailable, type ContractReader } from "../reader"
+import type { ScArg } from "../stellar"
 
 // The shape Soroban RPC returns in `simulation.error`: one HostError line, then the diagnostic event log.
 const SIMULATION_ERROR = [
@@ -99,6 +100,19 @@ describe("dedupeReads", () => {
     expect(d.value).toBe("CSAC.balance(CESCROW2)")
     // Arguments are part of the call: two escrows, two reads.
     expect(calls).toEqual(["CORACLE.get_reference_value", "CSAC.balance", "CSAC.balance"])
+  })
+
+  it("keys a struct argument with a nested bigint without throwing, and tells its values apart", async () => {
+    const { calls, reader } = counting()
+    const once = dedupeReads(reader)
+    const struct = (amount: bigint): ScArg => ({ type: "struct", value: { amount: { type: "i128", value: amount }, to: { type: "address", value: "CX" } } })
+    await expect(once({ contractId: "C1", functionName: "quote", args: [struct(5n)] })).resolves.toBeDefined()
+    await once({ contractId: "C1", functionName: "quote", args: [struct(5n)] })
+    await once({ contractId: "C1", functionName: "quote", args: [struct(6n)] })
+    // A bigint and the same digits as a string are different arguments.
+    await once({ contractId: "C1", functionName: "quote", args: [{ type: "i128", value: 5n }] })
+    await once({ contractId: "C1", functionName: "quote", args: [{ type: "i128", value: "5" }] })
+    expect(calls).toEqual(["C1.quote", "C1.quote", "C1.quote", "C1.quote"])
   })
 
   it("shares a failure too, and a new one reads afresh", async () => {

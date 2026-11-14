@@ -32,7 +32,7 @@ describe("fetchProtocolState", () => {
     expect(d.escrowUnderlying).toMatchObject({
       status: "live",
       value: 5_000_000n,
-      source: { contractId: m1.underlying.sac, fn: "balance", args: [{ type: "address", value: m1.contracts.recoveryEscrow, name: "id" }] },
+      source: { contractId: m1.underlying.sac, fn: "balance", args: [{ type: "address", value: m1.contracts.recoveryEscrow }] },
     })
     expect(d.tvl).toMatchObject({ status: "live", value: 2_230_113_029_038n + 5_000_000n })
     expect(d.tvl.status === "live" && d.tvl.sources?.map((s) => s.fn)).toEqual(["total_underlying", "balance"])
