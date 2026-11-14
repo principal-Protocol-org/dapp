@@ -12,15 +12,59 @@ export type ContractReader = (<T>(call: {
   rpcUrl?: string
 }
 
-export function createRpcReader(m: Manifest): ContractReader {
-  const server = createRpcServer(m.rpcUrl)
-  const read = <T>(call: { contractId: string; functionName: string; args?: ScArg[] }) =>
-    simulateContractRead<T>({
-      rpcUrl: m.rpcUrl,
-      networkPassphrase: m.networkPassphrase,
-      server,
-      invocation: { contractId: call.contractId, functionName: call.functionName, args: call.args ?? [] },
-    })
+const TRANSIENT_CODES = new Set(["ECONNREFUSED", "ECONNRESET", "ECONNABORTED", "ENOTFOUND", "ETIMEDOUT", "EAI_AGAIN", "EPIPE", "UND_ERR_SOCKET", "UND_ERR_CONNECT_TIMEOUT"])
+
+/**
+ * Whether a failed read says nothing about the contract, only about the endpoint (spec 0004 D-6): a
+ * network failure (fetch's `TypeError`, a socket error code, or the SDK's HTTP-client error with no
+ * HTTP answer), a timeout, an HTTP 5xx or 429, or the RPC's busy answer (`-32004`). Another endpoint may answer it. A simulation's own error (a contract
+ * error, an archived entry, a read that needs auth) is the contract's answer: final everywhere.
+ */
+export function isTransientRpcError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false
+  const e = error as { name?: unknown; message?: unknown; code?: unknown; status?: unknown; isAxiosError?: unknown; response?: { status?: unknown } | null; cause?: { code?: unknown } }
+  if (e.code === -32004) return true
+  const status = e.response?.status ?? e.status
+  if (typeof status === "number") return status >= 500 || status === 429
+  // SDK 17's HTTP client wraps a failed request (in Node, "fetch failed") with no HTTP answer at all.
+  if (e.isAxiosError === true && !e.response) return true
+  if (e.name === "TimeoutError" || e.name === "AbortError") return true
+  if (typeof e.message === "string" && /^timeout of \d+ms exceeded$/.test(e.message)) return true
+  if (typeof e.code === "string" && TRANSIENT_CODES.has(e.code)) return true
+  if (typeof e.cause?.code === "string" && TRANSIENT_CODES.has(e.cause.code)) return true
+  return error instanceof TypeError
+}
+
+type ReadServer = NonNullable<Parameters<typeof simulateContractRead>[0]["server"]>
+
+/**
+ * The app's contract reader: a simulation on the manifest's `rpcUrl`, then, on a transient failure
+ * only (`isTransientRpcError`), on each of `rpcFallbackUrls` in order (D-6). The answer's `rpcUrl`
+ * names the endpoint that answered, and `viaFallback` marks one that was not the first. A contract's
+ * own error is never asked again elsewhere. `serverFor` is a test hook.
+ */
+export function createRpcReader(m: Manifest, opts: { serverFor?: (rpcUrl: string) => ReadServer } = {}): ContractReader {
+  const urls = [m.rpcUrl, ...(m.rpcFallbackUrls ?? [])]
+  const servers = new Map<string, ReadServer>()
+  const serverFor = (url: string) => {
+    let server = servers.get(url)
+    if (!server) {
+      server = opts.serverFor ? opts.serverFor(url) : createRpcServer(url)
+      servers.set(url, server)
+    }
+    return server
+  }
+  const read = async <T>(call: { contractId: string; functionName: string; args?: ScArg[] }): Promise<ContractReadResult<T>> => {
+    const invocation = { contractId: call.contractId, functionName: call.functionName, args: call.args ?? [] }
+    for (let i = 0; ; i++) {
+      try {
+        const result = await simulateContractRead<T>({ rpcUrl: urls[i], networkPassphrase: m.networkPassphrase, server: serverFor(urls[i]), invocation })
+        return i === 0 ? result : { ...result, viaFallback: true }
+      } catch (error) {
+        if (i === urls.length - 1 || !isTransientRpcError(error)) throw error
+      }
+    }
+  }
   return Object.assign(read, { rpcUrl: m.rpcUrl })
 }
 
@@ -86,7 +130,8 @@ export async function readLive<T, U = T>(
   try {
     const result = await reader<T>(call)
     const live = liveValue(map ? map(result.value) : (result.value as unknown as U), result.latestLedger)
-    return { ...live, source: { ...base, rawXdr: result.rawXdr, ledger: result.latestLedger, rpcUrl: result.rpcUrl } }
+    const source = { ...base, rawXdr: result.rawXdr, ledger: result.latestLedger, rpcUrl: result.rpcUrl, ...(result.viaFallback ? { viaFallback: true } : {}) }
+    return { ...live, source }
   } catch (error) {
     return unavailable(error, base)
   }

@@ -106,12 +106,30 @@ describe("GET /api/health", () => {
     expect(body.indexer.status).toBe("ok")
   })
 
-  it("never throws: a manifest that cannot be read answers 200 with every part unavailable", async () => {
+  it("503, not cached, when every part is unavailable; the JSON still names each part's reason", async () => {
+    mocks.getLedgerClock.mockRejectedValue(new Error("rpc down"))
+    for (const m of [mocks.getIndexedEvents, mocks.keeperHealth, mocks.openAlertCounts]) m.mockRejectedValue(new mocks.DatabaseConfigError("DATABASE_URL is not set."))
+    const res = await GET()
+    expect(res.status).toBe(503)
+    expect(res.headers.get("cache-control")).toBe("no-store")
+    const body = await res.json()
+    expect(body.network).toBe("testnet")
+    expect(body.ledger).toEqual({ status: "unavailable", reason: "the RPC could not be read" })
+    expect(body.openAlerts).toEqual({ status: "unavailable", reason: "the database is not configured" })
+  })
+
+  it("one part reading is enough for 200", async () => {
+    for (const m of [mocks.getIndexedEvents, mocks.keeperHealth, mocks.openAlertCounts]) m.mockRejectedValue(new Error("db down"))
+    expect((await GET()).status).toBe(200)
+  })
+
+  it("never throws: a manifest that cannot be read answers 503 with every part unavailable", async () => {
     mocks.manifest.mockImplementation(() => {
       throw new Error("NEXT_PUBLIC_PRINCIPAL_NETWORK must be testnet or local")
     })
     const res = await GET()
-    expect(res.status).toBe(200)
+    expect(res.status).toBe(503)
+    expect(res.headers.get("cache-control")).toBe("no-store")
     const body = await res.json()
     expect(body.network).toBeNull()
     for (const part of ["ledger", "indexer", "keeper", "openAlerts"]) expect(body[part]).toEqual({ status: "unavailable", reason: "the manifest could not be read" })

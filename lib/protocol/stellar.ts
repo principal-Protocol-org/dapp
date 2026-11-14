@@ -54,6 +54,8 @@ export type ContractReadResult<T> = {
   /** Base64 XDR of the simulation's return value, taken before decoding: what a reviewer re-reads. */
   rawXdr: string;
   rpcUrl: string;
+  /** The answer came from one of the manifest's `rpcFallbackUrls`, not its `rpcUrl` (createRpcReader). */
+  viaFallback?: boolean;
 };
 
 type ReadRpcServer = {

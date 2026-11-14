@@ -59,6 +59,16 @@ describe("AsOf", () => {
     expect(line.textContent).toContain("Read across ledgers 5720080–5720087")
   })
 
+  it("names the fallback endpoint when any read came from one (D-6), and says nothing when none did", async () => {
+    const viaFallback = (ledger: number, url: string): ReadSource => ({ ...read(ledger), rpcUrl: url, viaFallback: true })
+    const at = await renderAt({ sources: [read(10), viaFallback(11, "https://rpc.backup.example/v1"), viaFallback(11, "https://rpc.backup.example/v1")], updatedAt: NOW, cadenceMs: 15_000 })
+    expect(screen.getByTestId("as-of").textContent).toContain("via fallback rpc.backup.example")
+    expect(screen.getByTestId("as-of").textContent?.match(/rpc\.backup\.example/g)).toHaveLength(1)
+    at.unmount()
+    await renderAt({ sources: [read(10), read(11)], updatedAt: NOW, cadenceMs: 15_000 })
+    expect(screen.getByTestId("as-of").textContent).not.toContain("fallback")
+  })
+
   it("says so when no figure could be read, rather than show a ledger", async () => {
     await renderAt({ sources: [], updatedAt: NOW, cadenceMs: 15_000 })
     expect(screen.getByTestId("as-of").textContent).toContain("No figure could be read")

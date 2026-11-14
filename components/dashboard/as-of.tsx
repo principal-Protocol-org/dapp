@@ -10,6 +10,15 @@ export function readsOf(lives: readonly (Live<unknown> | undefined)[]): ReadSour
   return lives.flatMap((l) => (l && l.status === "live" ? (l.sources ?? (l.source ? [l.source] : [])) : []))
 }
 
+/** An endpoint's host, for "via fallback <host>"; the URL itself when it does not parse. */
+const hostOf = (url: string) => {
+  try {
+    return new URL(url).host
+  } catch {
+    return url
+  }
+}
+
 const cadenceText = (ms: number) => (ms % 60_000 === 0 && ms >= 60_000 ? `${ms / 60_000} min` : `${Math.round(ms / 1000)} s`)
 
 /**
@@ -21,6 +30,8 @@ const cadenceText = (ms: number) => (ms % 60_000 === 0 && ms >= 60_000 ? `${ms /
  *   read, on the browser's clock as elapsed time only, never as an absolute time.
  * - Stale (marked) once that age is over 2 × `cadenceMs`: the refresh has not landed for two rounds.
  * - "Read across ledgers X–Y" when the reads answered at different ledgers (D-5).
+ * - "via fallback <host>" when any read was answered by one of the manifest's `rpcFallbackUrls`
+ *   (`ReadSource.viaFallback`, D-6), because the main RPC failed it.
  *
  * The age is read on the client after mount (`useNow`), never during render or prerender.
  */
@@ -51,6 +62,13 @@ export function AsOf({
     parts.push(
       <span key="spread">
         Read across ledgers {oldest}–{newest}
+      </span>,
+    )
+  const fallbackHosts = [...new Set(sources.filter((s) => s.viaFallback).map((s) => hostOf(s.rpcUrl)))]
+  if (fallbackHosts.length > 0)
+    parts.push(
+      <span key="fallback" className="wrap-anywhere">
+        via fallback {fallbackHosts.join(", ")}
       </span>,
     )
   if (stale)

@@ -330,6 +330,21 @@ describe("the overview (/dashboard)", () => {
     expect(safety.getByText("Oracle stale, Event index lagging (2)")).toBeTruthy()
   })
 
+  it("an unconfirmed oracle_unavailable is open but not counted critical until a second check confirms it", async () => {
+    const unavailable = (confirmedAt?: string) => ({ kind: "oracle_unavailable", subject: "CORACLE", severity: "critical", openedAt: "2026-11-14T02:00:00.000Z", payload: confirmedAt ? { confirmedAt } : {} })
+    mocks.fetch.mockImplementation(async (url: string) =>
+      url.startsWith("/api/dashboard/alerts") ? Response.json({ open: [unavailable()], recent: [], lastTest: null }) : answer(url),
+    )
+    const first = render(wrap(<Overview />))
+    expect(await region("Safety").findByText("1 open")).toBeTruthy()
+    first.unmount()
+    mocks.fetch.mockImplementation(async (url: string) =>
+      url.startsWith("/api/dashboard/alerts") ? Response.json({ open: [unavailable("2026-11-14T02:05:00.000Z")], recent: [], lastTest: null }) : answer(url),
+    )
+    render(wrap(<Overview />))
+    expect(await region("Safety").findByText("1 open · 1 critical")).toBeTruthy()
+  })
+
   it("no open alert reads None open", async () => {
     mocks.fetch.mockImplementation(async (url: string) => (url.startsWith("/api/dashboard/alerts") ? Response.json({ open: [], recent: [], lastTest: null }) : answer(url)))
     render(wrap(<Overview />))

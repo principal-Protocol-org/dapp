@@ -23,13 +23,13 @@ import "server-only"
  * secret-shaped string).
  */
 import { Keypair } from "@stellar/stellar-sdk"
-import { alertTitle, type Alert, type AlertSeverity, type RecentAlert } from "@/lib/app/alert-types"
+import { alertTitle, countsAsCritical, DEBOUNCED_KINDS, type Alert, type AlertSeverity, type RecentAlert } from "@/lib/app/alert-types"
 import { fetchOracleView, type OracleView } from "@/lib/protocol/dashboard/oracle"
 import { fetchPauses, type PauseView } from "@/lib/protocol/dashboard/pauses"
 import { isSignificantRejection, rejectionText } from "@/lib/protocol/dashboard/rejections"
 import { fetchRiskView, type RiskView } from "@/lib/protocol/dashboard/risk"
 import { fetchAccount } from "@/lib/protocol/horizon"
-import { createRpcReader, type ContractReader } from "@/lib/protocol/reader"
+import { createRpcReader, isTransientRpcError, type ContractReader } from "@/lib/protocol/reader"
 import { createRpcServer, getLedgerClock } from "@/lib/protocol/stellar"
 import type { Live, Manifest, Network } from "@/lib/protocol/types"
 import type { Sql } from "./db"
@@ -84,13 +84,24 @@ export const INDEXER_LAG_SECONDS = 3_600
 export const DEFAULT_SIGNER_MIN_XLM = "20"
 /** One webhook POST waits at most this long. */
 export const WEBHOOK_TIMEOUT_MS = 5_000
-/** A run starts no post after this, so a hanging webhook cannot hold it past `maxDuration`. */
-export const POST_BUDGET_MS = 25_000
+/**
+ * Every post of a run ends by this long after the run started: a notice is claimed only when a whole
+ * post (`WEBHOOK_TIMEOUT_MS`) still fits, so a run never holds a claim past `maxDuration` (60 s).
+ */
+export const POST_DEADLINE_MS = 50_000
+/** The check's reads (RPC, Horizon, database) share this budget from the run's start; a read still pending then is `Unread`. */
+export const READ_BUDGET_MS = 30_000
 /** At most this many pending alerts are posted per run; the rest wait for the next one. */
 export const MAX_POSTS_PER_RUN = 25
 /** `GET /api/dashboard/alerts`'s history: alerts open at some time in the last 7 days. */
 export const RECENT_ALERT_DAYS = 7
 const RECENT_LIMIT = 200
+
+/**
+ * Kinds that record an event rather than a lasting condition: their close is silent (no "Resolved"
+ * post), since the opening is what someone acts on.
+ */
+export const EVENT_KINDS: readonly AlertKind[] = ["oracle_rejection", "feed_broken"]
 
 /** Reasons a pull-mode feed can give that mean its price is unusable (D-21): the keeper does not submit them. */
 const BROKEN_FEED = new Set(["bad_price", "rescale", "future_ts"])
@@ -165,9 +176,10 @@ type Occurrence = { at: number; reason: string; value: string; txHash: string | 
 
 /**
  * Each significant rejection (`oob`, `decrease`, `deviate`, `fb_value`), from the indexed `ref_rej`
- * events and the keeper's `rejected` runs, keyed by reason and value: the same rejection seen in its
- * event and in the keeper's run, or repeated by the feed-mode keeper without a transaction (D-21), is
- * one alert. It stays open while an occurrence is younger than `REJECTION_WINDOW_SECONDS`, then closes.
+ * events and the keeper's `rejected` runs, keyed by reason: the same rejection seen in its event and in
+ * the keeper's run, repeated by the feed-mode keeper without a transaction (D-21), or tried again by
+ * the push keeper with each run's new value, is one alert. It stays open while an occurrence is younger
+ * than `REJECTION_WINDOW_SECONDS`, then closes silently (an event kind). The payload names the newest value.
  */
 function rejectionAlerts(i: AlertInput): DesiredAlert[] {
   const since = i.now - REJECTION_WINDOW_SECONDS * 1000
@@ -179,7 +191,7 @@ function rejectionAlerts(i: AlertInput): DesiredAlert[] {
   ].filter((o) => isSignificantRejection(o.reason) && o.at > since)
 
   const bySubject = new Map<string, Occurrence[]>()
-  for (const o of seen) bySubject.set(`${o.reason}:${o.value}`, [...(bySubject.get(`${o.reason}:${o.value}`) ?? []), o])
+  for (const o of seen) bySubject.set(o.reason, [...(bySubject.get(o.reason) ?? []), o])
   return [...bySubject.entries()]
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
     .map(([subject, all]) => {
@@ -398,7 +410,7 @@ function detail(kind: string, p: Record<string, unknown>): string {
     case "oracle_stale":
       return `Value age ${n(p.ageSeconds)} s, over the ${n(p.maxStaleSeconds)} s allowed: mint, trades, single-sided liquidity and redemption are blocked.`
     case "oracle_unavailable":
-      return `The oracle could not be read: ${s(p.reason)}.`
+      return `The oracle could not be read: ${s(p.reason)}.${typeof p.confirmedAt === "string" ? ` Still unreadable at ${p.confirmedAt}.` : ""}`
     case "oracle_rejection":
       return `${rejectionText(s(p.reason))} (reason ${s(p.reason)}), value ${s(p.value)}, seen ${n(p.occurrences)} time(s), last at ${s(p.lastAt)}.`
     case "feed_broken":
@@ -554,14 +566,20 @@ async function deliver(sql: Sql, row: PendingRow, status: "opened" | "resolved",
   }
 }
 
+/** A debounced alert (`oracle_unavailable`) that no later check has confirmed yet: neither posted nor critical. */
+const unconfirmed = (r: Pick<OpenRow, "kind" | "payload">) => DEBOUNCED_KINDS.includes(r.kind) && typeof r.payload?.confirmedAt !== "string"
+
 /**
  * Posts the undelivered notices of `network`, oldest alert first: an alert's opening before its
- * close (a close is not sent while its opening is undelivered). At most `maxPosts` alerts, and no
- * post starts after `postBudgetMs`. Delivery is at least once: a post that times out after the
- * webhook took it is sent again.
+ * close (a close is not sent while its opening is undelivered); an unconfirmed debounced alert waits.
+ * At most `maxPosts` alerts. A notice is claimed only while a whole post (`postTimeoutMs`) still ends
+ * by `deadline`, so a claimed notice is always posted or released before the run can be cut off.
+ * Delivery is at least once: a post that times out after the webhook took it is sent again.
  */
-async function deliverPending(sql: Sql, network: Network, post: PostAlert, opts: SyncOptions): Promise<{ posted: number; postFailures: number }> {
-  const deadline = Date.now() + (opts.postBudgetMs ?? POST_BUDGET_MS)
+async function deliverPending(sql: Sql, network: Network, post: PostAlert, opts: SyncOptions & { deadline: number }): Promise<{ posted: number; postFailures: number }> {
+  const timeout = opts.postTimeoutMs ?? WEBHOOK_TIMEOUT_MS
+  const fits = () => Date.now() + timeout <= opts.deadline
+  if (!fits()) return { posted: 0, postFailures: 0 }
   const pending = await sql<PendingRow>`
     select id, kind, subject, severity, opened_at, resolved_at, payload, opened_posted, resolved_posted from alerts
     where network = ${network} and not test and (not opened_posted or (resolved_at is not null and not resolved_posted))
@@ -569,7 +587,8 @@ async function deliverPending(sql: Sql, network: Network, post: PostAlert, opts:
   let posted = 0
   let postFailures = 0
   for (const row of pending) {
-    if (Date.now() >= deadline) break
+    if (row.resolved_at === null && unconfirmed(row)) continue
+    if (!fits()) break
     if (!row.opened_posted) {
       const r = await deliver(sql, row, "opened", network, post)
       if (r === "failed") postFailures++
@@ -577,7 +596,7 @@ async function deliverPending(sql: Sql, network: Network, post: PostAlert, opts:
       posted++
     }
     if (row.resolved_at === null || row.resolved_posted) continue
-    if (Date.now() >= deadline) break
+    if (!fits()) break
     const r = await deliver(sql, row, "resolved", network, post)
     if (r === "failed") postFailures++
     if (r === "posted") posted++
@@ -588,7 +607,13 @@ async function deliverPending(sql: Sql, network: Network, post: PostAlert, opts:
 export type SyncOptions = {
   /** Kinds whose open alerts are kept even when not desired (`heldKinds`). */
   held?: readonly string[]
-  postBudgetMs?: number
+  /**
+   * Wall-clock time (ms) by which every post must have ended: `runAlertCheck` passes the run's start
+   * plus `POST_DEADLINE_MS`. By default, `POST_DEADLINE_MS` from now.
+   */
+  deadline?: number
+  /** The poster's own timeout (`WEBHOOK_TIMEOUT_MS` by default): a claim needs that much time left. */
+  postTimeoutMs?: number
   maxPosts?: number
 }
 
@@ -597,9 +622,15 @@ export type SyncOptions = {
  * nothing` on the partial unique index of open alerts), closes each open one no longer desired once
  * (`resolved_at`), unless its kind is held. The state is written before any post; then every
  * undelivered notice is posted (`post`), and one that fails stays undelivered for the next run.
- * `now` (ms) stamps `opened_at` and `resolved_at`.
+ * `now` (ms) stamps `opened_at`, `resolved_at` and a debounced alert's `confirmedAt`.
+ *
+ * - A debounced kind (`oracle_unavailable`) opens at once but is posted, and counts as critical, only
+ *   once a later run still wants it: that run writes `payload.confirmedAt`. One that clears before is
+ *   closed with both notices marked delivered, and nothing is sent.
+ * - An event kind (`oracle_rejection`, `feed_broken`) closes silently: its close is marked delivered.
  */
 export async function syncAlerts(sql: Sql, network: Network, desired: readonly DesiredAlert[], post: PostAlert, now: number, opts: SyncOptions = {}): Promise<SyncResult> {
+  const deadline = opts.deadline ?? Date.now() + POST_DEADLINE_MS
   const at = iso(now)
   const held = new Set(opts.held ?? [])
   const key = (kind: string, subject: string) => `${kind}\u0000${subject}`
@@ -619,12 +650,21 @@ export async function syncAlerts(sql: Sql, network: Network, desired: readonly D
 
   const resolved: AlertRef[] = []
   for (const r of before) {
-    if (wanted.has(key(r.kind, r.subject)) || held.has(r.kind)) continue
-    const closed = await sql`update alerts set resolved_at = ${at}::timestamptz where id = ${r.id} and resolved_at is null returning id`
+    if (wanted.has(key(r.kind, r.subject))) {
+      // Still wanted by a later run than the one that opened it: a debounced alert is now confirmed.
+      if (unconfirmed(r)) await sql`update alerts set payload = payload || jsonb_build_object('confirmedAt', ${at}::text) where id = ${r.id} and resolved_at is null`
+      continue
+    }
+    if (held.has(r.kind)) continue
+    const silentOpen = unconfirmed(r)
+    const silentClose = silentOpen || (EVENT_KINDS as readonly string[]).includes(r.kind)
+    const closed = await sql`
+      update alerts set resolved_at = ${at}::timestamptz, opened_posted = opened_posted or ${silentOpen}, resolved_posted = resolved_posted or ${silentClose}
+      where id = ${r.id} and resolved_at is null returning id`
     if (closed.length > 0) resolved.push(ref(r))
   }
 
-  const delivery = await deliverPending(sql, network, post, opts)
+  const delivery = await deliverPending(sql, network, post, { ...opts, deadline })
   const open = (await openRows(sql, network)).map(toAlert)
   return { opened, resolved, open, ...delivery }
 }
@@ -675,12 +715,10 @@ export async function listAlerts(sql: Sql, network: Network, now: number = Date.
   }
 }
 
-/** The open alerts of `network` and how many are critical (`GET /api/health`). */
+/** The open alerts of `network` and how many count as critical (`countsAsCritical`), for `GET /api/health`. */
 export async function openAlertCounts(sql: Sql, network: Network): Promise<{ count: number; critical: number }> {
-  const rows = await sql<{ severity: AlertSeverity; n: string | number }>`
-    select severity, count(*) as n from alerts where network = ${network} and resolved_at is null and not test group by severity`
-  const count = rows.reduce((sum, r) => sum + Number(r.n), 0)
-  return { count, critical: Number(rows.find((r) => r.severity === "critical")?.n ?? 0) }
+  const open = (await openRows(sql, network)).map(toAlert)
+  return { count: open.length, critical: open.filter(countsAsCritical).length }
 }
 
 // ---------------------------------------------------------------- reading the input
@@ -688,20 +726,21 @@ export async function openAlertCounts(sql: Sql, network: Network): Promise<{ cou
 type Env = Readonly<Record<string, string | undefined>>
 
 /**
- * The keeper signer: `ORACLE_KEEPER_SECRET`'s public key when set, else `ORACLE_ADMIN_SECRET`'s; null
- * when neither is set (no check). Only the public key leaves this function.
+ * The key the keeper signs with, by `ORACLE_KEEPER_MODE`: `ORACLE_ADMIN_SECRET`'s public key in `push`
+ * mode (the default), `ORACLE_KEEPER_SECRET`'s in `feed` mode; null when that key is not set (no
+ * check). Only the public key leaves this function; an error names the variable, never its value.
  */
 export function signerAccount(env: Env): { account: string } | { error: string } | null {
-  for (const name of ["ORACLE_KEEPER_SECRET", "ORACLE_ADMIN_SECRET"] as const) {
-    const secret = env[name]?.trim()
-    if (!secret) continue
-    try {
-      return { account: Keypair.fromSecret(secret).publicKey() }
-    } catch {
-      return { error: `${name} is not a valid secret key` }
-    }
+  const mode = env.ORACLE_KEEPER_MODE?.trim() || "push"
+  if (mode !== "push" && mode !== "feed") return { error: "ORACLE_KEEPER_MODE is neither push nor feed" }
+  const name = mode === "feed" ? "ORACLE_KEEPER_SECRET" : "ORACLE_ADMIN_SECRET"
+  const secret = env[name]?.trim()
+  if (!secret) return null
+  try {
+    return { account: Keypair.fromSecret(secret).publicKey() }
+  } catch {
+    return { error: `${name} is not a valid secret key` }
   }
-  return null
 }
 
 const XLM_AMOUNT = /^\d{1,12}(\.\d{1,7})?$/
@@ -772,42 +811,82 @@ async function readCursors(sql: Sql, network: Network): Promise<CursorSeen[]> {
   })
 }
 
+/** The latest ledger from `rpcUrl`, then each of `rpcFallbackUrls` on a transient failure, as the contract reads do (D-6). */
+async function ledgerClockOf(manifest: Manifest): Promise<{ sequence: number; closeTime: number }> {
+  const urls = [manifest.rpcUrl, ...(manifest.rpcFallbackUrls ?? [])]
+  for (let i = 0; ; i++) {
+    try {
+      return await getLedgerClock(createRpcServer(urls[i]))
+    } catch (error) {
+      if (i === urls.length - 1 || !isTransientRpcError(error)) throw error
+    }
+  }
+}
+
 /** A read that throws becomes `Unread`, named by its error only. */
 const guard = <T,>(p: Promise<T>): Promise<T | Unread> => p.catch((error: unknown) => ({ error: nameOf(error) }))
+
+const TIMED_OUT = "the read did not answer within the check's read budget"
+
+/** `p`, or `Unread` (timed out) when it has not settled by `deadline` (wall-clock ms). The read itself is left to finish or fail on its own. */
+function by<T>(p: Promise<T | Unread>, deadline: number): Promise<T | Unread> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const late = new Promise<Unread>((resolve) => {
+    timer = setTimeout(() => resolve({ error: TIMED_OUT }), Math.max(0, deadline - Date.now()))
+  })
+  return Promise.race([p, late]).finally(() => clearTimeout(timer))
+}
 
 export type AlertDeps = {
   sql: Sql
   manifest: Manifest
   /** Where the keeper keys and `ALERT_SIGNER_MIN_XLM` are read (`process.env` in the route). */
   env: Env
-  /** ms; `Date.now()` by default. */
+  /** ms; `Date.now()` by default: stamps the alerts and anchors the windows over recorded rows. */
   now?: number
+  /**
+   * Wall-clock ms the run started (`Date.now()` by default; the route takes it first thing): the reads
+   * share `READ_BUDGET_MS` from it, and every post ends by `POST_DEADLINE_MS` from it.
+   */
+  startedAt?: number
+  /** A test hook for `READ_BUDGET_MS`. */
+  readBudgetMs?: number
   reader?: ContractReader
-  /** The latest ledger (sequence, close time in unix seconds); the manifest's RPC by default. */
+  /** The latest ledger (sequence, close time in unix seconds); the manifest's RPC, then its fallbacks, by default. */
   ledgerClock?: () => Promise<{ sequence: number; closeTime: number }>
   /** For Horizon; `fetch` by default. */
   fetchImpl?: typeof fetch
 }
 
-/** Reads everything the check judges, side by side; each source fails alone. */
+/**
+ * Reads everything the check judges, all at once: only the oracle and RiskControl wait for the ledger
+ * clock (they need its time and sequence). Each source fails alone, and any still pending
+ * `READ_BUDGET_MS` after the run's start is `Unread`, so the run always reaches its writes and posts.
+ */
 export async function collectAlertInput(deps: AlertDeps): Promise<AlertInput> {
   const { sql, manifest } = deps
   const now = deps.now ?? Date.now()
+  const readsBy = (deps.startedAt ?? Date.now()) + (deps.readBudgetMs ?? READ_BUDGET_MS)
   const network = manifest.network
   const oracleId = manifest.shared.oracle
   const reader = deps.reader ?? createRpcReader(manifest)
-  const clock = await guard(deps.ledgerClock ? deps.ledgerClock() : getLedgerClock(createRpcServer(manifest.rpcUrl)))
-  const noLedger: Unread = { error: "the ledger could not be read" }
   const since = iso(now - REJECTION_WINDOW_SECONDS * 1000)
+  const noLedger: Unread = { error: "the ledger could not be read" }
+  const clock = guard(deps.ledgerClock ? deps.ledgerClock() : ledgerClockOf(manifest))
+  const afterClock = <T,>(read: (c: { sequence: number; closeTime: number }) => Promise<T>) =>
+    clock.then((c): Promise<T | Unread> => (unread(c) ? Promise.resolve(noLedger) : guard(read(c))))
   const [oracle, risk, pauses, ticks, rejectionEvents, keeper, indexer, signer] = await Promise.all([
-    unread(clock) ? noLedger : guard(fetchOracleView(reader, manifest, clock.closeTime)),
-    unread(clock) ? noLedger : guard(fetchRiskView(reader, manifest, clock.sequence)),
-    guard(fetchPauses(reader, manifest)),
-    guard(readTicks(sql, network, oracleId, since)),
-    guard(readRejectionEvents(sql, network, oracleId, since)),
-    guard(keeperHealth(sql, network, ORACLE_TICK_INTERVAL_SECONDS, { oracle: oracleId, now })),
-    guard(readCursors(sql, network)),
-    readSigner(manifest, deps.env, deps.fetchImpl ?? fetch).catch((error: unknown): SignerSeen => ({ account: null, error: nameOf(error) })),
+    by(afterClock((c) => fetchOracleView(reader, manifest, c.closeTime)), readsBy),
+    by(afterClock((c) => fetchRiskView(reader, manifest, c.sequence)), readsBy),
+    by(guard(fetchPauses(reader, manifest)), readsBy),
+    by(guard(readTicks(sql, network, oracleId, since)), readsBy),
+    by(guard(readRejectionEvents(sql, network, oracleId, since)), readsBy),
+    by(guard(keeperHealth(sql, network, ORACLE_TICK_INTERVAL_SECONDS, { oracle: oracleId, now })), readsBy),
+    by(guard(readCursors(sql, network)), readsBy),
+    by(
+      readSigner(manifest, deps.env, deps.fetchImpl ?? fetch).catch((error: unknown): SignerSeen => ({ account: null, error: nameOf(error) })),
+      readsBy,
+    ).then((r): SignerSeen | null => (r !== null && "error" in r && !("account" in r) ? { account: null, error: r.error } : r)),
   ])
   return { network, now, intervalSeconds: ORACLE_TICK_INTERVAL_SECONDS, oracleId, oracle, ticks, rejectionEvents, keeper, pauses, risk, signer, indexer }
 }
@@ -822,10 +901,15 @@ export type AlertCheckResult = SyncResult & {
   critical: boolean
 }
 
-/** One run of the check: read, judge, sync, post. */
+/**
+ * One run of the check: read, judge, sync, post. Everything is timed from the run's start
+ * (`startedAt`): the reads end by `READ_BUDGET_MS`, the posts by `POST_DEADLINE_MS`. `critical` counts
+ * a debounced alert only once confirmed.
+ */
 export async function runAlertCheck(deps: AlertDeps & { post: PostAlert }): Promise<AlertCheckResult> {
-  const input = await collectAlertInput(deps)
+  const startedAt = deps.startedAt ?? Date.now()
+  const input = await collectAlertInput({ ...deps, startedAt })
   const held = heldKinds(input)
-  const sync = await syncAlerts(deps.sql, input.network, evaluateAlerts(input), deps.post, input.now, { held })
-  return { network: input.network, ...sync, held, unread: unreadSources(input), critical: sync.open.some((a) => isCritical(a.kind)) }
+  const sync = await syncAlerts(deps.sql, input.network, evaluateAlerts(input), deps.post, input.now, { held, deadline: startedAt + POST_DEADLINE_MS })
+  return { network: input.network, ...sync, held, unread: unreadSources(input), critical: sync.open.some(countsAsCritical) }
 }

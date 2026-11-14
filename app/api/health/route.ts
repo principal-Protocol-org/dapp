@@ -2,7 +2,7 @@ import "server-only"
 
 /**
  * `GET /api/health` (spec 0004 D-28): what the server sees, for uptime monitors and reviewers. Public,
- * no auth, no secret, cached 15 s at the edge. It always answers 200:
+ * no auth, no secret, cached 15 s at the edge. It answers 200 while any part reads:
  *
  * ```
  * { network,
@@ -14,7 +14,8 @@ import "server-only"
  *
  * Each part is read on its own, at most `HEALTH_PART_TIMEOUT_MS`: a part that fails or hangs reads
  * `{ status: "unavailable", reason }` (this app's words, never an error's text) and the others still
- * answer. `keeper.healthy` is null while no keeper run is recorded (unknown, not unhealthy).
+ * answer. `keeper.healthy` is null while no keeper run is recorded (unknown, not unhealthy). When every
+ * part is unavailable it answers 503 (not cached), so an uptime monitor sees the server is blind.
  * `connection()` keeps it out of the build's prerender.
  */
 import { connection } from "next/server"
@@ -60,7 +61,7 @@ export async function GET() {
     manifest = activeManifest()
   } catch {
     const none: Unavailable = { status: "unavailable", reason: "the manifest could not be read" }
-    return Response.json({ network: null, ledger: none, indexer: none, keeper: none, openAlerts: none }, { headers: { "cache-control": CACHED } })
+    return Response.json({ network: null, ledger: none, indexer: none, keeper: none, openAlerts: none }, { status: 503, headers: { "cache-control": "no-store" } })
   }
   const { network } = manifest
   const oracle = manifest.shared.oracle
@@ -81,5 +82,6 @@ export async function GET() {
     }, "the database could not be read"),
     part(() => openAlertCounts(sql, network), "the database could not be read"),
   ])
-  return Response.json({ network, ledger, indexer, keeper, openAlerts }, { headers: { "cache-control": CACHED } })
+  const blind = [ledger, indexer, keeper, openAlerts].every((p) => p.status === "unavailable")
+  return Response.json({ network, ledger, indexer, keeper, openAlerts }, blind ? { status: 503, headers: { "cache-control": "no-store" } } : { headers: { "cache-control": CACHED } })
 }

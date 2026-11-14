@@ -387,6 +387,7 @@ describe("the risk page (/dashboard/risk)", () => {
     const x = region("Exhaustion history")
     expect(await x.findByText("No alert data yet")).toBeTruthy()
     expect(x.getByText(/A trip rolls its transaction back, so it leaves no event/)).toBeTruthy()
+    expect(x.getByText(/covers the last 7 days/)).toBeTruthy()
   })
 
   it("exhaustion history lists the risk alerts, open and closed, once the route answers", async () => {
@@ -420,7 +421,7 @@ describe("the risk page (/dashboard/risk)", () => {
   it("no risk alert recorded reads plainly", async () => {
     answers.alerts = () => Response.json({ open: [], recent: [] })
     render(wrap(<RiskPanel />))
-    expect(await region("Exhaustion history").findByText("No exhaustion recorded yet")).toBeTruthy()
+    expect(await region("Exhaustion history").findByText("No exhaustion in the last 7 days")).toBeTruthy()
   })
 
   it("offers the page's evidence table and the as-of line; fits 375 px", async () => {

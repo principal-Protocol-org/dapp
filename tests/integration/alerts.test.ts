@@ -13,6 +13,11 @@
  *   are the risk page's exhaustion history.
  * - `signer_low`: the local admin key as the keeper signer, against a floor above its balance on the
  *   local Horizon, then the default floor.
+ * - `oracle_unavailable` (debounced): the local manifest pointed at a closed port, so this server's
+ *   reads fail. One failed run that the next run clears is never posted; two failed runs in a row post
+ *   it once (confirmed), and the run that reads again posts its close.
+ * - Fallback RPC (D-6): the same dead `rpcUrl` with the local RPC as `rpcFallbackUrls`; reads (and the
+ *   check's ledger clock) answer from the fallback, and each read's source names it.
  * - The routes: `?test=1` with a webhook that hangs (502 after the 5 s timeout, the row kept), then one
  *   that answers (200); the scheduled check (500 exactly while a critical alert is open); `GET
  *   /api/dashboard/alerts` and `GET /api/health`. No answer and no log line holds the webhook URL.
@@ -35,8 +40,9 @@ vi.mock("next/server", () => ({ connection: async () => {} }))
 import { fetchAccountState } from "@/lib/protocol/account-state"
 import { createHorizon } from "@/lib/protocol/horizon"
 import { addTrustline, fundWithFriendbot } from "@/lib/protocol/onboarding"
-import { createRpcReader } from "@/lib/protocol/reader"
+import { createRpcReader, readLive } from "@/lib/protocol/reader"
 import type { Manifest } from "@/lib/protocol/types"
+import { countsAsCritical } from "@/lib/app/alert-types"
 import { runAlertCheck, webhookPoster, type AlertCheckResult, type AlertRef, type WebhookPayload } from "@/lib/server/alerts"
 import { sql } from "@/lib/server/db"
 import { createStellarFaucetChain, resetFaucetStateForTests, runFaucet } from "@/lib/server/faucet"
@@ -263,6 +269,68 @@ describe.skipIf(skip !== null)("the alert check on the local stack", () => {
     out.log("at the default 20 XLM floor it closed")
   }, 2 * MINUTE)
 
+  /** A local port nothing listens on: every request to it is refused (a transient failure). */
+  async function deadRpcUrl(): Promise<string> {
+    const probe = createServer()
+    await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", resolve))
+    const port = (probe.address() as AddressInfo).port
+    await new Promise<void>((resolve) => probe.close(() => resolve()))
+    return `http://127.0.0.1:${port}/rpc`
+  }
+  const unavailableRows = () =>
+    sql<{ id: string; resolved_at: Date | null; opened_posted: boolean; resolved_posted: boolean; payload: Record<string, unknown> }>`
+      select id, resolved_at, opened_posted, resolved_posted, payload from alerts
+      where network = 'local' and kind = 'oracle_unavailable' and id > ${firstId} order by id`
+
+  it("oracle_unavailable is debounced: a one-run blip is never posted; two failed runs post it once, then its close", async () => {
+    const dead = { ...manifest, rpcUrl: await deadRpcUrl(), rpcFallbackUrls: undefined }
+    const blindCheck = () => runAlertCheck({ sql, manifest: dead, env: {}, post: webhookPoster(HOOK) })
+    const before = posted("oracle_unavailable").length
+
+    const blip = await blindCheck()
+    out.log(`blip, run 1 (dead RPC): ${brief(blip)}`)
+    expect(has(blip.opened, "oracle_unavailable", manifest.shared.oracle)).toBe(true)
+    expect(blip.open.find((a) => a.kind === "oracle_unavailable") && countsAsCritical(blip.open.find((a) => a.kind === "oracle_unavailable")!)).toBe(false)
+    expect(blip.unread).toEqual(expect.arrayContaining(["oracle", "risk"]))
+    const cleared = await check()
+    out.log(`blip, run 2 (RPC back): ${brief(cleared)}`)
+    expect(has(cleared.resolved, "oracle_unavailable")).toBe(true)
+    expect(posted("oracle_unavailable").length - before).toBe(0)
+    const [blipRow] = await unavailableRows()
+    expect(blipRow).toMatchObject({ opened_posted: true, resolved_posted: true })
+    expect(blipRow.payload.confirmedAt).toBeUndefined()
+
+    const first = await blindCheck()
+    const second = await blindCheck()
+    out.log(`outage, run 2 (still dead): ${brief(second)}`)
+    const confirmed = second.open.find((a) => a.kind === "oracle_unavailable")
+    expect(typeof confirmed?.payload.confirmedAt).toBe("string")
+    expect(countsAsCritical(confirmed!)).toBe(true)
+    expect(second.critical).toBe(true)
+    expect(has(first.opened, "oracle_unavailable")).toBe(true)
+    expect(posted("oracle_unavailable").map((h) => h.body.status).slice(before)).toEqual(["opened"])
+    out.log(`webhook got: ${posted("oracle_unavailable").at(-1)?.body.text}`)
+    const back = await check()
+    expect(has(back.resolved, "oracle_unavailable")).toBe(true)
+    expect(posted("oracle_unavailable").map((h) => h.body.status).slice(before)).toEqual(["opened", "resolved"])
+    out.log(`webhook got: ${posted("oracle_unavailable").at(-1)?.body.text}`)
+    const rows = await unavailableRows()
+    expect(rows).toHaveLength(2)
+    expect(rows[1]).toMatchObject({ opened_posted: true, resolved_posted: true })
+  }, 3 * MINUTE)
+
+  it("a dead rpcUrl with the local RPC as fallback: reads answer from the fallback and name it (D-6)", async () => {
+    const live = manifest.rpcUrl
+    const viaFallback = { ...manifest, rpcUrl: await deadRpcUrl(), rpcFallbackUrls: [live] }
+    const read = await readLive(createRpcReader(viaFallback), { contractId: manifest.shared.oracle, functionName: "max_stale_seconds" })
+    out.log(`max_stale_seconds through the fallback: ${JSON.stringify(read.status === "live" ? { value: String(read.value), ledger: read.ledger, rpcUrl: read.source?.rpcUrl, viaFallback: read.source?.viaFallback } : read)}`)
+    expect(read).toMatchObject({ status: "live", value: 3_600n, source: { rpcUrl: live, viaFallback: true } })
+    const r = await runAlertCheck({ sql, manifest: viaFallback, env: {}, post: webhookPoster(HOOK) })
+    out.log(`check with the dead rpcUrl and the fallback: ${brief(r)}`)
+    expect(r.unread).not.toContain("oracle")
+    expect(r.open.some((a) => a.kind === "oracle_unavailable")).toBe(false)
+  }, 2 * MINUTE)
+
   it("the routes: ?test=1 with a hanging then a working webhook, the scheduled check, the alerts API and the health endpoint", async () => {
     const bearer = randomBytes(32).toString("hex")
     const network = process.env.NEXT_PUBLIC_PRINCIPAL_NETWORK
@@ -309,7 +377,7 @@ describe.skipIf(skip !== null)("the alert check on the local stack", () => {
       const result = JSON.parse(scheduledText) as AlertCheckResult
       out.log(`scheduled run: ${scheduled.status} ${brief(result)}`)
       expect(scheduled.status).toBe(result.critical ? 500 : 200)
-      expect(result.critical).toBe(result.open.some((a) => ["oracle_stale", "oracle_unavailable", "keeper_unhealthy", "risk_exhausted", "indexer_gap"].includes(a.kind)))
+      expect(result.critical).toBe(result.open.some(countsAsCritical))
       expect(scheduledText).not.toContain(TOKEN)
 
       const api = await alertsApi()

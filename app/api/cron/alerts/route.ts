@@ -9,8 +9,9 @@ import "server-only"
  * the indexed rejections, the index cursors and the keeper signer's XLM, then opens and closes the
  * alerts in the `alerts` table (each opens once and closes once) and posts every opening and close to
  * `ALERT_WEBHOOK_URL` (5 s per post; a failed post is sent again by the next run). It answers 500
- * while a critical alert is open (`oracle_stale`, `oracle_unavailable`, `keeper_unhealthy`,
- * `risk_exhausted`, `indexer_gap`), so the scheduler's own failure alert fires too; 200 otherwise.
+ * while a critical alert is open (`oracle_stale`, `oracle_unavailable` once a second run confirms it,
+ * `keeper_unhealthy`, `risk_exhausted`, `indexer_gap`), so the scheduler's own failure alert fires
+ * too; 200 otherwise.
  *
  * `?test=1` only sends a clearly marked test alert, stores it (`test = true`, resolved at once: the
  * alert-test evidence) and answers 200 when the webhook took it, 502 when it did not.
@@ -24,7 +25,8 @@ import { runAlertCheck, sendTestAlert, webhookPoster } from "@/lib/server/alerts
 import { cronAuthorized, cronJson as json } from "@/lib/server/cron-auth"
 import { DatabaseConfigError, sql } from "@/lib/server/db"
 
-// About 25 contract reads and a Horizon read side by side, a few queries, then up to 25 s of posts.
+// About 25 contract reads, a Horizon read and a few queries side by side (all done by 30 s), the
+// state written, then posts that all end by 50 s (alerts.ts READ_BUDGET_MS, POST_DEADLINE_MS).
 export const maxDuration = 60
 
 /** The webhook URL when it is an http(s) URL; never logged. */
@@ -40,6 +42,8 @@ function webhookUrl(): string | null {
 }
 
 export async function GET(request: Request) {
+  // The run's clock starts here: the reads and the posts are budgeted from it (maxDuration 60 s).
+  const startedAt = Date.now()
   if (!(await cronAuthorized(request))) return json({ error: "unauthorized" }, 401)
 
   const url = webhookUrl()
@@ -58,7 +62,7 @@ export async function GET(request: Request) {
       const sent = await sendTestAlert(sql, manifest.network, post, Date.now())
       return json({ test: sent }, sent.delivered ? 200 : 502)
     }
-    const result = await runAlertCheck({ sql, manifest, env: process.env, post })
+    const result = await runAlertCheck({ sql, manifest, env: process.env, post, startedAt })
     if (result.unread.length > 0) console.warn(`alert check: could not read ${result.unread.join(", ")}; their alerts are kept as they were`)
     return json(result, result.critical ? 500 : 200)
   } catch (error) {

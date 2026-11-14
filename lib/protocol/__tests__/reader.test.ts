@@ -1,7 +1,11 @@
 // @vitest-environment node
+import { nativeToScVal, type rpc } from "@stellar/stellar-sdk"
 import { describe, expect, it } from "vitest"
-import { dedupeReads, isContractError, readLive, unavailable, type ContractReader } from "../reader"
+import testnetJson from "@/config/manifests/testnet.json"
+import { parseManifest } from "../manifest"
+import { createRpcReader, dedupeReads, isContractError, isTransientRpcError, readLive, unavailable, type ContractReader } from "../reader"
 import type { ScArg } from "../stellar"
+import type { Manifest } from "../types"
 
 // The shape Soroban RPC returns in `simulation.error`: one HostError line, then the diagnostic event log.
 const SIMULATION_ERROR = [
@@ -124,5 +128,115 @@ describe("dedupeReads", () => {
     await dedupeReads(reader)({ contractId: "C1", functionName: "x", args: [{ type: "u64", value: 5n }] })
     await dedupeReads(reader)({ contractId: "C1", functionName: "x", args: [{ type: "u64", value: 5n }] })
     expect(calls).toEqual(["C1.boom", "C1.x", "C1.x"])
+  })
+})
+
+// ---------------------------------------------------------------- fallback RPC endpoints (D-6)
+
+const PRIMARY = "https://rpc.primary.test"
+const SECOND = "https://rpc.second.test"
+const THIRD = "https://rpc.third.test"
+
+function manifestWith(fallbacks: string[] | undefined): Manifest {
+  const m = parseManifest(testnetJson)
+  return { ...m, rpcUrl: PRIMARY, rpcFallbackUrls: fallbacks }
+}
+
+const answer = (ledger: number) =>
+  ({
+    id: "1",
+    _parsed: true,
+    latestLedger: ledger,
+    events: [],
+    minResourceFee: "100",
+    transactionData: {},
+    result: { auth: [], retval: nativeToScVal(42n, { type: "i128" }) },
+  }) as unknown as rpc.Api.SimulateTransactionSuccessResponse
+
+/** One fake RPC per URL: an answer at `ledger`, or the thrown value. */
+function servers(table: Record<string, unknown>) {
+  const asked: string[] = []
+  const serverFor = (url: string) => ({
+    async simulateTransaction() {
+      asked.push(url)
+      const v = table[url]
+      if (typeof v === "number") return answer(v)
+      throw v
+    },
+  })
+  return { serverFor, asked }
+}
+
+const httpError = (status: number) => Object.assign(new Error(`Request failed with status code ${status}`), { response: { status } })
+
+describe("isTransientRpcError", () => {
+  it.each([
+    ["a fetch network failure", new TypeError("fetch failed")],
+    ["a socket error code", Object.assign(new Error("connect"), { code: "ECONNREFUSED" })],
+    ["a socket error in the cause", Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNRESET" } })],
+    ["the SDK's timeout", new Error("timeout of 20000ms exceeded")],
+    ["an aborted request", Object.assign(new Error("aborted"), { name: "TimeoutError" })],
+    ["HTTP 500", httpError(500)],
+    ["HTTP 503", httpError(503)],
+    ["HTTP 429", httpError(429)],
+    ["the RPC's busy answer", { code: -32004, message: "preflight queue full; retry later" }],
+    // What SDK 17's HTTP client throws in Node for a refused connection: no HTTP answer at all.
+    ["the SDK's wrapped network failure", Object.assign(new Error("fetch failed"), { name: "AxiosError", isAxiosError: true, response: null, status: undefined })],
+    ["the SDK's wrapped 502 (status on the error)", Object.assign(new Error("Request failed"), { isAxiosError: true, response: null, status: 502 })],
+  ])("%s is transient", (_name, error) => {
+    expect(isTransientRpcError(error)).toBe(true)
+  })
+
+  it.each([
+    ["a contract error", new Error("HostError: Error(Contract, #13)")],
+    ["an archived entry", new Error("Contract read requires restoring archived ledger entries before it can be queried.")],
+    ["HTTP 404", httpError(404)],
+    ["HTTP 400", httpError(400)],
+    ["the SDK's wrapped 404", Object.assign(new Error("Request failed with status code 404"), { isAxiosError: true, response: { status: 404 }, status: 404 })],
+    ["another JSON-RPC error", { code: -32602, message: "invalid params" }],
+    ["a string", "boom"],
+  ])("%s is final", (_name, error) => {
+    expect(isTransientRpcError(error)).toBe(false)
+  })
+})
+
+describe("createRpcReader with fallback endpoints (D-6)", () => {
+  const call = { contractId: "CDYGBFGO7KD446CDTGJ7M4OWUXC7UPBGPVM5CUWP2NSNX2CKK2TYYIPS", functionName: "max_stale_seconds" }
+
+  it("reads the manifest's rpcUrl first and stops there when it answers", async () => {
+    const s = servers({ [PRIMARY]: 100, [SECOND]: 200 })
+    const live = await readLive(createRpcReader(manifestWith([SECOND]), { serverFor: s.serverFor }), call)
+    expect(s.asked).toEqual([PRIMARY])
+    expect(live).toMatchObject({ status: "live", value: 42n, ledger: 100, source: { rpcUrl: PRIMARY, ledger: 100 } })
+    expect(live.status === "live" && live.source && "viaFallback" in live.source).toBe(false)
+  })
+
+  it("on a transient failure tries each fallback in order; the source names the endpoint that answered", async () => {
+    const s = servers({ [PRIMARY]: httpError(503), [SECOND]: new TypeError("fetch failed"), [THIRD]: 300 })
+    const live = await readLive(createRpcReader(manifestWith([SECOND, THIRD]), { serverFor: s.serverFor }), call)
+    expect(s.asked).toEqual([PRIMARY, SECOND, THIRD])
+    expect(live).toMatchObject({ status: "live", value: 42n, ledger: 300, source: { rpcUrl: THIRD, viaFallback: true, rawXdr: nativeToScVal(42n, { type: "i128" }).toXDR("base64") } })
+  })
+
+  it("a contract error is final: never asked again on a fallback", async () => {
+    const s = servers({ [PRIMARY]: new Error("HostError: Error(Contract, #3)"), [SECOND]: 200 })
+    const live = await readLive(createRpcReader(manifestWith([SECOND]), { serverFor: s.serverFor }), call)
+    expect(s.asked).toEqual([PRIMARY])
+    expect(live).toMatchObject({ status: "unavailable", error: "HostError: Error(Contract, #3)" })
+  })
+
+  it("a fallback's contract error is final too, and every endpoint failing gives the last error", async () => {
+    const s = servers({ [PRIMARY]: { code: -32004, message: "busy" }, [SECOND]: httpError(502) })
+    const live = await readLive(createRpcReader(manifestWith([SECOND]), { serverFor: s.serverFor }), call)
+    expect(s.asked).toEqual([PRIMARY, SECOND])
+    expect(live.status).toBe("unavailable")
+    expect(live.status === "unavailable" && live.error).toBe("Request failed with status code 502")
+  })
+
+  it("no fallback configured: a transient failure is the read's answer", async () => {
+    const s = servers({ [PRIMARY]: new TypeError("fetch failed") })
+    const live = await readLive(createRpcReader(manifestWith(undefined), { serverFor: s.serverFor }), call)
+    expect(s.asked).toEqual([PRIMARY])
+    expect(live).toMatchObject({ status: "unavailable", source: { rpcUrl: PRIMARY } })
   })
 })

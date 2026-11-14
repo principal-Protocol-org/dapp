@@ -124,7 +124,7 @@ function ExhaustionHistory() {
     body = (
       <>
         {risk.length === 0 ? (
-          <p className="text-sm text-ink-muted">No exhaustion recorded yet</p>
+          <p className="text-sm text-ink-muted">No exhaustion in the last 7 days</p>
         ) : (
           <ul className="grid gap-3">
             {risk.map((a) => (
@@ -157,8 +157,8 @@ function ExhaustionHistory() {
       title="Exhaustion history"
       meta={
         <p className="text-xs/5 text-ink-muted">
-          A trip rolls its transaction back, so it leaves no event. This history comes from the alert check: a warning opens at 90% of the limit, exhausted at
-          100%, and each closes when the volume falls back. Refreshes every 1 min.
+          A trip rolls its transaction back, so it leaves no event. This history comes from the alert check and covers the last 7 days: a warning opens at 90%
+          of the limit, exhausted at 100%, and each closes when the volume falls back. Refreshes every 1 min.
         </p>
       }
     >

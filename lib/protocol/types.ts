@@ -76,7 +76,8 @@ export type WalletState =
   | { status: "rejected"; reason: string }
 
 /** Where a figure was read: enough for a reviewer to repeat the call and compare the raw return value. */
-export type ReadSource = { contractId: string; fn: string; args: unknown[]; rawXdr: string; ledger: number; rpcUrl: string }
+/** Where a figure was read; `viaFallback` when `rpcUrl` is one of the manifest's fallbacks (D-6). */
+export type ReadSource = { contractId: string; fn: string; args: unknown[]; rawXdr: string; ledger: number; rpcUrl: string; viaFallback?: boolean }
 
 /** A chain value, or the reason it could not be read. Gates treat `unavailable` as a refusal. */
 export type Live<T> =

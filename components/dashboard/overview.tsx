@@ -20,7 +20,7 @@ import {
   useRiskView,
 } from "@/hooks/use-dashboard"
 import { useLedgerClock } from "@/hooks/use-ledger-clock"
-import { alertTitle, type Alert } from "@/lib/app/alert-types"
+import { alertTitle, countsAsCritical, type Alert } from "@/lib/app/alert-types"
 import type { OracleView } from "@/lib/protocol/dashboard/oracle"
 import { TVL_LABEL } from "@/lib/protocol/dashboard/protocol-state"
 import type { Remaining } from "@/lib/protocol/dashboard/risk"
@@ -178,7 +178,7 @@ function openKinds(open: readonly Alert[]): string {
   const counts = new Map<string, { n: number; critical: boolean }>()
   for (const a of open) {
     const c = counts.get(a.kind) ?? { n: 0, critical: false }
-    counts.set(a.kind, { n: c.n + 1, critical: c.critical || a.severity === "critical" })
+    counts.set(a.kind, { n: c.n + 1, critical: c.critical || countsAsCritical(a) })
   }
   return [...counts.entries()]
     .sort(([, a], [, b]) => Number(b.critical) - Number(a.critical))
@@ -191,7 +191,8 @@ function OpenAlerts() {
   if (q.isError) return <UnavailableTip label="Open alerts" reason={q.error?.message ?? "the alerts could not be read"} />
   if (!q.data) return <Skeleton className="inline-block h-5 w-24 align-middle" />
   const n = q.data.open.length
-  const critical = q.data.open.filter((a) => a.severity === "critical").length
+  // An oracle read that failed once is open but not critical until a second check confirms it.
+  const critical = q.data.open.filter(countsAsCritical).length
   if (n === 0) return <>None open</>
   return (
     <>

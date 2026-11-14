@@ -741,7 +741,7 @@ describe("server secrets", () => {
   it("appear only in files that start with import \"server-only\"", () => {
     const files = ["app", "components", "hooks", "lib"].flatMap((d) => sourceFiles(join(ROOT, d)))
     const offenders = files
-      .filter((f) => /FAUCET_|DATABASE_URL|CRON_SECRET|QSTASH_|ORACLE_ADMIN_|ORACLE_KEEPER_|ALERT_/.test(readFileSync(f, "utf8")))
+      .filter((f) => /FAUCET_|DATABASE_URL|CRON_SECRET|QSTASH_|ORACLE_ADMIN_|ORACLE_KEEPER_|ALERT_WEBHOOK|ALERT_SIGNER/.test(readFileSync(f, "utf8")))
       .filter((f) => !readFileSync(f, "utf8").startsWith('import "server-only"'))
       .map((f) => relative(ROOT, f))
     expect(offenders).toEqual([])

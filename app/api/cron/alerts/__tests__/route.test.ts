@@ -105,8 +105,12 @@ describe("/api/cron/alerts", () => {
 
   it("runs the check on the manifest's network with the server's environment and the webhook poster (maxDuration 60)", async () => {
     expect(maxDuration).toBe(60)
+    const before = Date.now()
     await call(auth)
     const [deps] = mocks.runAlertCheck.mock.calls[0]
+    // Timed from the request's arrival: the reads and the posts are budgeted from it.
+    expect(deps.startedAt).toBeGreaterThanOrEqual(before)
+    expect(deps.startedAt).toBeLessThanOrEqual(Date.now())
     expect(deps.manifest.network).toBe("testnet")
     expect(deps.env).toBe(process.env)
     expect(typeof deps.post).toBe("function")

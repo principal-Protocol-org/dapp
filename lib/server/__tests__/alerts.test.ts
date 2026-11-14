@@ -7,7 +7,11 @@ vi.mock("server-only", () => ({}))
 import { BLOCKED_WHEN_STALE, type Freshness, type OracleView } from "@/lib/protocol/dashboard/oracle"
 import type { PauseView } from "@/lib/protocol/dashboard/pauses"
 import type { RiskView } from "@/lib/protocol/dashboard/risk"
-import { liveValue } from "@/lib/protocol/reader"
+import testnetJson from "@/config/manifests/testnet.json"
+import { countsAsCritical } from "@/lib/app/alert-types"
+import { fakeReader } from "@/lib/protocol/dashboard/__tests__/fake-reader"
+import { parseManifest } from "@/lib/protocol/manifest"
+import { liveValue, type ContractReader } from "@/lib/protocol/reader"
 import type { Live } from "@/lib/protocol/types"
 import type { Sql } from "@/lib/server/db"
 import { redact } from "@/lib/server/request"
@@ -15,6 +19,7 @@ import {
   ALERT_KINDS,
   alertTitle,
   CRITICAL,
+  runAlertCheck,
   evaluateAlerts,
   heldKinds,
   INDEXER_LAG_SECONDS,
@@ -199,28 +204,33 @@ describe("evaluateAlerts: each kind's trigger and resolution (D-20)", () => {
       txHash: o.tx === undefined ? HASH : o.tx,
     })
 
-    it("an indexed significant ref_rej opens one alert keyed by reason and value", () => {
+    it("an indexed significant ref_rej opens one alert keyed by its reason", () => {
       const [a] = evaluateAlerts(input({ rejectionEvents: [event()] }))
       expect(a).toEqual({
         kind: "oracle_rejection",
-        subject: "deviate:12000000",
+        subject: "deviate",
         severity: "warning",
         payload: { reason: "deviate", value: "12000000", lastAt: ago(60), occurrences: 1, txHash: HASH, sources: ["event"] },
       })
     })
     it("the same rejection in an event and in the keeper's tick is one alert", () => {
       const alerts = evaluateAlerts(input({ rejectionEvents: [event({ age: 120 })], ticks: [tick({ age: 125 })] }))
-      expect(kinds(alerts)).toEqual(["oracle_rejection deviate:12000000"])
+      expect(kinds(alerts)).toEqual(["oracle_rejection deviate"])
       expect(alerts[0].payload).toMatchObject({ occurrences: 2, sources: ["event", "tick"], lastAt: ago(120) })
     })
     it("repeats of one rejection without a transaction (feed mode) keep one alert", () => {
       const alerts = evaluateAlerts(input({ ticks: [tick({ age: 60, tx: null }), tick({ age: 1_860, tx: null }), tick({ age: 3_660, tx: HASH })] }))
-      expect(kinds(alerts)).toEqual(["oracle_rejection deviate:12000000"])
+      expect(kinds(alerts)).toEqual(["oracle_rejection deviate"])
       expect(alerts[0].payload).toMatchObject({ occurrences: 3, txHash: HASH })
     })
-    it("each distinct (reason, value) has its own alert", () => {
+    it("each reason has its own alert", () => {
       const alerts = evaluateAlerts(input({ rejectionEvents: [event(), event({ reason: "oob", value: "99" })], ticks: [tick({ reason: "decrease", value: "9" })] }))
-      expect(kinds(alerts)).toEqual(["oracle_rejection decrease:9", "oracle_rejection deviate:12000000", "oracle_rejection oob:99"])
+      expect(kinds(alerts)).toEqual(["oracle_rejection decrease", "oracle_rejection deviate", "oracle_rejection oob"])
+    })
+    it("the push keeper's value moves every run: its repeated rejections stay one alert, naming the newest value", () => {
+      const alerts = evaluateAlerts(input({ ticks: [tick({ age: 60, value: "12000300" }), tick({ age: 1_860, value: "12000200" }), tick({ age: 3_660, value: "12000100" })] }))
+      expect(kinds(alerts)).toEqual(["oracle_rejection deviate"])
+      expect(alerts[0].payload).toMatchObject({ value: "12000300", occurrences: 3, lastAt: ago(60) })
     })
     it("routine reasons (stale_ts, no_data) and broken-feed reasons are not significant rejections", () => {
       const alerts = evaluateAlerts(
@@ -235,7 +245,7 @@ describe("evaluateAlerts: each kind's trigger and resolution (D-20)", () => {
       expect(evaluateAlerts(input({ ticks: [tick({ decision: "error", reason: "failed: TypeError" })] }))).toEqual([])
     })
     it(`resolves once no occurrence is younger than ${REJECTION_WINDOW_SECONDS} s`, () => {
-      expect(kinds(evaluateAlerts(input({ rejectionEvents: [event({ age: REJECTION_WINDOW_SECONDS - 1 })] })))).toEqual(["oracle_rejection deviate:12000000"])
+      expect(kinds(evaluateAlerts(input({ rejectionEvents: [event({ age: REJECTION_WINDOW_SECONDS - 1 })] })))).toEqual(["oracle_rejection deviate"])
       expect(evaluateAlerts(input({ rejectionEvents: [event({ age: REJECTION_WINDOW_SECONDS })] }))).toEqual([])
     })
     it("is held while either source cannot be read", () => {
@@ -429,11 +439,19 @@ function alertsDb() {
       return [{ id: String(row.id) }]
     }
     if (text.startsWith("update alerts set resolved_at =")) {
-      const [at, id] = v
+      const [at, silentOpen, silentClose, id] = v as [string, boolean, boolean, string]
       const r = byId(id)
       if (!r || r.resolved_at !== null) return []
-      r.resolved_at = new Date(at as string)
+      r.resolved_at = new Date(at)
+      r.opened_posted = r.opened_posted || silentOpen
+      r.resolved_posted = r.resolved_posted || silentClose
       return [{ id: String(r.id) }]
+    }
+    if (text.startsWith("update alerts set payload = payload || jsonb_build_object('confirmedAt'")) {
+      const [at, id] = v as [string, string]
+      const r = byId(id)
+      if (r && r.resolved_at === null) r.payload = { ...r.payload, confirmedAt: at }
+      return []
     }
     if (text.startsWith("update alerts set opened_posted = true")) {
       const r = byId(v[0])
@@ -622,14 +640,36 @@ describe("syncAlerts: each alert opens once and closes once", () => {
     expect(sent.map((p) => `${p.status} ${p.at}`)).toEqual([`opened ${iso(NOW)}`, `resolved ${iso(NOW + 1_000)}`])
   })
 
-  it("a run starts no post after its posting budget: the rest wait for the next run", async () => {
+  it("a run with less time left than one post claims nothing: the notices wait, unclaimed, for the next run", async () => {
     const db = alertsDb()
     const { post, sent } = poster()
-    const r = await syncAlerts(db.sql, "testnet", [STALE, LAG], post, NOW, { postBudgetMs: 0 })
+    const r = await syncAlerts(db.sql, "testnet", [STALE, LAG], post, NOW, { deadline: Date.now() + WEBHOOK_TIMEOUT_MS - 1 })
     expect(r.opened).toHaveLength(2)
+    expect(r.posted + r.postFailures).toBe(0)
     expect(sent).toHaveLength(0)
+    expect(db.texts.some((t) => t.startsWith("update alerts set opened_posted = true"))).toBe(false)
+    expect(db.rows.map((x) => x.opened_posted)).toEqual([false, false])
     await syncAlerts(db.sql, "testnet", [STALE, LAG], post, NOW + 1_000)
     expect(sent.map((p) => p.kind)).toEqual(["oracle_stale", "indexer_lag"])
+  })
+
+  it("a hanging webhook near the deadline: every notice claimed is posted or released, none is left claimed", async () => {
+    const db = alertsDb()
+    vi.spyOn(console, "error").mockImplementation(() => {})
+    const hanging = vi.fn(
+      (_url: string | URL | Request, init?: RequestInit) =>
+        new Promise<Response>((_, reject) => init?.signal?.addEventListener("abort", () => reject(init.signal?.reason))),
+    )
+    const post = webhookPoster(HOOK, { fetchImpl: hanging as unknown as typeof fetch, timeoutMs: 40 })
+    const three = [STALE, LAG, { ...LAG, subject: "market" }]
+    const r = await syncAlerts(db.sql, "testnet", three, post, NOW, { deadline: Date.now() + 100, postTimeoutMs: 40 })
+    const claims = db.texts.filter((t) => t.startsWith("update alerts set opened_posted = true")).length
+    const releases = db.texts.filter((t) => t.startsWith("update alerts set opened_posted = false")).length
+    expect(claims).toBeGreaterThan(0)
+    expect(claims).toBeLessThan(3) // the third would not have ended by the deadline
+    expect(releases).toBe(claims)
+    expect(r.postFailures).toBe(claims)
+    expect(db.rows.every((x) => !x.opened_posted)).toBe(true)
   })
 
   it("an opening another run claims first is not posted twice", async () => {
@@ -649,6 +689,126 @@ describe("syncAlerts: each alert opens once and closes once", () => {
     expect(sent).toHaveLength(0)
     expect(r.posted).toBe(0)
     expect(r.postFailures).toBe(0)
+  })
+})
+
+const UNAVAILABLE: DesiredAlert = { kind: "oracle_unavailable", subject: ORACLE, severity: "critical", payload: { reason: "rpc down" } }
+
+describe("oracle_unavailable is debounced: posted and critical only once a second run confirms it", () => {
+  it("a blip that clears by the next run is never posted, never critical, and closes without a word", async () => {
+    const db = alertsDb()
+    const { post, sent } = poster()
+    const first = await syncAlerts(db.sql, "testnet", [UNAVAILABLE], post, NOW)
+    expect(first.opened).toEqual([{ kind: "oracle_unavailable", subject: ORACLE, severity: "critical" }])
+    expect(first.open).toHaveLength(1)
+    expect(first.open.some(countsAsCritical)).toBe(false)
+    expect(await openAlertCounts(db.sql, "testnet")).toEqual({ count: 1, critical: 0 })
+    expect(sent).toHaveLength(0)
+
+    const second = await syncAlerts(db.sql, "testnet", [], post, NOW + 300_000)
+    expect(second.resolved).toEqual([{ kind: "oracle_unavailable", subject: ORACLE, severity: "critical" }])
+    expect(sent).toHaveLength(0)
+    expect(db.rows[0]).toMatchObject({ opened_posted: true, resolved_posted: true, resolved_at: new Date(NOW + 300_000) })
+    expect(db.rows[0].payload.confirmedAt).toBeUndefined()
+
+    await syncAlerts(db.sql, "testnet", [], post, NOW + 600_000)
+    expect(sent).toHaveLength(0)
+  })
+
+  it("a second failed run confirms it: posted then (dated from its first failure), critical from then, and its close is posted", async () => {
+    const db = alertsDb()
+    const { post, sent } = poster()
+    await syncAlerts(db.sql, "testnet", [UNAVAILABLE], post, NOW)
+    expect(sent).toHaveLength(0)
+
+    const second = await syncAlerts(db.sql, "testnet", [UNAVAILABLE], post, NOW + 300_000)
+    expect(second.opened).toEqual([])
+    expect(second.open[0].payload).toEqual({ reason: "rpc down", confirmedAt: iso(NOW + 300_000) })
+    expect(second.open.some(countsAsCritical)).toBe(true)
+    expect(await openAlertCounts(db.sql, "testnet")).toEqual({ count: 1, critical: 1 })
+    expect(sent).toHaveLength(1)
+    expect(sent[0]).toMatchObject({ status: "opened", kind: "oracle_unavailable", at: iso(NOW) })
+    expect(sent[0].text).toContain(`Still unreadable at ${iso(NOW + 300_000)}`)
+
+    await syncAlerts(db.sql, "testnet", [UNAVAILABLE], post, NOW + 600_000)
+    expect(sent).toHaveLength(1)
+    expect(db.rows[0].payload.confirmedAt).toBe(iso(NOW + 300_000))
+
+    await syncAlerts(db.sql, "testnet", [], post, NOW + 900_000)
+    expect(sent.map((p) => p.status)).toEqual(["opened", "resolved"])
+  })
+})
+
+describe("event kinds close silently", () => {
+  it.each(["oracle_rejection", "feed_broken"] as const)("%s: the opening is posted, the close is not", async (kind) => {
+    const db = alertsDb()
+    const { post, sent } = poster()
+    await syncAlerts(db.sql, "testnet", [{ kind, subject: "deviate", severity: "warning", payload: { reason: "deviate" } }], post, NOW)
+    const closing = await syncAlerts(db.sql, "testnet", [], post, NOW + 1_000)
+    expect(closing.resolved).toHaveLength(1)
+    expect(sent.map((p) => p.status)).toEqual(["opened"])
+    expect(db.rows[0]).toMatchObject({ opened_posted: true, resolved_posted: true })
+  })
+
+  it("a condition kind still posts its close", async () => {
+    const db = alertsDb()
+    const { post, sent } = poster()
+    await syncAlerts(db.sql, "testnet", [LAG], post, NOW)
+    await syncAlerts(db.sql, "testnet", [], post, NOW + 1_000)
+    expect(sent.map((p) => p.status)).toEqual(["opened", "resolved"])
+  })
+})
+
+describe("runAlertCheck: timed from the run's start", () => {
+  const M = parseManifest(testnetJson)
+  const market = M.markets[0]
+  /** Every read fails but the pauses: RiskControl is paused, the market's contracts are not. */
+  const pausedReader = () =>
+    fakeReader({
+      [`${M.shared.riskControl}.is_paused`]: true,
+      [`${market.contracts.sy}.is_paused`]: false,
+      [`${market.contracts.pool}.is_paused`]: false,
+      [`${market.contracts.manager}.is_paused`]: false,
+    })
+  const clock = async () => ({ sequence: 5_720_000, closeTime: LEDGER_TIME })
+
+  it("slow reads are cut at the read budget: the run still writes its state, and an unreadable oracle is not critical yet", async () => {
+    const db = alertsDb()
+    const { post, sent } = poster()
+    const hangs = Object.assign(() => new Promise<never>(() => {}), { rpcUrl: "https://rpc.test" }) as unknown as ContractReader
+    const started = Date.now()
+    const r = await runAlertCheck({ sql: db.sql, manifest: M, env: {}, post, now: NOW, reader: hangs, ledgerClock: () => new Promise(() => {}), readBudgetMs: 50 })
+    expect(Date.now() - started).toBeLessThan(2_000)
+    expect(r.unread).toEqual(expect.arrayContaining(["oracle", "risk", "pauses"]))
+    expect(r.held).toEqual(expect.arrayContaining(["paused", "risk_warning", "risk_exhausted", "oracle_warning", "oracle_stale"]))
+    expect(r.opened).toEqual([{ kind: "oracle_unavailable", subject: M.shared.oracle, severity: "critical" }])
+    expect(r.open[0].payload.reason).toBe("the read did not answer within the check's read budget")
+    expect(r.critical).toBe(false)
+    expect(sent).toHaveLength(0)
+  })
+
+  it("slow reads plus a hanging webhook: with no time left for a whole post, nothing is claimed; the next run posts it", async () => {
+    const db = alertsDb()
+    vi.spyOn(console, "error").mockImplementation(() => {})
+    const down = vi.fn(async () => {
+      throw new WebhookError("the webhook answered 503")
+    })
+    const first = await runAlertCheck({ sql: db.sql, manifest: M, env: {}, post: down, now: NOW, reader: pausedReader(), ledgerClock: clock })
+    expect(first.opened.map((a) => a.kind)).toContain("paused")
+    expect(first.postFailures).toBe(1)
+
+    // The reads of this run took 46 s: 4 s are left before the 50 s mark, less than one 5 s post.
+    const hanging = vi.fn(() => new Promise<void>(() => {}))
+    const db2Texts = db.texts.length
+    const late = await runAlertCheck({ sql: db.sql, manifest: M, env: {}, post: hanging, now: NOW + 300_000, startedAt: Date.now() - 46_000, readBudgetMs: 60_000, reader: pausedReader(), ledgerClock: clock })
+    expect(hanging).not.toHaveBeenCalled()
+    expect(late.posted + late.postFailures).toBe(0)
+    expect(db.texts.slice(db2Texts).some((t) => t.startsWith("update alerts set opened_posted = true"))).toBe(false)
+    expect(db.rows.find((x) => x.kind === "paused")?.opened_posted).toBe(false)
+
+    const { post, sent } = poster()
+    await runAlertCheck({ sql: db.sql, manifest: M, env: {}, post, now: NOW + 600_000, reader: pausedReader(), ledgerClock: clock })
+    expect(sent.map((p) => `${p.status} ${p.kind}`)).toContain("opened paused")
   })
 })
 
@@ -821,19 +981,26 @@ describe("the keeper signer and its floor", () => {
   const ADMIN = adminPair.secret()
   const KEEPER = keeperPair.secret()
 
-  it("is ORACLE_KEEPER_SECRET's public key when set, else ORACLE_ADMIN_SECRET's, else none", () => {
-    const keeper = signerAccount({ ORACLE_KEEPER_SECRET: KEEPER, ORACLE_ADMIN_SECRET: ADMIN })
-    const admin = signerAccount({ ORACLE_ADMIN_SECRET: ADMIN })
-    expect(keeper).toEqual({ account: keeperPair.publicKey() })
-    expect(admin).toEqual({ account: adminPair.publicKey() })
-    expect(signerAccount({})).toBeNull()
-    expect(signerAccount({ ORACLE_KEEPER_SECRET: "  " })).toBeNull()
+  it("follows ORACLE_KEEPER_MODE: push (the default) watches ORACLE_ADMIN_SECRET's key, feed ORACLE_KEEPER_SECRET's", () => {
+    const both = { ORACLE_KEEPER_SECRET: KEEPER, ORACLE_ADMIN_SECRET: ADMIN }
+    expect(signerAccount(both)).toEqual({ account: adminPair.publicKey() })
+    expect(signerAccount({ ...both, ORACLE_KEEPER_MODE: "push" })).toEqual({ account: adminPair.publicKey() })
+    expect(signerAccount({ ...both, ORACLE_KEEPER_MODE: "feed" })).toEqual({ account: keeperPair.publicKey() })
   })
 
-  it("an invalid key is an error naming the variable, never the value", () => {
-    const r = signerAccount({ ORACLE_KEEPER_SECRET: "SNOTAKEY" })
+  it("no key for the mode: no check", () => {
+    expect(signerAccount({})).toBeNull()
+    expect(signerAccount({ ORACLE_KEEPER_SECRET: KEEPER })).toBeNull()
+    expect(signerAccount({ ORACLE_KEEPER_MODE: "feed", ORACLE_ADMIN_SECRET: ADMIN })).toBeNull()
+    expect(signerAccount({ ORACLE_KEEPER_MODE: "feed", ORACLE_KEEPER_SECRET: "  " })).toBeNull()
+  })
+
+  it("an invalid key or mode is an error naming the variable, never the value", () => {
+    const r = signerAccount({ ORACLE_KEEPER_MODE: "feed", ORACLE_KEEPER_SECRET: "SNOTAKEY" })
     expect(r).toEqual({ error: "ORACLE_KEEPER_SECRET is not a valid secret key" })
     expect(JSON.stringify(r)).not.toContain("SNOTAKEY")
+    expect(signerAccount({ ORACLE_ADMIN_SECRET: "SNOTAKEY" })).toEqual({ error: "ORACLE_ADMIN_SECRET is not a valid secret key" })
+    expect(signerAccount({ ORACLE_KEEPER_MODE: "pull", ORACLE_ADMIN_SECRET: ADMIN })).toEqual({ error: "ORACLE_KEEPER_MODE is neither push nor feed" })
   })
 
   it("ALERT_SIGNER_MIN_XLM defaults to 20 XLM; decimals are exact; an invalid value falls back to 20", () => {

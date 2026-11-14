@@ -39,6 +39,18 @@ const KIND_WORDS: Readonly<Record<string, string>> = {
 
 export const alertTitle = (kind: string): string => (Object.hasOwn(KIND_WORDS, kind) ? KIND_WORDS[kind] : kind)
 
+/**
+ * Kinds that only say "this server's read failed" (`oracle_unavailable`): such an alert opens at once
+ * but is posted, and counts as critical, only once a later check confirms it (`payload.confirmedAt`).
+ * One that clears before then closes without a word.
+ */
+export const DEBOUNCED_KINDS: readonly string[] = ["oracle_unavailable"]
+
+/** Whether an open alert counts as critical: its severity, unless it is a debounced kind not confirmed yet. */
+export function countsAsCritical(a: Pick<Alert, "kind" | "severity" | "payload">): boolean {
+  return a.severity === "critical" && !(DEBOUNCED_KINDS.includes(a.kind) && typeof a.payload.confirmedAt !== "string")
+}
+
 /** An alert from the history (`recent`): one that opened, with its close time (null while still open). */
 export type RecentAlert = Alert & { resolvedAt: string | null }
 
