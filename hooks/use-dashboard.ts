@@ -1,0 +1,229 @@
+"use client"
+
+import { useEffect, useState } from "react"
+import { useQuery } from "@tanstack/react-query"
+import { useManifest } from "@/components/app/manifest-provider"
+import { useLedgerClock } from "@/hooks/use-ledger-clock"
+import { fetchOracleView, type OracleView } from "@/lib/protocol/dashboard/oracle"
+import { fetchPauses } from "@/lib/protocol/dashboard/pauses"
+import { fetchProtocolState } from "@/lib/protocol/dashboard/protocol-state"
+import { fetchRiskView } from "@/lib/protocol/dashboard/risk"
+import { createRpcReader } from "@/lib/protocol/reader"
+import type { Live } from "@/lib/protocol/types"
+import type { IndexedEvent, IndexedEvents } from "@/lib/server/indexer"
+
+/** Live widgets (oracle, RiskControl, pauses) refresh every 15 s (D-6, TRANCHE_2_3 l.1077). */
+export const DASHBOARD_LIVE_MS = 15_000
+/** Aggregates (the every-market sweep and its totals) and history (the index) refresh every 60 s. */
+export const DASHBOARD_AGGREGATE_MS = 60_000
+
+export type { IndexedEvent, IndexedEvents }
+
+/**
+ * The query, plus `stale`: a failed refetch keeps the old `data`, and `stale` tells callers not to
+ * show it as current (as `useMarketState` does, R35).
+ */
+function withStale<Q extends { isError: boolean }>(query: Q): Q & { stale: boolean } {
+  return { ...query, stale: query.isError }
+}
+
+const idsOf = (ids: readonly string[]) => ids.join(",")
+
+/**
+ * Every listed market's dashboard figures and the protocol totals (`fetchProtocolState`), every 60 s:
+ * the sweep reads each market's whole state, so it refreshes at the aggregate cadence.
+ */
+export function useProtocolState(marketIds?: readonly string[]) {
+  const m = useManifest()
+  const ids = marketIds ?? m.markets.map((market) => market.marketId)
+  return withStale(
+    useQuery({
+      queryKey: ["dashboard", "protocol", m.network, idsOf(ids)],
+      queryFn: () => fetchProtocolState(createRpcReader(m), m, ids),
+      refetchInterval: DASHBOARD_AGGREGATE_MS,
+    }),
+  )
+}
+
+/**
+ * The oracle (`fetchOracleView`) every 15 s, with the ledger time its freshness and time to block
+ * were computed at, so a countdown can follow the ledger clock between reads (`secondsToBlockNow`).
+ * It waits for the first ledger time: a view read without one would have no time to block.
+ */
+export function useOracleView() {
+  const m = useManifest()
+  const { ledgerTime } = useLedgerClock()
+  return withStale(
+    useQuery({
+      queryKey: ["dashboard", "oracle", m.network],
+      queryFn: async (): Promise<{ view: OracleView; ledgerTime: number }> => {
+        const at = ledgerTime as number
+        return { view: await fetchOracleView(createRpcReader(m), m, at), ledgerTime: at }
+      },
+      enabled: ledgerTime !== null,
+      refetchInterval: DASHBOARD_LIVE_MS,
+    }),
+  )
+}
+
+/**
+ * Seconds until operations block, now: the read's `timeToBlock` less the ledger time elapsed since
+ * it was computed. It follows the ledger clock (ledger time plus elapsed seconds), never the
+ * browser's wall clock alone. Null without a ledger time or a time to block.
+ */
+export function secondsToBlockNow(timeToBlock: Live<number>, readLedgerTime: number, ledgerTimeNow: number | null): number | null {
+  if (timeToBlock.status !== "live" || ledgerTimeNow === null) return null
+  // `fetchOracleView` floors the ledger time it is given; whole seconds left, rounded down.
+  return Math.floor(timeToBlock.value + Math.floor(readLedgerTime) - ledgerTimeNow)
+}
+
+/**
+ * RiskControl (`fetchRiskView`) every 15 s. It is given the ledger clock's sequence, for the lapsed
+ * window, which is deliberately not in the key (it would refetch on every ledger).
+ */
+export function useRiskView() {
+  const m = useManifest()
+  const { sequence } = useLedgerClock()
+  return withStale(
+    useQuery({
+      queryKey: ["dashboard", "risk", m.network],
+      queryFn: () => fetchRiskView(createRpcReader(m), m, sequence as number),
+      enabled: sequence !== null,
+      refetchInterval: DASHBOARD_LIVE_MS,
+    }),
+  )
+}
+
+/** Every pausable contract's `is_paused` (`fetchPauses`), every 15 s. */
+export function usePauses() {
+  const m = useManifest()
+  return withStale(
+    useQuery({
+      queryKey: ["dashboard", "pauses", m.network, idsOf(m.markets.map((market) => market.marketId))],
+      queryFn: () => fetchPauses(createRpcReader(m), m),
+      refetchInterval: DASHBOARD_LIVE_MS,
+    }),
+  )
+}
+
+/** Why a dashboard API answer could not be used, worded for the "Unavailable" tip. */
+type Reasons = { notFound: string; notConfigured: string; unavailable: string }
+
+const INDEX_REASONS: Reasons = {
+  notFound: "the event index is not available on this server",
+  notConfigured: "the event index is not configured on this server",
+  unavailable: "the event index could not be read",
+}
+
+const ALERT_REASONS: Reasons = {
+  notFound: "alerts not available yet",
+  notConfigured: "alerts are not configured on this server",
+  unavailable: "the alerts could not be read",
+}
+
+/**
+ * GETs one of the app's dashboard routes. The status is checked before the body: a route that does
+ * not exist answers Next's 404 HTML page, not JSON.
+ */
+async function getJson<T>(url: string, reasons: Reasons): Promise<T> {
+  const res = await fetch(url)
+  if (res.status === 404) throw new Error(reasons.notFound)
+  if (res.status === 503) {
+    const body = (await res.json().catch(() => null)) as { error?: unknown } | null
+    throw new Error(body?.error === "not_configured" ? reasons.notConfigured : reasons.unavailable)
+  }
+  if (!res.ok) throw new Error(`${url} answered ${res.status}`)
+  return (await res.json()) as T
+}
+
+/** How far the index has read, its lag, gaps and last reconciliation, over every group, every 60 s. */
+export function useIndexStatus() {
+  const m = useManifest()
+  return withStale(
+    useQuery({
+      queryKey: ["dashboard", "index-status", m.network],
+      queryFn: () => getJson<IndexedEvents>("/api/dashboard/events?limit=1", INDEX_REASONS),
+      refetchInterval: DASHBOARD_AGGREGATE_MS,
+    }),
+  )
+}
+
+/** Newest first, as the index orders them: by ledger, then by event id (fixed-width, so it sorts as the chain does). */
+const newestFirst = (a: IndexedEvent, b: IndexedEvent) => b.ledger - a.ledger || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0)
+
+/**
+ * Two group answers as one: the rows merged newest first, and the index state of the slower group
+ * (lower indexed-through ledger, older close time, longer lag), with both groups' gaps.
+ */
+function mergeAnswers(answers: IndexedEvents[], limit: number): IndexedEvents {
+  const closeTimes = answers.map((a) => a.indexedThroughCloseTime)
+  const lags = answers.map((a) => a.lagSeconds)
+  return {
+    rows: answers.flatMap((a) => a.rows).sort(newestFirst).slice(0, limit),
+    indexedThrough: Math.min(...answers.map((a) => a.indexedThrough)),
+    indexedThroughCloseTime: closeTimes.some((t) => t === null) ? null : [...(closeTimes as string[])].sort()[0],
+    lagSeconds: lags.some((l) => l === null) ? null : Math.max(...(lags as number[])),
+    gaps: answers.flatMap((a) => a.gaps),
+    reconcile: answers.find((a) => a.reconcile)?.reconcile ?? null,
+  }
+}
+
+/** The groups whose events are compliance history: RecoveryEscrow seizures and Permissioning changes. */
+const COMPLIANCE_GROUPS = ["escrow", "permissioning"] as const
+
+/**
+ * The latest `limit` compliance events (RecoveryEscrow and Permissioning), every 60 s. Both groups
+ * are read; one failing fails the list, which is never shown partial.
+ */
+export function useComplianceEvents(limit = 5) {
+  const m = useManifest()
+  return withStale(
+    useQuery({
+      queryKey: ["dashboard", "compliance-events", m.network, limit],
+      queryFn: async () =>
+        mergeAnswers(
+          await Promise.all(COMPLIANCE_GROUPS.map((g) => getJson<IndexedEvents>(`/api/dashboard/events?group=${g}&limit=${limit}`, INDEX_REASONS))),
+          limit,
+        ),
+      refetchInterval: DASHBOARD_AGGREGATE_MS,
+    }),
+  )
+}
+
+/**
+ * How many alerts are open, from `GET /api/dashboard/alerts` (`{ open, recent, lastTest }`), every
+ * 60 s. Until that route exists it answers 404, so this is an error worded "alerts not available
+ * yet". An answer without an `open` list is refused, never read as zero.
+ */
+export function useOpenAlerts() {
+  const m = useManifest()
+  return withStale(
+    useQuery({
+      queryKey: ["dashboard", "alerts", m.network],
+      queryFn: async (): Promise<{ open: number }> => {
+        const body = await getJson<{ open?: unknown }>("/api/dashboard/alerts", ALERT_REASONS)
+        if (!Array.isArray(body.open)) throw new Error("the alerts answer has no open list")
+        return { open: body.open.length }
+      },
+      refetchInterval: DASHBOARD_AGGREGATE_MS,
+    }),
+  )
+}
+
+/**
+ * The browser's clock, ticking every `intervalMs`, for elapsed-time displays ("12s ago"). Null until
+ * the first tick after mount: nothing reads the clock during render or prerender (Cache Components).
+ */
+export function useNow(intervalMs = 1000): number | null {
+  const [now, setNow] = useState<number | null>(null)
+  useEffect(() => {
+    const tick = () => setNow(Date.now())
+    const first = setTimeout(tick, 0)
+    const id = setInterval(tick, intervalMs)
+    return () => {
+      clearTimeout(first)
+      clearInterval(id)
+    }
+  }, [intervalMs])
+  return now
+}

@@ -47,12 +47,16 @@ export function CallToAction() {
   );
 }
 
+type FooterLink = { label: string; href: string; newTab: boolean };
+
+// The dashboard is a page of this site, so it opens in the same tab; the others open a new one.
 const footerLinks = [
-  { label: "Documentation", href: links.docs },
-  { label: "GitHub", href: links.github },
-  { label: "Discord", href: links.discord },
-  { label: "X (Twitter)", href: links.x },
-].filter((l): l is { label: string; href: string } => Boolean(l.href));
+  { label: "Dashboard", href: links.dashboard, newTab: false },
+  { label: "Documentation", href: links.docs, newTab: true },
+  { label: "GitHub", href: links.github, newTab: true },
+  { label: "Discord", href: links.discord, newTab: true },
+  { label: "X (Twitter)", href: links.x, newTab: true },
+].filter((l): l is FooterLink => Boolean(l.href));
 
 export function SiteFooter() {
   return (
@@ -72,8 +76,7 @@ export function SiteFooter() {
               <a
                 key={l.label}
                 href={l.href}
-                target="_blank"
-                rel="noopener"
+                {...(l.newTab ? { target: "_blank", rel: "noopener" } : {})}
                 className="text-sm/6 text-ink-muted hover:text-ink"
               >
                 {l.label}

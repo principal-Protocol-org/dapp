@@ -10,7 +10,7 @@ import { useManifest } from "@/components/app/manifest-provider"
 import type { Live } from "@/lib/protocol/types"
 import { Skeleton } from "@/components/ui/skeleton"
 import { safetyIssues } from "@/components/app/market/attention"
-import { Figure, LiveFigure } from "@/components/app/info-tip"
+import { LiveFigure, ReasonFigure, type FigureText } from "@/components/app/info-tip"
 import { formatDuration, UNAVAILABLE } from "@/components/app/live"
 
 function Row({ label, children }: { label: string; children: React.ReactNode }) {
@@ -32,16 +32,14 @@ const REJECTION_WORDS: Record<string, string> = {
 
 const pause = (paused: boolean) => (paused ? "Paused: new actions are refused" : "Not paused")
 
-type Fig = { text: string; reason?: string }
-
 /** "Unavailable" with the error of the first input that could not be read, or null when all are live. */
-function firstDown(...inputs: Live<unknown>[]): Fig | null {
+function firstDown(...inputs: Live<unknown>[]): FigureText | null {
   for (const i of inputs) if (i.status === "unavailable") return { text: UNAVAILABLE, reason: i.error }
   return null
 }
 
 /** Room left under a window limit. A limit of 0 means the limit is off. */
-function roomLeft(limit: Live<bigint>, volume: Live<bigint>, amount: (v: bigint) => string): Fig {
+function roomLeft(limit: Live<bigint>, volume: Live<bigint>, amount: (v: bigint) => string): FigureText {
   const down = firstDown(limit, volume)
   if (down) return down
   if (limit.status !== "live" || volume.status !== "live") return { text: UNAVAILABLE }
@@ -61,7 +59,7 @@ export function SafetyContent({ marketId }: { marketId: string }) {
   if (!market) return null
   const amount = (v: bigint) => formatAmount(v, market.underlying.decimals)
 
-  const oracle = (): Fig => {
+  const oracle = (): FigureText => {
     if (!ms) return { text: UNAVAILABLE }
     const down = firstDown(ms.oracleFresh, ms.oracleMaxStaleSeconds)
     if (down) return down
@@ -84,7 +82,7 @@ export function SafetyContent({ marketId }: { marketId: string }) {
     }} />
   }
 
-  const depositCap = (): Fig => {
+  const depositCap = (): FigureText => {
     if (state.status !== "connected") return { text: "Connect a wallet to see your cap" }
     const acc = account.stale ? undefined : account.data
     if (!acc) return { text: account.isPending ? "Loading" : UNAVAILABLE }
@@ -102,16 +100,16 @@ export function SafetyContent({ marketId }: { marketId: string }) {
       <Row label="Market pool"><LiveFigure label="Market pool" live={ms.poolPaused} format={pause} /></Row>
       <Row label="Risk control"><LiveFigure label="Risk control" live={ms.riskPaused} format={pause} /></Row>
       <Row label="Principal manager"><LiveFigure label="Principal manager" live={ms.managerPaused} format={pause} /></Row>
-      <Row label="Oracle"><Figure label="Oracle" figure={oracle()} /></Row>
+      <Row label="Oracle"><ReasonFigure label="Oracle" figure={oracle()} /></Row>
       <Row label="Oracle deviation cap"><LiveFigure label="Oracle deviation cap" live={ms.oracleMaxDeviationBps} format={formatBps} /></Row>
       <Row label="Oracle primary source"><LiveFigure label="Oracle primary source" live={ms.oraclePrimarySource} format={source} /></Row>
       <Row label="Oracle fallback source"><LiveFigure label="Oracle fallback source" live={ms.oracleFallbackSource} format={source} /></Row>
       <Row label="Oracle last rejected update">{lastRejection()}</Row>
-      <Row label="Circuit breaker, protocol-wide"><Figure label="Circuit breaker, protocol-wide" figure={roomLeft(ms.cb.limit, ms.cb.volume, amount)} /></Row>
+      <Row label="Circuit breaker, protocol-wide"><ReasonFigure label="Circuit breaker, protocol-wide" figure={roomLeft(ms.cb.limit, ms.cb.volume, amount)} /></Row>
       <Row label={`Circuit breaker, ${market.underlying.code}`}>
-        <Figure label={`Circuit breaker, ${market.underlying.code}`} figure={roomLeft(ms.cb.assetLimit, ms.cb.assetVolume, amount)} />
+        <ReasonFigure label={`Circuit breaker, ${market.underlying.code}`} figure={roomLeft(ms.cb.assetLimit, ms.cb.assetVolume, amount)} />
       </Row>
-      <Row label="Your deposit cap"><Figure label="Your deposit cap" figure={depositCap()} /></Row>
+      <Row label="Your deposit cap"><ReasonFigure label="Your deposit cap" figure={depositCap()} /></Row>
     </dl>
   ) : isPending ? (
     <Skeleton className="h-48 w-full" />

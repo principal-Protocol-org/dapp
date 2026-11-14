@@ -6,7 +6,7 @@ import { formatAmount, formatBps, formatFeeRate, formatRate } from "@/lib/protoc
 import { getMarket } from "@/lib/protocol/manifest"
 import { useManifest } from "@/components/app/manifest-provider"
 import { Skeleton } from "@/components/ui/skeleton"
-import { Figure, InfoTip, LiveFigure } from "@/components/app/info-tip"
+import { InfoTip, LiveFigure, ReasonFigure, type FigureText } from "@/components/app/info-tip"
 import { formatDuration, UNAVAILABLE } from "@/components/app/live"
 import { MATURITY_DATE } from "@/components/app/market/market-header"
 
@@ -27,7 +27,7 @@ export function MarketDetails({ marketId }: { marketId: string }) {
     )
   }
   const amount = (v: bigint) => formatAmount(v, market.underlying.decimals, 4, { group: true })
-  const oracleAge: { text: string; reason?: string } =
+  const oracleAge: FigureText =
     ms.oracleTimestamp.status === "unavailable"
       ? { text: UNAVAILABLE, reason: ms.oracleTimestamp.error }
       : ledgerTime === null
@@ -39,7 +39,7 @@ export function MarketDetails({ marketId }: { marketId: string }) {
         <Row label="Oracle rate" tip="Notional per SY share, read from the market oracle. PT and YT are counted in notional units.">
           <LiveFigure label="Oracle rate" live={ms.oracleRate} format={formatRate} />
         </Row>
-        <Row label="Oracle updated"><Figure label="Oracle updated" figure={oracleAge} /></Row>
+        <Row label="Oracle updated"><ReasonFigure label="Oracle updated" figure={oracleAge} /></Row>
         <Row label="Maturity"><LiveFigure label="Maturity" live={ms.maturity} format={(v) => MATURITY_DATE.format(new Date(Number(v) * 1000))} /></Row>
         {ms.settledRate.status === "unavailable" || ms.settledRate.value !== null ? (
           <Row label="Settlement rate">

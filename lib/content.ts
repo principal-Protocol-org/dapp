@@ -3,6 +3,8 @@ export const links = {
   app: "/app",
   /** The VitePress docs, proxied under /docs by next.config.ts. */
   docs: "/docs",
+  /** The public, read-only protocol dashboard (no wallet), served by this project under /dashboard. */
+  dashboard: "/dashboard",
   github: "https://github.com/principal-Protocol-org/principal",
   // TODO: set the community URLs; footer links without a URL are not rendered.
   discord: null as string | null,
