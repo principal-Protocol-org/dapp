@@ -6,9 +6,22 @@ import { evidenceRows, verifyCommand, type VerifiableFigure } from "@/lib/protoc
 import { formatAmountFixed } from "@/lib/protocol/format"
 import type { Live, ReadSource } from "@/lib/protocol/types"
 
-const mocks = vi.hoisted(() => ({
-  manifest: { network: "testnet" as "testnet" | "local" | "mainnet", rpcUrl: "https://rpc.test", rpcFallbackUrls: undefined as string[] | undefined },
-}))
+const mocks = vi.hoisted(() => {
+  const base = () => ({
+    network: "testnet" as "testnet" | "local" | "mainnet",
+    rpcUrl: "https://rpc.test",
+    rpcFallbackUrls: undefined as string[] | undefined,
+    shared: { router: "CROUTER", oracle: "CORACLE", permissioning: "CPERM", riskControl: "CRISK" },
+    markets: [
+      {
+        marketId: "m1",
+        underlying: { code: "USDY", issuer: "G", sac: "CAZIZBKBJ6WCXYQ2K6EOAAQ5BVOQBUUW5U7NRYGWQW6FFHAMNBRMUSDY", decimals: 7 },
+        contracts: { sy: "CA62ARXF2HOK3IJOSRRYFFDA2P3WCYGHN5F7NBBYB6I7NNEUYE367F2I" },
+      },
+    ],
+  })
+  return { base, manifest: base() }
+})
 vi.mock("@/components/app/manifest-provider", () => ({ useManifest: () => mocks.manifest }))
 
 import { CopyEvidence } from "../copy-evidence"
@@ -53,7 +66,7 @@ function setup() {
 }
 
 beforeEach(() => {
-  mocks.manifest = { network: "testnet", rpcUrl: RPC, rpcFallbackUrls: undefined }
+  mocks.manifest = mocks.base()
   writeText = vi.fn(async () => {})
 })
 
@@ -87,11 +100,11 @@ describe("the How to verify drawer (D-7)", () => {
     const dialog = screen.getByRole("dialog", { name: /TVL/ })
     const d = within(dialog)
     expect(d.getByText("223,011.30 USDY")).toBeTruthy()
-    expect(d.getByText("total_underlying=2230113029038; balance=0")).toBeTruthy()
+    expect(d.getByText(`SY CA62AR….total_underlying()=2230113029038; USDY SAC CAZIZB….balance(id=${ESCROW})=0`)).toBeTruthy()
     expect(d.getByText(SCALE_TEXT)).toBeTruthy()
     expect(d.getByRole("link", { name: new RegExp(SY) }).getAttribute("href")).toBe(`https://stellar.expert/explorer/testnet/contract/${SY}`)
     expect(d.getByRole("link", { name: new RegExp(SAC) }).getAttribute("href")).toBe(`https://stellar.expert/explorer/testnet/contract/${SAC}`)
-    expect(d.getByText(`total_underlying(); balance(id=${ESCROW})`)).toBeTruthy()
+    expect(d.getByText(`SY CA62AR….total_underlying(); USDY SAC CAZIZB….balance(id=${ESCROW})`)).toBeTruthy()
     expect(d.getByText("5720086–5720087")).toBeTruthy()
     expect(d.getByText(RPC)).toBeTruthy()
     expect(d.getByText("No fallback RPC configured")).toBeTruthy()
@@ -104,6 +117,29 @@ describe("the How to verify drawer (D-7)", () => {
     expect(xdr?.open).toBe(false)
     expect(within(xdr as HTMLElement).getByText(totalUnderlying.rawXdr)).toBeTruthy()
     expect(within(xdr as HTMLElement).getByText(escrowBalance.rawXdr)).toBeTruthy()
+  })
+
+  it("labels each command with its contract's role", async () => {
+    const user = setup()
+    render(<Figure label="TVL" live={tvl} format={usdy} />)
+    await user.click(screen.getByRole("button", { name: "How to verify TVL" }))
+    const d = within(screen.getByRole("dialog"))
+    expect(d.getByText("SY CA62AR… · total_underlying")).toBeTruthy()
+    expect(d.getByText("USDY SAC CAZIZB… · balance")).toBeTruthy()
+    // The evidence names each input by its contract too.
+    expect(d.getByText(`SY CA62AR….total_underlying()=2230113029038; USDY SAC CAZIZB….balance(id=${ESCROW})=0`)).toBeTruthy()
+  })
+
+  it("says how old the read is, and Stale past 2 × the cadence", async () => {
+    const user = setup()
+    const { unmount } = render(<Figure label="TVL" live={tvl} format={usdy} read={{ at: Date.now() - 4_000, cadenceMs: 15_000 }} />)
+    await user.click(screen.getByRole("button", { name: "How to verify TVL" }))
+    expect(await within(screen.getByRole("dialog")).findByText(/^Live · read [45]s ago · Read across ledgers 5720086–5720087$/)).toBeTruthy()
+    unmount()
+    render(<Figure label="TVL" live={tvl} format={usdy} read={{ at: Date.now() - 180_000, cadenceMs: 15_000 }} />)
+    await user.click(screen.getByRole("button", { name: "How to verify TVL" }))
+    const status = await within(screen.getByRole("dialog")).findByText(/^Stale · read 3m ago/)
+    expect(status.className).toContain("text-negative")
   })
 
   it("copies a command", async () => {
@@ -179,7 +215,8 @@ describe("CopyEvidence", () => {
     const user = setup()
     render(<CopyEvidence figures={figures} />)
     await user.click(screen.getByRole("button", { name: "Copy evidence table" }))
-    expect(writeText).toHaveBeenCalledWith(evidenceRows(figures))
+    expect(writeText).toHaveBeenCalledWith(evidenceRows(figures, { manifest: mocks.manifest as never }))
+    expect(String(writeText.mock.calls[0][0])).toContain("SY CA62AR….total_underlying()")
   })
 
   it("is disabled while no figure has been read", () => {

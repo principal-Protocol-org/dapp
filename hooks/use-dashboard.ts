@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react"
 import { useQuery } from "@tanstack/react-query"
 import { useManifest } from "@/components/app/manifest-provider"
+import { parseOpenAlerts, type OpenAlertsAnswer } from "@/lib/app/alert-types"
 import { useLedgerClock } from "@/hooks/use-ledger-clock"
 import { fetchOracleView, type OracleView } from "@/lib/protocol/dashboard/oracle"
 import { fetchPauses } from "@/lib/protocol/dashboard/pauses"
@@ -121,13 +122,16 @@ const ALERT_REASONS: Reasons = {
   unavailable: "the alerts could not be read",
 }
 
+/** An answer that asking again will not change: a missing route (404) or a body not in the expected shape. */
+class FinalError extends Error {}
+
 /**
  * GETs one of the app's dashboard routes. The status is checked before the body: a route that does
  * not exist answers Next's 404 HTML page, not JSON.
  */
 async function getJson<T>(url: string, reasons: Reasons): Promise<T> {
   const res = await fetch(url)
-  if (res.status === 404) throw new Error(reasons.notFound)
+  if (res.status === 404) throw new FinalError(reasons.notFound)
   if (res.status === 503) {
     const body = (await res.json().catch(() => null)) as { error?: unknown } | null
     throw new Error(body?.error === "not_configured" ? reasons.notConfigured : reasons.unavailable)
@@ -191,20 +195,25 @@ export function useComplianceEvents(limit = 5) {
 }
 
 /**
- * How many alerts are open, from `GET /api/dashboard/alerts` (`{ open, recent, lastTest }`), every
- * 60 s. Until that route exists it answers 404, so this is an error worded "alerts not available
- * yet". An answer without an `open` list is refused, never read as zero.
+ * The open alerts, from `GET /api/dashboard/alerts` (`{ open: Alert[] }`, `lib/app/alert-types`),
+ * every 60 s. Until that route exists it answers 404: an error worded "alerts not available yet",
+ * not retried. An answer not in that shape is refused, never read as zero.
  */
 export function useOpenAlerts() {
   const m = useManifest()
   return withStale(
     useQuery({
       queryKey: ["dashboard", "alerts", m.network],
-      queryFn: async (): Promise<{ open: number }> => {
-        const body = await getJson<{ open?: unknown }>("/api/dashboard/alerts", ALERT_REASONS)
-        if (!Array.isArray(body.open)) throw new Error("the alerts answer has no open list")
-        return { open: body.open.length }
+      queryFn: async (): Promise<OpenAlertsAnswer> => {
+        const body = await getJson<unknown>("/api/dashboard/alerts", ALERT_REASONS)
+        try {
+          return parseOpenAlerts(body)
+        } catch (error) {
+          throw new FinalError(error instanceof Error ? error.message : String(error))
+        }
       },
+      // As the app's default (one retry), except for a missing route or a malformed answer.
+      retry: (failures, error) => !(error instanceof FinalError) && failures < 1,
       refetchInterval: DASHBOARD_AGGREGATE_MS,
     }),
   )

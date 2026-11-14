@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { act, renderHook, waitFor } from "@testing-library/react"
 import type { ReactNode } from "react"
+import type { Alert } from "@/lib/app/alert-types"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 const mocks = vi.hoisted(() => ({
@@ -224,19 +225,46 @@ describe("useOpenAlerts", () => {
     expect(result.current.error?.message).toBe("alerts not available yet")
   })
 
-  it("counts the open alerts, every 60 s", async () => {
-    const fetchMock = vi.fn(async () => Response.json({ open: [{ kind: "oracle_stale" }, { kind: "risk_warning" }], recent: [], lastTest: null }))
+  it("does not retry a 404: the route is missing, not failing", async () => {
+    // The app's Providers retry once; this query must not, whatever the default.
+    client = new QueryClient({ defaultOptions: { queries: { retry: 1, retryDelay: 0 } } })
+    const fetchMock = vi.fn(async () => new Response("<!DOCTYPE html>", { status: 404, headers: { "content-type": "text/html" } }))
     vi.stubGlobal("fetch", fetchMock)
     const { result } = renderHook(() => useOpenAlerts(), { wrapper })
-    await waitFor(() => expect(result.current.data).toEqual({ open: 2 }))
+    await waitFor(() => expect(result.current.isError).toBe(true))
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it("still retries once on another failure", async () => {
+    client = new QueryClient({ defaultOptions: { queries: { retry: 1, retryDelay: 0 } } })
+    const fetchMock = vi.fn(async () => Response.json({ error: "unavailable" }, { status: 503 }))
+    vi.stubGlobal("fetch", fetchMock)
+    const { result } = renderHook(() => useOpenAlerts(), { wrapper })
+    await waitFor(() => expect(result.current.isError).toBe(true))
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it("returns the open alerts ({ open: Alert[] }), every 60 s", async () => {
+    const open: Alert[] = [
+      { kind: "oracle_stale", subject: "CORACLE", severity: "critical", openedAt: "2026-11-14T02:00:00.000Z", payload: { age: 4000 } },
+      { kind: "risk_warning", subject: "CRISK", severity: "warning", openedAt: "2026-11-14T03:00:00.000Z", payload: {} },
+    ]
+    const fetchMock = vi.fn(async () => Response.json({ open, recent: [], lastTest: null }))
+    vi.stubGlobal("fetch", fetchMock)
+    const { result } = renderHook(() => useOpenAlerts(), { wrapper })
+    await waitFor(() => expect(result.current.data).toEqual({ open }))
     expect(fetchMock).toHaveBeenCalledWith("/api/dashboard/alerts")
     expect(interval(["dashboard", "alerts", "testnet"])).toBe(DASHBOARD_AGGREGATE_MS)
   })
 
-  it("refuses an answer it cannot read rather than guess a count", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ alerts: "?" })))
+  it.each([
+    ["no open list", { alerts: "?" }],
+    ["an alert without its severity", { open: [{ kind: "k", subject: "s", openedAt: "2026-11-14T00:00:00Z", payload: {} }] }],
+    ["an unknown severity", { open: [{ kind: "k", subject: "s", severity: "info", openedAt: "2026-11-14T00:00:00Z", payload: {} }] }],
+  ])("refuses an answer it cannot read (%s) rather than guess a count", async (_, body) => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json(body)))
     const { result } = renderHook(() => useOpenAlerts(), { wrapper })
     await waitFor(() => expect(result.current.isError).toBe(true))
-    expect(result.current.error?.message).toBe("the alerts answer has no open list")
+    expect(result.current.error?.message).toBe("the alerts answer is not in the expected shape")
   })
 })

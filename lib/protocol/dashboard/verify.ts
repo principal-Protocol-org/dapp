@@ -4,7 +4,7 @@
  */
 import { scValToNative, xdr } from "@stellar/stellar-sdk"
 import { bytesToHex } from "../bytes"
-import type { Live, Network, ReadSource } from "../types"
+import type { Live, Manifest, Network, ReadSource } from "../types"
 
 /**
  * The account a simulation-only read names as source (`NULL_ACCOUNT` of `@stellar/stellar-sdk/contract`,
@@ -128,7 +128,60 @@ export function verifyCommand(network: Network, source: ReadSource | Omit<ReadSo
   ].join(" ")
 }
 
-export type VerifiableFigure = { label: string; display: string; live: Live<unknown> }
+export type VerifiableFigure = {
+  label: string
+  display: string
+  live: Live<unknown>
+  /** When the figure's reads arrived (ms) and how often they refresh: the status then says "read Xs ago", and Stale past 2 × the cadence. */
+  read?: { at: number; cadenceMs: number }
+}
+
+/** What the evidence needs beyond the figure: the manifest (to name contracts by role) and the time now (ms, for the read's age). */
+export type EvidenceContext = { manifest?: Manifest; now?: number }
+
+/** "CCRZ55…": a contract id, short. */
+const shortId = (id: string) => (id.length > 7 ? `${id.slice(0, 6)}…` : id)
+
+/** The role the manifest gives `id`, or undefined when it does not list it. */
+function knownRole(manifest: Manifest, id: string): string | undefined {
+  const s = manifest.shared
+  if (id === s.riskControl) return "RiskControl"
+  if (id === s.oracle) return "OracleAdapter"
+  if (id === s.permissioning) return "Permissioning"
+  if (id === s.router) return "Router"
+  if (s.factory && id === s.factory) return "Factory"
+  const names: Record<string, string> = {
+    sy: "SY",
+    manager: "PrincipalManager",
+    pool: "MarketPool",
+    recoveryEscrow: "RecoveryEscrow",
+    pt: "PT",
+    yt: "YT",
+    config: "MarketConfig",
+    oracle: "OracleAdapter",
+    router: "Router",
+  }
+  for (const m of manifest.markets) {
+    for (const [kind, contractId] of Object.entries(m.contracts)) if (contractId === id && names[kind]) return names[kind]
+    if (m.underlying.sac === id) return `${m.underlying.code} SAC`
+  }
+  return undefined
+}
+
+/**
+ * What a contract is in the protocol, from the manifest: "SY", "PrincipalManager", "MarketPool",
+ * "RiskControl", "OracleAdapter", "Permissioning", "RecoveryEscrow", "PT", "YT" (also "MarketConfig",
+ * "Router", "Factory" and "<code> SAC" for an underlying), or its short id when the manifest does not list it.
+ */
+export function contractRole(manifest: Manifest, id: string): string {
+  return knownRole(manifest, id) ?? shortId(id)
+}
+
+/** "RiskControl CCRZ55…": the role and the short id; the short id alone when the role is not known. */
+export function contractLabel(manifest: Manifest | undefined, id: string): string {
+  const role = manifest ? knownRole(manifest, id) : undefined
+  return role ? `${role} ${shortId(id)}` : shortId(id)
+}
 
 /**
  * One figure's evidence: the nine l.1824 cells, unescaped, plus each read's base64 XDR for the
@@ -214,19 +267,50 @@ export function decodedValue(rawXdr: string): string {
   return compactJson(native)
 }
 
-/** Each read's decoded value; a figure of several reads names each by its function (with arguments when a function repeats). */
-function rawValues(reads: ReadSource[]): string {
+/**
+ * Each read's decoded value. A figure of several reads names each input: by its function on one
+ * contract (with arguments when a function repeats), and by contract and call when the reads span
+ * several contracts ("RiskControl CCRZ55….is_paused()=false; SY CA62AC….is_paused()=false").
+ */
+function rawValues(reads: ReadSource[], manifest: Manifest | undefined): string {
   if (reads.length === 1) return decodedValue(reads[0].rawXdr)
+  if (spansContracts(reads)) return reads.map((r) => `${qualifiedCall(r, manifest)}=${decodedValue(r.rawXdr)}`).join("; ")
   const counts = new Map<string, number>()
   for (const r of reads) counts.set(r.fn, (counts.get(r.fn) ?? 0) + 1)
   return reads.map((r) => `${(counts.get(r.fn) ?? 0) > 1 ? call(r) : r.fn}=${decodedValue(r.rawXdr)}`).join("; ")
+}
+
+const spansContracts = (reads: Pick<ReadSource, "contractId">[]) => new Set(reads.map((r) => r.contractId)).size > 1
+
+/** "RiskControl CCRZ55….is_paused()": the call, named by its contract. */
+const qualifiedCall = (r: Pick<ReadSource, "contractId" | "fn" | "args">, manifest: Manifest | undefined) => `${contractLabel(manifest, r.contractId)}.${call(r)}`
+
+/** Seconds as "4s", "3m", "1h 5m", "2d 3h": a read's age. */
+function ageText(seconds: number): string {
+  const s = Math.max(0, Math.floor(seconds))
+  if (s < 60) return `${s}s`
+  if (s < 3600) return `${Math.floor(s / 60)}m`
+  if (s < 86400) return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`
+  return `${Math.floor(s / 86400)}d ${Math.floor((s % 86400) / 3600)}h`
+}
+
+/**
+ * "Live · read 4s ago", or "Stale · read 3m ago" past 2 × the cadence, when the read's time and the
+ * time now are known; "Live" otherwise. A spread adds "Read across ledgers X–Y".
+ */
+function liveStatus(f: VerifiableFigure, spread: { min: number; max: number } | undefined, now: number | undefined): string {
+  const across = spread ? `Read across ledgers ${spread.min}–${spread.max}` : null
+  if (!f.read || now === undefined) return across ?? "Live"
+  const ageMs = Math.max(0, now - f.read.at)
+  const head = `${ageMs > 2 * f.read.cadenceMs ? "Stale" : "Live"} · read ${ageText(ageMs / 1000)} ago`
+  return across ? `${head} · ${across}` : head
 }
 
 const unique = (xs: string[]) => [...new Set(xs.filter((x) => x !== ""))]
 const orNone = (xs: string[], sep: string) => (xs.length > 0 ? xs.join(sep) : NONE)
 
 /** The evidence for one figure, as the drawer and the evidence table read it. */
-export function figureEvidence(f: VerifiableFigure): FigureEvidence {
+export function figureEvidence(f: VerifiableFigure, ctx: EvidenceContext = {}): FigureEvidence {
   const { live } = f
   if (live.status === "unavailable") {
     const s = live.source
@@ -245,25 +329,32 @@ export function figureEvidence(f: VerifiableFigure): FigureEvidence {
   }
   const reads = live.sources ?? (live.source ? [live.source] : [])
   const spread = live.ledgerSpread
+  const named = spansContracts(reads)
   return {
     metric: f.label,
     contract: orNone(unique(reads.map((s) => s.contractId)), ", "),
-    call: orNone(reads.map(call), "; "),
-    raw: reads.length > 0 ? rawValues(reads) : NONE,
+    call: orNone(
+      reads.map((r) => (named ? qualifiedCall(r, ctx.manifest) : call(r))),
+      "; ",
+    ),
+    raw: reads.length > 0 ? rawValues(reads, ctx.manifest) : NONE,
     display: f.display,
     ledger: spread ? `${spread.min}–${spread.max}` : String(live.ledger),
     coverage: orNone(unique(reads.map((s) => s.rpcUrl)), ", "),
-    status: spread ? `Read across ledgers ${spread.min}–${spread.max}` : "Live",
+    status: liveStatus(f, spread, ctx.now),
     verified: "",
     rawXdr: reads.map((s) => s.rawXdr),
   }
 }
 
-/** The page's figures as a Markdown table with the TRANCHE_2_3 l.1824 columns; "Verified" is left for the reviewer. */
-export function evidenceRows(figures: VerifiableFigure[]): string {
+/**
+ * The page's figures as a Markdown table with the TRANCHE_2_3 l.1824 columns; "Verified" is left for
+ * the reviewer. With `ctx`, contracts are named by role and the status gives each read's age.
+ */
+export function evidenceRows(figures: VerifiableFigure[], ctx: EvidenceContext = {}): string {
   const line = (cells: string[]) => `| ${cells.map(cell).join(" | ")} |`.replace(/ {2}\|/g, " |")
   const rows = figures.map((f) => {
-    const e = figureEvidence(f)
+    const e = figureEvidence(f, ctx)
     return line([e.metric, e.contract, e.call, e.raw, e.display, e.ledger, e.coverage, e.status, e.verified])
   })
   return [line(COLUMNS), `|${ALIGN.join("|")}|`, ...rows].join("\n") + "\n"

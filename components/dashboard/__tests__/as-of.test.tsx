@@ -23,10 +23,10 @@ async function renderAt(props: Parameters<typeof AsOf>[0]) {
 }
 
 describe("AsOf", () => {
-  it("says the newest ledger, how long ago it was read and the cadence", async () => {
+  it("says the newest ledger, how long ago it was read, and the cadence", async () => {
     await renderAt({ sources: [read(5_720_087)], updatedAt: NOW - 12_000, cadenceMs: 15_000 })
     const line = screen.getByTestId("as-of")
-    expect(line.textContent).toContain("As of ledger 5720087 · 12s ago")
+    expect(line.textContent).toContain("Ledger 5720087 · read 12s ago")
     expect(line.textContent).toContain("Refreshes every 15 s")
     expect(line.textContent).not.toContain("Stale")
     expect(line.getAttribute("data-stale")).toBe("false")
@@ -49,13 +49,13 @@ describe("AsOf", () => {
       vi.advanceTimersByTime(121_000)
     })
     expect(screen.getByTestId("as-of").getAttribute("data-stale")).toBe("true")
-    expect(screen.getByTestId("as-of").textContent).toContain("2m 1s ago")
+    expect(screen.getByTestId("as-of").textContent).toContain("read 2m 1s ago")
   })
 
   it("labels reads from different ledgers (D-5) and dates the newest", async () => {
     await renderAt({ sources: [read(5_720_080), read(5_720_087), read(5_720_084)], updatedAt: NOW, cadenceMs: 15_000 })
     const line = screen.getByTestId("as-of")
-    expect(line.textContent).toContain("As of ledger 5720087")
+    expect(line.textContent).toContain("Ledger 5720087 · read")
     expect(line.textContent).toContain("Read across ledgers 5720080–5720087")
   })
 

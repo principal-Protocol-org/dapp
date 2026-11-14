@@ -2,7 +2,7 @@
 
 import Link from "next/link"
 import { formatDuration } from "@/components/app/live"
-import { UnavailableTip } from "@/components/app/info-tip"
+import { InfoTip, UnavailableTip } from "@/components/app/info-tip"
 import { useManifest } from "@/components/app/manifest-provider"
 import { Metric } from "@/components/app/market/metric"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -23,10 +23,11 @@ import {
 import { useLedgerClock } from "@/hooks/use-ledger-clock"
 import type { OracleView } from "@/lib/protocol/dashboard/oracle"
 import { TVL_LABEL } from "@/lib/protocol/dashboard/protocol-state"
+import { EFFECTIVE_WRAP_AND_MINT_LABEL, type Remaining } from "@/lib/protocol/dashboard/risk"
 import type { VerifiableFigure } from "@/lib/protocol/dashboard/verify"
 import { explorerUrl } from "@/lib/protocol/explorer"
 import { formatAmountFixed } from "@/lib/protocol/format"
-import { allLive, unavailable } from "@/lib/protocol/reader"
+import { unavailable } from "@/lib/protocol/reader"
 import type { Live, Manifest, Network } from "@/lib/protocol/types"
 import { AsOf, readsOf } from "./as-of"
 import { CopyEvidence } from "./copy-evidence"
@@ -46,12 +47,27 @@ function current<D, T>(q: QueryLike<D>, pick: (data: D) => Live<T>, blocked?: st
   return blocked ? unavailable(blocked) : undefined
 }
 
-/** The one underlying every market holds, for amounts; null when they differ (amount totals are then unavailable anyway). */
-function singleUnderlying(m: Manifest): { code: string; decimals: number } | null {
-  const first = m.markets[0]?.underlying ?? m.testAsset
-  if (!first) return null
-  return m.markets.every((x) => x.underlying.sac === m.markets[0].underlying.sac) ? { code: first.code, decimals: first.decimals } : null
+const MIXED_DECIMALS = "mixed decimals: the markets' underlying assets use different decimals"
+
+/**
+ * How amounts read: the decimals every market's underlying shares, and its code when they all hold
+ * the same asset (else "underlying units"). Markets whose decimals differ give no unit at all: an
+ * amount is then refused, never formatted with a guessed scale. With no market, the test asset.
+ */
+function unitsOf(m: Manifest): { decimals: number; code: string | null } | { refused: string } {
+  const underlyings = m.markets.length > 0 ? m.markets.map((x) => x.underlying) : m.testAsset ? [m.testAsset] : []
+  if (underlyings.length === 0) return { refused: "no markets" }
+  if (new Set(underlyings.map((u) => u.decimals)).size > 1) return { refused: MIXED_DECIMALS }
+  return { decimals: underlyings[0].decimals, code: new Set(underlyings.map((u) => u.sac)).size === 1 ? underlyings[0].code : null }
 }
+
+/** `live`, or Unavailable with `reason` when its value cannot be shown (a figure is never formatted with a guessed scale). */
+function refuse<T>(live: Live<T> | undefined, reason: string | null): Live<T> | undefined {
+  return reason && live && live.status === "live" ? unavailable(reason) : live
+}
+
+/** When a query's reads arrived and their cadence, for "read Xs ago"; none before the first answer or after a failed refresh. */
+const readOf = (q: { dataUpdatedAt: number; stale: boolean }, cadenceMs: number) => (q.dataUpdatedAt > 0 && !q.stale ? { at: q.dataUpdatedAt, cadenceMs } : undefined)
 
 const list = (words: readonly string[]) => (words.length <= 1 ? words.join("") : `${words.slice(0, -1).join(", ")} and ${words[words.length - 1]}`)
 
@@ -103,7 +119,7 @@ function ComplianceEvents({ network, ledgerTime }: { network: Network; ledgerTim
           <TableRow>
             <TableHead className="max-[520px]:px-3">Event</TableHead>
             <TableHead className="text-right max-[520px]:hidden">Ledger</TableHead>
-            <TableHead className="max-[520px]:px-3">Transaction</TableHead>
+            <TableHead className="max-[520px]:hidden">Transaction</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -114,19 +130,29 @@ function ComplianceEvents({ network, ledgerTime }: { network: Network; ledgerTim
               <TableRow key={r.id}>
                 <TableCell className="font-sans text-ink max-[520px]:px-3">
                   <span className="block">{complianceEventWords(r.topic)}</span>
+                  {/* Each piece stays whole; the separators between them are where the line may wrap. */}
                   <span className="block font-mono text-xs text-ink-muted">
-                    {/* Below 520 px the Ledger column folds into this line. */}
-                    <span className="whitespace-nowrap min-[520px]:hidden">ledger {r.ledger} · </span>
+                    <span className="min-[520px]:hidden">
+                      <span className="whitespace-nowrap">ledger {r.ledger}</span>
+                      {" · "}
+                    </span>
                     {who ? (
-                      <span title={who} className="whitespace-nowrap">
-                        {accountShort(who)} ·{" "}
-                      </span>
+                      <>
+                        <span title={who} className="whitespace-nowrap">
+                          {accountShort(who)}
+                        </span>
+                        {" · "}
+                      </>
                     ) : null}
                     <span className="whitespace-nowrap">{ledgerTime !== null ? ago(ledgerTime - closed) : r.closeTime}</span>
                   </span>
+                  {/* Below 520 px the Ledger and Transaction columns fold under the event. */}
+                  <span className="block min-[520px]:hidden">
+                    <TxLink network={network} hash={r.txHash} />
+                  </span>
                 </TableCell>
                 <TableCell className="text-right max-[520px]:hidden">{r.ledger}</TableCell>
-                <TableCell className="max-[520px]:px-3">
+                <TableCell className="max-[520px]:hidden">
                   <TxLink network={network} hash={r.txHash} />
                 </TableCell>
               </TableRow>
@@ -213,7 +239,9 @@ function OpenAlerts() {
   const q = useOpenAlerts()
   if (q.isError) return <UnavailableTip label="Open alerts" reason={q.error?.message ?? "the alerts could not be read"} />
   if (!q.data) return <Skeleton className="inline-block h-5 w-24 align-middle" />
-  return <>{q.data.open === 0 ? "None open" : `${q.data.open} open`}</>
+  const n = q.data.open.length
+  const critical = q.data.open.filter((a) => a.severity === "critical").length
+  return <>{n === 0 ? "None open" : `${n} open${critical > 0 ? ` · ${critical} critical` : ""}`}</>
 }
 
 /**
@@ -231,29 +259,57 @@ export function Overview() {
   const pauses = usePauses()
 
   const noClock = clockFailed && ledgerTime === null ? "the ledger time could not be read" : undefined
-  const unit = singleUnderlying(m)
-  const decimals = unit?.decimals ?? 7
-  const amount = (v: bigint) => (unit ? `${formatAmountFixed(v, unit.decimals)} ${unit.code}` : `${v} (raw units)`)
-  const scale = unit ? decimalsScale(unit.decimals, unit.code) : undefined
+  const units = unitsOf(m)
+  const refused = "refused" in units ? units.refused : null
+  const fixed = (v: bigint) => ("refused" in units ? String(v) : formatAmountFixed(v, units.decimals))
+  const amount = (v: bigint) => ("refused" in units ? String(v) : `${fixed(v)} ${units.code ?? "(underlying units)"}`)
+  const scale = "refused" in units ? undefined : decimalsScale(units.decimals, units.code ?? "underlying unit")
+  const aggregateRead = readOf(protocol, DASHBOARD_AGGREGATE_MS)
 
-  const tvl: FigureSpec<bigint> = { label: "TVL", live: current(protocol, (d) => d.totals.tvl), format: amount, scale }
-  const tvlReference: FigureSpec<bigint> = {
-    label: "TVL, reference value",
-    live: current(protocol, (d) => d.totals.tvlReference),
-    format: (v) => formatAmountFixed(v, decimals),
-    scale: `${decimals} decimals; TVL × the oracle's reference value ÷ 10,000,000`,
+  const tvl: FigureSpec<bigint> = { label: "TVL", live: refuse(current(protocol, (d) => d.totals.tvl), refused), format: amount, scale, read: aggregateRead }
+  // The oracle counts in US dollars ("oracle units", as /app says it).
+  const tvlUsd: FigureSpec<bigint> = {
+    label: "TVL in USD",
+    live: refuse(current(protocol, (d) => d.totals.tvlReference), refused),
+    format: (v) => `${fixed(v)} USD (oracle units)`,
+    scale: "refused" in units ? undefined : `${units.decimals} decimals; TVL × the oracle value ÷ 10,000,000, in US dollars (oracle units)`,
+    read: aggregateRead,
   }
-  const liquidity: FigureSpec<bigint> = { label: "Pool liquidity", live: current(protocol, (d) => d.totals.liquidity), format: amount, scale }
-  const riskCapacity: FigureSpec<{ limit: bigint; volume: bigint }> = {
-    label: "RiskControl capacity",
-    live: current(risk, (r) => allLive([r.limit, r.volume] as const, ([limit, volume]) => ({ limit, volume })), noClock),
-    format: ({ limit, volume }) => (limit <= 0n ? "No limit (disabled)" : `${amount(limit > volume ? limit - volume : 0n)} left of ${amount(limit)}`),
+  const liquidity: FigureSpec<bigint> = {
+    label: "Pool liquidity",
+    live: refuse(current(protocol, (d) => d.totals.liquidity), refused),
+    format: amount,
     scale,
+    read: aggregateRead,
   }
+
+  // D-10: the raw room left (null when the limit is off) and, when a market double-reports, what one wrap-and-mint can use.
+  const riskData = risk.stale ? undefined : risk.data
+  const riskRead = readOf(risk, DASHBOARD_LIVE_MS)
+  const limit = riskData?.limit.status === "live" ? riskData.limit.value : null
+  const riskRemaining: FigureSpec<Remaining> = {
+    label: "RiskControl capacity",
+    live: refuse(current(risk, (r) => r.remaining, noClock), refused),
+    format: (left) => (left === null ? "No limit (disabled)" : limit !== null ? `${amount(left)} left of ${amount(limit)}` : `${amount(left)} left`),
+    scale,
+    read: riskRead,
+  }
+  const effective: FigureSpec<Remaining> | null =
+    riskData && riskData.effectiveWrapAndMint
+      ? {
+          label: EFFECTIVE_WRAP_AND_MINT_LABEL,
+          live: refuse(riskData.effectiveWrapAndMint, refused),
+          format: (left) => (left === null ? "No limit (disabled)" : amount(left)),
+          scale,
+          read: riskRead,
+        }
+      : null
+
   const contractPauses: FigureSpec<string[]> = {
     label: "Contract pauses",
     live: current(pauses, (p) => p.paused),
     format: (names) => (names.length === 0 ? "None paused" : `Paused: ${names.join(", ")}`),
+    read: readOf(pauses, DASHBOARD_LIVE_MS),
   }
   const view = oracle.stale ? undefined : oracle.data
   const oracleFreshness: FigureSpec<number> = {
@@ -261,9 +317,10 @@ export function Overview() {
     live: current(oracle, (o) => o.view.timeToBlock, noClock),
     format: (seconds) => (view ? oracleLine(view.view, secondsToBlockNow(view.view.timeToBlock, view.ledgerTime, ledgerTime) ?? seconds) : String(seconds)),
     scale: "Seconds: the oracle timestamp + max_stale_seconds − ledger time",
+    read: readOf(oracle, DASHBOARD_LIVE_MS),
   }
 
-  const contractFigures = [tvl, tvlReference, liquidity, riskCapacity, contractPauses, oracleFreshness] as FigureSpec<unknown>[]
+  const contractFigures = [tvl, tvlUsd, liquidity, riskRemaining, ...(effective ? [effective] : []), contractPauses, oracleFreshness] as FigureSpec<unknown>[]
   const figures = contractFigures.map(verifiable).filter((f): f is VerifiableFigure => f !== null)
   const lives = contractFigures.map((f) => f.live)
   const newestUpdate = Math.max(0, ...[protocol, oracle, risk, pauses].map((q) => (q.stale ? 0 : q.dataUpdatedAt)))
@@ -295,23 +352,28 @@ export function Overview() {
       <div className="grid grid-cols-[minmax(0,1fr)] gap-6 min-[900px]:grid-cols-2">
         <Panel
           title="Protocol totals"
-          meta={<AsOf sources={readsOf([tvl.live, tvlReference.live, liquidity.live])} updatedAt={protocol.stale ? null : protocol.dataUpdatedAt || null} cadenceMs={DASHBOARD_AGGREGATE_MS} />}
+          meta={<AsOf sources={readsOf([tvl.live, tvlUsd.live, liquidity.live])} updatedAt={protocol.stale ? null : protocol.dataUpdatedAt || null} cadenceMs={DASHBOARD_AGGREGATE_MS} />}
         >
           <dl className="grid grid-cols-1 gap-x-6 gap-y-5 min-[420px]:grid-cols-2">
             <Metric label="TVL">
               <Shown {...tvl} />
             </Metric>
-            <Metric label="TVL, reference value">
-              <Shown {...tvlReference} />
+            <Metric label="TVL in USD">
+              <Shown {...tvlUsd} />
             </Metric>
-            <Metric label="Markets">{m.markets.length}</Metric>
+            <Metric label="Markets">
+              <span className="inline-flex items-center gap-1.5">
+                {m.markets.length}
+                <InfoTip label="Markets">Counted from the registry: markets discovered from the Router and published by the app.</InfoTip>
+              </span>
+            </Metric>
             <Metric label="Pool liquidity">
               <Shown {...liquidity} />
             </Metric>
           </dl>
           <ul className="grid gap-1 text-xs/5 text-ink-muted">
             <li>TVL: {TVL_LABEL.charAt(0).toLowerCase() + TVL_LABEL.slice(1)}.</li>
-            <li>Reference value: TVL × the oracle&apos;s reference value.</li>
+            <li>TVL in USD: TVL × the oracle value. The oracle counts in US dollars (oracle units), as the app does.</li>
             <li>Pool liquidity: each pool&apos;s PT and SY reserves, valued at the pool price.</li>
             <li>Markets: those listed in the registry. A total is Unavailable when any market&apos;s figure is.</li>
           </ul>
@@ -321,7 +383,7 @@ export function Overview() {
           title="Safety"
           meta={
             <AsOf
-              sources={readsOf([riskCapacity.live, contractPauses.live, oracleFreshness.live])}
+              sources={readsOf([riskRemaining.live, effective?.live, contractPauses.live, oracleFreshness.live])}
               updatedAt={Math.max(0, ...[oracle, risk, pauses].map((q) => (q.stale ? 0 : q.dataUpdatedAt))) || null}
               cadenceMs={DASHBOARD_LIVE_MS}
             />
@@ -329,8 +391,20 @@ export function Overview() {
         >
           <dl className="grid gap-3">
             <Row label="RiskControl capacity">
-              <Shown {...riskCapacity} />
+              <Shown {...riskRemaining} />
             </Row>
+            {effective ? (
+              <Row label={EFFECTIVE_WRAP_AND_MINT_LABEL}>
+                <Shown {...effective} />
+                {effective.live?.status === "live" ? (
+                  <span className="mt-1 block font-sans text-xs/5 text-ink-muted">
+                    Half the room left: in a market whose SY and manager both report to RiskControl, the SY deposit and the manager mint each count the
+                    same underlying, so one wrap-and-mint uses the room twice.
+                    {riskData && riskData.doubleReporting.length > 0 ? ` Markets: ${riskData.doubleReporting.join(", ")}.` : ""}
+                  </span>
+                ) : null}
+              </Row>
+            ) : null}
             <Row label="Pauses">
               <Shown {...contractPauses} />
             </Row>

@@ -4,9 +4,10 @@ import { Fragment, type ReactNode } from "react"
 import { CopyIcon, ExternalLink } from "lucide-react"
 import { useManifest } from "@/components/app/manifest-provider"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog"
-import { figureEvidence, verifyCommand, type VerifiableFigure } from "@/lib/protocol/dashboard/verify"
+import { useNow } from "@/hooks/use-dashboard"
+import { contractLabel, figureEvidence, verifyCommand, type VerifiableFigure } from "@/lib/protocol/dashboard/verify"
 import { explorerUrl } from "@/lib/protocol/explorer"
-import type { Live, Network, ReadSource } from "@/lib/protocol/types"
+import type { Live, Manifest, Network, ReadSource } from "@/lib/protocol/types"
 import { copyText } from "./copy-evidence"
 
 type AnySource = ReadSource | Omit<ReadSource, "rawXdr" | "ledger">
@@ -38,16 +39,23 @@ function ContractId({ network, id }: { network: Network; id: string }) {
   )
 }
 
-/** One read's `stellar contract invoke … --send=no` command, with a copy button; or why there is none. */
-function Command({ network, source, copyLabel }: { network: Network; source: AnySource; copyLabel: string }) {
+/** One read's `stellar contract invoke … --send=no` command, under its contract's role and function, with a copy button; or why there is none. */
+function Command({ manifest, source, copyLabel }: { manifest: Manifest; source: AnySource; copyLabel: string }) {
+  const title = <p className="font-mono text-xs/5 font-semibold text-ink">{`${contractLabel(manifest, source.contractId)} · ${source.fn}`}</p>
   let command: string
   try {
-    command = verifyCommand(network, source)
+    command = verifyCommand(manifest.network, source)
   } catch (error) {
-    return <p className="text-sm text-ink">No command: {error instanceof Error ? error.message : String(error)}</p>
+    return (
+      <div className="grid gap-1">
+        {title}
+        <p className="text-sm text-ink">No command: {error instanceof Error ? error.message : String(error)}</p>
+      </div>
+    )
   }
   return (
     <div className="grid gap-2 rounded-md border border-line bg-surface-sunk p-3">
+      {title}
       {/* Flags stay whole ("--source-account" never splits at its hyphens); long ids may wrap anywhere. The text is the command as is. */}
       <code className="font-mono text-xs/5 text-ink wrap-anywhere">
         {command.split(" ").map((word, i) => (
@@ -72,13 +80,14 @@ function Command({ network, source, copyLabel }: { network: Network; source: Any
 
 function DrawerBody({ figure, scale }: { figure: VerifiableFigure; scale?: string }) {
   const m = useManifest()
-  const e = figureEvidence(figure)
+  const now = useNow()
+  const e = figureEvidence(figure, { manifest: m, now: now ?? undefined })
   const reads = readsFor(figure.live)
   const contracts = [...new Set(reads.map((r) => r.contractId))]
   const fallbacks = m.rpcFallbackUrls ?? []
   const fnCounts = new Map<string, number>()
   for (const r of reads) fnCounts.set(r.fn, (fnCounts.get(r.fn) ?? 0) + 1)
-  const unavailable = figure.live.status === "unavailable"
+  const warn = figure.live.status === "unavailable" || e.status.startsWith("Stale")
   return (
     <>
       <DialogHeader className="pr-8">
@@ -102,7 +111,7 @@ function DrawerBody({ figure, scale }: { figure: VerifiableFigure; scale?: strin
           <span className="block text-ink-muted">{fallbacks.length > 0 ? `Fallback: ${fallbacks.join(", ")}` : "No fallback RPC configured"}</span>
         </Item>
         <Item label="Status">
-          <span className={unavailable ? "text-negative" : undefined}>{e.status}</span>
+          <span className={warn ? "text-negative" : undefined}>{e.status}</span>
         </Item>
       </dl>
       <section aria-labelledby="verify-commands" className="grid gap-2">
@@ -113,9 +122,9 @@ function DrawerBody({ figure, scale }: { figure: VerifiableFigure; scale?: strin
         {reads.map((r, i) => (
           <Command
             key={`${r.contractId}-${r.fn}-${i}`}
-            network={m.network}
+            manifest={m}
             source={r}
-            copyLabel={`Copy the ${r.fn} command${(fnCounts.get(r.fn) ?? 0) > 1 ? ` for ${r.contractId}${r.args.length > 0 ? ` (${i + 1})` : ""}` : ""}`}
+            copyLabel={`Copy the ${r.fn} command${(fnCounts.get(r.fn) ?? 0) > 1 ? ` for ${contractLabel(m, r.contractId)}${r.args.length > 0 ? ` (${i + 1})` : ""}` : ""}`}
           />
         ))}
       </section>

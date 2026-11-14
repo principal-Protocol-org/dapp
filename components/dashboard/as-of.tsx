@@ -13,7 +13,7 @@ export function readsOf(lives: readonly (Live<unknown> | undefined)[]): ReadSour
 const cadenceText = (ms: number) => (ms % 60_000 === 0 && ms >= 60_000 ? `${ms / 60_000} min` : `${Math.round(ms / 1000)} s`)
 
 /**
- * "As of ledger N · Xs ago · Refreshes every 15 s" (D-6), for a page or a panel:
+ * "Ledger N · read Xs ago · Refreshes every 15 s" (D-6), for a page or a panel:
  *
  * - N is the newest ledger among `sources` (or `ledger`), the ledgers the RPC answered at.
  * - "Xs ago" is the time since those reads arrived (`updatedAt`, ms, React Query's `dataUpdatedAt`).
@@ -45,7 +45,7 @@ export function AsOf({
   const stale = ageMs !== null && ageMs > 2 * cadenceMs
   const parts: React.ReactNode[] = []
   if (newest === null) parts.push(<span key="none">No figure could be read</span>)
-  else parts.push(<span key="ledger">As of ledger {newest}{ageMs !== null ? ` · ${formatDuration(ageMs / 1000)} ago` : ""}</span>)
+  else parts.push(<span key="ledger">Ledger {newest}{ageMs !== null ? ` · read ${formatDuration(ageMs / 1000)} ago` : ""}</span>)
   parts.push(<span key="cadence">Refreshes every {cadenceText(cadenceMs)}</span>)
   if (oldest !== null && newest !== null && oldest !== newest)
     parts.push(

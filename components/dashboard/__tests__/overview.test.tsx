@@ -14,6 +14,7 @@ const live = <T,>(value: T, fn = "f"): Live<T> => ({ status: "live", value, ledg
 const down = (error = "rpc down"): Live<never> => ({ status: "unavailable", error })
 
 const mocks = vi.hoisted(() => ({
+  manifest: {} as Record<string, unknown>,
   clock: { ledgerTime: 0 as number | null, sequence: 5_720_087 as number | null, isError: false },
   fetchProtocolState: vi.fn(),
   fetchOracleView: vi.fn(),
@@ -22,16 +23,20 @@ const mocks = vi.hoisted(() => ({
   fetch: vi.fn(),
 }))
 
-vi.mock("@/components/app/manifest-provider", () => {
-  const manifest = {
-    network: "testnet",
-    rpcUrl: "https://rpc.test",
-    markets: [{ marketId: "testnet-usdy-1802336344", displayName: "USDY", underlying: { code: "USDY", decimals: 7, sac: "CSAC" } }],
-    shared: { oracle: "CORACLE", riskControl: "CRISK" },
-    wasmHashes: {},
-  }
-  return { useManifest: () => manifest }
+const market = (marketId: string, underlying = { code: "USDY", decimals: 7, sac: "CSAC" }) => ({
+  marketId,
+  displayName: "USDY",
+  underlying,
+  contracts: { sy: `CSY${marketId}`, pool: `CPOOL${marketId}`, manager: `CMGR${marketId}` },
 })
+const baseManifest = () => ({
+  network: "testnet",
+  rpcUrl: "https://rpc.test",
+  markets: [market(MARKET)],
+  shared: { oracle: "CORACLE", riskControl: "CRISK", permissioning: "CPERM", router: "CROUTER" },
+  wasmHashes: {},
+})
+vi.mock("@/components/app/manifest-provider", () => ({ useManifest: () => mocks.manifest }))
 vi.mock("@/lib/protocol/reader", async (importActual) => ({ ...(await importActual<object>()), createRpcReader: () => ({}) }))
 vi.mock("@/hooks/use-ledger-clock", () => ({ useLedgerClock: () => mocks.clock }))
 vi.mock("@/lib/protocol/dashboard/protocol-state", async (importActual) => ({
@@ -48,6 +53,7 @@ vi.mock("@/hooks/use-wallet", () => ({
   },
 }))
 
+import { EFFECTIVE_WRAP_AND_MINT_LABEL } from "@/lib/protocol/dashboard/risk"
 import { Overview } from "../overview"
 
 function protocolState(over: { tvl?: Live<bigint>; liquidity?: Live<bigint> } = {}) {
@@ -120,6 +126,8 @@ const event = (id: string, ledger: number, group: string, topic: string, data: R
   data,
 })
 
+const ALERT = { kind: "oracle_stale", subject: "CORACLE", severity: "critical", openedAt: "2026-11-14T02:00:00.000Z", payload: {} }
+
 function answer(url: string): Response {
   if (url.startsWith("/api/dashboard/alerts")) return new Response("<!DOCTYPE html><title>404</title>", { status: 404, headers: { "content-type": "text/html" } })
   if (url.includes("group=permissioning"))
@@ -132,6 +140,7 @@ let client: QueryClient
 const wrap = (ui: ReactNode) => <QueryClientProvider client={client}>{ui}</QueryClientProvider>
 
 beforeEach(() => {
+  mocks.manifest = baseManifest()
   client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   mocks.clock = { ledgerTime: LEDGER_TIME, sequence: 5_720_087, isError: false }
   mocks.fetchProtocolState.mockReset().mockResolvedValue(protocolState())
@@ -163,7 +172,8 @@ describe("the overview (/dashboard)", () => {
 
     const totals = region("Protocol totals")
     expect(await totals.findByText("223,011.30 USDY")).toBeTruthy()
-    expect(totals.getByText("223,032.39")).toBeTruthy()
+    // The oracle's unit is US dollars, as /app says it ("USD (oracle units)").
+    expect(totals.getByText("223,032.39 USD (oracle units)")).toBeTruthy()
     expect(totals.getByText("105,200.00 USDY")).toBeTruthy()
     expect(totals.getByText("1")).toBeTruthy()
 
@@ -175,7 +185,8 @@ describe("the overview (/dashboard)", () => {
     const events = region("Latest compliance events")
     expect(await events.findByText("Account allowed")).toBeTruthy()
     expect(events.getByText("5707438")).toBeTruthy()
-    const tx = events.getByRole("link", { name: "View transaction 68be08ad3f0c4e2b9a1d7c5e8f6a4b3c2d1e0f9a8b7c6d5e4f3a2b1c0d9e8f7a on stellar.expert" })
+    // One link per breakpoint: in its own column from 520 px, under the event below it.
+    const [tx] = events.getAllByRole("link", { name: "View transaction 68be08ad3f0c4e2b9a1d7c5e8f6a4b3c2d1e0f9a8b7c6d5e4f3a2b1c0d9e8f7a on stellar.expert" })
     expect(tx.textContent).toBe("68be08…8f7a")
     expect(tx.getAttribute("href")).toBe(
       "https://stellar.expert/explorer/testnet/tx/68be08ad3f0c4e2b9a1d7c5e8f6a4b3c2d1e0f9a8b7c6d5e4f3a2b1c0d9e8f7a",
@@ -192,7 +203,7 @@ describe("the overview (/dashboard)", () => {
     render(wrap(<Overview />))
     await screen.findByText("223,011.30 USDY")
     await screen.findByText("None paused")
-    for (const label of ["TVL", "TVL, reference value", "Pool liquidity", "RiskControl capacity", "Contract pauses", "Oracle freshness"])
+    for (const label of ["TVL", "TVL in USD", "Pool liquidity", "RiskControl capacity", "Contract pauses", "Oracle freshness"])
       expect(screen.getByRole("button", { name: `How to verify ${label}` })).toBeTruthy()
   })
 
@@ -211,6 +222,74 @@ describe("the overview (/dashboard)", () => {
     const totals = region("Protocol totals")
     await totals.findByText("105,200.00 USDY")
     expect(totals.getByRole("button", { name: "Why TVL is unavailable, and how to verify it" })).toBeTruthy()
+  })
+
+  it("shows the effective wrap-and-mint capacity, with its reason, when a market double-reports (D-10)", async () => {
+    mocks.fetchRiskView.mockResolvedValue(
+      riskView({
+        doubleReporting: [MARKET],
+        effectiveWrapAndMint: { status: "live", value: 50_000_000_000_000n, ledger: 5_720_087, sources: [src("get_cb_limit"), src("get_cb_volume"), src("is_consumer")] },
+      }),
+    )
+    render(wrap(<Overview />))
+    const safety = region("Safety")
+    expect(await safety.findByText("10,000,000.00 USDY left of 10,000,000.00 USDY")).toBeTruthy()
+    expect(safety.getByText(EFFECTIVE_WRAP_AND_MINT_LABEL)).toBeTruthy()
+    expect(safety.getByText("5,000,000.00 USDY")).toBeTruthy()
+    expect(safety.getByText(/SY deposit and the manager mint each count the same underlying/)).toBeTruthy()
+    expect(safety.getByRole("button", { name: `How to verify ${EFFECTIVE_WRAP_AND_MINT_LABEL}` })).toBeTruthy()
+  })
+
+  it("no effective capacity line when no market double-reports; the raw remaining comes from the risk view", async () => {
+    mocks.fetchRiskView.mockResolvedValue(
+      riskView({ limit: live(0n), remaining: { status: "live", value: null, ledger: 5_720_087, sources: [src("get_cb_limit"), src("get_cb_volume")] } }),
+    )
+    render(wrap(<Overview />))
+    const safety = region("Safety")
+    expect(await safety.findByText("No limit (disabled)")).toBeTruthy()
+    expect(safety.queryByText(EFFECTIVE_WRAP_AND_MINT_LABEL)).toBeNull()
+  })
+
+  it("an effective capacity that cannot be read is Unavailable, with its reason", async () => {
+    mocks.fetchRiskView.mockResolvedValue(riskView({ effectiveWrapAndMint: down(`whether market ${MARKET} double-reports: rpc down`) }))
+    render(wrap(<Overview />))
+    const safety = region("Safety")
+    expect(await safety.findByRole("button", { name: `Why ${EFFECTIVE_WRAP_AND_MINT_LABEL} is unavailable, and how to verify it` })).toBeTruthy()
+  })
+
+  it("refuses to format amounts when the markets' decimals differ", async () => {
+    mocks.manifest = { ...baseManifest(), markets: [market(MARKET), market("second", { code: "BENJI", decimals: 6, sac: "CSAC2" })] }
+    render(wrap(<Overview />))
+    const totals = region("Protocol totals")
+    expect(await totals.findByRole("button", { name: "Why TVL in USD is unavailable, and how to verify it" })).toBeTruthy()
+    expect(totals.getByRole("button", { name: "Why TVL is unavailable, and how to verify it" })).toBeTruthy()
+    expect(totals.getByText("2")).toBeTruthy()
+  })
+
+  it("says where the markets count comes from", async () => {
+    const user = userEvent.setup()
+    render(wrap(<Overview />))
+    await user.click(region("Protocol totals").getByRole("button", { name: "More about Markets" }))
+    expect((await screen.findAllByText(/the registry: markets discovered from the Router and published by the app/)).length).toBeGreaterThan(0)
+  })
+
+  it("counts the open alerts once the alerts route answers", async () => {
+    mocks.fetch.mockImplementation(async (url: string) =>
+      url.startsWith("/api/dashboard/alerts") ? Response.json({ open: [ALERT], recent: [], lastTest: null }) : answer(url),
+    )
+    render(wrap(<Overview />))
+    expect(await region("Safety").findByText("1 open · 1 critical")).toBeTruthy()
+  })
+
+  it("below 520 px a compliance event folds its ledger and transaction under it, and the meta line can wrap", async () => {
+    render(wrap(<Overview />))
+    const events = region("Latest compliance events")
+    await events.findByText("Account allowed")
+    const links = events.getAllByRole("link", { name: /^View transaction / })
+    expect(links.map((a) => a.closest("td")?.className.includes("max-[520px]:hidden") || a.closest("span")?.className.includes("min-[520px]:hidden"))).toEqual([true, true])
+    expect(events.getByRole("columnheader", { name: "Transaction" }).className).toContain("max-[520px]:hidden")
+    // A space inside a nowrap span is no break point: the separators sit outside them.
+    for (const el of events.getByText("Account allowed").parentElement!.querySelectorAll(".whitespace-nowrap")) expect(el.textContent).not.toMatch(/·/)
   })
 
   it("a stale oracle says operations are blocked", async () => {
@@ -240,7 +319,7 @@ describe("the overview (/dashboard)", () => {
     render(wrap(<Overview />))
     await screen.findByText("223,011.30 USDY")
     expect(screen.getByRole("button", { name: "Copy evidence table" })).toBeTruthy()
-    expect(screen.getAllByTestId("as-of")[0].textContent).toContain("As of ledger 5720087")
+    expect(screen.getAllByTestId("as-of")[0].textContent).toContain("Ledger 5720087")
     expect(screen.getByText("No fallback RPC configured")).toBeTruthy()
   })
 

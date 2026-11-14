@@ -3,7 +3,20 @@ import { Address, nativeToScVal, xdr } from "@stellar/stellar-sdk"
 import { describe, expect, it } from "vitest"
 import { allLive, liveValue, readLive, unavailable } from "../../reader"
 import type { Live, ReadSource } from "../../types"
-import { ARG_NAMES, NULL_ACCOUNT, decodedValue, evidenceRows, figureEvidence, nameArgs, verifyCommand, type VerifiableFigure } from "../verify"
+import testnetJson from "@/config/manifests/testnet.json"
+import { parseManifest } from "../../manifest"
+import {
+  ARG_NAMES,
+  NULL_ACCOUNT,
+  contractLabel,
+  contractRole,
+  decodedValue,
+  evidenceRows,
+  figureEvidence,
+  nameArgs,
+  verifyCommand,
+  type VerifiableFigure,
+} from "../verify"
 import { fakeReader } from "./fake-reader"
 
 const ORACLE = "CDYGBFGO7KD446CDTGJ7M4OWUXC7UPBGPVM5CUWP2NSNX2CKK2TYYIPS"
@@ -11,6 +24,8 @@ const ESCROW = "CAMOWBMTMDLFJLFOSTULXQO7MUK2PT3XAQ62CA4L5DGPQKZFJWEKN24Q"
 const SAC = "CB2YO6BCOTN336RQUAMHOBCNABJG74URBIMNUHXB27K2QOLJKDCDXODZ"
 const YT = "CAXVQIHH7US4DUK2E2GE2N6VNXDECC6D4DOGXUSEG6SPKS7USNMYXDCB"
 const ACCOUNT = "GBLPAJ2GVSFUWCUIFMEV4EOV2XIOEWMJRIQ3LOM2Z42TNIY3J6ACB7UA"
+
+const testnet = parseManifest(testnetJson)
 
 const source = (fn: string, args: unknown[] = [], contractId = ORACLE): ReadSource => ({
   contractId,
@@ -136,13 +151,37 @@ describe("evidenceRows", () => {
       ] as const,
       ([a, b]) => a + b,
     )
+    // Reads from more than one contract: each input names its contract, by role when the manifest knows it.
     const e = figureEvidence({ label: "TVL", display: "223,011.30 USDY", live: tvl })
-    expect(e.raw).toBe("total_underlying=2230113029038; balance=0")
+    expect(e.raw).toBe("CA62AC….total_underlying()=2230113029038; CB2YO6….balance(id=" + ESCROW + ")=0")
+    expect(e.call).toBe("CA62AC….total_underlying(); CB2YO6….balance(id=" + ESCROW + ")")
     expect(e.rawXdr).toEqual([i128(2_230_113_029_038n), i128(0n)])
-    expect(evidenceRows([{ label: "TVL", display: "223,011.30 USDY", live: tvl }])).toContain("| total_underlying=2230113029038; balance=0 |")
+    const withRoles = { manifest: { ...testnet, markets: [{ ...testnet.markets[0], underlying: { ...testnet.markets[0].underlying, sac: SAC } }] } }
+    expect(figureEvidence({ label: "TVL", display: "223,011.30 USDY", live: tvl }, withRoles).raw).toBe(
+      "SY CA62AC….total_underlying()=2230113029038; USDY SAC CB2YO6….balance(id=" + ESCROW + ")=0",
+    )
+    expect(evidenceRows([{ label: "TVL", display: "223,011.30 USDY", live: tvl }], withRoles)).toContain(
+      "| SY CA62AC….total_underlying(); USDY SAC CB2YO6….balance(id=" + ESCROW + ") | SY CA62AC….total_underlying()=2230113029038; USDY SAC CB2YO6….balance(id=" + ESCROW + ")=0 |",
+    )
   })
 
-  it("a function read twice in one figure is named with its arguments", () => {
+  it("the same view read on several contracts names each contract (pauses)", () => {
+    const no = xdr.ScVal.scvBool(false).toXDR("base64")
+    const paused = (contractId: string): Live<boolean> => ({
+      status: "live",
+      value: false,
+      ledger: 1,
+      source: { ...source("is_paused", [], contractId), rawXdr: no, ledger: 1 },
+    })
+    const m = testnet.markets[0].contracts
+    const all = allLive([paused(testnet.shared.riskControl), paused(m.sy), paused(m.pool), paused(m.manager)] as const, () => [])
+    const e = figureEvidence({ label: "Contract pauses", display: "None paused", live: all }, { manifest: testnet })
+    expect(e.raw).toBe(
+      "RiskControl CCRZ55….is_paused()=false; SY CA62AC….is_paused()=false; MarketPool CB3JI6….is_paused()=false; PrincipalManager CDYL4Z….is_paused()=false",
+    )
+  })
+
+  it("a function read twice on one contract is named with its arguments", () => {
     const yes = xdr.ScVal.scvBool(true).toXDR("base64")
     const read = (who: string): Live<boolean> => ({
       status: "live",
@@ -193,6 +232,18 @@ describe("evidenceRows", () => {
     expect(row).toHaveLength(3)
   })
 
+  it("says how old the read is, and Stale past 2 × its cadence", () => {
+    const f: VerifiableFigure = { label: "Max stale", display: "1 h", live: live("max_stale_seconds"), read: { at: 1_000_000, cadenceMs: 15_000 } }
+    expect(figureEvidence(f, { now: 1_004_200 }).status).toBe("Live · read 4s ago")
+    expect(figureEvidence(f, { now: 1_030_000 }).status).toBe("Live · read 30s ago")
+    expect(figureEvidence(f, { now: 1_180_000 }).status).toBe("Stale · read 3m ago")
+    const spread = allLive([live("get_cb_limit", [], 10), live("get_cb_volume", [], 12)] as const, ([a, b]) => a - b)
+    expect(figureEvidence({ ...f, live: spread }, { now: 1_002_000 }).status).toBe("Live · read 2s ago · Read across ledgers 10–12")
+    expect(evidenceRows([f], { now: 1_180_000 })).toContain("| Stale · read 3m ago |")
+    // Without a clock the status keeps to what the read itself says.
+    expect(figureEvidence(f).status).toBe("Live")
+  })
+
   it("accepts VerifiableFigure", () => {
     const f: VerifiableFigure = { label: "l", display: "d", live: liveValue("x", 1) }
     expect(evidenceRows([f])).toContain("| l |")
@@ -227,5 +278,29 @@ describe("decodedValue", () => {
 
   it("XDR that does not decode is shown as it is, marked", () => {
     expect(decodedValue("not-xdr")).toBe("(undecoded) not-xdr")
+  })
+})
+
+describe("contractRole", () => {
+  const m = testnet.markets[0]
+  it("names every protocol contract the manifest lists", () => {
+    expect(contractRole(testnet, m.contracts.sy)).toBe("SY")
+    expect(contractRole(testnet, m.contracts.manager)).toBe("PrincipalManager")
+    expect(contractRole(testnet, m.contracts.pool)).toBe("MarketPool")
+    expect(contractRole(testnet, m.contracts.recoveryEscrow)).toBe("RecoveryEscrow")
+    expect(contractRole(testnet, m.contracts.pt)).toBe("PT")
+    expect(contractRole(testnet, m.contracts.yt)).toBe("YT")
+    expect(contractRole(testnet, m.contracts.config)).toBe("MarketConfig")
+    expect(contractRole(testnet, testnet.shared.riskControl)).toBe("RiskControl")
+    expect(contractRole(testnet, testnet.shared.oracle)).toBe("OracleAdapter")
+    expect(contractRole(testnet, testnet.shared.permissioning)).toBe("Permissioning")
+    expect(contractRole(testnet, testnet.shared.router)).toBe("Router")
+    expect(contractRole(testnet, m.underlying.sac)).toBe(`${m.underlying.code} SAC`)
+  })
+
+  it("an unknown contract is its short id", () => {
+    expect(contractRole(testnet, YT.replace("C", "D"))).toBe("DAXVQI…")
+    expect(contractLabel(testnet, testnet.shared.riskControl)).toBe("RiskControl CCRZ55…")
+    expect(contractLabel(undefined, testnet.shared.riskControl)).toBe("CCRZ55…")
   })
 })
