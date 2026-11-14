@@ -5,6 +5,8 @@ vi.mock("server-only", () => ({}))
 
 const mocks = vi.hoisted(() => ({
   tickOracle: vi.fn(),
+  tickFeed: vi.fn(),
+  lastSubmittedRejection: vi.fn(),
   keeperSigner: vi.fn(),
   recordTick: vi.fn(),
   verify: vi.fn(),
@@ -21,12 +23,13 @@ const mocks = vi.hoisted(() => ({
 }))
 vi.mock("@/lib/server/oracle-keeper", () => ({
   tickOracle: mocks.tickOracle,
+  tickFeed: mocks.tickFeed,
   keeperSigner: mocks.keeperSigner,
   OracleKeeperConfigError: mocks.OracleKeeperConfigError,
   OracleSubmitError: mocks.OracleSubmitError,
 }))
 // The telemetry write is mocked: these tests need no database. `sql` is passed through as is.
-vi.mock("@/lib/server/oracle-ticks", () => ({ recordTick: mocks.recordTick }))
+vi.mock("@/lib/server/oracle-ticks", () => ({ recordTick: mocks.recordTick, lastSubmittedRejection: mocks.lastSubmittedRejection }))
 vi.mock("@/lib/server/db", () => ({ sql: "the-sql" }))
 vi.mock("@upstash/qstash", () => ({
   Receiver: class {
@@ -252,5 +255,152 @@ describe("cron/oracle telemetry (D-19): one oracle_ticks row per run", () => {
     } finally {
       error.mockRestore()
     }
+  })
+})
+
+describe("cron/oracle feed mode (D-21): ORACLE_KEEPER_MODE=feed", () => {
+  const KEEPER = "S-keeper-not-read-by-these-tests"
+  const OTHER = "CACQKBIFAUCQKBIFAUCQKBIFAUCQKBIFAUCQKBIFAUCQKBIFAUCQLC2U"
+  const SYNCED = { status: "synced", mode: "feed", signer: SIGNER, value: "10000000", timestamp: 2_800, hash: "ab".repeat(32) }
+  const VARS = ["CRON_SECRET", "ORACLE_ADMIN_SECRET", "ORACLE_KEEPER_MODE", "ORACLE_KEEPER_SECRET", "ORACLE_KEEPER_ORACLE_ID"]
+  beforeEach(() => {
+    process.env.CRON_SECRET = SECRET
+    process.env.ORACLE_ADMIN_SECRET = "S-not-read-by-these-tests"
+    process.env.ORACLE_KEEPER_MODE = "feed"
+    process.env.ORACLE_KEEPER_SECRET = KEEPER
+    mocks.tickOracle.mockReset()
+    mocks.tickFeed.mockReset().mockResolvedValue(SYNCED)
+    mocks.keeperSigner.mockReset().mockReturnValue(SIGNER)
+    mocks.recordTick.mockReset().mockResolvedValue(undefined)
+    mocks.lastSubmittedRejection.mockReset().mockResolvedValue(null)
+  })
+  afterEach(() => {
+    for (const k of VARS) delete process.env[k]
+    vi.restoreAllMocks()
+  })
+  const run = () => call({ authorization: `Bearer ${SECRET}` })
+  const recordedAt = () => {
+    expect(mocks.recordTick).toHaveBeenCalledTimes(1)
+    const [, network, oracle, tick] = mocks.recordTick.mock.calls[0]
+    return { network, oracle, tick }
+  }
+
+  it("signs with ORACLE_KEEPER_SECRET (never the admin key) on the manifest's oracle, and answers 200 synced", async () => {
+    const res = await run()
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual(SYNCED)
+    expect(mocks.tickOracle).not.toHaveBeenCalled()
+    expect(mocks.tickFeed).toHaveBeenCalledTimes(1)
+    const [deps] = mocks.tickFeed.mock.calls[0]
+    expect(deps.secret).toBe(KEEPER)
+    expect(deps.oracle).toMatch(/^C[A-Z2-7]{55}$/)
+    expect(deps.lastSubmittedRejection).toBeNull()
+    const { oracle, tick } = recordedAt()
+    expect(oracle).toBe(deps.oracle)
+    expect(tick).toEqual(SYNCED)
+  })
+
+  it("hands the keeper its memory: the last submitted rejection read from oracle_ticks for that oracle", async () => {
+    mocks.lastSubmittedRejection.mockResolvedValue({ reason: "deviate", value: "11500000" })
+    await run()
+    const [sqlArg, network, oracle] = mocks.lastSubmittedRejection.mock.calls[0]
+    expect(sqlArg).toBe("the-sql")
+    expect(network).toBe("local")
+    expect(oracle).toBe(mocks.tickFeed.mock.calls[0][0].oracle)
+    expect(mocks.tickFeed.mock.calls[0][0].lastSubmittedRejection).toEqual({ reason: "deviate", value: "11500000" })
+  })
+
+  it("no memory when the database cannot be read: null (every significant rejection is submitted), logged by name, the run goes on", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {})
+    class DatabaseConfigError extends Error {
+      name = "DatabaseConfigError"
+    }
+    mocks.lastSubmittedRejection.mockRejectedValue(new DatabaseConfigError("postgres://user:pw@db.example/x is down"))
+    const res = await run()
+    expect(res.status).toBe(200)
+    expect(mocks.tickFeed.mock.calls[0][0].lastSubmittedRejection).toBeNull()
+    const lines = error.mock.calls.map((c) => c.map(String).join(" "))
+    expect(lines).toEqual(["oracle keeper: the last submitted rejection was not read: DatabaseConfigError"])
+  })
+
+  it("ORACLE_KEEPER_ORACLE_ID points the keeper, its memory and its record at another oracle", async () => {
+    process.env.ORACLE_KEEPER_ORACLE_ID = ` ${OTHER} `
+    await run()
+    expect(mocks.tickFeed.mock.calls[0][0].oracle).toBe(OTHER)
+    expect(mocks.lastSubmittedRejection.mock.calls[0][2]).toBe(OTHER)
+    expect(recordedAt().oracle).toBe(OTHER)
+  })
+
+  it("an ORACLE_KEEPER_ORACLE_ID that is not a contract id: 503 not_configured, nothing runs, recorded under feed", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {})
+    process.env.ORACLE_KEEPER_ORACLE_ID = "GBLPAJ2GVSFUWCUIFMEV4EOV2XIOEWMJRIQ3LOM2Z42TNIY3J6ACB7UA"
+    const res = await run()
+    expect(res.status).toBe(503)
+    expect(mocks.tickFeed).not.toHaveBeenCalled()
+    expect(recordedAt().tick).toEqual({ status: "not_configured", mode: "feed", signer: SIGNER, message: "ORACLE_KEEPER_ORACLE_ID is not a contract id." })
+  })
+
+  it("a skipped run (a routine rejection) answers 200 and logs nothing", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {})
+    const skipped = { status: "skipped", mode: "feed", signer: SIGNER, value: "10000000", timestamp: 2_800, reason: "stale_ts" }
+    mocks.tickFeed.mockResolvedValue(skipped)
+    const res = await run()
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual(skipped)
+    expect(recordedAt().tick).toEqual(skipped)
+    expect(error).not.toHaveBeenCalled()
+  })
+
+  it("a rejection that was not submitted answers 500 and logs it as not submitted", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {})
+    const repeat = { status: "rejected", mode: "feed", signer: SIGNER, value: "11500000", timestamp: 2_800, reason: "deviate" }
+    mocks.tickFeed.mockResolvedValue(repeat)
+    const res = await run()
+    expect(res.status).toBe(500)
+    expect(await res.json()).toEqual(repeat)
+    expect(error.mock.calls.map((c) => c.map(String).join(" "))).toEqual([
+      "oracle keeper: the oracle rejected value 11500000 at timestamp 2800 (reason deviate, not submitted)",
+    ])
+    expect(recordedAt().tick).toEqual(repeat)
+  })
+
+  it("not_configured (no key, no feed_source, error 15): 503, recorded under feed with ORACLE_KEEPER_SECRET's public key", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {})
+    mocks.tickFeed.mockRejectedValue(new mocks.OracleKeeperConfigError("the oracle has no feed source (set_feed_source was never called)."))
+    const res = await run()
+    expect(res.status).toBe(503)
+    expect(await res.json()).toEqual({ error: "not_configured" })
+    expect(mocks.keeperSigner).toHaveBeenCalledWith(KEEPER)
+    expect(recordedAt().tick).toEqual({ status: "not_configured", mode: "feed", signer: SIGNER, message: "the oracle has no feed source (set_feed_source was never called)." })
+  })
+
+  it("a failed run is recorded under feed, by error name", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {})
+    mocks.tickFeed.mockRejectedValue(new TypeError("rpc https://provider.example/key=abc said no"))
+    expect((await run()).status).toBe(500)
+    expect(recordedAt().tick).toEqual({ status: "failed", mode: "feed", signer: SIGNER, name: "TypeError" })
+  })
+
+  it("push stays the default: an unset or blank mode runs tickOracle with ORACLE_ADMIN_SECRET", async () => {
+    mocks.tickOracle.mockResolvedValue(UPDATED)
+    for (const mode of [undefined, "  ", "push"]) {
+      if (mode === undefined) delete process.env.ORACLE_KEEPER_MODE
+      else process.env.ORACLE_KEEPER_MODE = mode
+      mocks.tickOracle.mockClear()
+      expect((await run()).status).toBe(200)
+      expect(mocks.tickOracle).toHaveBeenCalledWith(expect.objectContaining({ secret: "S-not-read-by-these-tests" }))
+    }
+    expect(mocks.tickFeed).not.toHaveBeenCalled()
+    expect(mocks.lastSubmittedRejection).not.toHaveBeenCalled()
+  })
+
+  it("a mode that is neither push nor feed: 503 not_configured, nothing runs, recorded under the default (push)", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {})
+    process.env.ORACLE_KEEPER_MODE = "pull"
+    const res = await run()
+    expect(res.status).toBe(503)
+    expect(mocks.tickOracle).not.toHaveBeenCalled()
+    expect(mocks.tickFeed).not.toHaveBeenCalled()
+    expect(recordedAt().tick).toEqual({ status: "not_configured", mode: "push", signer: null, message: "ORACLE_KEEPER_MODE is neither push nor feed." })
   })
 })

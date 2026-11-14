@@ -1,0 +1,27 @@
+[package]
+name = "sep40_mock"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "A deployable SEP-40 mock feed (MockSep40Feed of principal 24d980d) for the dApp's local pull-mode proof"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# The version principal 24d980d builds the OracleAdapter with (contracts/oracle_adapter/Cargo.toml).
+soroban-sdk = { version = "=26.0.1" }
+
+# A workspace of its own: never part of another one.
+[workspace]
+
+# principal 24d980d's release profile (Cargo.toml).
+[profile.release]
+opt-level = "z"
+overflow-checks = true
+debug = false
+strip = "symbols"
+debug-assertions = false
+panic = "abort"
+codegen-units = 1
+lto = true

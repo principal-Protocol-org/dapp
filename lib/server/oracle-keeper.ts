@@ -1,14 +1,21 @@
 import "server-only"
 
 /**
- * The oracle keeper behind `/api/cron/oracle`, for the app's own test deployments (testnet, local).
- * The OracleAdapter's value is fresh for `max_stale_seconds` (read from the contract) and only its admin may push one, so a schedule calls
- * this every 30 minutes with `ORACLE_ADMIN_SECRET`, a key that is the oracle's admin and nothing else
- * (the protocol admin key never reaches the server). It pushes the value grown at
- * `ORACLE_APY_PERCENT` a year for the time elapsed, stamped with the ledger time, as
- * `scripts/dev-stack/oracle-tick.sh` does by hand. It never runs on mainnet.
+ * The oracle keeper behind `/api/cron/oracle`. It runs in one of two modes (`ORACLE_KEEPER_MODE`):
+ *
+ * - **push** (default), for the app's own test deployments (testnet, local): the OracleAdapter's value
+ *   is fresh for `max_stale_seconds` (read from the contract) and only its admin may push one, so a
+ *   schedule calls this every 30 minutes with `ORACLE_ADMIN_SECRET`, a key that is the oracle's admin
+ *   and nothing else (the protocol admin key never reaches the server). It pushes the value grown at
+ *   `ORACLE_APY_PERCENT` a year for the time elapsed, stamped with the ledger time, as
+ *   `scripts/dev-stack/oracle-tick.sh` does by hand. It never runs on mainnet.
+ * - **feed** (spec 0004 D-21): the oracle reads its own SEP-40 feed (`sync_from_feed`, permissionless,
+ *   principal 24d980d), so the keeper signs with `ORACLE_KEEPER_SECRET`, a funded key with no protocol
+ *   role, and holds no admin right: it may run on any network. It simulates the call and submits only
+ *   what is worth a transaction (`tickFeed`).
  */
-import { Keypair, type Transaction, type xdr } from "@stellar/stellar-sdk"
+import { Keypair, StrKey, rpc, scValToNative, type Transaction, type xdr } from "@stellar/stellar-sdk"
+import { decodeEvent, type DecodedEvent } from "@/lib/protocol/events"
 import { assertPreparedMatches } from "@/lib/protocol/review"
 import {
   buildInvocationEnvelope,
@@ -122,20 +129,32 @@ export function createOracleChain(manifest: Manifest, deps: { server?: OracleRpc
     async ledgerTime() {
       return (await getLedgerClock(server)).closeTime
     },
-    async send(signer, invocation) {
-      const sequence = (await server.getAccount(signer.publicKey())).sequenceNumber()
-      const built = buildInvocationEnvelope({ source: signer.publicKey(), sequence, networkPassphrase, invocation, timeoutSeconds: TX_TIMEOUT_SECONDS })
-      const prepared = await server.prepareTransaction(built)
-      // RPC may add footprint, resources and fee; it may not change the call or authorize anything else (R29).
-      assertPreparedMatches(built, prepared)
-      prepared.sign(signer)
-      const { hash } = await submitSignedTransaction({ rpcUrl, networkPassphrase, signedXdr: prepared.toEnvelope().toXDR("base64"), server })
-      const polled = await pollTransactionStatus({ rpcUrl, hash, server, attempts: 30, intervalMs: 1_000 })
-      if (polled.status === "FAILED") throw new OracleSubmitError(hash, failureCode(polled.failure?.result))
-      if (polled.status !== "SUCCESS") throw new OracleSubmitError(hash, NOT_CONFIRMED)
-      return { hash, returnValue: polled.returnValue }
-    },
+    send: (signer, invocation) => sendInvocation(manifest, server, signer, invocation),
   }
+}
+
+/**
+ * Sends `invocation` signed by `signer` and waits for success; returns the hash and the call's return
+ * value. A transaction that does not land throws `OracleSubmitError` with its hash.
+ */
+async function sendInvocation(
+  manifest: Manifest,
+  server: OracleRpcServer,
+  signer: Keypair,
+  invocation: ContractInvocation,
+): Promise<{ hash: string; returnValue: unknown }> {
+  const { rpcUrl, networkPassphrase } = manifest
+  const sequence = (await server.getAccount(signer.publicKey())).sequenceNumber()
+  const built = buildInvocationEnvelope({ source: signer.publicKey(), sequence, networkPassphrase, invocation, timeoutSeconds: TX_TIMEOUT_SECONDS })
+  const prepared = await server.prepareTransaction(built)
+  // RPC may add footprint, resources and fee; it may not change the call or authorize anything else (R29).
+  assertPreparedMatches(built, prepared)
+  prepared.sign(signer)
+  const { hash } = await submitSignedTransaction({ rpcUrl, networkPassphrase, signedXdr: prepared.toEnvelope().toXDR("base64"), server })
+  const polled = await pollTransactionStatus({ rpcUrl, hash, server, attempts: 30, intervalMs: 1_000 })
+  if (polled.status === "FAILED") throw new OracleSubmitError(hash, failureCode(polled.failure?.result))
+  if (polled.status !== "SUCCESS") throw new OracleSubmitError(hash, NOT_CONFIRMED)
+  return { hash, returnValue: polled.returnValue }
 }
 
 /** How the keeper feeds the oracle: it pushes a computed value (`set_reference_value`), or, from spec 0004 D-21, has the oracle read its feed. */
@@ -146,10 +165,21 @@ export type KeeperMode = "push" | "feed"
  * key, never the secret), which the run's `oracle_ticks` row records (spec 0004 D-19).
  */
 export type OracleTick = { mode: KeeperMode; signer: string } & (
+  /** Push: the ledger clock has not moved since the last value; nothing was sent. */
   | { status: "unchanged"; value: string; timestamp: number }
+  /** Push: the value landed. */
   | { status: "updated"; value: string; timestamp: number; hash: string }
-  /** The oracle refused the value (R4-8): the transaction succeeded, `set_reference_value` returned false. */
-  | { status: "rejected"; value: string; timestamp: number; hash: string; reason: string }
+  /**
+   * The oracle refused the value (R4-8): `set_reference_value` or `sync_from_feed` returned false.
+   * Push always sent it (`hash`). Feed mode sends only a new significant rejection; a repeat, a broken
+   * feed or an unknown reason has no `hash` (not submitted). `value` and `timestamp` are the oracle's
+   * `ref_rej` event's; null when no event said (`reason` is then `unknown`).
+   */
+  | { status: "rejected"; value: string | null; timestamp: number | null; hash?: string; reason: string }
+  /** Feed: the oracle took its feed's value (`ref_set`), in transaction `hash`. Null value: the landed call disagreed with its simulation. */
+  | { status: "synced"; value: string | null; timestamp: number | null; hash: string }
+  /** Feed: a routine rejection (`stale_ts`, `no_data`), never sent. `no_data` has no value or timestamp. */
+  | { status: "skipped"; value: string | null; timestamp: number | null; reason: string }
 )
 
 /** The public key of the keeper's key, for a run's tick record; null when the key is unset or not a Stellar secret. */
@@ -160,6 +190,17 @@ export function keeperSigner(secret: string | undefined): string | null {
     return Keypair.fromSecret(trimmed).publicKey()
   } catch {
     return null
+  }
+}
+
+/** The keeper's key from the variable `name`; a config error naming the variable (never its value) when unset or invalid. */
+function keeperKey(secret: string | undefined, name: string): Keypair {
+  const trimmed = secret?.trim()
+  if (!trimmed) throw new OracleKeeperConfigError(`${name} is not set.`)
+  try {
+    return Keypair.fromSecret(trimmed)
+  } catch {
+    throw new OracleKeeperConfigError(`${name} is not a valid Stellar secret key.`)
   }
 }
 
@@ -184,14 +225,7 @@ async function rejectionReason(chain: OracleChain): Promise<string> {
 export async function tickOracle(deps: { manifest: Manifest; secret: string | undefined; chain?: OracleChain }): Promise<OracleTick> {
   const { manifest } = deps
   if (manifest.network === "mainnet") throw new OracleKeeperConfigError("the oracle keeper runs only on testnet and local networks.")
-  const secret = deps.secret?.trim()
-  if (!secret) throw new OracleKeeperConfigError("ORACLE_ADMIN_SECRET is not set.")
-  let keeper: Keypair
-  try {
-    keeper = Keypair.fromSecret(secret)
-  } catch {
-    throw new OracleKeeperConfigError("ORACLE_ADMIN_SECRET is not a valid Stellar secret key.")
-  }
+  const keeper = keeperKey(deps.secret, "ORACLE_ADMIN_SECRET")
   const chain = deps.chain ?? createOracleChain(manifest)
   const run = { mode: "push" as const, signer: keeper.publicKey() }
 
@@ -220,4 +254,154 @@ export async function tickOracle(deps: { manifest: Manifest; secret: string | un
   // A rejection is a successful transaction that returned false: never report it as an update (R4-8).
   if (returnValue !== true) return { ...run, status: "rejected", value: next.toString(), timestamp: now, hash, reason: await rejectionReason(chain) }
   return { ...run, status: "updated", value: next.toString(), timestamp: now, hash }
+}
+
+// ---------------------------------------------------------------- feed mode (spec 0004 D-21)
+
+/**
+ * The reasons `sync_from_feed` can reject with (principal 24d980d `oracle_adapter/src/lib.rs:460-552`),
+ * in D-21's three classes:
+ * - significant: an attempted disallowed value change, the contract's own split
+ *   (`reject(…, significant: true)`, the only ones `last_rejection()` keeps); one transaction per new
+ *   (reason, value) puts it on-chain with a hash;
+ * - routine: no new data; never worth a transaction;
+ * - broken feed: the feed's own data is unusable (the contract counts these as not significant); no
+ *   transaction, and the alert check raises `feed_broken`.
+ */
+export const ROUTINE = ["stale_ts", "no_data"] as const
+export const SIGNIFICANT = ["oob", "decrease", "deviate", "fb_value"] as const
+export const BROKEN = ["bad_price", "rescale", "future_ts"] as const
+
+const isIn = (list: readonly string[], reason: string) => list.includes(reason)
+
+/** A simulation of `sync_from_feed`: its return value (native) and its events, as RPC reports them. */
+export type FeedSimulation = { retval: unknown; events: readonly xdr.DiagnosticEvent[] }
+
+/** What the feed keeper needs from the network: one view of the oracle, a simulation, and one signed call. */
+export type FeedChain = {
+  read(fn: "feed_source"): Promise<unknown>
+  /** Simulates `invocation` with `source` as the transaction's source. A simulation error throws its text. */
+  simulate(source: string, invocation: ContractInvocation): Promise<FeedSimulation>
+  send(signer: Keypair, invocation: ContractInvocation): Promise<{ hash: string; returnValue: unknown }>
+}
+
+/** The feed chain of `oracle` on the manifest's RPC. */
+export function createFeedChain(manifest: Manifest, oracle: string, deps: { server?: OracleRpcServer } = {}): FeedChain {
+  const { rpcUrl, networkPassphrase } = manifest
+  const server: OracleRpcServer = deps.server ?? createRpcServer(rpcUrl)
+  return {
+    async read(fn) {
+      return (await simulateContractRead({ rpcUrl, networkPassphrase, server, invocation: { contractId: oracle, functionName: fn, args: [] } })).value
+    },
+    async simulate(source, invocation) {
+      const simulation = await server.simulateTransaction(buildInvocationEnvelope({ source, sequence: "0", networkPassphrase, invocation }))
+      if (rpc.Api.isSimulationRestore(simulation)) throw new Error("the oracle needs archived ledger entries restored before it can sync")
+      if (rpc.Api.isSimulationError(simulation)) throw new Error(simulation.error)
+      if (!simulation.result) throw new Error("the simulation returned no result")
+      return { retval: scValToNative(simulation.result.retval), events: simulation.events ?? [] }
+    },
+    send: (signer, invocation) => sendInvocation(manifest, server, signer, invocation),
+  }
+}
+
+/** A simulation of a function the contract does not export (a 665bb67 oracle has no `feed_source`). */
+const MISSING_FUNCTION = /Error\(WasmVm, MissingValue\)/
+/** `FeedNotConfigured` (24d980d `Error` 15): `sync_from_feed` with no feed set. */
+const FEED_NOT_CONFIGURED = /Error\(Contract, #15\)/
+const NO_FEED_VIEW = "the oracle has no feed_source function: its code predates sync_from_feed (principal 665bb67 or older)."
+const NO_FEED = "the oracle has no feed source (set_feed_source was never called)."
+
+/** The oracle's own events in a simulation, decoded (`ref_set`, `ref_rej`); anything else, or of another contract, is left out. */
+function oracleEvents(events: readonly xdr.DiagnosticEvent[], oracle: string): DecodedEvent[] {
+  const decoded: DecodedEvent[] = []
+  for (const { event } of events) {
+    try {
+      if (event.type.name !== "contract" || event.contractId === null) continue
+      if (StrKey.encodeContract(Buffer.from(event.contractId.toBytes())) !== oracle) continue
+      const [topic] = event.body.value.topics
+      if (topic?.type !== "scvSymbol") continue
+      const one = decodeEvent("oracle", String(topic.value), scValToNative(event.body.value.data))
+      if (one) decoded.push(one)
+    } catch {
+      // An event of unexpected shape is not one of the oracle's.
+    }
+  }
+  return decoded
+}
+
+type Point = { value: string | null; timestamp: number | null }
+const NO_POINT: Point = { value: null, timestamp: null }
+/** An event's (value, timestamp) as a tick reports them. */
+function pointOf(event: DecodedEvent | undefined): Point {
+  const { value, timestamp } = event?.fields ?? {}
+  return { value: typeof value === "bigint" ? value.toString() : null, timestamp: typeof timestamp === "bigint" ? Number(timestamp) : null }
+}
+
+/**
+ * One feed-mode run (D-21). It checks the oracle has a feed (`feed_source()`; a missing view or
+ * `FeedNotConfigured` is a config error), simulates `sync_from_feed` as the keeper, then:
+ * - `true`: submits, and reports `synced` with the `ref_set` value;
+ * - `false`: reads the reason from the simulation's `ref_rej` event:
+ *   - routine (`stale_ts`, `no_data`): `skipped`, nothing sent;
+ *   - significant (`oob`, `decrease`, `deviate`, `fb_value`): submitted when its (reason, value) is
+ *     not `lastSubmittedRejection` (the last one this keeper put on-chain), so each distinct rejection
+ *     has a transaction; a repeat is `rejected` with no hash;
+ *   - broken feed (`bad_price`, `rescale`, `future_ts`), or a reason this app does not know: `rejected`, nothing sent;
+ *   - no `ref_rej` event: `rejected` with reason `unknown`, nothing sent.
+ * A submitted call's landed return value has the last word: it can differ from the simulation when the
+ * feed moved in between. No admin check and no network refusal: the key holds no role.
+ */
+export async function tickFeed(deps: {
+  manifest: Manifest
+  secret: string | undefined
+  /** The oracle to sync (`ORACLE_KEEPER_ORACLE_ID`); the manifest's by default. */
+  oracle?: string
+  chain?: FeedChain
+  /** The last significant rejection this keeper submitted for the oracle; null (or absent): none known, so any is new. */
+  lastSubmittedRejection?: { reason: string; value: string } | null
+}): Promise<OracleTick> {
+  const keeper = keeperKey(deps.secret, "ORACLE_KEEPER_SECRET")
+  const oracle = deps.oracle ?? deps.manifest.shared.oracle
+  const chain = deps.chain ?? createFeedChain(deps.manifest, oracle)
+  const run = { mode: "feed" as const, signer: keeper.publicKey() }
+
+  let source: unknown
+  try {
+    source = await chain.read("feed_source")
+  } catch (error) {
+    if (error instanceof Error && MISSING_FUNCTION.test(error.message)) throw new OracleKeeperConfigError(NO_FEED_VIEW)
+    throw error
+  }
+  if (source === null || source === undefined) throw new OracleKeeperConfigError(NO_FEED)
+
+  const invocation: ContractInvocation = { contractId: oracle, functionName: "sync_from_feed", args: [] }
+  let simulation: FeedSimulation
+  try {
+    simulation = await chain.simulate(keeper.publicKey(), invocation)
+  } catch (error) {
+    if (error instanceof Error && FEED_NOT_CONFIGURED.test(error.message)) throw new OracleKeeperConfigError(NO_FEED)
+    throw error
+  }
+  const events = oracleEvents(simulation.events, oracle)
+
+  if (simulation.retval === true) {
+    const { hash, returnValue } = await chain.send(keeper, invocation)
+    if (returnValue === true) return { ...run, status: "synced", ...pointOf(events.find((e) => e.topic === "ref_set")), hash }
+    return { ...run, status: "rejected", ...NO_POINT, hash, reason: "unknown" }
+  }
+  if (simulation.retval !== false) throw new Error("sync_from_feed simulated a return value that is neither true nor false")
+
+  const rejection = events.find((e) => e.topic === "ref_rej")
+  const reason = rejection?.fields.reason
+  if (typeof reason !== "string") return { ...run, status: "rejected", ...NO_POINT, reason: "unknown" }
+  // `no_data` carries the contract's placeholders (0, 0), not a price.
+  const point = reason === "no_data" ? NO_POINT : pointOf(rejection)
+  if (isIn(ROUTINE, reason)) return { ...run, status: "skipped", ...point, reason }
+  if (!isIn(SIGNIFICANT, reason)) return { ...run, status: "rejected", ...point, reason }
+  const last = deps.lastSubmittedRejection
+  if (last && last.reason === reason && last.value === point.value) return { ...run, status: "rejected", ...point, reason }
+
+  const { hash, returnValue } = await chain.send(keeper, invocation)
+  if (returnValue === true) return { ...run, status: "synced", ...NO_POINT, hash }
+  return { ...run, status: "rejected", ...point, hash, reason }
 }

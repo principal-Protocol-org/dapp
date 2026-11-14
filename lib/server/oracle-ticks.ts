@@ -6,15 +6,16 @@ import "server-only"
  * successful update, the rejected runs, the failed runs and the keeper's health from them.
  *
  * - Decisions: `pushed` (an update landed), `synced` (the oracle took its feed's value, feed mode),
- *   `skipped` (the run changed nothing), `rejected` (the oracle refused the value: a successful
- *   transaction, R4-8) and `error` (the run failed, or could not start).
+ *   `skipped` (the run changed nothing; in feed mode, a routine rejection, with its reason),
+ *   `rejected` (the oracle refused the value, R4-8; in feed mode with a tx hash only when the keeper
+ *   submitted it, D-21) and `error` (the run failed, or could not start).
  * - Rows are public (`GET /api/dashboard/oracle-ticks`): the signer is a public key, an error's
  *   reason is `not_configured: <the app's own words>` or `failed: <error name>`, never an error's
  *   text (RPC text may carry a provider URL).
  */
 import type { Network } from "@/lib/protocol/types"
 import type { Sql } from "./db"
-import type { KeeperMode, OracleTick } from "./oracle-keeper"
+import { SIGNIFICANT, type KeeperMode, type OracleTick } from "./oracle-keeper"
 
 /** The keeper's schedule: every 30 minutes (the oracle is fresh for its `max_stale_seconds`, 3,600 s on our deployments). */
 export const ORACLE_TICK_INTERVAL_SECONDS = 1_800
@@ -40,10 +41,16 @@ export function tickRow(tick: OracleTick | KeeperFailure): TickRow {
   switch (tick.status) {
     case "updated":
       return { mode, decision: "pushed", value: tick.value, reason: null, txHash: tick.hash, signer }
+    case "synced":
+      return { mode, decision: "synced", value: tick.value, reason: null, txHash: tick.hash, signer }
     case "unchanged":
       return { mode, decision: "skipped", value: tick.value, reason: null, txHash: null, signer }
+    case "skipped":
+      // A routine rejection keeps its reason: the page and the alert check read it.
+      return { mode, decision: "skipped", value: tick.value, reason: tick.reason, txHash: null, signer }
     case "rejected":
-      return { mode, decision: "rejected", value: tick.value, reason: tick.reason, txHash: tick.hash, signer }
+      // Feed mode sends only a new significant rejection: a repeat or a broken feed has no hash.
+      return { mode, decision: "rejected", value: tick.value, reason: tick.reason, txHash: tick.hash ?? null, signer }
     case "not_configured":
       return { mode, decision: "error", value: null, reason: `not_configured: ${tick.message}`, txHash: null, signer }
     case "failed":
@@ -57,6 +64,21 @@ export async function recordTick(sql: Sql, network: Network, oracle: string, tic
   await sql`
     insert into oracle_ticks (network, oracle, mode, decision, value, reason, tx_hash, signer)
     values (${network}, ${oracle}, ${r.mode}, ${r.decision}, ${r.value}::numeric, ${r.reason}, ${r.txHash}, ${r.signer})`
+}
+
+/**
+ * The feed keeper's memory (D-21): the last significant rejection it submitted for `oracle`, from the
+ * newest feed-mode `rejected` row with a tx hash. A rejection with the same (reason, value) is not
+ * submitted again. Null when none is recorded.
+ */
+export async function lastSubmittedRejection(sql: Sql, network: Network, oracle: string): Promise<{ reason: string; value: string } | null> {
+  const [row] = await sql<{ reason: string | null; value: string | null }>`
+    select reason, value::text as value from oracle_ticks
+    where network = ${network} and oracle = ${oracle} and mode = 'feed' and decision = 'rejected' and tx_hash is not null
+      and reason = any(${[...SIGNIFICANT]}::text[])
+    order by at desc, id desc
+    limit 1`
+  return row?.reason && row.value !== null ? { reason: row.reason, value: row.value } : null
 }
 
 /** A recorded run, as the API answers it: the value an exact decimal string (7 decimals, as the oracle stores it), never a float. */

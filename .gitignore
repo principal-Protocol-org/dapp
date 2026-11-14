@@ -17,6 +17,9 @@
 # local working data: the indexer's history captures (pnpm indexer:capture), imported with the developer's go
 /var/
 
+# the SEP-40 mock feed's cargo build (scripts/dev-stack/feed-oracle.sh)
+/tests/fixtures/sep40-mock/target/
+
 # next.js
 /.next/
 /out/

@@ -5,7 +5,7 @@ vi.mock("server-only", () => ({}))
 
 import type { Sql } from "@/lib/server/db"
 import type { KeeperFailure } from "@/lib/server/oracle-ticks"
-import { keeperHealth, listTicks, ORACLE_TICK_INTERVAL_SECONDS, recordTick, tickRow } from "@/lib/server/oracle-ticks"
+import { keeperHealth, lastSubmittedRejection, listTicks, ORACLE_TICK_INTERVAL_SECONDS, recordTick, tickRow } from "@/lib/server/oracle-ticks"
 import type { OracleTick } from "@/lib/server/oracle-keeper"
 
 const ORACLE = "CDYGBFGO7KD446CDTGJ7M4OWUXC7UPBGPVM5CUWP2NSNX2CKK2TYYIPS"
@@ -44,6 +44,39 @@ describe("tickRow: one cron/oracle run as an oracle_ticks row (D-19)", () => {
   })
   it("any other failure is an error with the error's name only", () => {
     expect(tickRow(failed)).toEqual({ mode: "push", decision: "error", value: null, reason: "failed: TypeError", txHash: null, signer: SIGNER })
+  })
+  it("feed mode (D-21): a sync is synced, with its value and hash", () => {
+    expect(tickRow({ status: "synced", mode: "feed", signer: SIGNER, value: "10000000", timestamp: 1, hash: HASH })).toEqual({
+      mode: "feed",
+      decision: "synced",
+      value: "10000000",
+      reason: null,
+      txHash: HASH,
+      signer: SIGNER,
+    })
+    // A sync that landed against a rejected simulation: value unknown, never a made-up one.
+    expect(tickRow({ status: "synced", mode: "feed", signer: SIGNER, value: null, timestamp: null, hash: HASH })).toMatchObject({ decision: "synced", value: null })
+  })
+  it("feed mode: a routine rejection is skipped and keeps its reason; no hash", () => {
+    expect(tickRow({ status: "skipped", mode: "feed", signer: SIGNER, value: "10000000", timestamp: 1, reason: "stale_ts" })).toEqual({
+      mode: "feed",
+      decision: "skipped",
+      value: "10000000",
+      reason: "stale_ts",
+      txHash: null,
+      signer: SIGNER,
+    })
+    expect(tickRow({ status: "skipped", mode: "feed", signer: SIGNER, value: null, timestamp: null, reason: "no_data" })).toMatchObject({ value: null, reason: "no_data" })
+  })
+  it("feed mode: a rejection that was not submitted (a repeat, a broken feed) has no hash", () => {
+    expect(tickRow({ status: "rejected", mode: "feed", signer: SIGNER, value: "-1", timestamp: 1, reason: "bad_price" })).toEqual({
+      mode: "feed",
+      decision: "rejected",
+      value: "-1",
+      reason: "bad_price",
+      txHash: null,
+      signer: SIGNER,
+    })
   })
   it("a submitted transaction that did not land keeps its hash, with its result code or 'not confirmed'", () => {
     expect(tickRow({ status: "failed", mode: "push", signer: SIGNER, name: "invokeHostFunctionTrapped", hash: HASH })).toEqual({
@@ -145,5 +178,26 @@ describe("listTicks", () => {
     expect(calls[0].text).toContain("value::text")
     expect(calls[0].text).toContain("order by at desc, id desc")
     expect(calls[0].values).toEqual(["testnet", ORACLE, ORACLE, 20])
+  })
+})
+
+describe("lastSubmittedRejection (D-21): the feed keeper's memory of the last rejection it put on-chain", () => {
+  it("the newest feed-mode significant rejection with a tx hash, for this network and oracle", async () => {
+    const { sql, calls } = fakeSql([{ reason: "deviate", value: "11500000" }])
+    expect(await lastSubmittedRejection(sql, "local", ORACLE)).toEqual({ reason: "deviate", value: "11500000" })
+    expect(calls).toHaveLength(1)
+    const q = calls[0].text
+    expect(q).toContain("value::text")
+    expect(q).toContain("mode = 'feed'")
+    expect(q).toContain("decision = 'rejected'")
+    expect(q).toContain("tx_hash is not null")
+    expect(q).toContain("order by at desc, id desc")
+    expect(q).toContain("limit 1")
+    // Only significant reasons: a submitted run whose reason is unknown is no memory of one.
+    expect(calls[0].values).toEqual(["local", ORACLE, ["oob", "decrease", "deviate", "fb_value"]])
+  })
+  it("null when none is recorded", async () => {
+    expect(await lastSubmittedRejection(fakeSql([]).sql, "local", ORACLE)).toBeNull()
+    expect(await lastSubmittedRejection(fakeSql([{ reason: "deviate", value: null }]).sql, "local", ORACLE)).toBeNull()
   })
 })
