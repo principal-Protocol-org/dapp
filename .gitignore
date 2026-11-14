@@ -14,6 +14,8 @@
 /coverage
 # live Testnet run records (pnpm test:e2e:testnet): transaction hashes and public keys, kept per run
 /e2e-artifacts/
+# local working data: the indexer's history captures (pnpm indexer:capture), imported with the developer's go
+/var/
 
 # next.js
 /.next/

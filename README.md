@@ -18,6 +18,8 @@ on a local network. It is Deliverable 2 of Tranche 2 of SCF #45.
 | `/app/manage/new` | The market-creation wizard (seven steps). See "Manager view and the wizard". |
 | `POST /api/faucet` | Server route behind "Get test tokens". |
 | `GET` or `POST /api/cron/record` | The rate recorder, called by a scheduler. Both methods run the same checks. Refuses any other caller. |
+| `GET` or `POST /api/cron/index` | The event indexer, called by a scheduler. Same checks as the recorder. See "Event indexer". |
+| `GET /api/dashboard/events` | The indexed protocol events, public and read-only. See "Event indexer". |
 
 ## Trade flows
 
@@ -199,6 +201,89 @@ sub-daily crons at deploy time.
 - Never put a real connection string or secret in this repository. Use `.env.local`, `.env.testnet`
   and `.env.mainnet` (all git-ignored) and the Vercel project settings.
 
+## Event indexer
+
+A scheduled job calls `/api/cron/index` (GET or POST) every 5 minutes. It reads the protocol's
+contract events with the RPC's `getEvents` into the `events` table (migrations 0004 and 0005), one
+row per RPC event id, so a retry or two overlapping runs never duplicate a row. Each row keeps the
+contract, topic, ledger, close time, transaction hash, the market's pool, the decoded fields (`data`)
+and the event value as the RPC sent it (`raw_xdr`, base64 XDR of the `ScVal`; decode it with
+`stellar xdr decode --type ScVal`).
+
+Contracts are indexed in five groups, each with its own cursor in `ingest_cursor`
+(`events:<group>:<network>`):
+
+| Group | Contracts |
+|---|---|
+| `market` | Every listed market's SY wrapper, manager and pool |
+| `escrow` | Every listed market's RecoveryEscrow |
+| `oracle` | The shared OracleAdapter |
+| `permissioning` | The shared Permissioning contract |
+| `risk` | The shared RiskControl contract |
+
+- A first run starts at the manifest's `deployLedger`, or at the RPC's oldest ledger if that is
+  later. The RPC keeps about 7 days on Testnet.
+- Each run reads pages of 200 events (at most 5 contracts per request), saves the cursor after
+  every page, and starts no page after its 50 s budget. The next run resumes there.
+- A cursor only moves forward. A run that is behind cannot rewind one that is ahead.
+- When a cursor is older than the RPC's oldest ledger, the run records the gap (`{ from, to }`,
+  in the answer and the server log) and goes on from the oldest ledger. It never skips silently.
+- Each run compares every RecoveryEscrow's `record_count` with its indexed `recovery` events.
+- A market listed after the `market` cursor has passed its creation misses its first events.
+  Re-index the group from the ledger before its creation.
+
+The route answers:
+
+| Status | Body | When |
+|---|---|---|
+| 200 | `{ inserted, groups, reconcile }` | Each group: `indexedThrough`, `gap`, `complete` (false when the budget ran out). Each escrow: `recordCount`, `indexed`, `ok`. |
+| 401 | | The caller sent neither a valid `Authorization: Bearer $CRON_SECRET` nor a valid QStash signature. |
+| 503 | `{ error: "not_configured" }` | `DATABASE_URL` is missing. |
+| 500 | The same body, a group with `error: "failed"`, or `{ error: "failed" }` | The RPC failed. The next run resumes at the cursor. |
+
+Schedule (ops, with the developer's go): a QStash schedule with cron `*/5 * * * *` to
+`https://<domain>/api/cron/index`, as for the recorder. Apply migrations 0004 and 0005 to the
+network's database first (`pnpm db:migrate --env-file .env.testnet`).
+
+`GET /api/dashboard/events` serves the index, public and without a wallet. `?group=`, `?pool=`,
+`?before=<event id>` (older rows, for paging) and `?limit=` (1 to 200, default 50) filter the list.
+It answers `{ rows, indexedThrough, lagSeconds }`, newest first and cached 60 s at the edge. Rows
+never carry the raw XDR; `?id=<event id>` answers `{ event }` with its `rawXdr`.
+
+Operator commands (`scripts/indexer.mjs`). The database is `--database-url <url>`, else the
+`DATABASE_URL` of `--env-file <path>`, else `DATABASE_URL`, else `.env.local`'s. None prints it, but
+pnpm echoes the command line and the shell keeps it: use `--env-file` for a real database.
+
+```bash
+pnpm indexer:reindex --network testnet --group escrow --from 5707342   # read the group again from that ledger
+pnpm indexer:export --network testnet --out events.jsonl                # events rows and cursors, as JSON Lines
+pnpm indexer:import --in events.jsonl --env-file .env.testnet           # upsert them: idempotent, cursors only move forward
+pnpm indexer:capture --network testnet                                  # index into the local database, then export
+```
+
+- `reindex` sets the group's cursor to the ledger before `--from`. Rows already indexed are kept,
+  and the events read again are not duplicated. It refuses to move a cursor forward. Run it when no
+  indexer run is in progress, or that run may move the cursor on again.
+- `capture` indexes a network from its manifest's RPC into a database on this machine only (it
+  refuses any other), then exports that network's rows to
+  `var/indexer-capture/<network>-<YYYYMMDD>.jsonl` (`--out` to change it). `var/` is git-ignored.
+  It only reads from the RPC.
+
+**Testnet history capture (deadline 2026-11-20).** The RPC drops the official deployment's first
+events (the Permissioning grants, the oracle's `src_set` and first `ref_set`) around 2026-11-20
+09:00 UTC, and the two `cb_limit` changes around 2026-11-21. A capture taken before then keeps them.
+To load it into the Testnet database (with the developer's go):
+
+1. Run `pnpm indexer:capture --network testnet` again just before the import. It resumes from the
+   local cursors, so the file's cursors are recent. An old file's cursors would make the first
+   scheduled run record a gap from them to the RPC's oldest ledger.
+2. `pnpm db:migrate --env-file .env.testnet`, then
+   `pnpm indexer:import --in var/indexer-capture/testnet-<YYYYMMDD>.jsonl --env-file .env.testnet`.
+3. Create the `*/5 * * * *` schedule.
+
+If the schedule already ran before the import, the import fills the history and keeps the newer
+cursors.
+
 ## Local network
 
 `scripts/dev-stack/` runs a local Stellar network with a real, seeded market, so every flow works
@@ -225,11 +310,15 @@ Use `pnpm`.
 | `pnpm test:e2e:testnet` | The live end-to-end suites on Stellar Testnet (see [CI](#ci)). |
 | `pnpm lint` | ESLint. |
 | `pnpm typecheck` | `tsc --noEmit`. |
+| `pnpm indexer:reindex`, `indexer:export`, `indexer:import`, `indexer:capture` | The event indexer's operator commands (see "Event indexer"). |
 
 `pnpm test:integration` needs the local stack running and a deployed `config/manifests/local.json`
 (`scripts/dev-stack/README.md`). If the network is not reachable, the suite skips and says why.
 
-- It runs the routes, curve, oracle, registry and recorder suites against the existing local market.
+- It runs the routes, curve, oracle, registry, recorder and indexer suites against the existing local market.
+  The indexer suite also needs the local Postgres migrated (`pnpm db:migrate`) and refuses a
+  `DATABASE_URL` that is not on this machine: it seizes a throwaway account's positions and deletes
+  and restores local `events` rows.
   It does not redeploy the stack or rewrite `local.json`.
 - It signs with throwaway local accounts (the stack's dev keys), never a real key.
 - It skips the cases that need a market near maturity, and says so.
