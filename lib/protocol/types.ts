@@ -75,5 +75,10 @@ export type WalletState =
   | { status: "wrong_network"; publicKey: string; actualPassphrase: string; expectedPassphrase: string }
   | { status: "rejected"; reason: string }
 
+/** Where a figure was read: enough for a reviewer to repeat the call and compare the raw return value. */
+export type ReadSource = { contractId: string; fn: string; args: unknown[]; rawXdr: string; ledger: number; rpcUrl: string }
+
 /** A chain value, or the reason it could not be read. Gates treat `unavailable` as a refusal. */
-export type Live<T> = { status: "live"; value: T; ledger: number } | { status: "unavailable"; error: string }
+export type Live<T> =
+  | { status: "live"; value: T; ledger: number; source?: ReadSource; sources?: ReadSource[]; ledgerSpread?: { min: number; max: number } }
+  | { status: "unavailable"; error: string; source?: Omit<ReadSource, "rawXdr" | "ledger"> }

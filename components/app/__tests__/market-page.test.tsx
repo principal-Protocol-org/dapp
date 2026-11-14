@@ -447,6 +447,17 @@ describe("SafetyContent manager pause", () => {
   })
 })
 
+describe("SafetyContent unavailable reason", () => {
+  it("shows the reason of an unavailable row in an UnavailableTip", async () => {
+    mocks.ms = marketState({ managerPaused: down("HostError: Error(Contract, #7)") })
+    wrap(<SafetyContent marketId="m1" />)
+    const row = screen.getByText("Principal manager").nextSibling as HTMLElement
+    expect(row.textContent).toBe("Unavailable")
+    await userEvent.click(within(row).getByRole("button", { name: "More about Principal manager (unavailable)" }))
+    expect((await screen.findByRole("tooltip")).textContent).toBe("HostError: Error(Contract, #7)")
+  })
+})
+
 describe("SafetyContent", () => {
   it("lists pauses, oracle freshness and circuit-breaker room", () => {
     mocks.ms = marketState({ riskPaused: live(true) })

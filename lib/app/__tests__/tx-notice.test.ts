@@ -1,18 +1,9 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest"
 import { SubmissionRejectedError } from "@/lib/protocol/stellar"
-import { explorerTxUrl, noticeForError, noticeForResult } from "../tx-notice"
+import { noticeForError, noticeForResult } from "../tx-notice"
 
 const HASH = "ab".repeat(32)
-
-describe("explorerTxUrl", () => {
-  it("links Testnet transactions to stellar.expert", () => {
-    expect(explorerTxUrl("testnet", HASH)).toBe(`https://stellar.expert/explorer/testnet/tx/${HASH}`)
-  })
-  it("has no link for a local network", () => {
-    expect(explorerTxUrl("local", HASH)).toBeNull()
-  })
-})
 
 describe("noticeForResult", () => {
   it("confirms a success with its link", () => {

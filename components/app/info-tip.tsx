@@ -3,7 +3,8 @@
 import { useRef, useState, type ReactNode } from "react"
 import { InfoIcon } from "lucide-react"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
-import { UNAVAILABLE } from "@/components/app/live"
+import { showLiveReason, UNAVAILABLE } from "@/components/app/live"
+import type { Live } from "@/lib/protocol/types"
 
 /**
  * A small "i" beside a label, with the explanation behind it (R2-65). One shared component for every
@@ -73,4 +74,10 @@ export function LabelWithTip({ label, tip, className }: { label: string; tip?: R
       <InfoTip label={label}>{tip}</InfoTip>
     </span>
   )
+}
+
+/** A formatted live figure; when the read failed, "Unavailable" with its reason behind an info tip. */
+export function LiveFigure<T>({ label, live, format }: { label: string; live: Live<T> | undefined; format: (v: T) => string }) {
+  const { text, reason } = showLiveReason(live, format)
+  return reason ? <UnavailableTip label={label} reason={reason} /> : <>{text}</>
 }

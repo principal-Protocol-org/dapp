@@ -10,7 +10,8 @@ import { useManifest } from "@/components/app/manifest-provider"
 import type { Live } from "@/lib/protocol/types"
 import { Skeleton } from "@/components/ui/skeleton"
 import { safetyIssues } from "@/components/app/market/attention"
-import { formatDuration, showLive, UNAVAILABLE } from "@/components/app/live"
+import { LiveFigure } from "@/components/app/info-tip"
+import { formatDuration, UNAVAILABLE } from "@/components/app/live"
 
 function Row({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -61,14 +62,14 @@ export function SafetyContent({ marketId }: { marketId: string }) {
 
   const source = (v: string | null) => (v === null ? "None" : shorten(v))
 
-  const lastRejection = (): string => {
+  const lastRejection = (): React.ReactNode => {
     if (!ms) return UNAVAILABLE
-    return showLive(ms.oracleLastRejection, (r) => {
+    return <LiveFigure label="Oracle last rejected update" live={ms.oracleLastRejection} format={(r) => {
       if (r === null) return "None"
       const why = REJECTION_WORDS[r.reason] ?? r.reason
       const when = ledgerTime === null ? null : `${formatDuration(ledgerTime - Number(r.timestamp))} ago`
       return `${why} (value ${formatRate(r.value)}${when ? `, ${when}` : ""})`
-    })
+    }} />
   }
 
   const depositCap = (): string => {
@@ -83,14 +84,14 @@ export function SafetyContent({ marketId }: { marketId: string }) {
 
   return ms ? (
     <dl className="grid gap-3 text-ink">
-      <Row label="SY wrapper">{showLive(ms.syPaused, pause)}</Row>
-      <Row label="Market pool">{showLive(ms.poolPaused, pause)}</Row>
-      <Row label="Risk control">{showLive(ms.riskPaused, pause)}</Row>
-      <Row label="Principal manager">{showLive(ms.managerPaused, pause)}</Row>
+      <Row label="SY wrapper"><LiveFigure label="SY wrapper" live={ms.syPaused} format={pause} /></Row>
+      <Row label="Market pool"><LiveFigure label="Market pool" live={ms.poolPaused} format={pause} /></Row>
+      <Row label="Risk control"><LiveFigure label="Risk control" live={ms.riskPaused} format={pause} /></Row>
+      <Row label="Principal manager"><LiveFigure label="Principal manager" live={ms.managerPaused} format={pause} /></Row>
       <Row label="Oracle">{oracle()}</Row>
-      <Row label="Oracle deviation cap">{showLive(ms.oracleMaxDeviationBps, formatBps)}</Row>
-      <Row label="Oracle primary source">{showLive(ms.oraclePrimarySource, source)}</Row>
-      <Row label="Oracle fallback source">{showLive(ms.oracleFallbackSource, source)}</Row>
+      <Row label="Oracle deviation cap"><LiveFigure label="Oracle deviation cap" live={ms.oracleMaxDeviationBps} format={formatBps} /></Row>
+      <Row label="Oracle primary source"><LiveFigure label="Oracle primary source" live={ms.oraclePrimarySource} format={source} /></Row>
+      <Row label="Oracle fallback source"><LiveFigure label="Oracle fallback source" live={ms.oracleFallbackSource} format={source} /></Row>
       <Row label="Oracle last rejected update">{lastRejection()}</Row>
       <Row label="Circuit breaker, protocol-wide">{roomLeft(ms.cb.limit, ms.cb.volume, amount)}</Row>
       <Row label={`Circuit breaker, ${market.underlying.code}`}>

@@ -20,7 +20,7 @@ describe("unavailable", () => {
       throw busy
     }
     const live = await readLive(reader, { contractId: "C", functionName: "pool_state" })
-    expect(live).toEqual({ status: "unavailable", error: "The Stellar network is busy. Try again in a moment." })
+    expect(live).toMatchObject({ status: "unavailable", error: "The Stellar network is busy. Try again in a moment." })
     expect(live.status === "unavailable" && isContractError(live.error)).toBe(false)
   })
 
@@ -66,6 +66,6 @@ describe("readLive", () => {
       throw new Error(SIMULATION_ERROR)
     }
     const live = await readLive(reader, { contractId: "C", functionName: "balance" })
-    expect(live).toEqual({ status: "unavailable", error: "HostError: Error(Contract, #13)" })
+    expect(live).toMatchObject({ status: "unavailable", error: "HostError: Error(Contract, #13)" })
   })
 })

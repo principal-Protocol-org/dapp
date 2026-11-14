@@ -1,26 +1,35 @@
 import { StrKey } from "@stellar/stellar-sdk"
 import { userErrorMessage } from "./errors"
 import { createRpcServer, simulateContractRead, type ContractReadResult, type ScArg } from "./stellar"
-import type { Live, Manifest } from "./types"
+import type { Live, Manifest, ReadSource } from "./types"
 
-export type ContractReader = <T>(call: {
+export type ContractReader = (<T>(call: {
   contractId: string
   functionName: string
   args?: ScArg[]
-}) => Promise<ContractReadResult<T>>
+}) => Promise<ContractReadResult<T>>) & {
+  /** The RPC this reader calls; lets a failed read still say where it was attempted. */
+  rpcUrl?: string
+}
 
 export function createRpcReader(m: Manifest): ContractReader {
   const server = createRpcServer(m.rpcUrl)
-  return <T>(call: { contractId: string; functionName: string; args?: ScArg[] }) =>
+  const read = <T>(call: { contractId: string; functionName: string; args?: ScArg[] }) =>
     simulateContractRead<T>({
       rpcUrl: m.rpcUrl,
       networkPassphrase: m.networkPassphrase,
       server,
       invocation: { contractId: call.contractId, functionName: call.functionName, args: call.args ?? [] },
     })
+  return Object.assign(read, { rpcUrl: m.rpcUrl })
 }
 
-export function liveValue<T>(value: T, ledger: number): Live<T> {
+/** The call's arguments as plain, JSON-safe data (bigints as decimal strings). */
+function plainArgs(args: ScArg[] | undefined): unknown[] {
+  return (args ?? []).map((a) => ({ ...a, value: typeof a.value === "bigint" ? a.value.toString() : a.value }))
+}
+
+export function liveValue<T>(value: T, ledger: number): Extract<Live<T>, { status: "live" }> {
   return { status: "live", value, ledger }
 }
 
@@ -39,8 +48,8 @@ function summarizeError(error: unknown): string {
   return first.length <= MAX_ERROR_LENGTH ? first : `${first.slice(0, MAX_ERROR_LENGTH - 1)}…`
 }
 
-export function unavailable(error: unknown): Live<never> {
-  return { status: "unavailable", error: summarizeError(error) }
+export function unavailable(error: unknown, source?: Omit<ReadSource, "rawXdr" | "ledger">): Live<never> {
+  return source ? { status: "unavailable", error: summarizeError(error), source } : { status: "unavailable", error: summarizeError(error) }
 }
 
 /**
@@ -52,11 +61,13 @@ export async function readLive<T, U = T>(
   call: { contractId: string; functionName: string; args?: ScArg[] },
   map?: (value: T) => U,
 ): Promise<Live<U>> {
+  const base = { contractId: call.contractId, fn: call.functionName, args: plainArgs(call.args), rpcUrl: reader.rpcUrl ?? "" }
   try {
     const result = await reader<T>(call)
-    return liveValue(map ? map(result.value) : (result.value as unknown as U), result.latestLedger)
+    const live = liveValue(map ? map(result.value) : (result.value as unknown as U), result.latestLedger)
+    return { ...live, source: { ...base, rawXdr: result.rawXdr, ledger: result.latestLedger, rpcUrl: result.rpcUrl } }
   } catch (error) {
-    return unavailable(error)
+    return unavailable(error, base)
   }
 }
 
@@ -77,15 +88,24 @@ export function allLive<T extends readonly Live<unknown>[], U>(
   inputs: T,
   combine: (values: { [K in keyof T]: T[K] extends Live<infer V> ? V : never }) => U,
 ): Live<U> {
-  let ledger = 0
+  let min = Infinity
+  let max = 0
   const values: unknown[] = []
+  const sources: ReadSource[] = []
   for (const input of inputs) {
     if (input.status === "unavailable") return input
     values.push(input.value)
-    ledger = Math.max(ledger, input.ledger)
+    min = Math.min(min, input.ledger)
+    max = Math.max(max, input.ledger)
+    // An input that is itself a combination already lists its reads.
+    if (input.sources) sources.push(...input.sources)
+    else if (input.source) sources.push(input.source as ReadSource)
   }
   try {
-    return liveValue(combine(values as never), ledger)
+    const live = liveValue(combine(values as never), max)
+    if (sources.length > 0) live.sources = sources
+    if (min !== max && inputs.length > 0) live.ledgerSpread = { min, max }
+    return live
   } catch (error) {
     return unavailable(error)
   }

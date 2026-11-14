@@ -80,7 +80,7 @@ function healthy(): Record<string, Handler> {
 describe("fetchMarketState", () => {
   it("reads every market value as Live with its ledger", async () => {
     const s = await fetchMarketState(fakeReader(healthy()), manifest, market.marketId)
-    expect(s.oracleRate).toEqual({ status: "live", value: 10_500_000n, ledger: 777 })
+    expect(s.oracleRate).toMatchObject({ status: "live", value: 10_500_000n, ledger: 777 })
     expect(s.oracleTimestamp).toMatchObject({ status: "live", value: 1_790_000_000n })
     expect(s.oracleFresh).toMatchObject({ status: "live", value: true })
     expect(s.maturity).toMatchObject({ status: "live", value: BigInt(market.maturity) })
@@ -104,7 +104,7 @@ describe("fetchMarketState", () => {
     expect(s.syPaused).toMatchObject({ value: false })
     expect(s.poolPaused).toMatchObject({ value: false })
     expect(s.riskPaused).toMatchObject({ value: false })
-    expect(s.managerPaused).toEqual({ status: "live", value: false, ledger: 777 })
+    expect(s.managerPaused).toMatchObject({ status: "live", value: false, ledger: 777 })
     expect(s.cb.limit).toMatchObject({ value: 1_000n })
     expect(s.cb.assetVolume).toMatchObject({ value: 200n })
     expect(s.topology).toMatchObject({ status: "live", value: { matches: true, mismatches: [] } })
@@ -184,7 +184,7 @@ describe("fetchMarketState", () => {
     const table = healthy()
     table[`${c.sy}.balance_of`] = new Error("rpc 429")
     const s = await fetchMarketState(fakeReader(table), manifest, market.marketId)
-    expect(s.managerSy).toEqual({ status: "unavailable", error: "rpc 429" })
+    expect(s.managerSy).toMatchObject({ status: "unavailable", error: "rpc 429" })
   })
 
   it("calls is_available with no arguments, reads max_stale_seconds, and the underlying SAC is the risk-control asset key", async () => {
@@ -205,7 +205,7 @@ describe("fetchMarketState", () => {
     const table = healthy()
     table[`${c.pt}.total_supply`] = new Error("rpc 429")
     const s = await fetchMarketState(fakeReader(table), manifest, market.marketId)
-    expect(s.totalPt).toEqual({ status: "unavailable", error: "rpc 429" })
+    expect(s.totalPt).toMatchObject({ status: "unavailable", error: "rpc 429" })
     expect(s.totalYt.status).toBe("live")
   })
 
@@ -283,7 +283,7 @@ describe("fetchMarketState", () => {
     const table = healthy()
     table[`${c.router}.market`] = new Error("archived")
     const s = await fetchMarketState(fakeReader(table), manifest, market.marketId)
-    expect(s.topology).toEqual({ status: "unavailable", error: "archived" })
+    expect(s.topology).toMatchObject({ status: "unavailable", error: "archived" })
   })
 
   it("topology is unavailable when maturity cannot be read", async () => {

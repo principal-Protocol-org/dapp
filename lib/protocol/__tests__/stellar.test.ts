@@ -155,7 +155,7 @@ describe("simulateContractRead", () => {
       },
     });
 
-    expect(read).toEqual({
+    expect(read).toMatchObject({
       value: 123n,
       latestLedger: 77,
       minResourceFee: "321",

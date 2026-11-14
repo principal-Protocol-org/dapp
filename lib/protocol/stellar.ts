@@ -51,6 +51,9 @@ export type ContractReadResult<T> = {
   value: T;
   latestLedger: number;
   minResourceFee: string;
+  /** Base64 XDR of the simulation's return value, taken before decoding: what a reviewer re-reads. */
+  rawXdr: string;
+  rpcUrl: string;
 };
 
 type ReadRpcServer = {
@@ -249,6 +252,8 @@ export async function simulateContractRead<T = unknown>(params: {
     value: scValToNative(simulation.result.retval) as T,
     latestLedger: simulation.latestLedger,
     minResourceFee: simulation.minResourceFee,
+    rawXdr: simulation.result.retval.toXDR("base64"),
+    rpcUrl: params.rpcUrl,
   };
 }
 
