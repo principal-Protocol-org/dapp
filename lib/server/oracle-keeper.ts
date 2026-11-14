@@ -29,6 +29,42 @@ const TX_TIMEOUT_SECONDS = 60
 /** The keeper cannot run: no key, a key that is not the oracle admin, or a network it must not feed. */
 export class OracleKeeperConfigError extends Error {}
 
+/** What a sent transaction that never confirmed reports as its code. */
+export const NOT_CONFIRMED = "not confirmed"
+
+/**
+ * The keeper sent its update, and it did not land: it failed on-chain, or it was not confirmed in
+ * time. `hash` is the transaction's (public); `code` is its result code (e.g.
+ * `invokeHostFunctionTrapped`, `txBadSeq`), `FAILED` when RPC gave no result, or `not confirmed`.
+ * The message carries the same two, never a key.
+ */
+export class OracleSubmitError extends Error {
+  constructor(
+    readonly hash: string,
+    readonly code: string,
+  ) {
+    super(code === NOT_CONFIRMED ? `the oracle update was not confirmed in time (${hash})` : `the oracle update failed on-chain (${hash}, ${code})`)
+    this.name = "OracleSubmitError"
+  }
+}
+
+/** A FAILED transaction's result code: the host function's for a contract call, else the transaction's; `FAILED` when RPC gave none. */
+function failureCode(result: xdr.TransactionResult | undefined): string {
+  if (!result) return "FAILED"
+  try {
+    const outcome = result.result
+    if (outcome.type === "txFailed") {
+      const [operation] = outcome.results
+      if (operation?.type === "opInner" && operation.tr.type === "invokeHostFunction") return operation.tr.invokeHostFunctionResult.type
+      if (operation) return operation.type === "opInner" ? operation.tr.type : operation.type
+    }
+    return outcome.type
+  } catch {
+    // An undecodable result: the status alone.
+    return "FAILED"
+  }
+}
+
 /**
  * The value to push at ledger time `now`: `current × (1 + apy)^(elapsed / year)`, floored and never
  * below `current` (the contract refuses a decrease). Null when `now` is not after `lastTimestamp`:
@@ -95,8 +131,8 @@ export function createOracleChain(manifest: Manifest, deps: { server?: OracleRpc
       prepared.sign(signer)
       const { hash } = await submitSignedTransaction({ rpcUrl, networkPassphrase, signedXdr: prepared.toEnvelope().toXDR("base64"), server })
       const polled = await pollTransactionStatus({ rpcUrl, hash, server, attempts: 30, intervalMs: 1_000 })
-      if (polled.status === "FAILED") throw new Error(`the oracle update failed on-chain (${hash})`)
-      if (polled.status !== "SUCCESS") throw new Error(`the oracle update was not confirmed in time (${hash})`)
+      if (polled.status === "FAILED") throw new OracleSubmitError(hash, failureCode(polled.failure?.result))
+      if (polled.status !== "SUCCESS") throw new OracleSubmitError(hash, NOT_CONFIRMED)
       return { hash, returnValue: polled.returnValue }
     },
   }

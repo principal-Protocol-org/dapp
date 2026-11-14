@@ -11,6 +11,7 @@ const state = vi.hoisted(() => ({
   cursors: [] as Record<string, unknown>[],
   counts: [] as Record<string, unknown>[],
   DatabaseConfigError: class DatabaseConfigError extends Error {},
+  manifestError: null as Error | null,
 }))
 vi.mock("@/lib/server/db", () => ({
   // The events and ingest_cursor tables: the real read model runs its SQL against these rows.
@@ -34,7 +35,12 @@ vi.mock("@/lib/protocol/manifest-source", async () => {
   const { parseManifest } = await import("@/lib/protocol/manifest")
   const json = (await import("@/config/manifests/testnet.json")).default
   const m = parseManifest(json)
-  return { activeManifest: () => m }
+  return {
+    activeManifest: () => {
+      if (state.manifestError) throw state.manifestError
+      return m
+    },
+  }
 })
 
 import { GET } from "../route"
@@ -188,5 +194,25 @@ describe("GET /api/dashboard/events", () => {
     expect(b.status).toBe(503)
     expect(b.headers.get("cache-control")).toBe("no-store")
     expect(await b.json()).toEqual({ error: "unavailable" })
+  })
+})
+
+describe("GET /api/dashboard/events when the manifest cannot be read", () => {
+  it("answers 503 unavailable, never cached, logged by name only (not an unhandled 500)", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {})
+    try {
+      state.fail = null
+      state.manifestError = new Error('NEXT_PUBLIC_PRINCIPAL_NETWORK must be "testnet" or "local", got "x".')
+      for (const query of ["", "?id=0024565460586500096-0000000000"]) {
+        const res = await GET(new Request(`https://app.example/api/dashboard/events${query}`))
+        expect(res.status).toBe(503)
+        expect(await res.json()).toEqual({ error: "unavailable" })
+        expect(res.headers.get("cache-control")).toBe("no-store")
+      }
+      expect(error.mock.calls.map((c) => c.map(String).join(" "))).toEqual(["dashboard events route: Error", "dashboard events route: Error"])
+    } finally {
+      state.manifestError = null
+      error.mockRestore()
+    }
   })
 })

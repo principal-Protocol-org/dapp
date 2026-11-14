@@ -8,8 +8,8 @@ import { Metric } from "@/components/app/market/metric"
 import { Badge } from "@/components/ui/badge"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { DASHBOARD_LIVE_MS, secondsToBlockNow, useOracleTicks, useOracleView, type IndexedEvent, type RecordedTick } from "@/hooks/use-dashboard"
-import { useLedgerClock } from "@/hooks/use-ledger-clock"
+import { DASHBOARD_LIVE_MS, secondsToBlockNow, useOracleTicks, useOracleView, type IndexedEvent, type KeeperHealth, type RecordedTick } from "@/hooks/use-dashboard"
+import { LEDGER_CLOCK_REFETCH_MS, useLedgerClock } from "@/hooks/use-ledger-clock"
 import type { Freshness, OracleSourceView, OracleView } from "@/lib/protocol/dashboard/oracle"
 import { isSignificantRejection, lastRejectionNote, rejectionText } from "@/lib/protocol/dashboard/rejections"
 import type { VerifiableFigure } from "@/lib/protocol/dashboard/verify"
@@ -188,6 +188,17 @@ function TickTable({ network, ticks }: { network: Network; ticks: RecordedTick[]
 }
 
 /**
+ * Healthy now (D-19): the last success is younger than 2 × the interval, its age measured on the
+ * ledger clock here. The API's own `healthy` was computed when its answer was, and that answer is
+ * cached for minutes: it is used only until the ledger clock is read.
+ */
+export function keeperHealthyNow(health: Pick<KeeperHealth, "healthy" | "lastSuccessAt">, intervalSeconds: number, ledgerTime: number | null): boolean {
+  if (health.lastSuccessAt === null) return false
+  if (ledgerTime === null) return health.healthy
+  return ledgerTime - Date.parse(health.lastSuccessAt) / 1000 < 2 * intervalSeconds
+}
+
+/**
  * The keeper's health and recent runs (D-19), from its recorded ticks (`GET /api/dashboard/oracle-ticks`).
  * No run recorded is a neutral state: "No keeper run recorded yet", neither healthy nor unhealthy.
  */
@@ -200,6 +211,7 @@ function KeeperPanel({ network, ledgerTime }: { network: Network; ledgerTime: nu
   else {
     const { health, ticks, intervalSeconds } = q.data
     const none = health.lastTickAt === null
+    const healthy = keeperHealthyNow(health, intervalSeconds, ledgerTime)
     body = (
       <>
         <dl className="grid grid-cols-1 gap-x-6 gap-y-4 min-[420px]:grid-cols-2 min-[900px]:grid-cols-4">
@@ -207,7 +219,7 @@ function KeeperPanel({ network, ledgerTime }: { network: Network; ledgerTime: nu
             {none ? (
               <span className="font-sans text-ink-muted">No keeper run recorded yet</span>
             ) : (
-              <Badge status={health.healthy ? "live" : "paused"}>{health.healthy ? "Healthy" : "Unhealthy"}</Badge>
+              <Badge status={healthy ? "live" : "paused"}>{healthy ? "Healthy" : "Unhealthy"}</Badge>
             )}
           </Metric>
           <Metric label="Last successful update" valueClassName="min-w-0 text-sm wrap-anywhere">
@@ -260,15 +272,19 @@ function KeeperPanel({ network, ledgerTime }: { network: Network; ledgerTime: nu
  */
 export function OraclePanel() {
   const m = useManifest()
-  const { ledgerTime, isError: clockFailed } = useLedgerClock()
+  const { ledgerTime, isError: clockFailed, sinceReadSeconds } = useLedgerClock()
   const oracle = useOracleView()
+  // One rounding for every age on the page: whole seconds of ledger time, floored.
+  const nowSeconds = ledgerTime === null ? null : Math.floor(ledgerTime)
+  // The clock's time is extrapolated between reads; past 2 × its cadence without a new read, say so.
+  const clockLag = sinceReadSeconds != null && sinceReadSeconds > (2 * LEDGER_CLOCK_REFETCH_MS) / 1000 ? Math.floor(sinceReadSeconds) : null
 
   const noClock = clockFailed && ledgerTime === null ? "the ledger time could not be read" : undefined
   const read = readOf(oracle, DASHBOARD_LIVE_MS)
   const view = oracle.stale ? undefined : oracle.data
   const pick = <T,>(f: (v: OracleView) => Live<T>) => current(oracle, (d) => f(d.view), noClock)
 
-  const left = view ? secondsToBlockNow(view.view.timeToBlock, view.ledgerTime, ledgerTime) : null
+  const left = view ? secondsToBlockNow(view.view.timeToBlock, view.ledgerTime, nowSeconds) : null
   const available = !(view?.view.available.status === "live" && !view.view.available.value)
   const fresh = view ? freshnessNow(view.view, left) : null
 
@@ -277,7 +293,7 @@ export function OraclePanel() {
     label: "Oracle timestamp",
     live: pick((v) => v.timestamp),
     format: (ts) => {
-      const age = ledgerTime !== null ? Math.floor(ledgerTime) - Number(ts) : null
+      const age = nowSeconds !== null ? nowSeconds - Number(ts) : null
       return age !== null && age >= 0 ? `${utc(ts)} · ${formatDuration(age)} ago on the ledger clock` : utc(ts)
     },
     scale: "Unix seconds (UTC)",
@@ -406,6 +422,11 @@ export function OraclePanel() {
             </Row>
             <Row label="Time until operations block">
               <Shown {...timeToBlock} className={freshState === "stale" ? "text-negative" : undefined} />
+              {clockLag !== null ? (
+                <span className="mt-1 block font-sans text-xs/5 font-semibold text-negative">
+                  Ledger clock not refreshed for {formatDuration(clockLag)}: the countdown runs on the last read plus elapsed time
+                </span>
+              ) : null}
             </Row>
           </dl>
           <p className="text-sm text-ink">{BLOCKED_WHEN_STALE_LINE}</p>

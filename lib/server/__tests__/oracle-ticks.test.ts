@@ -45,6 +45,17 @@ describe("tickRow: one cron/oracle run as an oracle_ticks row (D-19)", () => {
   it("any other failure is an error with the error's name only", () => {
     expect(tickRow(failed)).toEqual({ mode: "push", decision: "error", value: null, reason: "failed: TypeError", txHash: null, signer: SIGNER })
   })
+  it("a submitted transaction that did not land keeps its hash, with its result code or 'not confirmed'", () => {
+    expect(tickRow({ status: "failed", mode: "push", signer: SIGNER, name: "invokeHostFunctionTrapped", hash: HASH })).toEqual({
+      mode: "push",
+      decision: "error",
+      value: null,
+      reason: "failed: invokeHostFunctionTrapped",
+      txHash: HASH,
+      signer: SIGNER,
+    })
+    expect(tickRow({ status: "failed", mode: "push", signer: SIGNER, name: "not confirmed", hash: HASH })).toMatchObject({ reason: "failed: not confirmed", txHash: HASH })
+  })
 })
 
 describe("recordTick", () => {

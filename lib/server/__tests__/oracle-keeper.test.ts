@@ -12,6 +12,7 @@ vi.mock("server-only", () => ({}))
 import {
   ORACLE_APY_PERCENT,
   OracleKeeperConfigError,
+  OracleSubmitError,
   createOracleChain,
   keeperSigner,
   nextReferenceValue,
@@ -238,5 +239,41 @@ describe("the RPC oracle chain", () => {
     const { server } = fakeRpc("FAILED")
     const chain = createOracleChain(manifest, { server })
     await expect(chain.send(keeper, invocation)).rejects.toThrow(/failed on-chain/)
+  })
+
+  it("a failed submission is an OracleSubmitError carrying its hash and the result code (the contract trapped)", async () => {
+    const { server, sent } = fakeRpc("FAILED")
+    // As RPC reports a FAILED Soroban transaction (the shape stellar.test.ts pins).
+    const trapped = new xdr.TransactionResult({
+      feeCharged: 48_031n,
+      result: xdr.TransactionResultResult.txFailed([
+        xdr.OperationResult.opInner(xdr.OperationResultTr.invokeHostFunction(xdr.InvokeHostFunctionResult.invokeHostFunctionTrapped())),
+      ]),
+      ext: xdr.TransactionResultExt.v0(),
+    })
+    server.getTransaction.mockImplementation(async () => ({ status: "FAILED", resultXdr: trapped }) as never)
+    const error = await createOracleChain(manifest, { server }).send(keeper, invocation).catch((e: unknown) => e)
+    expect(error).toBeInstanceOf(OracleSubmitError)
+    expect((error as OracleSubmitError).hash).toBe(bytesToHex(sent[0].hash()))
+    expect((error as OracleSubmitError).code).toBe("invokeHostFunctionTrapped")
+    expect((error as Error).message).not.toContain(keeper.secret())
+  })
+
+  it("a FAILED answer without its result reads FAILED; one never confirmed reads not confirmed, with its hash", async () => {
+    const failed = fakeRpc("FAILED")
+    const e1 = await createOracleChain(manifest, { server: failed.server }).send(keeper, invocation).catch((e: unknown) => e)
+    expect(e1).toMatchObject({ code: "FAILED", hash: bytesToHex(failed.sent[0].hash()) })
+    const lost = fakeRpc("NOT_FOUND")
+    vi.useFakeTimers()
+    try {
+      const pending = createOracleChain(manifest, { server: lost.server }).send(keeper, invocation).catch((e: unknown) => e)
+      await vi.runAllTimersAsync()
+      const e2 = await pending
+      expect(e2).toBeInstanceOf(OracleSubmitError)
+      expect(e2).toMatchObject({ code: "not confirmed", hash: bytesToHex(lost.sent[0].hash()) })
+      expect((e2 as Error).message).toMatch(/not confirmed in time/)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

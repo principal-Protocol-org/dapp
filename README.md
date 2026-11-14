@@ -187,7 +187,8 @@ answers:
 Every run, whatever its answer, writes one row to `oracle_ticks` (migration 0004): its time, mode,
 decision (`pushed`, `skipped`, `rejected` or `error`; `synced` is for the feed mode), value, reason,
 tx hash and signer (a public key). An error's reason is `not_configured: <the route's own words>` or
-`failed: <error name>`, never an error's text. A row that cannot be written (no `DATABASE_URL`, a
+`failed: <error name>`, never an error's text. A transaction the keeper sent that did not land keeps
+its hash, with `failed: <result code>` (e.g. `invokeHostFunctionTrapped`) or `failed: not confirmed`. A row that cannot be written (no `DATABASE_URL`, a
 database down) is logged by error name and never changes the answer.
 `GET /api/dashboard/oracle-ticks?limit=` (1 to 100, default 20) serves them, public and without a
 wallet, for this network's oracle: `{ ticks, health, intervalSeconds }`, newest first, cached 60 s
@@ -195,7 +196,8 @@ at the edge, errors never cached (503 `not_configured` or `unavailable`). `healt
 `{ healthy, lastSuccessAt, lastTickAt, rejected24h, failures24h }`: healthy while the last success
 (`pushed` or `synced`; a skipped run changes nothing, so it is none) is younger than
 2 × `intervalSeconds` (1,800 s, the schedule). `lastTickAt` null means no run is recorded: an unknown
-state, which the oracle page reads "No keeper run recorded yet".
+state, which the oracle page reads "No keeper run recorded yet". The answer is cached, so the page
+measures the last success's age itself, on the ledger clock, with the same rule.
 
 Do not create the mainnet schedule before the dApp supports Mainnet. `NEXT_PUBLIC_PRINCIPAL_NETWORK`
 accepts `testnet` or `local` only, so the recorder would write Testnet data into the mainnet database.

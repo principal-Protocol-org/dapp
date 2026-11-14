@@ -23,12 +23,13 @@ export type TickDecision = "pushed" | "synced" | "skipped" | "rejected" | "error
 
 /**
  * A run with no tick: the keeper could not start (`not_configured`: no key, a key that is not the
- * oracle admin, no primary source, mainnet; `message` is the app's own words), or it failed
- * (`name`: the error's name only).
+ * oracle admin, no primary source, mainnet; `message` is the app's own words), or it failed. A
+ * failed run's `name` is the error's name only; for a transaction it sent that did not land
+ * (`OracleSubmitError`), it is the result code or `not confirmed`, and `hash` is that transaction's.
  */
 export type KeeperFailure =
   | { status: "not_configured"; mode: KeeperMode; signer: string | null; message: string }
-  | { status: "failed"; mode: KeeperMode; signer: string | null; name: string }
+  | { status: "failed"; mode: KeeperMode; signer: string | null; name: string; hash?: string }
 
 /** The row a run writes, beside its network, oracle and time. */
 export type TickRow = { mode: KeeperMode; decision: TickDecision; value: string | null; reason: string | null; txHash: string | null; signer: string | null }
@@ -46,7 +47,7 @@ export function tickRow(tick: OracleTick | KeeperFailure): TickRow {
     case "not_configured":
       return { mode, decision: "error", value: null, reason: `not_configured: ${tick.message}`, txHash: null, signer }
     case "failed":
-      return { mode, decision: "error", value: null, reason: `failed: ${tick.name}`, txHash: null, signer }
+      return { mode, decision: "error", value: null, reason: `failed: ${tick.name}`, txHash: tick.hash ?? null, signer }
   }
 }
 

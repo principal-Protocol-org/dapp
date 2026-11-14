@@ -16,7 +16,7 @@ import { activeManifest } from "@/lib/protocol/manifest-source"
 import type { Manifest } from "@/lib/protocol/types"
 import { cronAuthorized, cronJson as json } from "@/lib/server/cron-auth"
 import { sql } from "@/lib/server/db"
-import { keeperSigner, OracleKeeperConfigError, tickOracle, type OracleTick } from "@/lib/server/oracle-keeper"
+import { keeperSigner, OracleKeeperConfigError, OracleSubmitError, tickOracle, type OracleTick } from "@/lib/server/oracle-keeper"
 import { recordTick, type KeeperFailure } from "@/lib/server/oracle-ticks"
 
 // Three reads, one prepared transaction, up to 30 s of confirmation polling, then the tick's row
@@ -58,6 +58,11 @@ export async function GET(request: Request) {
       console.error(`oracle keeper: ${error.message}`)
       outcome = { status: "not_configured", mode, signer: keeperSigner(secret), message: error.message }
       response = json({ error: "not_configured" }, 503)
+    } else if (error instanceof OracleSubmitError) {
+      // A transaction that did not land: its hash and result code are public, and the row keeps them.
+      console.error(`oracle keeper: the oracle update did not land: ${error.code} (tx ${error.hash})`)
+      outcome = { status: "failed", mode, signer: keeperSigner(secret), name: error.code, hash: error.hash }
+      response = json({ error: "failed" }, 500)
     } else {
       console.error("oracle keeper failed:", errorName(error))
       outcome = { status: "failed", mode, signer: keeperSigner(secret), name: errorName(error) }

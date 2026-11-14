@@ -31,10 +31,11 @@ export async function GET(request: Request) {
   if (raw !== null && (!/^\d{1,3}$/.test(raw) || Number(raw) < 1 || Number(raw) > MAX_LIMIT)) return json({ error: "invalid_limit" }, 400)
   const limit = raw === null ? DEFAULT_LIMIT : Number(raw)
 
-  const manifest = activeManifest()
-  const { network } = manifest
-  const oracle = manifest.shared.oracle
   try {
+    // Inside the try: a manifest that cannot be read is a 503, never an unhandled 500.
+    const manifest = activeManifest()
+    const { network } = manifest
+    const oracle = manifest.shared.oracle
     const [ticks, health] = await Promise.all([
       listTicks(sql, { network, oracle, limit }),
       keeperHealth(sql, network, ORACLE_TICK_INTERVAL_SECONDS, { oracle }),

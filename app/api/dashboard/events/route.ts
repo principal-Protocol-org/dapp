@@ -68,8 +68,9 @@ export async function GET(request: Request) {
   const query = id === null ? listQuery(params) : null
   if (query && "error" in query) return json({ error: query.error }, 400)
 
-  const network = activeManifest().network
   try {
+    // Inside the try: a manifest that cannot be read is a 503, never an unhandled 500.
+    const network = activeManifest().network
     if (id !== null) {
       const event = await getIndexedEvent(sql, { network, id })
       return event ? json({ event }, 200, CACHED) : json({ error: "not_found" }, 404)

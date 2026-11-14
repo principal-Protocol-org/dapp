@@ -7,13 +7,19 @@ const mocks = vi.hoisted(() => ({
   listTicks: vi.fn(),
   keeperHealth: vi.fn(),
   DatabaseConfigError: class DatabaseConfigError extends Error {},
+  manifestError: null as Error | null,
 }))
 vi.mock("@/lib/server/db", () => ({ sql: "the-sql", DatabaseConfigError: mocks.DatabaseConfigError }))
 vi.mock("@/lib/server/oracle-ticks", () => ({ listTicks: mocks.listTicks, keeperHealth: mocks.keeperHealth, ORACLE_TICK_INTERVAL_SECONDS: 1_800 }))
 vi.mock("@/lib/protocol/manifest-source", async () => {
   const { parseManifest } = await import("@/lib/protocol/manifest")
   const m = parseManifest((await import("@/config/manifests/local.example.json")).default)
-  return { activeManifest: () => m }
+  return {
+    activeManifest: () => {
+      if (mocks.manifestError) throw mocks.manifestError
+      return m
+    },
+  }
 })
 
 import localExample from "@/config/manifests/local.example.json"
@@ -39,6 +45,21 @@ describe("GET /api/dashboard/oracle-ticks (D-19)", () => {
   beforeEach(() => {
     mocks.listTicks.mockReset().mockResolvedValue([TICK])
     mocks.keeperHealth.mockReset().mockResolvedValue(HEALTH)
+    mocks.manifestError = null
+  })
+
+  it("a manifest that cannot be read answers 503 unavailable, never cached, logged by name only", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {})
+    try {
+      mocks.manifestError = new Error('NEXT_PUBLIC_PRINCIPAL_NETWORK must be "testnet" or "local", got "x".')
+      const res = await get()
+      expect(res.status).toBe(503)
+      expect(await res.json()).toEqual({ error: "unavailable" })
+      expect(res.headers.get("cache-control")).toBe("no-store")
+      expect(error.mock.calls.map((c) => c.map(String).join(" "))).toEqual(["dashboard oracle-ticks route: Error"])
+    } finally {
+      error.mockRestore()
+    }
   })
 
   it("answers the recent ticks and the keeper's health for this network's oracle, cached 60 s", async () => {

@@ -9,11 +9,21 @@ const mocks = vi.hoisted(() => ({
   recordTick: vi.fn(),
   verify: vi.fn(),
   OracleKeeperConfigError: class OracleKeeperConfigError extends Error {},
+  OracleSubmitError: class OracleSubmitError extends Error {
+    constructor(
+      readonly hash: string,
+      readonly code: string,
+    ) {
+      super(`the oracle update failed on-chain (${hash}, ${code})`)
+      this.name = "OracleSubmitError"
+    }
+  },
 }))
 vi.mock("@/lib/server/oracle-keeper", () => ({
   tickOracle: mocks.tickOracle,
   keeperSigner: mocks.keeperSigner,
   OracleKeeperConfigError: mocks.OracleKeeperConfigError,
+  OracleSubmitError: mocks.OracleSubmitError,
 }))
 // The telemetry write is mocked: these tests need no database. `sql` is passed through as is.
 vi.mock("@/lib/server/oracle-ticks", () => ({ recordTick: mocks.recordTick }))
@@ -179,6 +189,25 @@ describe("cron/oracle telemetry (D-19): one oracle_ticks row per run", () => {
       expect(res.status).toBe(500)
       expect(recorded()).toEqual({ status: "failed", mode: "push", signer: SIGNER, name: "TypeError" })
       expect(JSON.stringify(mocks.recordTick.mock.calls)).not.toContain("provider.example")
+    } finally {
+      error.mockRestore()
+    }
+  })
+
+  it("a submitted transaction that did not land is recorded with its hash and its result code (500 failed)", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {})
+    try {
+      const hash = "ef".repeat(32)
+      mocks.tickOracle.mockRejectedValue(new mocks.OracleSubmitError(hash, "invokeHostFunctionTrapped"))
+      const res = await run()
+      expect(res.status).toBe(500)
+      expect(await res.json()).toEqual({ error: "failed" })
+      expect(recorded()).toEqual({ status: "failed", mode: "push", signer: SIGNER, name: "invokeHostFunctionTrapped", hash })
+      expect(error.mock.calls.map((c) => c.map(String).join(" "))).toEqual([`oracle keeper: the oracle update did not land: invokeHostFunctionTrapped (tx ${hash})`])
+      mocks.recordTick.mockClear()
+      mocks.tickOracle.mockRejectedValue(new mocks.OracleSubmitError(hash, "not confirmed"))
+      await run()
+      expect(recorded()).toMatchObject({ name: "not confirmed", hash })
     } finally {
       error.mockRestore()
     }

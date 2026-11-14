@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
-import { render, screen, within } from "@testing-library/react"
+import { act, render, screen, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import type { ReactNode } from "react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -22,7 +22,12 @@ const down = (error = "rpc down"): Live<never> => ({ status: "unavailable", erro
 
 const mocks = vi.hoisted(() => ({
   manifest: {} as Record<string, unknown>,
-  clock: { ledgerTime: 0 as number | null, sequence: 5_720_087 as number | null, isError: false },
+  clock: { ledgerTime: 0 as number | null, sequence: 5_720_087 as number | null, isError: false } as {
+    ledgerTime: number | null
+    sequence: number | null
+    isError: boolean
+    sinceReadSeconds?: number | null
+  },
   fetchOracleView: vi.fn(),
   fetch: vi.fn(),
 }))
@@ -37,7 +42,7 @@ const baseManifest = () => ({
 })
 vi.mock("@/components/app/manifest-provider", () => ({ useManifest: () => mocks.manifest }))
 vi.mock("@/lib/protocol/reader", async (importActual) => ({ ...(await importActual<object>()), createRpcReader: () => ({}) }))
-vi.mock("@/hooks/use-ledger-clock", () => ({ useLedgerClock: () => mocks.clock }))
+vi.mock("@/hooks/use-ledger-clock", () => ({ useLedgerClock: () => mocks.clock, LEDGER_CLOCK_REFETCH_MS: 6_000 }))
 vi.mock("@/lib/protocol/dashboard/oracle", async (importActual) => ({ ...(await importActual<object>()), fetchOracleView: mocks.fetchOracleView }))
 // No wallet provider anywhere: a view that read the wallet would throw.
 vi.mock("@/hooks/use-wallet", () => ({
@@ -216,7 +221,7 @@ describe("the oracle page (/dashboard/oracle, D-17)", () => {
     expect(row(value, "Freshness")).toMatch(/^Stale/)
   })
 
-  it("Unavailable, with the reason, without a ledger clock; and after a failed refresh", async () => {
+  it("Unavailable, with the reason, without a ledger clock, or when the figures cannot be read", async () => {
     mocks.clock = { ledgerTime: null, sequence: null, isError: true }
     const { unmount } = render(wrap(<OraclePanel />))
     const value = region("Reference value")
@@ -230,6 +235,50 @@ describe("the oracle page (/dashboard/oracle, D-17)", () => {
     const again = region("Reference value")
     expect(await again.findByRole("button", { name: "Why Reference value is unavailable, and how to verify it" })).toBeTruthy()
     expect(row(again, "Freshness")).toBe("Unavailable")
+  })
+
+  it("after a failed refresh the old read is never shown as current: every figure is Unavailable with the reason (oracle.stale)", async () => {
+    const user = userEvent.setup()
+    render(wrap(<OraclePanel />))
+    const value = region("Reference value")
+    expect(await value.findByText("1.0000919")).toBeTruthy()
+    // The refetch fails; React Query keeps the old data, flagged stale.
+    mocks.fetchOracleView.mockRejectedValue(new Error("rpc down"))
+    await act(() => client.refetchQueries({ queryKey: ["dashboard", "oracle"] }))
+    expect(await value.findByRole("button", { name: "Why Reference value is unavailable, and how to verify it" })).toBeTruthy()
+    expect(value.queryByText("1.0000919")).toBeNull()
+    expect(row(value, "Freshness")).toBe("Unavailable")
+    expect(row(value, "Time until operations block")).toBe("Unavailable")
+    expect(row(region("Policy"), "Max stale")).toBe("Unavailable")
+    expect(region("Update path").queryByText("Not supported by this oracle's code")).toBeNull()
+    await user.click(value.getByRole("button", { name: "Why Reference value is unavailable, and how to verify it" }))
+    expect((await screen.findAllByText(/the last refresh failed: rpc down/)).length).toBeGreaterThan(0)
+  })
+
+  it("one rounding: with a ledger clock between seconds, the timestamp's age, the freshness age and the countdown agree", async () => {
+    mocks.clock = { ...mocks.clock, ledgerTime: LEDGER_TIME + 0.5 }
+    render(wrap(<OraclePanel />))
+    const value = region("Reference value")
+    await value.findByText("1.0000919")
+    // The view was read at ledger time LEDGER_TIME + 0.5 (floored by fetchOracleView); now is the same instant.
+    expect(row(value, "Timestamp")).toContain("12m 0s ago")
+    expect(row(value, "Freshness")).toContain("age 12m 0s of 1 hour")
+    expect(row(value, "Time until operations block")).toContain("48m 0s")
+  })
+
+  it("marks the countdown when the ledger clock has not been refreshed for over 2 × its cadence (12 s)", async () => {
+    mocks.clock = { ...mocks.clock, isError: true, sinceReadSeconds: 12 }
+    const { rerender } = render(wrap(<OraclePanel />))
+    const value = region("Reference value")
+    await value.findByText("1.0000919")
+    expect(row(value, "Time until operations block")).not.toContain("not refreshed")
+    mocks.clock = { ...mocks.clock, isError: true, sinceReadSeconds: 15.4 }
+    rerender(wrap(<OraclePanel />))
+    expect(row(value, "Time until operations block")).toContain("Ledger clock not refreshed for 15s")
+    // Read again: the marker goes.
+    mocks.clock = { ...mocks.clock, isError: false, sinceReadSeconds: 1 }
+    rerender(wrap(<OraclePanel />))
+    expect(row(value, "Time until operations block")).not.toContain("not refreshed")
   })
 
   it("shows the policy and the value bounds", async () => {
@@ -369,6 +418,23 @@ describe("the keeper's health on the oracle page (D-19)", () => {
     expect(within(runs).getAllByRole("link", { name: `View transaction ${TX2} on stellar.expert` }).length).toBeGreaterThan(0)
     expect(within(runs).getAllByTitle(SIGNER).length).toBeGreaterThan(0)
     expect(keeper.getByRole("link", { name: /oracle-ticks/ }).getAttribute("href")).toBe("/api/dashboard/oracle-ticks?limit=100")
+  })
+
+  it("the badge follows the ledger clock, not the cached answer: healthy:true but a last success 3,600 s old reads Unhealthy", async () => {
+    // The API answer is cached up to ~6 min: it said healthy when it was computed.
+    const at = (ageSeconds: number) => new Date((LEDGER_TIME - ageSeconds) * 1000).toISOString()
+    answers.ticks = () => Response.json({ ticks: [tick({ at: at(3_600) })], health: { ...HEALTHY, healthy: true, lastSuccessAt: at(3_600), lastTickAt: at(3_600) }, intervalSeconds: 1_800 })
+    const { unmount } = render(wrap(<OraclePanel />))
+    const keeper = region("Keeper")
+    expect(await keeper.findByText("Unhealthy")).toBeTruthy()
+    expect(keeper.queryByText("Healthy")).toBeNull()
+    expect(row(keeper, "Last successful update")).toContain("1h 0m ago")
+    unmount()
+    client.clear()
+    // 3,599 s: still healthy, even if the cached answer said otherwise.
+    answers.ticks = () => Response.json({ ticks: [tick({ at: at(3_599) })], health: { ...HEALTHY, healthy: false, lastSuccessAt: at(3_599), lastTickAt: at(3_599) }, intervalSeconds: 1_800 })
+    render(wrap(<OraclePanel />))
+    expect(await region("Keeper").findByText("Healthy")).toBeTruthy()
   })
 
   it("unhealthy when the last success is too old, or there is none", async () => {

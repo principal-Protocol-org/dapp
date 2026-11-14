@@ -58,6 +58,10 @@ const MARKET_WORDS: Record<string, string> = {
   src_set: "Oracle sources set",
   feed_set: "Oracle feed set",
   adm_xfer: "Admin handed over",
+  // Wiring: the SY and the pool name their RecoveryEscrow, the SY and the manager their RiskControl; the SY sets its deposit cap.
+  esc_set: "RecoveryEscrow wired",
+  rc_set: "RiskControl wired",
+  cap_set: "Deposit cap set",
 }
 
 /** A `paused` event's state: only a decoded boolean says paused or unpaused; anything else is not guessed. */

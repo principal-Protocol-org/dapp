@@ -33,8 +33,11 @@ describe("event words", () => {
     for (const topic of [...market, ...pool, ...oracle]) expect(eventWords(topic), topic).not.toBe(topic)
     expect(eventWords("buy_pt")).toBe("PT bought")
     expect(eventWords("ref_rej")).toBe("Oracle update rejected")
-    // Topics the index stores undecoded show as they are.
-    expect(eventWords("esc_set")).toBe("esc_set")
+    // Every topic the indexed contracts publish has words (principal 665bb67 and origin/main), the wiring ones included.
+    expect(eventWords("esc_set")).toBe("RecoveryEscrow wired")
+    expect(eventWords("rc_set")).toBe("RiskControl wired")
+    expect(eventWords("cap_set")).toBe("Deposit cap set")
+    expect(eventWords("not_a_topic")).toBe("not_a_topic")
     for (const topic of ["deposit", "withdraw", "mint", "recombine", "redeem", "yt_claim", "buy_pt", "sell_pt", "sell_yt", "flash_yt", "add_liq", "zap_liq", "rem_liq", "sy_xfer", "lp_xfer"])
       expect(eventSubject(topic, { from: "GF", to: "GT" }), topic).toBe("GF")
     expect(eventSubject("seize", { caller: "GC", account: "GA" })).toBe("GA")
