@@ -28,9 +28,14 @@ const RISK_WORDS: Record<string, string> = {
   rm_cons: "Consumer removed",
 }
 
+/** A `paused` event's state: only a decoded boolean says paused or unpaused; anything else is not guessed. */
+export function pausedWords(data: Record<string, unknown>): "Paused" | "Unpaused" | "Pause state not decoded" {
+  return data.paused === true ? "Paused" : data.paused === false ? "Unpaused" : "Pause state not decoded"
+}
+
 /** Plain words for any indexed event this module knows; a topic not listed shows as it is. */
 export function eventWords(topic: string, data: Record<string, unknown> = {}): string {
-  if (topic === "paused") return data.paused === false ? "Unpaused" : "Paused"
+  if (topic === "paused") return pausedWords(data)
   return COMPLIANCE_WORDS[topic] ?? RISK_WORDS[topic] ?? topic
 }
 

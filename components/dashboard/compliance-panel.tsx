@@ -152,10 +152,26 @@ function EventRef({ network, event }: { network: Network; event: IndexedEscrowEv
   )
 }
 
-function TxRow({ label, network, event, indexError }: { label: string; network: Network; event: IndexedEscrowEvent | null; indexError: string | null }) {
+function TxRow({
+  label,
+  network,
+  event,
+  indexError,
+  pending = false,
+}: {
+  label: string
+  network: Network
+  event: IndexedEscrowEvent | null
+  indexError: string | null
+  pending?: boolean
+}) {
   return (
     <Row label={label}>
-      {event ? (
+      {pending ? (
+        <span role="status" aria-label="Reading the event index" className="block">
+          <Skeleton className="h-4 w-48 max-w-full" />
+        </span>
+      ) : event ? (
         <EventRef network={network} event={event} />
       ) : indexError ? (
         <UnavailableTip label={label} reason={indexError} />
@@ -182,6 +198,15 @@ function RecordCard({ row, u, network, figures }: { row: EscrowRow; u: Units; ne
   let badge: ReactNode = null
   if (row.kind === "unavailable") {
     body = <UnavailableTip label={title} reason={row.reason} className="text-sm text-ink" />
+  } else if (row.kind === "waiting") {
+    // Archived on-chain: its stand-in comes from the index, which has not answered yet.
+    badge = <Badge status="dev">Archived</Badge>
+    body = (
+      <>
+        <p className="text-sm text-ink">Archived on-chain; reading the event index for it</p>
+        <Skeleton className="h-16 w-full" />
+      </>
+    )
   } else if (row.kind === "indexed") {
     const d = row.seizure.data
     badge = <Badge status="dev">Archived</Badge>
@@ -257,8 +282,10 @@ function RecordCard({ row, u, network, figures }: { row: EscrowRow; u: Units; ne
           ) : null}
         </dl>
         <dl className="grid gap-3">
-          <TxRow label="Seizure transaction" network={network} event={row.seizure} indexError={row.indexError} />
-          {r?.finalized ? <TxRow label="Finalization transaction" network={network} event={row.finalization} indexError={row.indexError} /> : null}
+          <TxRow label="Seizure transaction" network={network} event={row.seizure} indexError={row.indexError} pending={row.indexPending} />
+          {r?.finalized ? (
+            <TxRow label="Finalization transaction" network={network} event={row.finalization} indexError={row.indexError} pending={row.indexPending} />
+          ) : null}
         </dl>
       </>
     )
@@ -336,11 +363,12 @@ export function CompliancePanel() {
   }))
 
   const recordsRead = readOf(escrows, DASHBOARD_AGGREGATE_MS)
-  const index: { events: IndexedEscrowEvent[] } | { error: string } | null = escrowEvents.isError
+  // Live first (D-16): the records never wait for the index; only their transactions and an archived record's stand-in do.
+  const index: { events: IndexedEscrowEvent[] } | { error: string } | "pending" = escrowEvents.isError
     ? { error: escrowEvents.error?.message ?? "the event index could not be read" }
     : escrowEvents.data
       ? { events: escrowEvents.data.rows }
-      : null
+      : "pending"
 
   type EscrowBlock = {
     escrow: string
@@ -359,7 +387,7 @@ export function CompliancePanel() {
       read: recordsRead,
     }
     const rows =
-      live.status === "live" && index && !("refused" in units)
+      live.status === "live" && !("refused" in units)
         ? joinEscrowRecords(e.escrow, live, index).map((row) => ({
             row,
             figures: row.kind === "live" ? recordFigures(row.id, row.record, units, recordsRead) : undefined,

@@ -8,7 +8,7 @@ import { readLive, toAddress, toBool, unavailable, type ContractReader } from ".
 import type { Live, Manifest } from "../types"
 
 /** An indexed `add_psr` or `rm_psr` event (the fields this module reads), as the events API lists it. */
-export type PauserEvent = { id: string; topic: string; ledger: number; closeTime: string; txHash: string; data: Record<string, unknown> }
+export type PauserEvent = { id: string; contractId: string; topic: string; ledger: number; closeTime: string; txHash: string; data: Record<string, unknown> }
 
 /** An account the index says is a pauser: its last `add_psr`/`rm_psr` event is this `add_psr`. */
 export type IndexedPauser = { account: string; added: PauserEvent }
@@ -17,13 +17,14 @@ export type IndexedPauser = { account: string; added: PauserEvent }
 const oldestFirst = (a: PauserEvent, b: PauserEvent) => a.ledger - b.ledger || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
 
 /**
- * The pausers the index holds, in the order they were (last) added: `add_psr` and `rm_psr` replayed
- * oldest first, so an account removed and added again is listed, and one removed last is not.
+ * The pausers the index holds for `riskControl`, in the order they were (last) added: its `add_psr`
+ * and `rm_psr` replayed oldest first, so an account removed and added again is listed, and one
+ * removed last is not. Another contract's events are ignored.
  */
-export function indexedPausers(rows: readonly PauserEvent[]): IndexedPauser[] {
+export function indexedPausers(rows: readonly PauserEvent[], riskControl: string): IndexedPauser[] {
   const last = new Map<string, PauserEvent>()
   for (const row of [...rows].sort(oldestFirst)) {
-    if (row.topic !== "add_psr" && row.topic !== "rm_psr") continue
+    if (row.contractId !== riskControl || (row.topic !== "add_psr" && row.topic !== "rm_psr")) continue
     const pauser = row.data.pauser
     if (typeof pauser !== "string" || pauser === "") continue
     // Re-inserting moves the account to the end: the map keeps the order of each account's last event.

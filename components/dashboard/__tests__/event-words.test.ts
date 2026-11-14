@@ -18,6 +18,9 @@ describe("event words", () => {
     for (const topic of ["cb_limit", "ast_limit", "cb_window", "add_psr", "rm_psr", "add_cons", "rm_cons", "acc_grant"]) expect(eventWords(topic)).not.toBe(topic)
     expect(eventWords("paused", { caller: "GC", paused: true })).toBe("Paused")
     expect(eventWords("paused", { paused: false })).toBe("Unpaused")
+    // An undecoded event (stored with data {}) is never read as a pause.
+    expect(eventWords("paused", {})).toBe("Pause state not decoded")
+    expect(eventWords("paused", { paused: "true" })).toBe("Pause state not decoded")
     expect(eventWords("mystery")).toBe("mystery")
     expect(eventSubject("add_psr", { caller: "GC", pauser: "GP" })).toBe("GP")
     expect(eventSubject("add_cons", { caller: "GC", consumer: "CS" })).toBe("CS")

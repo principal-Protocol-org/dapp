@@ -17,7 +17,7 @@ import type { Live, Manifest, Network } from "@/lib/protocol/types"
 import { AsOf, readsOf } from "./as-of"
 import { CopyEvidence } from "./copy-evidence"
 import { EventList, TxLink, type EventRowText } from "./event-list"
-import { accountShort, closeTimeText } from "./event-words"
+import { accountShort, closeTimeText, pausedWords } from "./event-words"
 import { decimalsScale, verifiable, type FigureSpec } from "./figure"
 import { Panel, Row } from "./panel"
 import { current, readOf, refuse, Shown, unitsOf, type QueryLike } from "./query-figures"
@@ -260,7 +260,13 @@ export function RiskPanel() {
     const by = typeof r.data.caller === "string" ? <span title={r.data.caller}>by {accountShort(r.data.caller)}</span> : undefined
     const value = (raw: unknown) => {
       if (typeof raw !== "string" && typeof raw !== "number") return "an unreadable value"
-      const v = BigInt(raw)
+      let v: bigint
+      try {
+        v = BigInt(raw)
+      } catch {
+        // Not an integer: shown as stored, never thrown or guessed.
+        return `${raw} (raw value)`
+      }
       return v === 0n ? "0 (disabled)" : amount(v)
     }
     if (r.topic === "cb_limit") return { title: `Circuit-breaker limit set to ${value(r.data.limit)}`, detail: by }
@@ -272,7 +278,12 @@ export function RiskPanel() {
   }
   const describePause = (r: IndexedEvent): EventRowText => {
     const by = typeof r.data.caller === "string" ? <span title={r.data.caller}>by {accountShort(r.data.caller)}</span> : undefined
-    if (r.topic === "paused") return { title: `${contractLabel(m, r.contractId)} ${r.data.paused === false ? "unpaused" : "paused"}`, detail: by }
+    if (r.topic === "paused") {
+      const state = pausedWords(r.data)
+      const label = contractLabel(m, r.contractId)
+      // Only a decoded boolean says paused or unpaused (no guess).
+      return { title: state === "Pause state not decoded" ? `${label}: pause state not decoded` : `${label} ${state.toLowerCase()}`, detail: by }
+    }
     const who = typeof r.data.pauser === "string" ? accountShort(r.data.pauser) : "an account"
     return { title: r.topic === "add_psr" ? `Pauser added: ${who}` : `Pauser removed: ${who}`, detail: by }
   }
@@ -392,15 +403,13 @@ export function RiskPanel() {
                 <UnavailableTip label="Indexed pausers" reason={pausers.events.error?.message ?? "the event index could not be read"} />
               </Row>
             ) : !pausers.events.data ? (
-              <div>
-                <dd>
-                  <Skeleton className="h-10 w-full" />
-                </dd>
-              </div>
+              <Row label="Indexed pausers">
+                <Skeleton className="h-5 w-40 max-w-full" />
+              </Row>
             ) : pauserFigures.length === 0 ? (
-              <div className="border-t border-line pt-3">
-                <dd className="text-sm text-ink-muted">No pauser indexed yet</dd>
-              </div>
+              <Row label="Indexed pausers">
+                <span className="font-sans text-ink-muted">No pauser indexed yet</span>
+              </Row>
             ) : (
               pauserFigures.map((p) => (
                 <Row key={p.account} label={<AccountLink network={m.network} id={p.account} />}>

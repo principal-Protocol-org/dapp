@@ -27,7 +27,7 @@ vi.mock("@/components/app/manifest-provider", () => {
       { marketId: "m1", contracts: { recoveryEscrow: "CESCROW" } },
       { marketId: "m2", contracts: { recoveryEscrow: "CESCROW" } },
     ],
-    shared: {},
+    shared: { riskControl: "CRISK" },
   }
   return { useManifest: () => manifest }
 })
@@ -418,7 +418,9 @@ describe("useAllEvents", () => {
     const { result } = renderHook(() => useAllEvents({ group: "risk", topics: ["add_psr", "rm_psr"] }), { wrapper })
     await waitFor(() => expect(result.current.isError).toBe(true))
     expect(n).toBe(MAX_EVENT_PAGES)
-    expect(result.current.error?.message).toBe(`the event index holds more than ${MAX_EVENT_PAGES * 200} such events, more than this page reads`)
+    // 25 full pages may be exactly 5,000 rows, or more: the page cannot tell without reading on.
+    expect(result.current.error?.message).toBe("the event index holds 5,000 or more rows for this list, more than this page reads")
+    expect(MAX_EVENT_PAGES * 200).toBe(5000)
   })
 })
 
@@ -442,7 +444,7 @@ describe("useEventCounts", () => {
 describe("usePausers", () => {
   const A = "GBZXN7PIRZGNMHGA7MUUUF4GWPY5AYPV6LY4UV2GL6VJGIQRXFDNMADI"
   it("lists the indexed pausers, then confirms each live every 15 s", async () => {
-    const added = { ...row("0000000000000000009-0000000000", 9, "risk", "add_psr"), data: { caller: "GADMIN", pauser: A } }
+    const added = { ...row("0000000000000000009-0000000000", 9, "risk", "add_psr"), contractId: "CRISK", data: { caller: "GADMIN", pauser: A } }
     const fetchMock = vi.fn(async () => Response.json(indexAnswer({ rows: [added] })))
     vi.stubGlobal("fetch", fetchMock)
     mocks.fetchPausers.mockResolvedValue({ admin: { status: "live", value: "GADMIN", ledger: 1 }, adminIsPauser: { status: "live", value: true, ledger: 1 }, pausers: [] })

@@ -179,6 +179,31 @@ describe("joinEscrowRecords (D-16)", () => {
   })
 })
 
+describe("joinEscrowRecords while the index has not answered (live first, D-16)", () => {
+  it("live records show at once, their transactions pending; an archived one waits for the index", async () => {
+    const list = await liveList({ 0: ARCHIVED, 1: raw(1n) }, 2n)
+    const rows = joinEscrowRecords(ESCROW, list, "pending")
+    expect(rows[0]).toEqual({ kind: "waiting", id: 0n })
+    expect(rows[1]).toMatchObject({ kind: "live", id: 1n, seizure: null, finalization: null, indexError: null, indexPending: true })
+    expect(rows[1].kind === "live" && rows[1].record.status).toBe("live")
+  })
+
+  it("once it answers, nothing is pending", async () => {
+    const list = await liveList({ 0: raw(0n) }, 1n)
+    expect(joinEscrowRecords(ESCROW, list, { events: [indexed("recovery", "0")] })[0]).toMatchObject({ kind: "live", indexPending: false })
+    expect(joinEscrowRecords(ESCROW, list, { error: "down" })[0]).toMatchObject({ kind: "live", indexPending: false, indexError: "down" })
+  })
+
+  it("two indexed events of one record with the same ledger and id keep a stable order (the earliest is the seizure)", async () => {
+    const list = await liveList({ 0: raw(0n) }, 1n)
+    const a = indexed("recovery", "0", { txHash: "aa".repeat(32) })
+    const b = { ...a, txHash: "bb".repeat(32) }
+    // Same id and ledger: the comparator says equal (0), so the sort keeps the given order.
+    const [row] = joinEscrowRecords(ESCROW, list, { events: [a, b] })
+    expect(row.kind === "live" && row.seizure?.txHash).toBe("aa".repeat(32))
+  })
+})
+
 describe("fetchAssetCompliance", () => {
   const manifest = parseManifest(testnetJson)
   const market = manifest.markets[0]

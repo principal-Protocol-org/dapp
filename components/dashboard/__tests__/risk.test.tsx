@@ -124,13 +124,18 @@ const ev = (ledger: number, topic: string, data: Record<string, unknown>, contra
   data,
 })
 
-type Answers = { pausers?: unknown[]; limits?: unknown[]; pauseHistory?: unknown[]; alerts?: () => Response }
+type Answers = { pausers?: unknown[]; pausersDown?: boolean; pausersFull?: boolean; limits?: unknown[]; pauseHistory?: unknown[]; alerts?: () => Response }
 let answers: Answers = {}
 
 function answer(url: string): Response {
   if (url.startsWith("/api/dashboard/alerts"))
     return answers.alerts ? answers.alerts() : new Response("<!DOCTYPE html><title>404</title>", { status: 404, headers: { "content-type": "text/html" } })
-  if (url.includes("group=risk&topic=add_psr")) return Response.json({ ...INDEX, rows: answers.pausers ?? [] })
+  if (url.includes("group=risk&topic=add_psr")) {
+    if (answers.pausersDown) return Response.json({ error: "unavailable" }, { status: 503 })
+    // A page of 200 every time: more history than the page reads.
+    if (answers.pausersFull) return Response.json({ ...INDEX, rows: Array.from({ length: 200 }, () => ev(5_718_000, "add_psr", { caller: ADMIN, pauser: A })) })
+    return Response.json({ ...INDEX, rows: answers.pausers ?? [] })
+  }
   if (url.includes("topic=cb_limit")) return Response.json({ ...INDEX, rows: answers.limits ?? [] })
   if (url.includes("topic=paused")) return Response.json({ ...INDEX, rows: answers.pauseHistory ?? [] })
   return Response.json(INDEX)
@@ -164,6 +169,15 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals())
 
 const region = (name: string) => within(screen.getByRole("region", { name }))
+
+/** Every `dd` of the region's lists has its `dt` (valid `<dl>` nesting: each `div` group holds a term and its description). */
+function expectValidLists(name: string) {
+  const el = screen.getByRole("region", { name })
+  for (const dl of el.querySelectorAll("dl")) {
+    for (const child of dl.children) expect(child.tagName).toBe("DIV")
+    for (const dd of dl.querySelectorAll("dd")) expect(dd.parentElement?.querySelector(":scope > dt"), dd.textContent ?? "").toBeTruthy()
+  }
+}
 
 describe("the risk page (/dashboard/risk)", () => {
   it("shows the limit, the volume, the raw remaining capacity and the wrap-and-mint capacity with its explanation (D-10)", async () => {
@@ -273,6 +287,7 @@ describe("the risk page (/dashboard/risk)", () => {
     // The admin pauses by the contract's rule, with no event.
     expect(p.getByText("Admin (a pauser by the contract's rule)")).toBeTruthy()
     expect(p.getByRole("button", { name: "How to verify RiskControl admin" })).toBeTruthy()
+    expectValidLists("Pausers")
   })
 
   it("an indexed pauser the contract no longer counts is flagged, never listed as a pauser", async () => {
@@ -285,8 +300,32 @@ describe("the risk page (/dashboard/risk)", () => {
   it("no pauser indexed yet reads plainly, and the admin is still shown", async () => {
     render(wrap(<RiskPanel />))
     const p = region("Pausers")
+    // While the index is read, the list's terms and descriptions stay paired.
+    expectValidLists("Pausers")
     expect(await p.findByText("No pauser indexed yet")).toBeTruthy()
     expect(await p.findByText("GBLP…B7UA")).toBeTruthy()
+    expectValidLists("Pausers")
+  })
+
+  it("the pausers list is Unavailable, never empty, when the index cannot be read", async () => {
+    answers.pausersDown = true
+    render(wrap(<RiskPanel />))
+    const p = region("Pausers")
+    // Retried once (the app's default) before it counts as down.
+    expect(await p.findByRole("button", { name: "More about Indexed pausers (unavailable)" }, { timeout: 4000 })).toBeTruthy()
+    expect(p.queryByText("No pauser indexed yet")).toBeNull()
+    expectValidLists("Pausers")
+  })
+
+  it("the pausers list is Unavailable, never partial or empty, past the history the page reads", async () => {
+    const user = userEvent.setup()
+    answers.pausersFull = true
+    render(wrap(<RiskPanel />))
+    const p = region("Pausers")
+    await user.click(await p.findByRole("button", { name: "More about Indexed pausers (unavailable)" }, { timeout: 4000 }))
+    expect((await screen.findAllByText(/holds 5,000 or more rows/)).length).toBeGreaterThan(0)
+    expect(p.queryByText("No pauser indexed yet")).toBeNull()
+    expect(mocks.fetchPausers).not.toHaveBeenCalledWith(expect.anything(), expect.anything(), [A])
   })
 
   it("shows the limit-change history (indexed cb_limit, ast_limit, cb_window) under the current live values", async () => {
@@ -324,6 +363,23 @@ describe("the risk page (/dashboard/risk)", () => {
     expect((await h.findAllByText("MarketPool CPOOL unpaused")).length).toBeGreaterThan(0)
     expect(h.getAllByText("RiskControl CRISK paused").length).toBeGreaterThan(0)
     expect(mocks.fetch).toHaveBeenCalledWith("/api/dashboard/events?topic=paused%2Cadd_psr%2Crm_psr&limit=20")
+  })
+
+  it("a pause event whose state was not decoded is never read as a pause", async () => {
+    answers.pauseHistory = [ev(5_718_650, "paused", {}), ev(5_718_640, "paused", { caller: ADMIN, paused: true })]
+    render(wrap(<RiskPanel />))
+    const h = region("Pause history")
+    expect((await h.findAllByText("RiskControl CRISK: pause state not decoded")).length).toBeGreaterThan(0)
+    // Only the decoded one reads paused.
+    expect(h.getAllByText("RiskControl CRISK paused")).toHaveLength(1)
+  })
+
+  it("a limit that is not an integer shows its raw value, never throws", async () => {
+    answers.limits = [ev(5_718_400, "cb_limit", { caller: ADMIN, limit: "1.5" }), ev(5_718_300, "ast_limit", { caller: ADMIN, asset: "CSAC", limit: "lots" })]
+    render(wrap(<RiskPanel />))
+    const h = region("Limit changes")
+    expect((await h.findAllByText("Circuit-breaker limit set to 1.5 (raw value)")).length).toBeGreaterThan(0)
+    expect(h.getAllByText("USDY asset limit set to lots (raw value)").length).toBeGreaterThan(0)
   })
 
   it("exhaustion history: No alert data yet until the alerts route exists (D-12)", async () => {

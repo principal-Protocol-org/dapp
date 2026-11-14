@@ -15,6 +15,7 @@ const HOLDER = "GBZXN7PIRZGNMHGA7MUUUF4GWPY5AYPV6LY4UV2GL6VJGIQRXFDNMADI"
 const ADMIN = "GBLPAJ2GVSFUWCUIFMEV4EOV2XIOEWMJRIQ3LOM2Z42TNIY3J6ACB7UA"
 const SEIZE_TX = "445a001b1a22259cc9566fadbd9645da017240fb8a31c3b068ca12e437c7e336"
 const FINAL_TX = "1ef22da5bd6d6d1b7a3f0e5c4d2b1a09f8e7d6c5b4a39281706f5e4d3c2ba829"
+const SEIZE_TX_1 = "84ba9d7f2c90b4528265a70087cc0eba44a1276f863da393a6c568e4fd7608b7"
 
 const src = (fn: string, contractId: string, args: unknown[] = [], ledger = 5_720_087): ReadSource => ({ contractId, fn, args, rawXdr: "AAAA", ledger, rpcUrl: RPC })
 const live = <T,>(value: T, source: ReadSource): Live<T> => ({ status: "live", value, ledger: source.ledger, source })
@@ -129,10 +130,11 @@ const permEvent = (ledger: number, topic: string, data: Record<string, unknown>)
   data,
 })
 
-type Answers = { escrow?: unknown[]; reconcile?: unknown; counts?: Record<string, number>; permissioning?: unknown[]; escrowDown?: boolean }
+type Answers = { escrow?: unknown[]; reconcile?: unknown; counts?: Record<string, number>; permissioning?: unknown[]; escrowDown?: boolean; escrowHang?: boolean }
 let answers: Answers = {}
 
-function answer(url: string): Response {
+function answer(url: string): Response | Promise<Response> {
+  if (url.includes("group=escrow") && answers.escrowHang) return new Promise<Response>(() => {})
   if (url.includes("group=escrow")) {
     if (answers.escrowDown) return Response.json({ error: "not_configured" }, { status: 503 })
     return Response.json({ ...INDEX, rows: answers.escrow ?? [], ...(answers.reconcile !== undefined ? { reconcile: answers.reconcile } : {}) })
@@ -201,7 +203,7 @@ describe("the compliance page (/dashboard/compliance)", () => {
 
   it("lists live records with the tx hashes joined from the indexed recovery and finalize events", async () => {
     withRecords([record(0n), record(1n, { finalized: true, underlyingFromPt: 2_400_000_000n, underlyingFromYt: 7_000_000n })])
-    answers.escrow = [escrowEvent("finalize", "1", 5_800_000, FINAL_TX), escrowEvent("recovery", "1", 5_720_010, SEIZE_TX), escrowEvent("recovery", "0", 5_720_000, SEIZE_TX)]
+    answers.escrow = [escrowEvent("finalize", "1", 5_800_000, FINAL_TX), escrowEvent("recovery", "1", 5_720_010, SEIZE_TX_1), escrowEvent("recovery", "0", 5_720_000, SEIZE_TX)]
     answers.reconcile = { at: "2026-11-14T02:13:14.633Z", results: [{ escrow: ESCROW, recordCount: 2, indexed: 2, ok: true }] }
     render(wrap(<CompliancePanel />))
     const r = region("RecoveryEscrow records")
@@ -209,9 +211,13 @@ describe("the compliance page (/dashboard/compliance)", () => {
     expect(zero.getByText("1,000.00 SY")).toBeTruthy()
     expect(zero.getAllByText("250.00 PT").length).toBeGreaterThan(0)
     expect(zero.getByRole("button", { name: "How to verify Record 0 SY shares seized" })).toBeTruthy()
-    expect(zero.getByRole("link", { name: `View transaction ${SEIZE_TX} on stellar.expert` })).toBeTruthy()
+    // Each record shows its own seizure, joined by record id.
+    expect(await zero.findByRole("link", { name: `View transaction ${SEIZE_TX} on stellar.expert` })).toBeTruthy()
+    expect(zero.queryByRole("link", { name: `View transaction ${SEIZE_TX_1} on stellar.expert` })).toBeNull()
     expect(zero.getByText("Held in escrow")).toBeTruthy()
     const one = within(r.getByRole("article", { name: "Record 1" }))
+    expect(one.getByRole("link", { name: `View transaction ${SEIZE_TX_1} on stellar.expert` })).toBeTruthy()
+    expect(one.queryByRole("link", { name: `View transaction ${SEIZE_TX} on stellar.expert` })).toBeNull()
     expect(one.getByText("Finalized")).toBeTruthy()
     expect(one.getByText("240.00 USDY")).toBeTruthy()
     expect(one.getByRole("link", { name: `View transaction ${FINAL_TX} on stellar.expert` })).toBeTruthy()
@@ -240,6 +246,22 @@ describe("the compliance page (/dashboard/compliance)", () => {
     expect(
       (await screen.findAllByText("Record 0 is archived on-chain (its read requires restoring), and the event index holds no recovery event for it")).length,
     ).toBeGreaterThan(0)
+  })
+
+  it("D-16 live first: records show from their live reads at once; the transaction waits for the index, an archived record too", async () => {
+    withRecords([archived(0n), record(1n)])
+    answers.escrowHang = true
+    render(wrap(<CompliancePanel />))
+    const r = region("RecoveryEscrow records")
+    const one = within(await r.findByRole("article", { name: "Record 1" }))
+    expect(one.getByText("1,000.00 SY")).toBeTruthy()
+    expect(one.getByRole("button", { name: "How to verify Record 1 SY shares seized" })).toBeTruthy()
+    const tx = one.getByText("Seizure transaction").closest("div") as HTMLElement
+    expect(within(tx).getByRole("status", { name: "Reading the event index" })).toBeTruthy()
+    expect(one.queryByText(/Unavailable|Not in the event index/)).toBeNull()
+    const zero = within(r.getByRole("article", { name: "Record 0" }))
+    expect(zero.getByText("Archived on-chain; reading the event index for it")).toBeTruthy()
+    expect(zero.queryByText(/Unavailable/)).toBeNull()
   })
 
   it("a live record the index does not hold yet keeps its fields; its transaction says so", async () => {

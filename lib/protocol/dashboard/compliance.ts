@@ -119,8 +119,9 @@ export type IndexedEscrowEvent = {
  * One record of an escrow, for the compliance page:
  * - `live`: read live, with its own read (the drawer's `get_record --id N`) and, from the index, the
  *   seizure and finalization events (null when the index does not hold them; `indexError` when the
- *   index could not be read).
+ *   index could not be read; `indexPending` while it has not answered yet).
  * - `indexed`: archived on-chain, shown from its indexed `recovery` event (Review Focus 4).
+ * - `waiting`: archived on-chain, and the index has not answered yet: its stand-in is still coming.
  * - `unavailable`: archived on-chain, and the index does not hold it (or could not be read).
  */
 export type EscrowRow =
@@ -131,8 +132,10 @@ export type EscrowRow =
       seizure: IndexedEscrowEvent | null
       finalization: IndexedEscrowEvent | null
       indexError: string | null
+      indexPending: boolean
     }
   | { kind: "indexed"; id: bigint; seizure: IndexedEscrowEvent; finalization: IndexedEscrowEvent | null }
+  | { kind: "waiting"; id: bigint }
   | { kind: "unavailable"; id: bigint; reason: string }
 
 const ARCHIVED_WORDS = "is archived on-chain (its read requires restoring)"
@@ -140,20 +143,23 @@ const ARCHIVED_WORDS = "is archived on-chain (its read requires restoring)"
 /**
  * The records of `escrow`, oldest first, each joined with its indexed events by escrow contract and
  * record id (`data.id`, a decimal string). `index` is every indexed `recovery` and `finalize` event,
- * or why the index could not be read.
+ * why the index could not be read, or "pending" before it answers: live records never wait for it
+ * (D-16, live first); only an archived record's stand-in does.
  */
 export function joinEscrowRecords(
   escrow: string,
   records: Extract<Live<RecoveryRecord[]>, { status: "live" }>,
-  index: { events: readonly IndexedEscrowEvent[] } | { error: string },
+  index: { events: readonly IndexedEscrowEvent[] } | { error: string } | "pending",
 ): EscrowRow[] {
-  const events = "events" in index ? [...index.events].sort((a, b) => a.ledger - b.ledger || (a.id < b.id ? -1 : 1)) : []
+  const pending = index === "pending"
+  const events = !pending && "events" in index ? [...index.events].sort((a, b) => a.ledger - b.ledger || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)) : []
   const find = (topic: string, id: bigint) => events.find((e) => e.contractId === escrow && e.topic === topic && String(e.data.id) === id.toString()) ?? null
-  const indexError = "error" in index ? index.error : null
+  const indexError = !pending && "error" in index ? index.error : null
   return records.value.map((r): EscrowRow => {
     const seizure = find("recovery", r.id)
     const finalization = find("finalize", r.id)
     if (r.status === "archived") {
+      if (pending) return { kind: "waiting", id: r.id }
       if (seizure) return { kind: "indexed", id: r.id, seizure, finalization }
       const why = indexError ? `the event index could not be read: ${indexError}` : "the event index holds no recovery event for it"
       return { kind: "unavailable", id: r.id, reason: `Record ${r.id} ${ARCHIVED_WORDS}, and ${why}` }
@@ -161,7 +167,7 @@ export function joinEscrowRecords(
     const { status, source, ...fields } = r
     void status
     const record: Live<RecoveryRecordFields> = source ? { ...liveValue(fields, source.ledger), source } : liveValue(fields, records.ledger)
-    return { kind: "live", id: r.id, record, seizure, finalization, indexError }
+    return { kind: "live", id: r.id, record, seizure, finalization, indexError, indexPending: pending }
   })
 }
 

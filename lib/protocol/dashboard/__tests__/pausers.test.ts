@@ -14,6 +14,7 @@ const B = "GBBPZ6KVXM72MVKSZMAPMM6O4UN6XID22ZO7EOEXGCKFCOZTNVY3JVXG"
 
 const ev = (ledger: number, topic: "add_psr" | "rm_psr", pauser: string, index = 0): PauserEvent => ({
   id: `${String(ledger).padStart(19, "0")}-${String(index).padStart(10, "0")}`,
+  contractId: RISK,
   topic,
   ledger,
   closeTime: "2026-11-14T00:00:00.000Z",
@@ -25,19 +26,24 @@ describe("indexedPausers", () => {
   it("replays add_psr and rm_psr oldest first, whatever order the index lists them in (newest first)", () => {
     const rows = [ev(30, "add_psr", A), ev(20, "rm_psr", A), ev(15, "add_psr", B), ev(10, "add_psr", A)]
     // A was added, removed, then added again: listed, with its latest add. B stays listed.
-    expect(indexedPausers(rows)).toEqual([
+    expect(indexedPausers(rows, RISK)).toEqual([
       { account: B, added: rows[2] },
       { account: A, added: rows[0] },
     ])
   })
 
   it("a pauser removed last is not listed; within one ledger the event index orders them", () => {
-    expect(indexedPausers([ev(10, "rm_psr", A, 1), ev(10, "add_psr", A, 0)])).toEqual([])
-    expect(indexedPausers([ev(10, "add_psr", A, 1), ev(10, "rm_psr", A, 0)]).map((p) => p.account)).toEqual([A])
+    expect(indexedPausers([ev(10, "rm_psr", A, 1), ev(10, "add_psr", A, 0)], RISK)).toEqual([])
+    expect(indexedPausers([ev(10, "add_psr", A, 1), ev(10, "rm_psr", A, 0)], RISK).map((p) => p.account)).toEqual([A])
   })
 
   it("ignores other topics and rows whose pauser is not an address", () => {
-    expect(indexedPausers([{ ...ev(10, "add_psr", A), topic: "paused" }, { ...ev(11, "add_psr", A), data: {} }])).toEqual([])
+    expect(indexedPausers([{ ...ev(10, "add_psr", A), topic: "paused" }, { ...ev(11, "add_psr", A), data: {} }], RISK)).toEqual([])
+  })
+
+  it("reads only RiskControl's events: another contract's add_psr is not a pauser of RiskControl", () => {
+    const other = { ...ev(12, "add_psr", B), contractId: manifest.markets[0].contracts.pool }
+    expect(indexedPausers([other, ev(10, "add_psr", A)], RISK).map((p) => p.account)).toEqual([A])
   })
 })
 

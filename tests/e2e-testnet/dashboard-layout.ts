@@ -3,14 +3,15 @@
  * hand against a running app, never in CI (it is not a `*.test.ts`, so no Vitest config picks it up).
  * It only reads: no wallet, nothing signed.
  *
- *   pnpm dashboard:layout [--base <url>] [--paths /dashboard,/dashboard/risk] [--shots <dir>] [--headed]
+ *   pnpm dashboard:layout [--base <url>] [--paths /dashboard,/dashboard/risk] [--shots <dir>] [--theme light|dark] [--headed]
  *
  * - `--base`: the app. Default http://localhost:3000. For Testnet data, build and start it with
  *   `NEXT_PUBLIC_PRINCIPAL_NETWORK=testnet` in front of both `pnpm build` and `pnpm start`.
  * - `--paths`: the pages to check. Default: every `/dashboard` view, and the first market's detail page.
  *   `/dashboard/markets/:first` stands for that page: its id is read from the markets list, so the
  *   check works on any network.
- * - `--shots`: also write, per page, a desktop and a 375 px screenshot (light), and one at 375 px
+ * - `--theme`: the app's theme for the run, light (default) or dark (the `pp-mode` the theme toggle stores).
+ * - `--shots`: also write, per page, a desktop and a 375 px screenshot in that theme, and one at 375 px
  *   with the first How-to-verify drawer open. Use a gitignored folder, e.g. `e2e-artifacts/dashboard`.
  *
  * At 375 px, for each page, once its skeletons are gone:
@@ -30,10 +31,11 @@ const FIRST_MARKET = "/dashboard/markets/:first"
 
 const VIEWS = ["/dashboard", "/dashboard/markets", FIRST_MARKET, "/dashboard/oracle", "/dashboard/risk", "/dashboard/compliance", "/dashboard/activity"]
 
-type Args = { base: string; paths: string[]; shots: string | null; headed: boolean }
+type Theme = "light" | "dark"
+type Args = { base: string; paths: string[]; shots: string | null; headed: boolean; theme: Theme }
 
 function parseArgs(argv: string[]): Args {
-  const args: Args = { base: "http://localhost:3000", paths: VIEWS, shots: null, headed: false }
+  const args: Args = { base: "http://localhost:3000", paths: VIEWS, shots: null, headed: false, theme: "light" }
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i]
     const value = () => {
@@ -45,6 +47,11 @@ function parseArgs(argv: string[]): Args {
     else if (flag === "--paths") args.paths = value().split(",").map((p) => p.trim()).filter(Boolean)
     else if (flag === "--shots") args.shots = resolve(value())
     else if (flag === "--headed") args.headed = true
+    else if (flag === "--theme") {
+      const theme = value()
+      if (theme !== "light" && theme !== "dark") throw new Error("--theme is light or dark")
+      args.theme = theme
+    }
     else throw new Error(`Unknown flag ${flag}`)
   }
   return args
@@ -80,6 +87,17 @@ async function resolvePath(browser: Browser, args: Args, path: string): Promise<
   }
 }
 
+/** A browser context in `theme`: the app reads it from `localStorage["pp-mode"]` (next-themes, no system theme). */
+async function themed(browser: Browser, theme: Theme, options: Parameters<Browser["newContext"]>[0]) {
+  const context = await browser.newContext({ ...options, colorScheme: theme })
+  await context.addInitScript((mode) => {
+    try {
+      localStorage.setItem("pp-mode", mode)
+    } catch {}
+  }, theme)
+  return context
+}
+
 async function checkPage(browser: Browser, args: Args, requested: string, checks: Check[]): Promise<void> {
   let path = requested
   try {
@@ -91,7 +109,7 @@ async function checkPage(browser: Browser, args: Args, requested: string, checks
   const url = `${args.base}${path}`
   const add = (check: string, ok: boolean, detail: string) => checks.push({ page: path, check, ok, detail })
 
-  const phone = await browser.newContext({ viewport: { width: 375, height: 812 }, colorScheme: "light", deviceScaleFactor: 2 })
+  const phone = await themed(browser, args.theme, { viewport: { width: 375, height: 812 }, deviceScaleFactor: 2 })
   const page = await phone.newPage()
   try {
     await open(page, url)
@@ -108,7 +126,7 @@ async function checkPage(browser: Browser, args: Args, requested: string, checks
     if (tables.length === 0) add("tables show every column", true, "no table on this page")
     for (const t of tables) add(`table "${t.region}" shows every column`, t.scroll === t.client, `scrollWidth ${t.scroll}, clientWidth ${t.client}`)
 
-    if (args.shots) await page.screenshot({ path: join(args.shots, `${slug(path)}-375-light.png`), fullPage: true })
+    if (args.shots) await page.screenshot({ path: join(args.shots, `${slug(path)}-375-${args.theme}.png`), fullPage: true })
 
     const verify = page.getByRole("button", { name: /^(How to verify |Why .* is unavailable, and how to verify it$)/ }).first()
     if ((await verify.count()) === 0) add("drawer fits 375 px", true, "no figure on this page")
@@ -122,7 +140,7 @@ async function checkPage(browser: Browser, args: Args, requested: string, checks
         return { scroll: el?.scrollWidth ?? 0, client: el?.clientWidth ?? 0, doc: document.documentElement.scrollWidth, inner: window.innerWidth }
       })
       add("drawer fits 375 px", d.scroll <= d.client && d.doc <= d.inner, `drawer ${d.scroll}/${d.client}, page ${d.doc}/${d.inner}`)
-      if (args.shots) await page.screenshot({ path: join(args.shots, `${slug(path)}-375-drawer-light.png`) })
+      if (args.shots) await page.screenshot({ path: join(args.shots, `${slug(path)}-375-drawer-${args.theme}.png`) })
       await page.keyboard.press("Escape")
     }
   } catch (error) {
@@ -132,11 +150,11 @@ async function checkPage(browser: Browser, args: Args, requested: string, checks
   }
 
   if (args.shots) {
-    const desk = await browser.newContext({ viewport: { width: 1280, height: 900 }, colorScheme: "light" })
+    const desk = await themed(browser, args.theme, { viewport: { width: 1280, height: 900 } })
     const p = await desk.newPage()
     try {
       await open(p, url)
-      await p.screenshot({ path: join(args.shots, `${slug(path)}-desktop-light.png`), fullPage: true })
+      await p.screenshot({ path: join(args.shots, `${slug(path)}-desktop-${args.theme}.png`), fullPage: true })
     } finally {
       await desk.close()
     }

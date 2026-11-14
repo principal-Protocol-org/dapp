@@ -312,7 +312,9 @@ async function fetchAllEvents(q: EventQuery): Promise<IndexedEvents> {
   const rows = [...first.rows]
   let last = first.rows
   for (let page = 1; last.length === ALL_PAGE; page++) {
-    if (page >= MAX_EVENT_PAGES) throw new FinalError(`the event index holds more than ${MAX_EVENT_PAGES * ALL_PAGE} such events, more than this page reads`)
+    // The last page read was full: there may be no more, or more; either way this page does not show them all.
+    if (page >= MAX_EVENT_PAGES)
+      throw new FinalError(`the event index holds ${(MAX_EVENT_PAGES * ALL_PAGE).toLocaleString("en-US")} or more rows for this list, more than this page reads`)
     last = (await getJson<IndexedEvents>(eventsUrl(q, { limit: String(ALL_PAGE), before: last[last.length - 1].id }), INDEX_REASONS)).rows
     rows.push(...last)
   }
@@ -366,7 +368,7 @@ const PAUSER_TOPICS = ["add_psr", "rm_psr"] as const
 export function usePausers() {
   const m = useManifest()
   const events = useAllEvents({ group: "risk", topics: PAUSER_TOPICS })
-  const indexed = events.data && !events.stale ? indexedPausers(events.data.rows) : []
+  const indexed = events.data && !events.stale ? indexedPausers(events.data.rows, m.shared.riskControl) : []
   const accounts = indexed.map((p) => p.account)
   const live = withStale(
     useQuery({
