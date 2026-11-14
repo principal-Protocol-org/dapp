@@ -42,7 +42,8 @@ scripts/dev-stack/oracle-tick.sh                          # run this every 30 mi
   one hour; the ticks keep minting, swaps and quotes working. Rates cannot go down.
   A v2 oracle may refuse a value: `set_reference_value` then returns `false` in a successful
   transaction, and the script fails with the oracle's `last_rejection()`. It also fails on an oracle
-  with no primary source (a v1 oracle, or one never given `set_sources`).
+  with no primary source (a v1 oracle, or one never given `set_sources`). `ORACLE_TICK_MANIFEST=<path>`
+  (local only) ticks the oracle of another local deployment's manifest instead of `local.json`'s.
 
 - `feed-oracle.sh` (local only; it refuses any other network) proves the keeper's feed mode
   (spec 0004 D-21, D-22) without touching the market. It builds the SEP-40 mock feed in
@@ -68,19 +69,25 @@ scripts/dev-stack/oracle-tick.sh                          # run this every 30 mi
   fails shows its error, with anything shaped like a secret key redacted.
 
 - `drill.sh` gives the public dashboard real history (spec 0004 D-31): one compliance recovery (a
-  throwaway account onboarded, given 10 USDY of SY, deauthorized on the SAC by the SAC admin, then
-  `seize_all_positions`), one oracle value over the deviation cap (simulated first, it must answer
-  `false`; it lands as `ref_rej` `deviate`), one `oracle-tick.sh`, and a RiskControl pause of
-  `DRILL_PAUSE_SECONDS` (default 15, at most 30) then unpause. Locally it signs with
-  `principal-localdev-admin` and onboards with the issuer's own steps; the throwaway key
+  throwaway account onboarded, given 10 USDY of SY and PT and YT minted from 5 SY, deauthorized on the
+  SAC by the SAC admin, then `seize_all_positions`), one oracle value over the deviation cap (simulated
+  first, it must answer `false`; it lands as `ref_rej` `deviate`), one `oracle-tick.sh`, and a
+  RiskControl pause of `DRILL_PAUSE_SECONDS` (default 15, at most 30) then unpause. Locally it signs
+  with `principal-localdev-admin` and onboards with the issuer's own steps; the throwaway key
   (`drill-<network>-<time>-<pid>`) is removed from the keystore at the end, and an exit trap unpauses
-  RiskControl on any failure or interruption. Every hash goes to stderr, and a JSON summary to stdout.
+  RiskControl on any failure or interruption (INT, TERM, QUIT; the cleanup ignores further ones). The
+  mint is skipped, and said, when the market has matured (the dev stack's market usually has) or the
+  oracle is stale: the record then holds SY only. `DRILL_MANIFEST=<path>` (local only) runs it on
+  another local deployment, e.g. a fresh one written with `MANIFEST_OUT`, and passes it on to
+  `oracle-tick.sh` as `ORACLE_TICK_MANIFEST`. Every hash goes to stderr, and a JSON summary to stdout.
   `DRILL_STEPS=recovery,oracle,pause` picks steps. On Testnet it is the developer's run only (the main
-  README, "The Testnet drill"): it refuses CI, overridden key names and a run without a terminal, and
-  asks for the market id before it signs.
+  README, "The Testnet drill"): it refuses CI, an agent session, Stellar CLI overrides, overridden key
+  names and a run without a terminal, and asks for the market id before it signs.
 
   ```bash
   scripts/dev-stack/drill.sh                         # local, about 30 s
+  MANIFEST_OUT=/tmp/fresh.json MATURITY_SECONDS=1500 scripts/dev-stack/deploy.sh   # a market that can still mint
+  DRILL_MANIFEST=/tmp/fresh.json scripts/dev-stack/drill.sh
   ```
 
 Outputs (both git-ignored; never commit them):

@@ -35,13 +35,13 @@ afterAll(() => {
 })
 
 /** Runs drill.sh with stdin, stdout and stderr on pipes (no terminal) and the stubs first on PATH. */
-function drill(env: Record<string, string | undefined>): Promise<{ code: number; stderr: string; stdout: string }> {
+function drill(env: Record<string, string | undefined>, script: string = DRILL): Promise<{ code: number; stderr: string; stdout: string }> {
   const base: Record<string, string> = { PATH: `${stubs}:${process.env.PATH ?? ""}`, HOME: process.env.HOME ?? dir }
   const full: Record<string, string | undefined> = { ...base, ...env }
   for (const k of Object.keys(full)) if (full[k] === undefined) delete full[k]
   return new Promise((resolve) => {
     // Only these variables: CI, GITHUB_ACTIONS and key names of the test run never leak in.
-    execFile("bash", [DRILL], { env: full as NodeJS.ProcessEnv, timeout: 20_000, encoding: "utf8" }, (error, stdout, stderr) => {
+    execFile("bash", [script], { env: full as NodeJS.ProcessEnv, timeout: 20_000, encoding: "utf8" }, (error, stdout, stderr) => {
       const code = error ? (typeof error.code === "number" ? error.code : 1) : 0
       resolve({ code, stdout, stderr })
     })
@@ -63,6 +63,32 @@ describe("drill.sh on testnet refuses before touching the keystore or the networ
     const r = await drill({ PRINCIPAL_NETWORK: "testnet", GITHUB_ACTIONS: "true" })
     expect(r.code).not.toBe(0)
     expect(r.stderr).toMatch(/never runs? (from|in) CI/i)
+    expect(calls()).toBe("")
+  })
+
+  it("refuses an agent session (CLAUDECODE)", async () => {
+    const r = await drill({ PRINCIPAL_NETWORK: "testnet", CLAUDECODE: "1" })
+    expect(r.code).not.toBe(0)
+    expect(r.stderr).toContain("The Testnet drill is run by the developer, not by an agent.")
+    expect(calls()).toBe("")
+  })
+
+  it("refuses Stellar CLI variables that would change the network, source, signer or sending", async () => {
+    for (const name of ["STELLAR_RPC_URL", "STELLAR_NETWORK_PASSPHRASE", "STELLAR_NETWORK", "STELLAR_ACCOUNT", "STELLAR_RPC_HEADERS", "STELLAR_SIGN_WITH_KEY", "STELLAR_SEND", "STELLAR_INVOKE_VIEW"]) {
+      const r = await drill({ PRINCIPAL_NETWORK: "testnet", [name]: "x" })
+      expect(r.code, name).not.toBe(0)
+      expect(r.stderr, name).toContain(`${name} is set`)
+      expect(calls()).toBe("")
+    }
+  })
+
+  it("refuses another manifest on testnet, in the drill and in oracle-tick.sh", async () => {
+    const r = await drill({ PRINCIPAL_NETWORK: "testnet", DRILL_MANIFEST: join(dir, "m.json") })
+    expect(r.code).not.toBe(0)
+    expect(r.stderr).toMatch(/DRILL_MANIFEST and ORACLE_TICK_MANIFEST are for the local network only/)
+    const tick = await drill({ PRINCIPAL_NETWORK: "testnet", ORACLE_TICK_MANIFEST: join(dir, "m.json") }, join(process.cwd(), "scripts", "dev-stack", "oracle-tick.sh"))
+    expect(tick.code).not.toBe(0)
+    expect(tick.stderr).toMatch(/ORACLE_TICK_MANIFEST is for the local network only/)
     expect(calls()).toBe("")
   })
 

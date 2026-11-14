@@ -16,6 +16,12 @@ need jq "brew install jq"
 need node "Install Node.js."
 
 MANIFEST="$DAPP_DIR/config/manifests/$NETWORK.json"
+# ORACLE_TICK_MANIFEST: another local deployment's manifest (one written with deploy.sh's MANIFEST_OUT);
+# drill.sh passes it on with DRILL_MANIFEST. Local only: on testnet the tick follows testnet.json.
+if [ -n "${ORACLE_TICK_MANIFEST:-}" ]; then
+  [ "$NETWORK" = local ] || die "ORACLE_TICK_MANIFEST is for the local network only"
+  MANIFEST="$ORACLE_TICK_MANIFEST"
+fi
 [ -f "$MANIFEST" ] || die "$MANIFEST not found. Run scripts/dev-stack/deploy.sh first."
 APY="5"
 RATE_ARG=""

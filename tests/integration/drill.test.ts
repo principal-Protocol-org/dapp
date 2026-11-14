@@ -12,23 +12,37 @@
  *   fresh again, and nothing shaped like a secret key was printed.
  * - A drill stopped (SIGTERM) while RiskControl is paused unpauses it in its trap before it exits.
  *
+ * - When the market has not matured (and the oracle is fresh), the throwaway account also mints PT and YT,
+ *   so the seizure record holds PT and YT (what finalize_record settles after maturity); otherwise the
+ *   drill says why it skipped the mint and the record holds SY only. The dev stack's market usually has
+ *   matured (MATURITY_SECONDS=3600): `DRILL_MANIFEST=<manifest>` runs this suite, and the drill, on another
+ *   local deployment, e.g. one made with `MANIFEST_OUT=<path> MATURITY_SECONDS=1200 deploy.sh`.
+ *
  * The local database already holds earlier seizures (the indexer suite's), so every count is over the
  * drill's own transaction hashes. Needs `scripts/dev-stack/up.sh`, a deployed market, and `principal-pg`
  * migrated (`pnpm db:migrate`) on this machine. The drill signs with the dev stack's local keys only.
  */
 import { spawn } from "node:child_process"
+import { readFileSync } from "node:fs"
 import { join } from "node:path"
 import { describe, expect, it, vi } from "vitest"
 
 // `server-only` throws outside a react-server bundle; the indexer is a server module.
 vi.mock("server-only", () => ({}))
 
+import { parseManifest } from "@/lib/protocol/manifest"
 import { createRpcReader } from "@/lib/protocol/reader"
 import { createRpcServer } from "@/lib/protocol/stellar"
 import type { Manifest } from "@/lib/protocol/types"
 import { sql } from "@/lib/server/db"
 import { getIndexedEvents, indexEvents, type IndexGroup } from "@/lib/server/indexer"
 import { DAPP, DEV_STACK, loadDatabaseUrl, MINUTE, readManifest, redact, run, skipReason } from "./local-stack"
+
+/** The manifest the drill runs on: `DRILL_MANIFEST` (another local deployment), else `config/manifests/local.json`. */
+function drillManifest(): Manifest {
+  const path = process.env.DRILL_MANIFEST
+  return path ? parseManifest(JSON.parse(readFileSync(path, "utf8"))) : readManifest()
+}
 
 const DRILL = join(DEV_STACK, "drill.sh")
 const HASH = /^[0-9a-f]{64}$/
@@ -42,6 +56,8 @@ type DrillSummary = {
   key: string | null
   keyRemoved: boolean
   recordIds: number[]
+  mint: { done: true; syShares: number } | { done: false; reason: string }
+  record: { id: number; account: string; sy_shares: string; pt_amount: string; yt_amount: string; lp_amount: string; finalized: boolean } | null
   rejection: { reason: string; value: string } | null
   pausedSeconds: number | null
   txs: { step: string; hash: string; url: string | null }[]
@@ -111,7 +127,7 @@ describe.skipIf(skip !== null)("drill.sh on the local network", () => {
   it(
     "seizes a throwaway account, gets one deviate rejection and pauses RiskControl for a few seconds; the index holds each",
     async () => {
-      const manifest = readManifest()
+      const manifest = drillManifest()
       const market = manifest.markets[0]
       let stdout: string
       let stderr: string
@@ -137,7 +153,8 @@ describe.skipIf(skip !== null)("drill.sh on the local network", () => {
       expect(out.pausedSeconds).toBeGreaterThanOrEqual(0)
       expect(out.pausedSeconds).toBeLessThan(60)
       const steps = out.txs.map((t) => t.step)
-      for (const step of ["trustline", "authorize", "grant_account", "pay", "deposit", "deauthorize", "seize", "deviate", "oracle_tick", "pause", "unpause"]) {
+      const expected = ["friendbot", "trustline", "authorize", "grant_account", "grant_pt", "grant_yt", "pay", "deposit", "deauthorize", "seize", "deviate", "oracle_tick", "pause", "unpause"]
+      for (const step of out.mint.done ? [...expected, "mint"] : expected) {
         expect(steps, `the summary lists the ${step} transaction`).toContain(step)
       }
       for (const tx of out.txs) {
@@ -165,6 +182,22 @@ describe.skipIf(skip !== null)("drill.sh on the local network", () => {
         tx_hash: hashOf("seize"),
         data: { account: out.account, id: String(out.recordIds[0]) },
       })
+      // The record's shape follows the mint: PT and YT held for finalize_record, or SY only.
+      const data = recovery[0].data as Record<string, string>
+      expect(out.record).toMatchObject({ id: out.recordIds[0], account: out.account, finalized: false })
+      expect(BigInt(data.sy_shares)).toBeGreaterThan(0n)
+      if (out.mint.done) {
+        log(`minted PT and YT: the record holds PT ${out.record?.pt_amount}, YT ${out.record?.yt_amount}`)
+        expect(BigInt(data.pt_amount)).toBeGreaterThan(0n)
+        expect(BigInt(data.yt_amount)).toBeGreaterThan(0n)
+        expect(out.record).toMatchObject({ pt_amount: data.pt_amount, yt_amount: data.yt_amount })
+        expect(stderr).toContain("finalize_record --caller")
+      } else {
+        log(`no mint (${out.mint.reason}): the record holds SY only`)
+        expect(out.mint.reason).toMatch(/matured|stale/)
+        expect(stderr).toContain(`no PT and YT mint: ${out.mint.reason}`)
+        expect(data).toMatchObject({ pt_amount: "0", yt_amount: "0" })
+      }
 
       const rejections = rows.filter((r) => r.topic === "ref_rej")
       expect(rejections).toHaveLength(1)
@@ -193,7 +226,7 @@ describe.skipIf(skip !== null)("drill.sh on the local network", () => {
   it(
     "a drill stopped while RiskControl is paused unpauses it in its trap",
     async () => {
-      const manifest = readManifest()
+      const manifest = drillManifest()
       expect(await isPaused(manifest)).toBe(false)
       const child = spawn("bash", [DRILL], {
         cwd: DAPP,

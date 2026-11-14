@@ -611,31 +611,68 @@ PRINCIPAL_NETWORK=testnet scripts/dev-stack/drill.sh
 
 | Step | What it does | Signed by |
 |---|---|---|
-| Recovery | A throwaway account (a key made for the run, funded by Friendbot) adds a USDY trustline, is onboarded by the app's public faucet, and deposits 10 USDY into the SY wrapper. It is then deauthorized on the USDY SAC, and `seize_all_positions` moves its SY to the RecoveryEscrow: one record, one `recovery` event. Its key is then removed from the keystore. | The throwaway key (trustline, deposit). `principal-testnet-admin`, the SAC admin and so the escrow's issuer authority (deauthorize, seize). |
-| Oracle | A value over the deviation cap (the cap plus 5 %: 15 % above the current value with the 1,000 bps cap), simulated first: the drill stops unless the simulation answers `false`. Sent, it returns `false` and the oracle emits `ref_rej` with reason `deviate`. Then one `oracle-tick.sh`, so the oracle is fresh again. | `principal-testnet-oracle`, the OracleAdapter admin. |
+| Recovery | A throwaway account (a key made for the run, funded by Friendbot) adds a USDY trustline, is onboarded by the app's public faucet, deposits 10 USDY into the SY wrapper and mints PT and YT from 5 SY. It is then deauthorized on the USDY SAC, and `seize_all_positions` moves everything to the RecoveryEscrow: one record (its SY unwrapped to USDY at once, its PT and YT held until `finalize_record`), one `recovery` event. Its key is then removed from the keystore. | The throwaway key (trustline, deposit, mint). `principal-testnet-admin`, the SAC admin and so the escrow's issuer authority (deauthorize, seize). |
+| Oracle | A value over the deviation cap (the cap plus 5 %: 15 % above the current value with the 1,000 bps cap), simulated first: the drill stops unless the simulation answers `false`. Sent, it returns `false` and the oracle emits `ref_rej` with reason `deviate`. Then one `oracle-tick.sh`, so the oracle is fresh again. A tick refused as `stale_ts` (the scheduled keeper landed in the same ledger second) is retried once, 6 s later, and both hashes are printed. | `principal-testnet-oracle`, the OracleAdapter admin. |
 | Pause | RiskControl `pause`, about 15 s, then `unpause`: two `paused` events. Every market refuses deposits and mints meanwhile. | `principal-testnet-admin`, the RiskControl admin. |
 
-- **Before it signs anything**, it refuses CI, any key name but the official ones and a run without a
-  terminal. It checks each key against the contract's own admin (`admin()`, `get_admin()`) and that
-  RiskControl is not already paused (it never unpauses a pause it did not make), shows what it will
-  sign, and asks you to type the market id.
-- **The pause always ends.** Once the pause is sent, an exit trap unpauses on any failure or Ctrl-C,
-  after waiting for a pause transaction still in flight. `DRILL_PAUSE_SECONDS` (0 to 30, default 15)
-  sets the wait, so the pause lasts under a minute; the drill prints how long it lasted in ledger time.
+- **Before it signs anything**, it refuses CI, an agent session (`CLAUDECODE`: "The Testnet drill is
+  run by the developer, not by an agent."), the Stellar CLI variables that would change the network,
+  the default source, the signer or the sending (`STELLAR_RPC_URL`, `STELLAR_RPC_HEADERS`,
+  `STELLAR_NETWORK_PASSPHRASE`, `STELLAR_NETWORK`, `STELLAR_ACCOUNT`, `STELLAR_SIGN_WITH_KEY`,
+  `STELLAR_SEND`, `STELLAR_INVOKE_VIEW`; it unsets them on every network, so `oracle-tick.sh` never
+  inherits one), any key name but the official ones, `DRILL_MANIFEST`, and a run without a terminal. It
+  checks each key against the contract's own admin (`admin()`, `get_admin()`), that RiskControl is not
+  already paused (it never unpauses a pause it did not make) and that the oracle reads as fresh (the
+  mint needs it: a stale or unreadable oracle stops the run), shows what it will sign, and asks you to
+  type the market id.
+- **The pause always ends.** Once the pause is sent, an exit trap unpauses on any failure, Ctrl-C, TERM
+  or `Ctrl-\` (QUIT). It decides from the pause's own transaction, waiting for one still in flight, not from an
+  `is_paused` read that may lag. While it cleans up it ignores further interrupts, so a second Ctrl-C
+  cannot cut the unpause short. `DRILL_PAUSE_SECONDS` (0 to 30, default 15) sets the wait, so the pause
+  lasts under a minute; the drill prints how long it lasted in ledger time.
+- **When no trap can run** (SIGKILL, the machine asleep or off), check and unpause by hand. RiskControl
+  is `shared.riskControl` of `config/manifests/testnet.json` (`jq -r .shared.riskControl
+  config/manifests/testnet.json`), `CCRZ55SG273OTUZSFME6A6XXXEZ3GM5IMVRLF4NEEWNC54NGCRHIMHJC` today:
+
+  ```bash
+  RC=$(jq -r .shared.riskControl config/manifests/testnet.json)
+  stellar contract invoke --id "$RC" --source-account "$(stellar keys address principal-testnet-admin)" --network testnet --send=no -- is_paused
+  stellar contract invoke --id "$RC" --source principal-testnet-admin --network testnet -- unpause --caller "$(stellar keys address principal-testnet-admin)"
+  ```
+
 - **Options.** `DRILL_STEPS=oracle,pause` runs only those steps, in the same order.
   `DRILL_ONBOARD=issuer` onboards with `principal-testnet-issuer` (the faucet's own key, the classic
   issuer and Permissioning admin) instead of the public faucet; `DRILL_FAUCET_ORIGIN` changes the
-  faucet's origin.
-- **No secret.** It passes identity names to the Stellar CLI, never a secret, discards `keys generate`'s
-  output and prints the CLI's errors with anything shaped like a secret key redacted. Progress and
-  hashes go to stderr, and a JSON summary (hashes, the throwaway account, the record id) to stdout.
-- **Alerts.** The `deviate` rejection opens `oracle_rejection` (warning, posted) for 24 h. An alert
-  check that happens to run during the pause opens and then closes `paused`.
-- **Finalization** needs the market's maturity (11 February 2027, 08:59:04 UTC for
-  `testnet-usdy-1802336344`), so it is not part of the drill. After maturity, settle the drill's record
-  (its id is in the summary) as the SAC admin:
-  `stellar contract invoke --id <recoveryEscrow> --source principal-testnet-admin --network testnet -- finalize_record --caller <that key's address> --id <record id>`.
-  For a demo before then, run the steps on a short-maturity market made with the wizard.
+  faucet's origin. `DRILL_MANIFEST` (local only) runs on another local deployment's manifest, e.g. one
+  written by `MANIFEST_OUT=<path> deploy.sh` for a market that has not matured.
+- **No secret, every hash.** It passes identity names to the Stellar CLI, never a secret, discards
+  `keys generate`'s output and prints the CLI's errors with anything shaped like a secret key redacted.
+  Every hash goes to stderr with its link: Friendbot's from its answer, the faucet's authorization and
+  payment from Horizon (the faucet's answer carries no hash). The faucet's allow-list calls are
+  contract calls by its own key: Horizon does not list them under the account and the faucet does not
+  return them, so the drill cannot print them; the dashboard's Activity view shows them once indexed.
+  A JSON summary (hashes, the throwaway account, the mint, the record) goes to stdout.
+- **What each run leaves** on Testnet, and a rerun adds another full set:
+  - a deauthorized throwaway account holding about 99,990 test USDY (the faucet's 100,000 less the
+    deposit) and Friendbot's XLM, unspendable once its key is deleted;
+  - its Permissioning grants (the account, and each market's PT and YT);
+  - one RecoveryEscrow record (the USDY from its SY, and its PT and YT until finalized);
+  - one `ref_rej` `deviate`, one keeper `ref_set` and two RiskControl `paused` events;
+  - an `oracle_rejection` alert (warning, posted) open for 24 h. An alert check that happens to run
+    during the pause also opens and then closes `paused`.
+- **Finalization.** `finalize_record` settles the record's PT and YT into USDY, and only after the
+  market's maturity (11 February 2027, 08:59:04 UTC for `testnet-usdy-1802336344`), so it is not part of
+  the drill. The drill prints the command with the record's id; after maturity, as the SAC admin:
+
+  ```bash
+  stellar contract invoke --id CAMOWBMTMDLFJLFOSTULXQO7MUK2PT3XAQ62CA4L5DGPQKZFJWEKN24Q --source principal-testnet-admin --network testnet -- \
+    finalize_record --caller "$(stellar keys address principal-testnet-admin)" --id <record id>
+  ```
+
+  It answers `(underlying_from_pt, underlying_from_yt)` and emits `finalize`. A record without PT or YT
+  (a drill run on a matured market, where the mint is skipped and said) has nothing to settle:
+  `finalize_record` refuses it with `NothingToFinalize`. For a demo before February 2027, run the drill
+  on a short-maturity market.
 
 ## Local network
 
@@ -675,8 +712,10 @@ Use `pnpm`.
   mock feed and standalone oracle (`scripts/dev-stack/feed-oracle.sh`), needs Rust with
   `wasm32v1-none` and the same local Postgres, and deletes its rows afterwards. The drill suite
   (`drill.test.ts`) runs `scripts/dev-stack/drill.sh` on the local market (a throwaway account seized,
-  one `deviate` rejection, RiskControl paused for a few seconds, then stopped mid-pause to prove the
-  trap unpauses) and checks the indexed rows; its rows stay in the local database.
+  with PT and YT when the market can still mint, else SY only; one `deviate` rejection; RiskControl
+  paused for a few seconds, then stopped mid-pause to prove the trap unpauses) and checks the indexed
+  rows; its rows stay in the local database. `DRILL_MANIFEST=<path>` runs it on another local
+  deployment, e.g. a fresh one made with `MANIFEST_OUT=<path> MATURITY_SECONDS=1500 deploy.sh`.
   It does not redeploy the stack or rewrite `local.json`.
 - It signs with throwaway local accounts (the stack's dev keys), never a real key.
 - It skips the cases that need a market near maturity, and says so.
