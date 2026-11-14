@@ -224,6 +224,18 @@ describe("the overview (/dashboard)", () => {
     expect(totals.getByRole("button", { name: "Why TVL is unavailable, and how to verify it" })).toBeTruthy()
   })
 
+  it("pool liquidity reads No liquidity yet, never 0, while no pool is seeded (as /app)", async () => {
+    mocks.fetchProtocolState.mockResolvedValue({
+      ...protocolState({ liquidity: live(0n) }),
+      markets: { [MARKET]: { poolSeeded: live(false, "reserves") } },
+    })
+    render(wrap(<Overview />))
+    const totals = region("Protocol totals")
+    expect(await totals.findByText("No liquidity yet")).toBeTruthy()
+    expect(totals.queryByText("0.00 USDY")).toBeNull()
+    expect(totals.getByRole("button", { name: "How to verify Pool liquidity" })).toBeTruthy()
+  })
+
   it("shows the effective wrap-and-mint capacity, with its reason, when a market double-reports (D-10)", async () => {
     mocks.fetchRiskView.mockResolvedValue(
       riskView({

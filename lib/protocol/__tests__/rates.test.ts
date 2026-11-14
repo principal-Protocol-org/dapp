@@ -10,7 +10,7 @@ import {
   effectiveImpliedApy,
   fixedPayoffUsd,
   leverage,
-  marketTvl,
+  tvlOf,
   underlyingApy7d,
   ytPrice,
 } from "../rates"
@@ -136,31 +136,39 @@ describe("underlyingApy7d", () => {
   })
 })
 
-describe("marketTvl", () => {
-  const ms = (over: Partial<Record<"managerSy" | "exchangeRate" | "poolState", Live<unknown>>> = {}) =>
-    ({
-      managerSy: live(700n),
-      exchangeRate: live(1_0500000n),
-      poolState: live({
-        ptReserve: 99_999_999n,
-        syReserve: 300n,
-        totalLp: 1n,
-        rate: SCALE,
-        exponent: 1n,
-        feeRate: 0n,
-        secondsToMaturity: 1n,
-      }),
-      ...over,
-    }) as unknown as MarketState
-
-  it("TVL counts the manager SY and the pool SY at the SY rate, not the PT reserve", () => {
-    expect(marketTvl(ms())).toEqual({ status: "live", value: (1000n * 1_0500000n) / SCALE, ledger: 1 })
+describe("tvlOf (D-8: one TVL for /app and the dashboard)", () => {
+  const src = (fn: string, ledger: number) => ({ contractId: `C${fn}`, fn, args: [], rawXdr: "AAAA", ledger, rpcUrl: "https://rpc.test" })
+  const at = <T,>(value: T, fn: string, ledger = 1): Live<T> => ({ status: "live", value, ledger, source: src(fn, ledger) })
+  const state = (over: Partial<Record<"syUnderlying" | "escrowUnderlying", Live<bigint>>> = {}) => ({
+    syUnderlying: at(2_230_113_029_038n, "total_underlying"),
+    escrowUnderlying: at(5_000_000n, "balance"),
+    ...over,
   })
 
-  it("is unavailable if any input is unavailable", () => {
-    for (const k of ["managerSy", "exchangeRate", "poolState"] as const) {
-      const r = marketTvl(ms({ [k]: { status: "unavailable", error: "rpc down" } }))
-      expect(r.status).toBe("unavailable")
+  it("is the SY wrapper's total_underlying plus the underlying RecoveryEscrow holds", () => {
+    expect(tvlOf(state())).toMatchObject({ status: "live", value: 2_230_113_029_038n + 5_000_000n })
+  })
+
+  it("with an empty escrow it is exactly total_underlying", () => {
+    expect(tvlOf(state({ escrowUnderlying: at(0n, "balance") }))).toMatchObject({ status: "live", value: 2_230_113_029_038n })
+  })
+
+  it("does not count the manager's SY or the pool's SY reserve (the old definition)", () => {
+    // A MarketState carrying the old inputs still gives total_underlying + escrow: nothing else is read.
+    const ms = { ...state(), poolState: live({ syReserve: 300n }), exchangeRate: live(1_0500000n) } as unknown as MarketState
+    expect(tvlOf(ms)).toMatchObject({ status: "live", value: 2_230_113_029_038n + 5_000_000n })
+  })
+
+  it("keeps both reads as its provenance, total_underlying first, and labels a ledger spread", () => {
+    const t = tvlOf(state({ escrowUnderlying: at(0n, "balance", 2) }))
+    expect(t.status === "live" && t.sources?.map((s) => s.fn)).toEqual(["total_underlying", "balance"])
+    expect(t.status === "live" && t.ledgerSpread).toEqual({ min: 1, max: 2 })
+  })
+
+  it("is unavailable if either input is, never a partial sum", () => {
+    for (const k of ["syUnderlying", "escrowUnderlying"] as const) {
+      const r = tvlOf(state({ [k]: { status: "unavailable", error: "rpc down" } }))
+      expect(r).toMatchObject({ status: "unavailable", error: "rpc down" })
     }
   })
 })

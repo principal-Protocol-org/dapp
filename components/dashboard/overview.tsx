@@ -27,47 +27,13 @@ import { EFFECTIVE_WRAP_AND_MINT_LABEL, type Remaining } from "@/lib/protocol/da
 import type { VerifiableFigure } from "@/lib/protocol/dashboard/verify"
 import { explorerUrl } from "@/lib/protocol/explorer"
 import { formatAmountFixed } from "@/lib/protocol/format"
-import { unavailable } from "@/lib/protocol/reader"
-import type { Live, Manifest, Network } from "@/lib/protocol/types"
+import type { Network } from "@/lib/protocol/types"
 import { AsOf, readsOf } from "./as-of"
 import { CopyEvidence } from "./copy-evidence"
 import { accountShort, ago, complianceEventWords, eventSubject, txShort } from "./event-words"
-import { decimalsScale, Figure, verifiable, type FigureSpec } from "./figure"
+import { decimalsScale, verifiable, type FigureSpec } from "./figure"
 import { Panel, Row } from "./panel"
-
-type QueryLike<D> = { data?: D; stale: boolean; error: Error | null; dataUpdatedAt: number }
-
-/**
- * A figure from a query: undefined while the first read is pending; Unavailable, with the reason,
- * after a failed refresh (the old value is never shown as current); else the picked read.
- */
-function current<D, T>(q: QueryLike<D>, pick: (data: D) => Live<T>, blocked?: string): Live<T> | undefined {
-  if (q.stale) return unavailable(`the last refresh failed: ${q.error?.message ?? "unknown error"}`)
-  if (q.data !== undefined) return pick(q.data)
-  return blocked ? unavailable(blocked) : undefined
-}
-
-const MIXED_DECIMALS = "mixed decimals: the markets' underlying assets use different decimals"
-
-/**
- * How amounts read: the decimals every market's underlying shares, and its code when they all hold
- * the same asset (else "underlying units"). Markets whose decimals differ give no unit at all: an
- * amount is then refused, never formatted with a guessed scale. With no market, the test asset.
- */
-function unitsOf(m: Manifest): { decimals: number; code: string | null } | { refused: string } {
-  const underlyings = m.markets.length > 0 ? m.markets.map((x) => x.underlying) : m.testAsset ? [m.testAsset] : []
-  if (underlyings.length === 0) return { refused: "no markets" }
-  if (new Set(underlyings.map((u) => u.decimals)).size > 1) return { refused: MIXED_DECIMALS }
-  return { decimals: underlyings[0].decimals, code: new Set(underlyings.map((u) => u.sac)).size === 1 ? underlyings[0].code : null }
-}
-
-/** `live`, or Unavailable with `reason` when its value cannot be shown (a figure is never formatted with a guessed scale). */
-function refuse<T>(live: Live<T> | undefined, reason: string | null): Live<T> | undefined {
-  return reason && live && live.status === "live" ? unavailable(reason) : live
-}
-
-/** When a query's reads arrived and their cadence, for "read Xs ago"; none before the first answer or after a failed refresh. */
-const readOf = (q: { dataUpdatedAt: number; stale: boolean }, cadenceMs: number) => (q.dataUpdatedAt > 0 && !q.stale ? { at: q.dataUpdatedAt, cadenceMs } : undefined)
+import { current, NO_LIQUIDITY, noPoolSeeded, readOf, refuse, Shown, unitsOf } from "./query-figures"
 
 const list = (words: readonly string[]) => (words.length <= 1 ? words.join("") : `${words.slice(0, -1).join(", ")} and ${words[words.length - 1]}`)
 
@@ -80,11 +46,6 @@ function oracleLine(view: OracleView, secondsLeft: number): string {
   const max = view.maxStale.status === "live" ? Number(view.maxStale.value) : null
   const warning = max !== null ? (max - secondsLeft) * 4 >= max * 3 : view.freshness === "warning"
   return `${warning ? "Warning" : "Fresh"} · operations block in ${formatDuration(secondsLeft)} without an update`
-}
-
-/** A figure, or a skeleton while its first read is pending. */
-function Shown<T>(spec: FigureSpec<T>) {
-  return spec.live ? <Figure {...spec} /> : <Skeleton className="inline-block h-5 w-32 max-w-full align-middle" />
 }
 
 
@@ -275,10 +236,12 @@ export function Overview() {
     scale: "refused" in units ? undefined : `${units.decimals} decimals; TVL × the oracle value ÷ 10,000,000, in US dollars (oracle units)`,
     read: aggregateRead,
   }
+  // As /app: while no pool is seeded, pool liquidity is "No liquidity yet", never 0.
+  const unseeded = !protocol.stale && protocol.data !== undefined && noPoolSeeded(Object.values(protocol.data.markets).map((d) => d.poolSeeded))
   const liquidity: FigureSpec<bigint> = {
     label: "Pool liquidity",
     live: refuse(current(protocol, (d) => d.totals.liquidity), refused),
-    format: amount,
+    format: (v) => (unseeded ? NO_LIQUIDITY : amount(v)),
     scale,
     read: aggregateRead,
   }

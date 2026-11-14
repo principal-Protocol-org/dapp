@@ -7,7 +7,9 @@
  *
  * - `--base`: the app. Default http://localhost:3000. For Testnet data, build and start it with
  *   `NEXT_PUBLIC_PRINCIPAL_NETWORK=testnet` in front of both `pnpm build` and `pnpm start`.
- * - `--paths`: the pages to check. Default: every `/dashboard` view.
+ * - `--paths`: the pages to check. Default: every `/dashboard` view, and the first market's detail page.
+ *   `/dashboard/markets/:first` stands for that page: its id is read from the markets list, so the
+ *   check works on any network.
  * - `--shots`: also write, per page, a desktop and a 375 px screenshot (light), and one at 375 px
  *   with the first How-to-verify drawer open. Use a gitignored folder, e.g. `e2e-artifacts/dashboard`.
  *
@@ -23,7 +25,10 @@ import { mkdirSync } from "node:fs"
 import { join, resolve } from "node:path"
 import { chromium, type Browser, type Page } from "playwright"
 
-const VIEWS = ["/dashboard", "/dashboard/markets", "/dashboard/oracle", "/dashboard/risk", "/dashboard/compliance", "/dashboard/activity"]
+/** Stands for the first market's detail page, found on the markets list (Task 6). */
+const FIRST_MARKET = "/dashboard/markets/:first"
+
+const VIEWS = ["/dashboard", "/dashboard/markets", FIRST_MARKET, "/dashboard/oracle", "/dashboard/risk", "/dashboard/compliance", "/dashboard/activity"]
 
 type Args = { base: string; paths: string[]; shots: string | null; headed: boolean }
 
@@ -58,7 +63,31 @@ async function open(page: Page, url: string): Promise<void> {
   await page.waitForTimeout(1000)
 }
 
-async function checkPage(browser: Browser, args: Args, path: string, checks: Check[]): Promise<void> {
+/** `path`, with `FIRST_MARKET` replaced by the first market link on `/dashboard/markets`. */
+async function resolvePath(browser: Browser, args: Args, path: string): Promise<string> {
+  if (path !== FIRST_MARKET) return path
+  const context = await browser.newContext()
+  try {
+    const page = await context.newPage()
+    await page.goto(`${args.base}/dashboard/markets`, { waitUntil: "domcontentloaded" })
+    const link = page.locator('main a[href^="/dashboard/markets/"]').first()
+    await link.waitFor({ timeout: 60_000 })
+    const href = await link.getAttribute("href")
+    if (!href) throw new Error("the markets list links to no market")
+    return href
+  } finally {
+    await context.close()
+  }
+}
+
+async function checkPage(browser: Browser, args: Args, requested: string, checks: Check[]): Promise<void> {
+  let path = requested
+  try {
+    path = await resolvePath(browser, args, requested)
+  } catch (error) {
+    checks.push({ page: requested, check: "page found", ok: false, detail: error instanceof Error ? error.message.split("\n")[0] : String(error) })
+    return
+  }
   const url = `${args.base}${path}`
   const add = (check: string, ok: boolean, detail: string) => checks.push({ page: path, check, ok, detail })
 

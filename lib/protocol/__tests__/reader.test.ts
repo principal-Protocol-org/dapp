@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest"
-import { isContractError, readLive, unavailable, type ContractReader } from "../reader"
+import { dedupeReads, isContractError, readLive, unavailable, type ContractReader } from "../reader"
 
 // The shape Soroban RPC returns in `simulation.error`: one HostError line, then the diagnostic event log.
 const SIMULATION_ERROR = [
@@ -67,5 +67,48 @@ describe("readLive", () => {
     }
     const live = await readLive(reader, { contractId: "C", functionName: "balance" })
     expect(live).toMatchObject({ status: "unavailable", error: "HostError: Error(Contract, #13)" })
+  })
+})
+
+describe("dedupeReads", () => {
+  const counting = () => {
+    const calls: string[] = []
+    const reader = Object.assign(
+      async <T,>({ contractId, functionName, args = [] }: { contractId: string; functionName: string; args?: { value: unknown }[] }) => {
+        calls.push(`${contractId}.${functionName}`)
+        if (functionName === "boom") throw new Error("rpc down")
+        return { value: `${contractId}.${functionName}(${args.map((a) => String(a.value)).join(",")})` as T, latestLedger: 7, minResourceFee: "0" }
+      },
+      { rpcUrl: "https://rpc.test" },
+    ) as unknown as ContractReader
+    return { calls, reader }
+  }
+
+  it("makes each distinct call once and hands every caller the same answer", async () => {
+    const { calls, reader } = counting()
+    const once = dedupeReads(reader)
+    expect(once.rpcUrl).toBe("https://rpc.test")
+    const [a, b, c, d] = await Promise.all([
+      once({ contractId: "CORACLE", functionName: "get_reference_value" }),
+      once({ contractId: "CORACLE", functionName: "get_reference_value" }),
+      once({ contractId: "CSAC", functionName: "balance", args: [{ type: "address", value: "CESCROW1" }] }),
+      once({ contractId: "CSAC", functionName: "balance", args: [{ type: "address", value: "CESCROW2" }] }),
+    ])
+    expect(a).toBe(b)
+    expect(c.value).toBe("CSAC.balance(CESCROW1)")
+    expect(d.value).toBe("CSAC.balance(CESCROW2)")
+    // Arguments are part of the call: two escrows, two reads.
+    expect(calls).toEqual(["CORACLE.get_reference_value", "CSAC.balance", "CSAC.balance"])
+  })
+
+  it("shares a failure too, and a new one reads afresh", async () => {
+    const { calls, reader } = counting()
+    const once = dedupeReads(reader)
+    const results = await Promise.allSettled([once({ contractId: "C1", functionName: "boom" }), once({ contractId: "C1", functionName: "boom" })])
+    expect(results.map((r) => r.status)).toEqual(["rejected", "rejected"])
+    expect(calls).toEqual(["C1.boom"])
+    await dedupeReads(reader)({ contractId: "C1", functionName: "x", args: [{ type: "u64", value: 5n }] })
+    await dedupeReads(reader)({ contractId: "C1", functionName: "x", args: [{ type: "u64", value: 5n }] })
+    expect(calls).toEqual(["C1.boom", "C1.x", "C1.x"])
   })
 })

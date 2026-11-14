@@ -40,7 +40,10 @@ export function marketState(over: Partial<MarketState> = {}): MarketState {
     fees: { tokenizationBps: live(0n), ytBps: live(0n), swapTierBps: live(0n), protocolShareBps: live(0n) },
     swapFeeRate: live(0n),
     exchangeRate: live(10_000_000n),
-    managerSy: live(60_000_000_000n),
+    // TVL (D-8, `tvlOf`): total_underlying 9,500 + 50 held by RecoveryEscrow = 9,550. The old sum (manager SY
+    // 6,000 + pool SY 3,400 = 9,400) is no longer read.
+    syUnderlying: live(95_000_000_000n),
+    escrowUnderlying: live(500_000_000n),
     syPaused: live(false),
     poolPaused: live(false),
     riskPaused: live(false),

@@ -7,6 +7,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 const mocks = vi.hoisted(() => ({
   clock: { ledgerTime: 1_000_000 as number | null, sequence: 5_720_000 as number | null, isError: false },
   fetchProtocolState: vi.fn(),
+  fetchMarketDashboard: vi.fn(),
+  pendingClaim: vi.fn(),
   fetchOracleView: vi.fn(),
   fetchRiskView: vi.fn(),
   fetchPauses: vi.fn(),
@@ -19,7 +21,11 @@ vi.mock("@/components/app/manifest-provider", () => {
 })
 vi.mock("@/lib/protocol/reader", () => ({ createRpcReader: () => ({}) }))
 vi.mock("@/hooks/use-ledger-clock", () => ({ useLedgerClock: () => mocks.clock }))
-vi.mock("@/lib/protocol/dashboard/protocol-state", () => ({ fetchProtocolState: mocks.fetchProtocolState }))
+vi.mock("@/lib/protocol/dashboard/protocol-state", () => ({
+  fetchProtocolState: mocks.fetchProtocolState,
+  fetchMarketDashboard: mocks.fetchMarketDashboard,
+  pendingClaim: mocks.pendingClaim,
+}))
 vi.mock("@/lib/protocol/dashboard/oracle", () => ({ fetchOracleView: mocks.fetchOracleView }))
 vi.mock("@/lib/protocol/dashboard/risk", () => ({ fetchRiskView: mocks.fetchRiskView }))
 vi.mock("@/lib/protocol/dashboard/pauses", () => ({ fetchPauses: mocks.fetchPauses }))
@@ -30,9 +36,11 @@ import {
   secondsToBlockNow,
   useComplianceEvents,
   useIndexStatus,
+  useMarketDashboard,
   useOpenAlerts,
   useOracleView,
   usePauses,
+  usePendingClaim,
   useProtocolState,
   useRiskView,
 } from "@/hooks/use-dashboard"
@@ -72,6 +80,8 @@ beforeEach(() => {
   client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   mocks.clock = { ledgerTime: 1_000_000, sequence: 5_720_000, isError: false }
   mocks.fetchProtocolState.mockReset().mockResolvedValue({ markets: {}, totals: {} })
+  mocks.fetchMarketDashboard.mockReset().mockResolvedValue({ marketId: "m1" })
+  mocks.pendingClaim.mockReset().mockResolvedValue({ status: "live", value: 5n, ledger: 1 })
   mocks.fetchOracleView.mockReset().mockResolvedValue({ contractId: "ORACLE" })
   mocks.fetchRiskView.mockReset().mockResolvedValue({ contractId: "RISK" })
   mocks.fetchPauses.mockReset().mockResolvedValue({ contracts: [], paused: { status: "live", value: [], ledger: 1 } })
@@ -103,6 +113,42 @@ describe("useProtocolState", () => {
     mocks.fetchProtocolState.mockRejectedValue(new Error("rpc down"))
     await act(() => result.current.refetch())
     await waitFor(() => expect(result.current.stale).toBe(true))
+  })
+})
+
+describe("useMarketDashboard", () => {
+  it("reads one market's figures (the detail page) every 15 s, keyed by network and market", async () => {
+    const { result } = renderHook(() => useMarketDashboard("m2"), { wrapper })
+    await waitFor(() => expect(result.current.data).toBeDefined())
+    expect(mocks.fetchMarketDashboard).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ network: "testnet" }), { marketId: "m2" })
+    expect(mocks.fetchProtocolState).not.toHaveBeenCalled()
+    expect(interval(["dashboard", "market", "testnet", "m2"])).toBe(DASHBOARD_LIVE_MS)
+  })
+
+  it("an id the manifest does not list is an error, not a read", async () => {
+    const { result } = renderHook(() => useMarketDashboard("nope"), { wrapper })
+    await waitFor(() => expect(result.current.isError).toBe(true))
+    expect(result.current.error?.message).toMatch(/nope/)
+    expect(mocks.fetchMarketDashboard).not.toHaveBeenCalled()
+  })
+})
+
+describe("usePendingClaim", () => {
+  const ms = { ytFrozen: { status: "live", value: false, ledger: 1 } } as never
+  const ACCOUNT = "GBLPAJ2GVSFUWCUIFMEV4EOV2XIOEWMJRIQ3LOM2Z42TNIY3J6ACB7UA"
+
+  it("reads nothing until an address is looked up and the market is read", () => {
+    renderHook(() => usePendingClaim("m1", null, ms), { wrapper })
+    renderHook(() => usePendingClaim("m1", ACCOUNT, undefined), { wrapper })
+    expect(mocks.pendingClaim).not.toHaveBeenCalled()
+  })
+
+  it("reads the account's pending claim with the market's state, keyed by account, every 15 s", async () => {
+    const { result } = renderHook(() => usePendingClaim("m1", ACCOUNT, ms), { wrapper })
+    await waitFor(() => expect(result.current.data).toBeDefined())
+    expect(mocks.pendingClaim).toHaveBeenCalledWith(expect.anything(), { marketId: "m1" }, ACCOUNT, ms)
+    expect(result.current.data).toEqual({ status: "live", value: 5n, ledger: 1 })
+    expect(interval(["dashboard", "pending", "testnet", "m1", ACCOUNT])).toBe(DASHBOARD_LIVE_MS)
   })
 })
 

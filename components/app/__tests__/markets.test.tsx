@@ -172,9 +172,10 @@ describe("MarketGroups", () => {
   it("asset row shows total liquidity over TVL, best YT leverage, best fixed APY", () => {
     renderList()
     const row = assetRow()
-    // Liquidity per market: SY 3,400 + PT 1,200 x its price / oracle 1.05. m1: 4,520. m2: 4,485.71. TVL: (6,000 + 3,400) = 9,400 each.
+    // Liquidity per market: SY 3,400 + PT 1,200 x its price / oracle 1.05. m1: 4,520. m2: 4,485.71.
+    // TVL (tvlOf, D-8): total_underlying 9,500 + escrow 50 = 9,550 each, 19,100 for the asset.
     expect(within(row).getByText("9,005.71")).toBeTruthy()
-    expect(within(row).getByText("18,800")).toBeTruthy()
+    expect(within(row).getByText("19,100")).toBeTruthy()
     expect(within(row).getByText("50x")).toBeTruthy()
     // 7% APR compounded over 10 days: 7.2436%.
     expect(within(row).getByText("7.24%")).toBeTruthy()
@@ -204,7 +205,7 @@ describe("MarketGroups", () => {
     const card = marketCard("m1")
     expect(within(card).getByRole("link", { name: /USDY · m1/ }).getAttribute("href")).toBe("/app/markets/m1")
     expect(within(card).getByText("4,520")).toBeTruthy()
-    expect(within(card).getByText("9,400")).toBeTruthy()
+    expect(within(card).getByText("9,550")).toBeTruthy()
     expect(within(card).getByText("4.98%")).toBeTruthy()
     expect(within(card).getByRole("img", { name: /30-day fixed APY, up 0\.18 points/ })).toBeTruthy()
     expect(within(card).getByText("+0.18 pt")).toBeTruthy()

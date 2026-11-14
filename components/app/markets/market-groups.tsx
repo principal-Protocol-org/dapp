@@ -9,7 +9,7 @@ import { useMarketStates } from "@/hooks/use-market-state"
 import { useManifest } from "@/components/app/manifest-provider"
 import { aprToApy } from "@/lib/protocol/math"
 import { formatAmount, formatPercent } from "@/lib/protocol/format"
-import { leverage, marketTvl } from "@/lib/protocol/rates"
+import { leverage, tvlOf } from "@/lib/protocol/rates"
 import type { MarketState } from "@/lib/protocol/market-state"
 import type { Manifest, Market } from "@/lib/protocol/types"
 import { Badge } from "@/components/ui/badge"
@@ -162,8 +162,9 @@ function LiquidityTvl({
   )
 }
 
-function tvlOf(ms: MarketState) {
-  const t = marketTvl(ms)
+/** TVL (D-8, `tvlOf`: total_underlying + RecoveryEscrow), as this list shows it. */
+function tvlFigure(ms: MarketState) {
+  const t = tvlOf(ms)
   return t.status === "live" ? ({ kind: "value", value: t.value } as const) : ({ kind: "unavailable" } as const)
 }
 
@@ -272,7 +273,7 @@ function MaturityRow({
       {ms ? (
         <>
           <Cell label="Liquidity / TVL">
-            <LiquidityTvl liquidity={liquidityOf(ms)} tvl={tvlOf(ms)} decimals={decimals} unit={unit} />
+            <LiquidityTvl liquidity={liquidityOf(ms)} tvl={tvlFigure(ms)} decimals={decimals} unit={unit} />
           </Cell>
           <Cell label="Underlying APY (7 d)" className="font-mono tabular-nums">
             <UnderlyingApy pool={market.contracts.pool} />
@@ -376,7 +377,7 @@ function AssetGroup({
   const states = slots.map((s) => (s.stale ? undefined : s.data))
   const loading = slots.some((s) => s.isPending && s.data === undefined)
   const liquidity = total(states.map((ms) => (ms ? liquidityOf(ms) : undefined)))
-  const tvl = total(states.map((ms) => (ms ? tvlOf(ms) : undefined)))
+  const tvl = total(states.map((ms) => (ms ? tvlFigure(ms) : undefined)))
   const liveStates = states.filter((ms): ms is MarketState => ms !== undefined && isLive(ms, ledgerTime))
   const bestLev = best(liveStates.map(leverageOf))
   const bestApy = best(liveStates.map((ms) => fixedApyOf(ms, ledgerTime)))

@@ -2,6 +2,7 @@ import { render, screen } from "@testing-library/react"
 import { describe, expect, it, vi } from "vitest"
 
 vi.mock("@/components/dashboard/overview", () => ({ Overview: () => <h1>overview</h1> }))
+vi.mock("@/components/dashboard/markets-table", () => ({ MarketsView: () => <h1>markets view</h1> }))
 
 import DashboardPage from "../../../app/dashboard/page"
 import ActivityPage from "../../../app/dashboard/activity/page"
@@ -17,9 +18,14 @@ describe("the dashboard routes", () => {
     expect(screen.getByRole("heading", { name: "overview" })).toBeTruthy()
   })
 
+  it("/dashboard/markets is the markets view, no longer a placeholder", () => {
+    render(<MarketsPage />)
+    expect(screen.getByRole("heading", { name: "markets view" })).toBeTruthy()
+    expect(screen.queryByText(/Coming in this release/)).toBeNull()
+  })
+
   // Every sub-navigation link has a page (none 404s); the ones a later task fills say so plainly.
   it.each([
-    ["Markets", MarketsPage],
     ["Oracle", OraclePage],
     ["Risk", RiskPage],
     ["Compliance", CompliancePage],

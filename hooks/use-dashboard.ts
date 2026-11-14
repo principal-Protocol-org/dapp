@@ -7,7 +7,8 @@ import { parseOpenAlerts, type OpenAlertsAnswer } from "@/lib/app/alert-types"
 import { useLedgerClock } from "@/hooks/use-ledger-clock"
 import { fetchOracleView, type OracleView } from "@/lib/protocol/dashboard/oracle"
 import { fetchPauses } from "@/lib/protocol/dashboard/pauses"
-import { fetchProtocolState } from "@/lib/protocol/dashboard/protocol-state"
+import { fetchMarketDashboard, fetchProtocolState, pendingClaim, type MarketDashboard } from "@/lib/protocol/dashboard/protocol-state"
+import { getMarket } from "@/lib/protocol/manifest"
 import { fetchRiskView } from "@/lib/protocol/dashboard/risk"
 import { createRpcReader } from "@/lib/protocol/reader"
 import type { Live } from "@/lib/protocol/types"
@@ -42,6 +43,47 @@ export function useProtocolState(marketIds?: readonly string[]) {
       queryKey: ["dashboard", "protocol", m.network, idsOf(ids)],
       queryFn: () => fetchProtocolState(createRpcReader(m), m, ids),
       refetchInterval: DASHBOARD_AGGREGATE_MS,
+    }),
+  )
+}
+
+/**
+ * One market's dashboard figures (`fetchMarketDashboard`), for its detail page: one batch of reads every
+ * 15 s, the live cadence, since the page watches that one market. An id the manifest does not list is an
+ * error, never a read (the route shows the not-found page before this runs).
+ */
+export function useMarketDashboard(marketId: string) {
+  const m = useManifest()
+  return withStale(
+    useQuery({
+      queryKey: ["dashboard", "market", m.network, marketId],
+      queryFn: () => {
+        const market = getMarket(m, marketId)
+        if (!market) throw new Error(`Unknown market "${marketId}"`)
+        return fetchMarketDashboard(createRpcReader(m), m, market)
+      },
+      refetchInterval: DASHBOARD_LIVE_MS,
+    }),
+  )
+}
+
+/**
+ * What `account` would be paid by claiming its YT yield now, net of the YT fee (`pendingClaim`, D-9),
+ * every 15 s. It reads nothing until an address has been looked up (`account`, already validated) and
+ * the market's state (`ms`) is in: the net needs its fee, exchange rate and oracle value. No wallet.
+ */
+export function usePendingClaim(marketId: string, account: string | null, ms: MarketDashboard | undefined) {
+  const m = useManifest()
+  return withStale(
+    useQuery({
+      queryKey: ["dashboard", "pending", m.network, marketId, account],
+      queryFn: () => {
+        const market = getMarket(m, marketId)
+        if (!market) throw new Error(`Unknown market "${marketId}"`)
+        return pendingClaim(createRpcReader(m), market, account as string, ms as MarketDashboard)
+      },
+      enabled: account !== null && ms !== undefined,
+      refetchInterval: DASHBOARD_LIVE_MS,
     }),
   )
 }

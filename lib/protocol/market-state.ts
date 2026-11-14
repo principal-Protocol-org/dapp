@@ -1,6 +1,7 @@
 import { allLive, readLive, toBigint, toBool, unavailable, type ContractReader } from "./reader"
 import { getMarket } from "./manifest"
 import { bytesToHex } from "./bytes"
+import { nameArgs } from "./dashboard/verify"
 import type { Live, Manifest, Market } from "./types"
 
 export type PoolStateView = {
@@ -53,8 +54,13 @@ export type MarketState = {
   }
   swapFeeRate: Live<bigint>
   exchangeRate: Live<bigint>
-  /** SY shares the PrincipalManager holds (`SYWrapper.balance_of(manager)`), for TVL. */
-  managerSy: Live<bigint>
+  /**
+   * `SYWrapper.total_underlying()`: underlying the SY wrapper holds. With `escrowUnderlying`, the TVL
+   * `/app` and the dashboard share (D-8, `tvlOf`).
+   */
+  syUnderlying: Live<bigint>
+  /** The underlying SAC's `balance(recoveryEscrow)` (its argument named `id`): underlying RecoveryEscrow holds after unwrapping seized positions. */
+  escrowUnderlying: Live<bigint>
   syPaused: Live<boolean>
   poolPaused: Live<boolean>
   riskPaused: Live<boolean>
@@ -197,7 +203,8 @@ export async function fetchMarketState(reader: ContractReader, m: Manifest, mark
     oracleRate, oracleTimestamp, oracleFresh, oracleMaxStaleSeconds,
     oracleMaxDeviationBps, oraclePrimarySource, oracleFallbackSource, oracleLastRejection, settledRate, ytFrozen, ytAccruedIndex, totalPt, totalYt,
     lpTotalSupply, tokenizationBps, ytBps, swapTierBps, protocolShareBps, exchangeRate, syPaused, poolPaused,
-    riskPaused, managerPaused, cbLimit, cbVolume, assetLimit, assetVolume, poolState, seeded, swapFeeRate, info, matured, managerSy,
+    riskPaused, managerPaused, cbLimit, cbVolume, assetLimit, assetVolume, poolState, seeded, swapFeeRate, info, matured, syUnderlying,
+    escrowUnderlying,
   ] = await Promise.all([
     big(c.oracle, "get_reference_value"),
     big(c.oracle, "get_reference_timestamp"),
@@ -233,7 +240,9 @@ export async function fetchMarketState(reader: ContractReader, m: Manifest, mark
     swapFeeChain,
     routerInfo,
     maturity,
-    big(c.sy, "balance_of", [{ type: "address", value: c.manager }]),
+    // TVL (D-8): what the SY wrapper holds plus what RecoveryEscrow holds. The SAC names its argument `id`.
+    big(c.sy, "total_underlying"),
+    big(market.underlying.sac, "balance", [{ type: "address", value: c.recoveryEscrow }]).then((live) => nameArgs(live, ["id"])),
   ])
 
   return {
@@ -259,7 +268,8 @@ export async function fetchMarketState(reader: ContractReader, m: Manifest, mark
     fees: { tokenizationBps, ytBps, swapTierBps, protocolShareBps },
     swapFeeRate,
     exchangeRate,
-    managerSy,
+    syUnderlying,
+    escrowUnderlying,
     syPaused,
     poolPaused,
     riskPaused,

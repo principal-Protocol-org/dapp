@@ -7,7 +7,9 @@ import { getMarket } from "../manifest"
 import { fetchMarketState, type MarketState } from "../market-state"
 import { SCALE } from "../math"
 import { pendingOf } from "../position"
-import { allLive, readLive, toAddress, toBigint, unavailable, type ContractReader } from "../reader"
+import { tvlOf } from "../rates"
+import { allLive, dedupeReads, readLive, toAddress, toBigint, unavailable, type ContractReader } from "../reader"
+import { accruedFees } from "../roles"
 import type { Live, Manifest, Market } from "../types"
 import { poolValueInUnderlying } from "../yield"
 import { nameArgs } from "./verify"
@@ -15,17 +17,28 @@ import { nameArgs } from "./verify"
 /** How the dashboard labels TVL: what it counts, and that escrowed underlying is included. */
 export const TVL_LABEL = "Underlying held by the SY wrapper, plus underlying held by RecoveryEscrow (included)"
 
+/** One fee bucket: unclaimed SY shares, and what they are worth in underlying at the SY exchange rate. */
+export type FeeBucket = { sy: Live<bigint>; underlying: Live<bigint> }
+
+/**
+ * A market's dashboard figures. `syUnderlying` (`SYWrapper.total_underlying()`) and `escrowUnderlying`
+ * (the underlying SAC's `balance(escrow)`) come from its `MarketState`: `/app` reads the same two views.
+ */
 export type MarketDashboard = MarketState & {
-  /** `SYWrapper.total_underlying()`: underlying held by the SY wrapper. */
-  syUnderlying: Live<bigint>
-  /** The underlying SAC's `balance(escrow)`: underlying RecoveryEscrow holds after unwrapping seized positions. */
-  escrowUnderlying: Live<bigint>
-  /** TVL (`TVL_LABEL`): `syUnderlying + escrowUnderlying`, underlying units. Equals `total_underlying` while the escrow is empty. */
+  /** TVL (`TVL_LABEL`): `tvlOf`, `syUnderlying + escrowUnderlying`, underlying units; `/app` shows the same figure. Equals `total_underlying` while the escrow is empty. */
   tvl: Live<bigint>
   /** TVL in reference units: `tvl × oracle value / SCALE`. */
   tvlReference: Live<bigint>
-  /** Estimated pool value in underlying (`poolValueInUnderlying`, PT at the pool price); 0 while the pool is unseeded. */
+  /**
+   * Estimated pool value in underlying (`poolValueInUnderlying`, PT at the pool price); 0 while the pool is
+   * unseeded, so totals still add up. A view shows an unseeded pool (`poolSeeded` false) as "No liquidity yet".
+   */
   liquidity: Live<bigint>
+  /**
+   * Swap, tokenization and YT fees accrued and not yet claimed: the pool's `accrued_fees` plus the
+   * manager's, per bucket. Protocol is paid to the treasury, creator to the creator.
+   */
+  feeBuckets: { protocol: FeeBucket; creator: FeeBucket }
   feeRecipients: { treasury: Live<string>; creator: Live<string>; protocolAdmin: Live<string> }
 }
 
@@ -46,29 +59,32 @@ function liquidityOf(ms: MarketState): Live<bigint> {
   })
 }
 
-async function fetchMarketDashboard(reader: ContractReader, manifest: Manifest, market: Market): Promise<MarketDashboard> {
+/**
+ * One market's dashboard figures: its `MarketState` (`fetchMarketState`, as `/app` reads it), plus the
+ * fee buckets and recipients. One batch of parallel reads; a failed read is that figure's Unavailable.
+ */
+export async function fetchMarketDashboard(reader: ContractReader, manifest: Manifest, market: Market): Promise<MarketDashboard> {
   const c = market.contracts
   const address = (fn: string) => readLive<unknown, string>(reader, { contractId: c.config, functionName: fn }, toAddress)
-  const [ms, syUnderlying, escrowUnderlying, treasury, creator, protocolAdmin] = await Promise.all([
+  const [ms, fees, treasury, creator, protocolAdmin] = await Promise.all([
     fetchMarketState(reader, manifest, market.marketId),
-    readLive<unknown, bigint>(reader, { contractId: c.sy, functionName: "total_underlying" }, toBigint),
-    readLive<unknown, bigint>(
-      reader,
-      { contractId: market.underlying.sac, functionName: "balance", args: [{ type: "address", value: c.recoveryEscrow }] },
-      toBigint,
-    ).then((live) => nameArgs(live, ["id"])),
+    accruedFees(reader, market),
     address("treasury"),
     address("creator"),
     address("protocol_admin"),
   ])
-  const tvl = allLive([syUnderlying, escrowUnderlying] as const, ([sy, escrow]) => sy + escrow)
+  const tvl = tvlOf(ms)
+  const bucket = (pick: (f: { protocol: bigint; creator: bigint }) => bigint): FeeBucket => {
+    const sy = allLive([fees] as const, ([f]) => pick(f))
+    // What SYWrapper.withdraw pays for these shares: shares × exchange rate / SCALE, floored.
+    return { sy, underlying: allLive([sy, ms.exchangeRate] as const, ([shares, rate]) => (shares * rate) / SCALE) }
+  }
   return {
     ...ms,
-    syUnderlying,
-    escrowUnderlying,
     tvl,
     tvlReference: allLive([tvl, ms.oracleRate] as const, ([amount, rate]) => (amount * rate) / SCALE),
     liquidity: liquidityOf(ms),
+    feeBuckets: { protocol: bucket((f) => f.protocol), creator: bucket((f) => f.creator) },
     feeRecipients: { treasury, creator, protocolAdmin },
   }
 }
@@ -98,7 +114,10 @@ export async function fetchProtocolState(reader: ContractReader, manifest: Manif
     if (!market) throw new Error(`Unknown market "${id}"`)
     return market
   })
-  const dashboards = await Promise.all(markets.map((market) => fetchMarketDashboard(reader, manifest, market)))
+  // One sweep per refresh: each market's views once, and the views of contracts the markets share
+  // (oracle, RiskControl) once in all, not once per market (Review Focus 5).
+  const sweep = dedupeReads(reader)
+  const dashboards = await Promise.all(markets.map((market) => fetchMarketDashboard(sweep, manifest, market)))
   const byId = Object.fromEntries(markets.map((market, i) => [market.marketId, dashboards[i]]))
 
   const pick = (f: (d: MarketDashboard) => Live<bigint>): [string, Live<bigint>][] =>

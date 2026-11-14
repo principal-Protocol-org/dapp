@@ -212,7 +212,8 @@ describe("MarketStats", () => {
   it("shows five stats: liquidity, TVL, underlying APY 7 d, PT fixed APY, YT leverage", () => {
     wrap(<MarketStats marketId="m1" />)
     expect(stat("Liquidity")?.textContent).toBe("≈ 4,520 STA")
-    expect(stat("TVL")?.textContent).toBe("≈ 9,400 STA")
+    // tvlOf (D-8): total_underlying 9,500 + RecoveryEscrow 50.
+    expect(stat("TVL")?.textContent).toBe("≈ 9,550 STA")
     expect(stat("Underlying APY (7 d)")?.textContent).toContain("4.98%")
     expect(stat("PT fixed APY")?.textContent).toMatch(/^\d+\.\d\d%$/)
     expect(stat("YT leverage")?.textContent).toBe("50x")
@@ -228,6 +229,15 @@ describe("MarketStats", () => {
     expect(liquidity.className).not.toContain("text-[15px]")
     expect((liquidity.parentElement as HTMLElement).className).toContain("content-between")
     expect(screen.getByText("Liquidity").className).toBe("label")
+  })
+  it("TVL is Unavailable when the escrow balance or total_underlying cannot be read, never total_underlying alone", () => {
+    for (const over of [{ escrowUnderlying: down() }, { syUnderlying: down() }]) {
+      mocks.ms = marketState(over)
+      const { unmount } = wrap(<MarketStats marketId="m1" />)
+      expect(stat("TVL")?.textContent).toMatch(/^Unavailable/)
+      expect(stat("TVL")?.textContent).not.toContain("9,500")
+      unmount()
+    }
   })
   it("labels a short underlying window 'since <date>' and never extrapolates (R2-44)", () => {
     mocks.history = "short"

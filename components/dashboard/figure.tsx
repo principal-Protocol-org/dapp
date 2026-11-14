@@ -1,5 +1,6 @@
 "use client"
 
+import type { ReactNode } from "react"
 import { InfoIcon } from "lucide-react"
 import { cn } from "cn"
 import { UNAVAILABLE } from "@/components/app/live"
@@ -35,20 +36,24 @@ export function decimalsScale(decimals: number, code: string): string {
   return `${decimals} decimals: ${(10n ** BigInt(decimals)).toLocaleString("en-US")} = 1 ${code}`
 }
 
+/** How a live value shows on the page when plain text is not enough (a link): `format` still gives the evidence and the drawer their text. */
+export type FigureRender<T> = (value: T, display: string) => ReactNode
+
 /**
  * A dashboard figure (D-7): the formatted value, or "Unavailable", and an info button that opens
  * the How-to-verify drawer. For a failed read the drawer says why, and still gives the call that was
  * attempted, so the reader can try it. `live` undefined (not read yet) shows "Unavailable" with no
- * button: callers show a skeleton while the first read is pending.
+ * button: callers show a skeleton while the first read is pending. `render` replaces the visible
+ * value only, e.g. a shortened address that links to the explorer.
  */
-export function Figure<T>({ label, live, format, scale, read, className }: FigureSpec<T> & { className?: string }) {
+export function Figure<T>({ label, live, format, scale, read, className, render }: FigureSpec<T> & { className?: string; render?: FigureRender<T> }) {
   if (!live) return <span className={className}>{UNAVAILABLE}</span>
   const display = figureDisplay(live, format)
   const down = live.status === "unavailable"
   const figure: VerifiableFigure = read ? { label, display, live, read } : { label, display, live }
   return (
     <span className={cn("inline-flex max-w-full min-w-0 items-center gap-1.5", className)}>
-      <span className="min-w-0 wrap-anywhere">{display}</span>
+      <span className="min-w-0 wrap-anywhere">{render && live.status === "live" ? render(live.value, display) : display}</span>
       <VerifyDrawer
         figure={figure}
         scale={scale}

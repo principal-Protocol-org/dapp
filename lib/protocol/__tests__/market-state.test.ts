@@ -67,7 +67,8 @@ function healthy(): Record<string, Handler> {
     [`${c.config}.swap_fee_rate`]: 123n,
     [`${c.sy}.exchange_rate`]: 10_000_000n,
     [`${c.sy}.is_paused`]: false,
-    [`${c.sy}.balance_of`]: 700n,
+    [`${c.sy}.total_underlying`]: 2_230_113_029_038n,
+    [`${sac}.balance`]: 5_000_000n,
     [`${manifest.shared.riskControl}.is_paused`]: false,
     [`${manifest.shared.riskControl}.get_cb_limit`]: 1_000n,
     [`${manifest.shared.riskControl}.get_cb_volume`]: 100n,
@@ -126,11 +127,24 @@ describe("fetchMarketState", () => {
     expect(s.managerPaused.status).toBe("unavailable")
   })
 
-  it("reads the SY the PrincipalManager holds, via balance_of(manager)", async () => {
+  it("reads TVL's two views once each: SY total_underlying() and the SAC's balance(escrow), named id (D-8)", async () => {
     const calls: Calls = []
     const s = await fetchMarketState(fakeReader(healthy(), calls), manifest, market.marketId)
-    expect(s.managerSy).toMatchObject({ status: "live", value: 700n })
-    expect(calls.find((x) => x.key === `${c.sy}.balance_of`)?.args).toEqual([{ type: "address", value: c.manager }])
+    expect(s.syUnderlying).toMatchObject({ status: "live", value: 2_230_113_029_038n, source: { contractId: c.sy, fn: "total_underlying", args: [] } })
+    expect(s.escrowUnderlying).toMatchObject({
+      status: "live",
+      value: 5_000_000n,
+      source: { contractId: sac, fn: "balance", args: [{ type: "address", value: c.recoveryEscrow, name: "id" }] },
+    })
+    expect(calls.filter((x) => x.key === `${c.sy}.total_underlying`)).toHaveLength(1)
+    expect(calls.filter((x) => x.key === `${sac}.balance`).map((x) => x.args)).toEqual([[{ type: "address", value: c.recoveryEscrow }]])
+  })
+
+  it("no longer reads the manager's SY balance: TVL is total_underlying, not manager SY + pool SY", async () => {
+    const calls: Calls = []
+    const s = await fetchMarketState(fakeReader(healthy(), calls), manifest, market.marketId)
+    expect(calls.some((x) => x.key === `${c.sy}.balance_of`)).toBe(false)
+    expect("managerSy" in s).toBe(false)
   })
 
   it("a v1 oracle (no is_available) reads as unavailable, never a crash (R4-2)", async () => {
@@ -180,11 +194,13 @@ describe("fetchMarketState", () => {
     expect(s.oracleLastRejection.status).toBe("unavailable")
   })
 
-  it("an unreadable manager SY balance is unavailable, not zero", async () => {
+  it("an unreadable total_underlying or escrow balance is unavailable, not zero", async () => {
     const table = healthy()
-    table[`${c.sy}.balance_of`] = new Error("rpc 429")
+    table[`${c.sy}.total_underlying`] = new Error("rpc 429")
+    table[`${sac}.balance`] = new Error("rpc 503")
     const s = await fetchMarketState(fakeReader(table), manifest, market.marketId)
-    expect(s.managerSy).toMatchObject({ status: "unavailable", error: "rpc 429" })
+    expect(s.syUnderlying).toMatchObject({ status: "unavailable", error: "rpc 429" })
+    expect(s.escrowUnderlying).toMatchObject({ status: "unavailable", error: "rpc 503" })
   })
 
   it("calls is_available with no arguments, reads max_stale_seconds, and the underlying SAC is the risk-control asset key", async () => {

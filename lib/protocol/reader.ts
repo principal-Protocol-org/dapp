@@ -29,6 +29,26 @@ function plainArgs(args: ScArg[] | undefined): unknown[] {
   return (args ?? []).map((a) => ({ ...a, value: typeof a.value === "bigint" ? a.value.toString() : a.value }))
 }
 
+/**
+ * A reader that makes each distinct call (contract, function, arguments) once for as long as it lives,
+ * and hands every later caller the same answer, or the same failure. A sweep over many markets wrapped
+ * in one reads the views of the contracts they share (oracle, RiskControl) once, not once per market.
+ * Make a new one per refresh: it never expires, so a refresh that reused it would read nothing new.
+ */
+export function dedupeReads(reader: ContractReader): ContractReader {
+  const answers = new Map<string, Promise<ContractReadResult<unknown>>>()
+  const read = <T>(call: { contractId: string; functionName: string; args?: ScArg[] }) => {
+    const key = JSON.stringify([call.contractId, call.functionName, plainArgs(call.args)])
+    let answer = answers.get(key)
+    if (!answer) {
+      answer = reader<unknown>(call)
+      answers.set(key, answer)
+    }
+    return answer as Promise<ContractReadResult<T>>
+  }
+  return Object.assign(read, { rpcUrl: reader.rpcUrl })
+}
+
 export function liveValue<T>(value: T, ledger: number): Extract<Live<T>, { status: "live" }> {
   return { status: "live", value, ledger }
 }
