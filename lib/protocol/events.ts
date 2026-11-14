@@ -12,7 +12,17 @@ import type { Manifest, Market } from "./types"
  * event is decoded per contract role, never by topic alone.
  */
 
-export type Role = "sy" | "manager" | "pt" | "yt" | "pool" | "escrow" | "oracle"
+export type Role =
+  | "sy"
+  | "manager"
+  | "pt"
+  | "yt"
+  | "pool"
+  | "escrow"
+  | "oracle"
+  | "permissioning"
+  | "riskControl"
+  | "config"
 
 export type DecodedEvent = { role: Role; topic: string; fields: Record<string, unknown> }
 
@@ -76,6 +86,8 @@ const SHAPES: Record<Role, Record<string, readonly string[]>> = {
     rem_liq: ["from", "to", "lp", "pt_out", "sy_out"], // :1106
     lp_xfer: ["from", "to", "amount"], // :558
     lp_seize: ["caller", "account", "amount"], // :584
+    paused: ["paused"], // :1172, a bare bool
+    fee_claim: ["payee", "owed", "protocol"], // :1578
   },
   // principal_manager/src/lib.rs
   manager: {
@@ -83,6 +95,9 @@ const SHAPES: Record<Role, Record<string, readonly string[]>> = {
     recombine: ["from", "amount", "shares"], // :453
     redeem: ["from", "pt_amount", "yt_amount", "from_pt", "from_yt"], // :520
     yt_claim: ["from", "gross", "paid"], // :549
+    paused: ["paused"], // :663, a bare bool
+    settled: ["rate"], // :769
+    fee_claim: ["payee", "owed", "protocol"], // :832
   },
   // sy_wrapper/src/lib.rs
   sy: {
@@ -90,6 +105,7 @@ const SHAPES: Record<Role, Record<string, readonly string[]>> = {
     withdraw: ["from", "shares", "underlying_out"], // :338
     sy_xfer: ["from", "to", "amount"], // :197
     seize: ["caller", "account", "shares"], // :511
+    paused: ["paused"], // :505, a bare bool
   },
   // pt_token/src/lib.rs
   pt: {
@@ -114,13 +130,51 @@ const SHAPES: Record<Role, Record<string, readonly string[]>> = {
   // oracle_adapter/src/lib.rs
   oracle: {
     ref_set: ["value", "timestamp"], // :90
+    ref_rej: ["value", "timestamp", "reason"], // :729
+    src_set: ["primary", "fallback"], // :231, the fallback is an Option (null when unset)
+    feed_set: ["feed", "asset"], // :251
+    adm_xfer: ["current_admin", "new_admin"], // :681
+  },
+  // permissioning/src/lib.rs
+  permissioning: {
+    acc_grant: ["caller", "account"], // :60
+    acc_rev: ["caller", "account"], // :69
+    acc_batch: ["caller"], // :84, a bare address
+    ast_grant: ["caller", "account", "asset"], // :106
+    ast_rev: ["caller", "account", "asset"], // :116
+    adm_xfer: ["current_admin", "new_admin"], // :132
+  },
+  // risk_control/src/lib.rs
+  riskControl: {
+    paused: ["caller", "paused"], // :122, :130 (a tuple, unlike the bare bool elsewhere)
+    add_psr: ["caller", "pauser"], // :156
+    rm_psr: ["caller", "pauser"], // :165
+    add_cons: ["caller", "consumer"], // :204
+    rm_cons: ["caller", "consumer"], // :213
+    cb_limit: ["caller", "limit"], // :314
+    ast_limit: ["caller", "asset", "limit"], // :327
+    cb_window: ["caller", "ledgers"], // :340
+    adm_xfer: ["current_admin", "new_admin"], // :384
+  },
+  // market_config/src/lib.rs
+  config: {
+    fees_set: ["caller", "tokenization_fee_bps", "yt_fee_bps", "swap_fee_tier_bps"], // :170
+    payee_set: ["caller", "payee"], // :184
+    share_set: ["caller", "protocol_share_bps"], // :196
+    treas_set: ["caller", "treasury"], // :203
+    padm_xfer: ["caller", "new_admin"], // :212
   },
 }
 
 /** Decodes one event for the contract role that emitted it; null for an unknown topic or shape. */
 export function decodeEvent(role: Role, topic: string, data: unknown): DecodedEvent | null {
   const names = Object.hasOwn(SHAPES[role], topic) ? SHAPES[role][topic] : undefined
-  if (!names || !Array.isArray(data) || data.length !== names.length) return null
+  if (!names) return null
+  // A one-field event publishes the bare value (`paused`, `settled`, `acc_batch`), not a tuple.
+  if (names.length === 1) {
+    return data === undefined || data === null || Array.isArray(data) ? null : { role, topic, fields: { [names[0]]: data } }
+  }
+  if (!Array.isArray(data) || data.length !== names.length) return null
   const fields: Record<string, unknown> = {}
   names.forEach((name, i) => {
     fields[name] = data[i]

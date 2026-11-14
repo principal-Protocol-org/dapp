@@ -48,6 +48,12 @@ export type Manifest = {
   friendbotUrl?: string
   generatedAt: string
   sourceCommit: string
+  /** Ledger of the deployment's first contract creation: where the indexer starts. */
+  deployLedger?: number
+  /** Oracle source hashes the monitor recognises: sha256(preimage) = hash. */
+  oracleSources?: { hash: string; preimage: string }[]
+  /** RPC endpoints tried, in order, after `rpcUrl`. */
+  rpcFallbackUrls?: string[]
   shared: SharedContracts
   /** Pinned Wasm hash (hex) per market contract kind; the trust anchor for restoring code (R29b). */
   wasmHashes: Partial<Record<WasmHashKey, string>>

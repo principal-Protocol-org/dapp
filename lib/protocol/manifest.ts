@@ -61,6 +61,14 @@ const envelope = {
   friendbotUrl: z.string().url().optional(),
   generatedAt: z.string().datetime(),
   sourceCommit: z.string().min(1),
+  /** Ledger of the deployment's first contract creation: where the indexer starts. */
+  deployLedger: z.number().int().positive().optional(),
+  /** Oracle source hashes the monitor recognises: sha256(preimage) = hash. */
+  oracleSources: z
+    .array(z.object({ hash: z.string().regex(/^[0-9a-fA-F]{64}$/, "Expected a 32-byte hash in hex"), preimage: z.string().min(1) }))
+    .optional(),
+  /** RPC endpoints tried, in order, after `rpcUrl`. */
+  rpcFallbackUrls: z.array(z.string().url()).optional(),
 }
 
 const manifestSchemaV1 = z.object({
@@ -148,6 +156,9 @@ export function validateManifest(m: Manifest): Finding[] {
   if (m.network !== "local") {
     if (!m.rpcUrl.startsWith("https://")) error(`rpcUrl must use https:// on ${m.network}.`)
     if (!m.horizonUrl.startsWith("https://")) error(`horizonUrl must use https:// on ${m.network}.`)
+    for (const url of m.rpcFallbackUrls ?? []) {
+      if (!url.startsWith("https://")) error(`rpcFallbackUrls must use https:// on ${m.network}: ${url}.`)
+    }
     if (m.friendbotUrl && !m.friendbotUrl.startsWith("https://")) {
       error(`friendbotUrl must use https:// on ${m.network}.`)
     }

@@ -1,4 +1,5 @@
 // @vitest-environment node
+import { createHash } from "node:crypto"
 import { describe, expect, it } from "vitest"
 // The interim 3 Oct 2026 Testnet file (v1), frozen as a fixture: the committed testnet.json changes with each deployment.
 import testnetJson from "@/lib/protocol/__tests__/fixtures/testnet-interim.json"
@@ -186,5 +187,49 @@ describe("manifest v2", () => {
     expect(errors(badRouter).some((f) => f.message.includes("router"))).toBe(true)
     const badOracle = { ...m, markets: [{ ...m.markets[0], contracts: { ...m.markets[0].contracts, oracle: other } }] }
     expect(errors(badOracle).some((f) => f.message.includes("oracle"))).toBe(true)
+  })
+})
+
+describe("manifest monitoring fields", () => {
+  const base = () => structuredClone(committedTestnetJson) as Record<string, unknown>
+  const HASH = "8f157e8d" + "0".repeat(56)
+
+  it("accepts deployLedger, oracleSources and rpcFallbackUrls", () => {
+    const m = parseManifest({
+      ...base(),
+      deployLedger: 5707351,
+      oracleSources: [{ hash: HASH, preimage: "principal-oracle-source:testnet:USDY:app-team:keeper" }],
+      rpcFallbackUrls: ["https://rpc.example.org"],
+    })
+    expect(m.deployLedger).toBe(5707351)
+    expect(m.oracleSources?.[0].hash).toBe(HASH)
+    expect(m.rpcFallbackUrls).toEqual(["https://rpc.example.org"])
+    expect(errors(m)).toEqual([])
+  })
+
+  it("refuses an oracle source hash that is not 64 hex characters", () => {
+    for (const hash of ["8f157e8d", HASH + "0", "z".repeat(64)]) {
+      expect(() => parseManifest({ ...base(), oracleSources: [{ hash, preimage: "x" }] })).toThrow(/oracleSources/)
+    }
+  })
+
+  it("refuses a non-https fallback RPC off local and allows it on local", () => {
+    const bad = parseManifest({ ...base(), rpcFallbackUrls: ["http://rpc.example.org"] })
+    expect(errors(bad).some((f) => f.message.includes("rpcFallbackUrls"))).toBe(true)
+    const local = parseManifest({ ...structuredClone(localExample), rpcFallbackUrls: ["http://localhost:8001"] })
+    expect(errors(local)).toEqual([])
+  })
+
+  it("refuses a non-positive deployLedger", () => {
+    expect(() => parseManifest({ ...base(), deployLedger: 0 })).toThrow(/deployLedger/)
+  })
+
+  it("pins testnet.json: every oracle source hash is sha256 of its preimage", () => {
+    const m = parseManifest(committedTestnetJson)
+    expect(m.deployLedger).toBeGreaterThan(0)
+    expect(m.oracleSources?.length).toBeGreaterThan(0)
+    for (const s of m.oracleSources ?? []) {
+      expect(createHash("sha256").update(s.preimage).digest("hex")).toBe(s.hash)
+    }
   })
 })
