@@ -253,7 +253,10 @@ Schedule (ops, with the developer's go): a QStash schedule with cron `*/5 * * * 
 network's database first (`pnpm db:migrate --env-file .env.testnet`).
 
 `GET /api/dashboard/events` serves the index, public and without a wallet. `?group=`, `?pool=`,
+`?topic=<a,b,…>` (at most 10 topics, filtered in the query so a page holds only them),
 `?before=<event id>` (older rows, for paging) and `?limit=` (1 to 200, default 50) filter the list.
+`?counts=1` adds `counts`: the number of indexed events per topic for the group and pool asked, over
+every row, not one page (the compliance page's Permissioning counts).
 It answers `{ rows, indexedThrough, indexedThroughCloseTime, lagSeconds, gaps, reconcile }`, newest
 first and cached 60 s at the edge: `indexedThrough` is the slowest group's cursor, and
 `indexedThroughCloseTime` its close time, from which a page computes a fresh lag whatever the cache's

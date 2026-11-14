@@ -221,6 +221,16 @@ describe("the risk page (/dashboard/risk)", () => {
     expect(await region("Window").findByText("Lapsed: the next counted deposit opens a new window")).toBeTruthy()
   })
 
+  it("without a ledger clock nothing waits forever: the breaker figures and the per-asset limits are Unavailable, with the reason", async () => {
+    mocks.clock = { ledgerTime: null, sequence: null, isError: true }
+    render(wrap(<RiskPanel />))
+    expect(await region("Circuit breaker").findByRole("button", { name: "Why Circuit-breaker limit is unavailable, and how to verify it" })).toBeTruthy()
+    const assets = region("Per-asset limits")
+    expect(assets.getByRole("button", { name: "More about Per-asset limits (unavailable)" })).toBeTruthy()
+    expect(assets.queryByText((_, el) => el?.getAttribute("data-slot") === "skeleton")).toBeNull()
+    expect(mocks.fetchRiskView).not.toHaveBeenCalled()
+  })
+
   it("shows each asset's limit, volume and remaining", async () => {
     render(wrap(<RiskPanel />))
     const assets = region("Per-asset limits")

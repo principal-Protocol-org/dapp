@@ -334,10 +334,14 @@ export function RiskPanel() {
         </Panel>
 
         <Panel title="Per-asset limits" meta={<p className="text-xs/5 text-ink-muted">One limit per underlying asset, in the same window</p>}>
-          {!riskData && !risk.stale ? (
+          {risk.stale || (noClock && !riskData) ? (
+            <UnavailableTip
+              label="Per-asset limits"
+              reason={risk.stale ? `the last refresh failed: ${risk.error?.message ?? "unknown error"}` : (noClock as string)}
+              className="text-sm text-ink"
+            />
+          ) : !riskData ? (
             <Skeleton className="h-16 w-full" />
-          ) : risk.stale ? (
-            <UnavailableTip label="Per-asset limits" reason={`the last refresh failed: ${risk.error?.message ?? "unknown error"}`} className="text-sm text-ink" />
           ) : assets.length === 0 ? (
             <p className="text-sm text-ink-muted">No market lists an asset yet.</p>
           ) : (
@@ -388,9 +392,15 @@ export function RiskPanel() {
                 <UnavailableTip label="Indexed pausers" reason={pausers.events.error?.message ?? "the event index could not be read"} />
               </Row>
             ) : !pausers.events.data ? (
-              <Skeleton className="h-10 w-full" />
+              <div>
+                <dd>
+                  <Skeleton className="h-10 w-full" />
+                </dd>
+              </div>
             ) : pauserFigures.length === 0 ? (
-              <p className="border-t border-line pt-3 text-sm text-ink-muted">No pauser indexed yet</p>
+              <div className="border-t border-line pt-3">
+                <dd className="text-sm text-ink-muted">No pauser indexed yet</dd>
+              </div>
             ) : (
               pauserFigures.map((p) => (
                 <Row key={p.account} label={<AccountLink network={m.network} id={p.account} />}>
