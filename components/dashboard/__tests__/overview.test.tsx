@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
-import { render, screen, within } from "@testing-library/react"
+import { act, render, screen, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import type { ReactNode } from "react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -243,13 +243,38 @@ describe("the overview (/dashboard)", () => {
         effectiveWrapAndMint: { status: "live", value: 50_000_000_000_000n, ledger: 5_720_087, sources: [src("get_cb_limit"), src("get_cb_volume"), src("is_consumer")] },
       }),
     )
+    const user = userEvent.setup()
     render(wrap(<Overview />))
     const safety = region("Safety")
     expect(await safety.findByText("10,000,000.00 USDY left of 10,000,000.00 USDY")).toBeTruthy()
-    expect(safety.getByText(EFFECTIVE_WRAP_AND_MINT_LABEL)).toBeTruthy()
+    // A short label at 375 px; the long one is in its info tip.
+    expect(safety.getByText("Wrap-and-mint capacity")).toBeTruthy()
+    expect(safety.queryByText(EFFECTIVE_WRAP_AND_MINT_LABEL)).toBeNull()
     expect(safety.getByText("5,000,000.00 USDY")).toBeTruthy()
     expect(safety.getByText(/SY deposit and the manager mint each count the same underlying/)).toBeTruthy()
-    expect(safety.getByRole("button", { name: `How to verify ${EFFECTIVE_WRAP_AND_MINT_LABEL}` })).toBeTruthy()
+    expect(safety.getByRole("button", { name: "How to verify Wrap-and-mint capacity" })).toBeTruthy()
+    await user.click(safety.getByRole("button", { name: "More about Wrap-and-mint capacity" }))
+    expect((await screen.findAllByText(new RegExp(EFFECTIVE_WRAP_AND_MINT_LABEL))).length).toBeGreaterThan(0)
+  })
+
+  it("the wrap-and-mint row turns Unavailable with the reason, and does not vanish, when the risk refresh fails", async () => {
+    const user = userEvent.setup()
+    mocks.fetchRiskView.mockResolvedValue(
+      riskView({
+        doubleReporting: [MARKET],
+        effectiveWrapAndMint: { status: "live", value: 50_000_000_000_000n, ledger: 5_720_087, sources: [src("get_cb_limit"), src("get_cb_volume"), src("is_consumer")] },
+      }),
+    )
+    render(wrap(<Overview />))
+    const safety = region("Safety")
+    await safety.findByText("5,000,000.00 USDY")
+    mocks.fetchRiskView.mockRejectedValue(new Error("rpc down"))
+    await act(() => client.refetchQueries({ queryKey: ["dashboard", "risk"] }))
+    const why = await safety.findByRole("button", { name: "Why Wrap-and-mint capacity is unavailable, and how to verify it" })
+    expect(safety.getByText("Wrap-and-mint capacity")).toBeTruthy()
+    expect(safety.queryByText("5,000,000.00 USDY")).toBeNull()
+    await user.click(why)
+    expect((await screen.findAllByText(/the last refresh failed: rpc down/)).length).toBeGreaterThan(0)
   })
 
   it("no effective capacity line when no market double-reports; the raw remaining comes from the risk view", async () => {
@@ -259,14 +284,14 @@ describe("the overview (/dashboard)", () => {
     render(wrap(<Overview />))
     const safety = region("Safety")
     expect(await safety.findByText("No limit (disabled)")).toBeTruthy()
-    expect(safety.queryByText(EFFECTIVE_WRAP_AND_MINT_LABEL)).toBeNull()
+    expect(safety.queryByText("Wrap-and-mint capacity")).toBeNull()
   })
 
   it("an effective capacity that cannot be read is Unavailable, with its reason", async () => {
     mocks.fetchRiskView.mockResolvedValue(riskView({ effectiveWrapAndMint: down(`whether market ${MARKET} double-reports: rpc down`) }))
     render(wrap(<Overview />))
     const safety = region("Safety")
-    expect(await safety.findByRole("button", { name: `Why ${EFFECTIVE_WRAP_AND_MINT_LABEL} is unavailable, and how to verify it` })).toBeTruthy()
+    expect(await safety.findByRole("button", { name: "Why Wrap-and-mint capacity is unavailable, and how to verify it" })).toBeTruthy()
   })
 
   it("refuses to format amounts when the markets' decimals differ", async () => {

@@ -559,10 +559,21 @@ export type IndexedEvents = {
  */
 export async function getIndexedEvents(
   sql: Sql,
-  q: { network: Network; group?: IndexGroup; pool?: string; before?: string; limit: number; /** ms; `Date.now()` by default. */ now?: number },
+  q: {
+    network: Network
+    group?: IndexGroup
+    pool?: string
+    /** Only these topics (`cb_limit`, `ast_limit`…): filtered in the query, so a page holds only them. */
+    topics?: readonly string[]
+    before?: string
+    limit: number
+    /** ms; `Date.now()` by default. */
+    now?: number
+  },
 ): Promise<IndexedEvents> {
   const group = q.group ?? null
   const pool = q.pool ?? null
+  const topics = q.topics && q.topics.length > 0 ? [...q.topics] : null
   const before = q.before ?? null
   const rows = await sql<EventRowIn>`
     select id, group_name, contract_id, topic, ledger, close_time, tx_hash, pool, data
@@ -570,6 +581,7 @@ export async function getIndexedEvents(
     where network = ${q.network}
       and (${group}::text is null or group_name = ${group})
       and (${pool}::text is null or pool = ${pool})
+      and (${topics}::text[] is null or topic = any(${topics}::text[]))
       and (${before}::text is null or id < ${before})
     order by ledger desc, id desc
     limit ${q.limit}`
@@ -612,6 +624,23 @@ export async function getIndexedEvents(
     gaps,
     reconcile: byName.get(escrowName)?.reconcile ?? null,
   }
+}
+
+/**
+ * How many events the index holds per topic, for the group and pool asked: every row, not one page
+ * (the Permissioning counts on the compliance page). A topic with no event is absent.
+ */
+export async function getEventCounts(sql: Sql, q: { network: Network; group?: IndexGroup; pool?: string }): Promise<Record<string, number>> {
+  const group = q.group ?? null
+  const pool = q.pool ?? null
+  const rows = await sql<{ topic: string; n: string | number }>`
+    select topic, count(*) as n
+    from events
+    where network = ${q.network}
+      and (${group}::text is null or group_name = ${group})
+      and (${pool}::text is null or pool = ${pool})
+    group by topic`
+  return Object.fromEntries(rows.map((r) => [r.topic, Number(r.n)]))
 }
 
 /** One indexed event with its raw XDR (base64 `ScVal`), or null when the index does not hold it. */

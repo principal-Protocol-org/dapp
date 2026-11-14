@@ -18,22 +18,22 @@ import {
   usePauses,
   useProtocolState,
   useRiskView,
-  type IndexedEvents,
 } from "@/hooks/use-dashboard"
 import { useLedgerClock } from "@/hooks/use-ledger-clock"
 import type { OracleView } from "@/lib/protocol/dashboard/oracle"
 import { TVL_LABEL } from "@/lib/protocol/dashboard/protocol-state"
-import { EFFECTIVE_WRAP_AND_MINT_LABEL, type Remaining } from "@/lib/protocol/dashboard/risk"
+import type { Remaining } from "@/lib/protocol/dashboard/risk"
 import type { VerifiableFigure } from "@/lib/protocol/dashboard/verify"
-import { explorerUrl } from "@/lib/protocol/explorer"
 import { formatAmountFixed } from "@/lib/protocol/format"
 import type { Network } from "@/lib/protocol/types"
 import { AsOf, readsOf } from "./as-of"
 import { CopyEvidence } from "./copy-evidence"
-import { accountShort, ago, complianceEventWords, eventSubject, txShort } from "./event-words"
+import { lagText, TxLink } from "./event-list"
+import { accountShort, ago, complianceEventWords, eventSubject } from "./event-words"
 import { decimalsScale, verifiable, type FigureSpec } from "./figure"
 import { Panel, Row } from "./panel"
 import { current, NO_LIQUIDITY, noPoolSeeded, readOf, refuse, Shown, unitsOf } from "./query-figures"
+import { WrapAndMintRow, wrapAndMintSpec } from "./risk-panel"
 
 const list = (words: readonly string[]) => (words.length <= 1 ? words.join("") : `${words.slice(0, -1).join(", ")} and ${words[words.length - 1]}`)
 
@@ -48,22 +48,6 @@ function oracleLine(view: OracleView, secondsLeft: number): string {
   return `${warning ? "Warning" : "Fresh"} · operations block in ${formatDuration(secondsLeft)} without an update`
 }
 
-
-function TxLink({ network, hash }: { network: Network; hash: string }) {
-  const url = explorerUrl(network, "tx", hash)
-  if (!url) return <span className="font-mono text-xs wrap-anywhere">{txShort(hash)}</span>
-  return (
-    <a
-      href={url}
-      target="_blank"
-      rel="noreferrer"
-      aria-label={`View transaction ${hash} on stellar.expert`}
-      className="font-mono text-xs underline-offset-4 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
-    >
-      {txShort(hash)}
-    </a>
-  )
-}
 
 function ComplianceEvents({ network, ledgerTime }: { network: Network; ledgerTime: number | null }) {
   const q = useComplianceEvents(5)
@@ -132,14 +116,6 @@ function ComplianceEvents({ network, ledgerTime }: { network: Network; ledgerTim
   )
 }
 
-/** How far behind ledger time the index is: from the indexed-through ledger's close time and the ledger clock, never the cached lag. */
-function lagText(index: IndexedEvents, ledgerTime: number | null): { text: string; late: boolean } | null {
-  const closed = index.indexedThroughCloseTime ? Date.parse(index.indexedThroughCloseTime) / 1000 : null
-  const seconds = closed !== null && ledgerTime !== null ? Math.max(0, ledgerTime - closed) : index.lagSeconds
-  if (seconds === null) return null
-  return { text: `${formatDuration(seconds)} behind ledger time`, late: seconds > 3600 }
-}
-
 function IndexStatus({ ledgerTime }: { ledgerTime: number | null }) {
   const q = useIndexStatus()
   const data = q.stale ? undefined : q.data
@@ -154,7 +130,7 @@ function IndexStatus({ ledgerTime }: { ledgerTime: number | null }) {
       <dl className="grid gap-3">
         <Row label="Indexed through ledger">{data.indexedThrough > 0 ? data.indexedThrough : "Not indexed yet"}</Row>
         <Row label="Lag">
-          {lag ? <span className={lag.late ? "text-negative" : undefined}>{lag.text}</span> : "Not known yet"}
+          {lag ? <span className={lag.late ? "text-negative" : undefined}>{lag.text} behind ledger time</span> : "Not known yet"}
           {lag?.late ? <span className="block text-negative">Over 1 hour behind</span> : null}
         </Row>
         <Row label="Gaps">
@@ -257,16 +233,8 @@ export function Overview() {
     scale,
     read: riskRead,
   }
-  const effective: FigureSpec<Remaining> | null =
-    riskData && riskData.effectiveWrapAndMint
-      ? {
-          label: EFFECTIVE_WRAP_AND_MINT_LABEL,
-          live: refuse(riskData.effectiveWrapAndMint, refused),
-          format: (left) => (left === null ? "No limit (disabled)" : amount(left)),
-          scale,
-          read: riskRead,
-        }
-      : null
+  // Kept, Unavailable with the reason, when the risk refresh fails (it never vanishes then).
+  const effective = wrapAndMintSpec(risk, { format: (left) => (left === null ? "No limit (disabled)" : amount(left)), scale, read: riskRead }, refused)
 
   const contractPauses: FigureSpec<string[]> = {
     label: "Contract pauses",
@@ -356,18 +324,7 @@ export function Overview() {
             <Row label="RiskControl capacity">
               <Shown {...riskRemaining} />
             </Row>
-            {effective ? (
-              <Row label={EFFECTIVE_WRAP_AND_MINT_LABEL}>
-                <Shown {...effective} />
-                {effective.live?.status === "live" ? (
-                  <span className="mt-1 block font-sans text-xs/5 text-ink-muted">
-                    Half the room left: in a market whose SY and manager both report to RiskControl, the SY deposit and the manager mint each count the
-                    same underlying, so one wrap-and-mint uses the room twice.
-                    {riskData && riskData.doubleReporting.length > 0 ? ` Markets: ${riskData.doubleReporting.join(", ")}.` : ""}
-                  </span>
-                ) : null}
-              </Row>
-            ) : null}
+            {effective ? <WrapAndMintRow spec={effective} doubleReporting={riskData?.doubleReporting ?? []} /> : null}
             <Row label="Pauses">
               <Shown {...contractPauses} />
             </Row>

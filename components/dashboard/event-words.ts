@@ -17,10 +17,36 @@ export function complianceEventWords(topic: string): string {
   return COMPLIANCE_WORDS[topic] ?? topic
 }
 
-/** The account an event is about: `account`, or the caller for a batch (whose accounts the event does not carry). */
+/** RiskControl's indexed events (D-14): limits, the window, pausers and consumers. `paused` reads from its value. */
+const RISK_WORDS: Record<string, string> = {
+  cb_limit: "Circuit-breaker limit set",
+  ast_limit: "Asset limit set",
+  cb_window: "Window length set",
+  add_psr: "Pauser added",
+  rm_psr: "Pauser removed",
+  add_cons: "Consumer added",
+  rm_cons: "Consumer removed",
+}
+
+/** Plain words for any indexed event this module knows; a topic not listed shows as it is. */
+export function eventWords(topic: string, data: Record<string, unknown> = {}): string {
+  if (topic === "paused") return data.paused === false ? "Unpaused" : "Paused"
+  return COMPLIANCE_WORDS[topic] ?? RISK_WORDS[topic] ?? topic
+}
+
+/** The field naming who an event is about, when it is not `account`. */
+const SUBJECT_FIELD: Record<string, string> = { acc_batch: "caller", add_psr: "pauser", rm_psr: "pauser", add_cons: "consumer", rm_cons: "consumer" }
+
+/** The account an event is about: `account`, the pauser or consumer, or the caller for a batch (whose accounts the event does not carry). */
 export function eventSubject(topic: string, data: Record<string, unknown>): string | null {
-  const value = topic === "acc_batch" ? data.caller : data.account
+  const value = data[SUBJECT_FIELD[topic] ?? "account"]
   return typeof value === "string" && value !== "" ? value : null
+}
+
+/** "2026-11-14 00:04:59 UTC": an indexed event's ledger close time, as the index stores it (ISO, UTC). */
+export function closeTimeText(iso: string): string {
+  const m = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})(\.\d+)?Z$/.exec(iso)
+  return m ? `${m[1]} ${m[2]} UTC` : iso
 }
 
 /** "68be08…8f7a": a transaction hash, short. */

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { accountShort, ago, complianceEventWords, eventSubject, txShort } from "../event-words"
+import { accountShort, ago, closeTimeText, complianceEventWords, eventSubject, eventWords, txShort } from "../event-words"
 
 describe("event words", () => {
   it("words every compliance topic, and shows an unknown one as it is", () => {
@@ -12,6 +12,21 @@ describe("event words", () => {
     expect(eventSubject("acc_grant", { caller: "GC", account: "GA" })).toBe("GA")
     expect(eventSubject("acc_batch", { caller: "GC" })).toBe("GC")
     expect(eventSubject("finalize", {})).toBeNull()
+  })
+
+  it("words the risk topics, a pause from its value, and names a pauser or consumer as the subject", () => {
+    for (const topic of ["cb_limit", "ast_limit", "cb_window", "add_psr", "rm_psr", "add_cons", "rm_cons", "acc_grant"]) expect(eventWords(topic)).not.toBe(topic)
+    expect(eventWords("paused", { caller: "GC", paused: true })).toBe("Paused")
+    expect(eventWords("paused", { paused: false })).toBe("Unpaused")
+    expect(eventWords("mystery")).toBe("mystery")
+    expect(eventSubject("add_psr", { caller: "GC", pauser: "GP" })).toBe("GP")
+    expect(eventSubject("add_cons", { caller: "GC", consumer: "CS" })).toBe("CS")
+  })
+
+  it("reads a close time as UTC, whole seconds", () => {
+    expect(closeTimeText("2026-11-14T00:04:59.000Z")).toBe("2026-11-14 00:04:59 UTC")
+    expect(closeTimeText("2026-11-14T00:04:59Z")).toBe("2026-11-14 00:04:59 UTC")
+    expect(closeTimeText("not a time")).toBe("not a time")
   })
 
   it("shortens ids and dates history coarsely", () => {

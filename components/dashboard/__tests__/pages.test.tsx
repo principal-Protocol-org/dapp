@@ -3,6 +3,8 @@ import { describe, expect, it, vi } from "vitest"
 
 vi.mock("@/components/dashboard/overview", () => ({ Overview: () => <h1>overview</h1> }))
 vi.mock("@/components/dashboard/markets-table", () => ({ MarketsView: () => <h1>markets view</h1> }))
+vi.mock("@/components/dashboard/risk-panel", () => ({ RiskPanel: () => <h1>risk view</h1> }))
+vi.mock("@/components/dashboard/compliance-panel", () => ({ CompliancePanel: () => <h1>compliance view</h1> }))
 
 import DashboardPage from "../../../app/dashboard/page"
 import ActivityPage from "../../../app/dashboard/activity/page"
@@ -24,11 +26,18 @@ describe("the dashboard routes", () => {
     expect(screen.queryByText(/Coming in this release/)).toBeNull()
   })
 
+  it.each([
+    ["risk", RiskPage],
+    ["compliance", CompliancePage],
+  ])("/dashboard/%s is its view, no longer a placeholder", (name, Page) => {
+    render(<Page />)
+    expect(screen.getByRole("heading", { name: `${name} view` })).toBeTruthy()
+    expect(screen.queryByText(/Coming in this release/)).toBeNull()
+  })
+
   // Every sub-navigation link has a page (none 404s); the ones a later task fills say so plainly.
   it.each([
     ["Oracle", OraclePage],
-    ["Risk", RiskPage],
-    ["Compliance", CompliancePage],
     ["Activity", ActivityPage],
   ])("%s has a page that says it is coming, and fits 375 px", (title, Page) => {
     render(<Page />)

@@ -1,6 +1,5 @@
-import { ComingSoon } from "@/components/dashboard/coming-soon"
+import { CompliancePanel } from "@/components/dashboard/compliance-panel"
 
-// Placeholder until the compliance view lands (spec 0004 D-16); that task replaces this file.
 export default function DashboardCompliancePage() {
-  return <ComingSoon title="Compliance" summary="The asset administrator and its flags, RecoveryEscrow records with their transactions, and Permissioning activity." />
+  return <CompliancePanel />
 }

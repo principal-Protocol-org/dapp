@@ -1,25 +1,28 @@
 "use client"
 
 import { useEffect, useState } from "react"
-import { useQuery } from "@tanstack/react-query"
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query"
 import { useManifest } from "@/components/app/manifest-provider"
 import { parseOpenAlerts, type OpenAlertsAnswer } from "@/lib/app/alert-types"
 import { useLedgerClock } from "@/hooks/use-ledger-clock"
+import { fetchAssetCompliance, fetchEscrowRecords } from "@/lib/protocol/dashboard/compliance"
 import { fetchOracleView, type OracleView } from "@/lib/protocol/dashboard/oracle"
 import { fetchPauses } from "@/lib/protocol/dashboard/pauses"
+import { fetchPausers, indexedPausers } from "@/lib/protocol/dashboard/pausers"
+import { createHorizon } from "@/lib/protocol/horizon"
 import { fetchMarketDashboard, fetchProtocolState, pendingClaim, type MarketDashboard } from "@/lib/protocol/dashboard/protocol-state"
 import { getMarket } from "@/lib/protocol/manifest"
 import { fetchRiskView } from "@/lib/protocol/dashboard/risk"
 import { createRpcReader } from "@/lib/protocol/reader"
 import type { Live } from "@/lib/protocol/types"
-import type { IndexedEvent, IndexedEvents } from "@/lib/server/indexer"
+import type { IndexedEvent, IndexedEvents, IndexGroup } from "@/lib/server/indexer"
 
 /** Live widgets (oracle, RiskControl, pauses) refresh every 15 s (D-6, TRANCHE_2_3 l.1077). */
 export const DASHBOARD_LIVE_MS = 15_000
 /** Aggregates (the every-market sweep and its totals) and history (the index) refresh every 60 s. */
 export const DASHBOARD_AGGREGATE_MS = 60_000
 
-export type { IndexedEvent, IndexedEvents }
+export type { IndexedEvent, IndexedEvents, IndexGroup }
 
 /**
  * The query, plus `stale`: a failed refetch keeps the old `data`, and `stale` tells callers not to
@@ -158,8 +161,11 @@ const INDEX_REASONS: Reasons = {
   unavailable: "the event index could not be read",
 }
 
+/** Why the alerts cannot be read while their route does not exist (404): a page may say there is no alert data yet. */
+export const ALERTS_NOT_AVAILABLE = "alerts not available yet"
+
 const ALERT_REASONS: Reasons = {
-  notFound: "alerts not available yet",
+  notFound: ALERTS_NOT_AVAILABLE,
   notConfigured: "alerts are not configured on this server",
   unavailable: "the alerts could not be read",
 }
@@ -237,9 +243,10 @@ export function useComplianceEvents(limit = 5) {
 }
 
 /**
- * The open alerts, from `GET /api/dashboard/alerts` (`{ open: Alert[] }`, `lib/app/alert-types`),
- * every 60 s. Until that route exists it answers 404: an error worded "alerts not available yet",
- * not retried. An answer not in that shape is refused, never read as zero.
+ * The open alerts, from `GET /api/dashboard/alerts` (`{ open: Alert[], recent? }`, `lib/app/alert-types`),
+ * every 60 s, with the recent (closed) ones when the answer lists them. Until that route exists it
+ * answers 404: an error worded `ALERTS_NOT_AVAILABLE`, not retried. An answer not in that shape is
+ * refused, never read as zero.
  */
 export function useOpenAlerts() {
   const m = useManifest()
@@ -256,6 +263,156 @@ export function useOpenAlerts() {
       },
       // As the app's default (one retry), except for a missing route or a malformed answer.
       retry: (failures, error) => !(error instanceof FinalError) && failures < 1,
+      refetchInterval: DASHBOARD_AGGREGATE_MS,
+    }),
+  )
+}
+
+/** Which indexed events a list shows: one group (every group when omitted), one pool, some topics. */
+export type EventQuery = { group?: IndexGroup; pool?: string; topics?: readonly string[] }
+
+/** `GET /api/dashboard/events` for `q`, plus the extra parameters (`limit`, `before`, `counts`). */
+function eventsUrl(q: EventQuery, extra: Record<string, string>): string {
+  const params = new URLSearchParams()
+  if (q.group) params.set("group", q.group)
+  if (q.pool) params.set("pool", q.pool)
+  if (q.topics && q.topics.length > 0) params.set("topic", q.topics.join(","))
+  for (const [k, v] of Object.entries(extra)) params.set(k, v)
+  return `/api/dashboard/events?${params}`
+}
+
+const queryKeyOf = (q: EventQuery) => [q.group ?? "all", q.pool ?? "all", (q.topics ?? []).join(",")] as const
+
+/**
+ * One indexed-event list, newest first, `pageSize` rows a page (`EventList`). `fetchNextPage` reads
+ * the rows older than the last one shown (`before`); a page shorter than `pageSize` is the last.
+ * Every loaded page refreshes every 60 s (history).
+ */
+export function useEventPages(q: EventQuery, pageSize: number) {
+  const m = useManifest()
+  return withStale(
+    useInfiniteQuery({
+      queryKey: ["dashboard", "events", m.network, ...queryKeyOf(q), pageSize],
+      queryFn: ({ pageParam }: { pageParam: string | null }) =>
+        getJson<IndexedEvents>(eventsUrl(q, { limit: String(pageSize), ...(pageParam ? { before: pageParam } : {}) }), INDEX_REASONS),
+      initialPageParam: null as string | null,
+      getNextPageParam: (last: IndexedEvents) => (last.rows.length === pageSize ? last.rows[last.rows.length - 1].id : null),
+      refetchInterval: DASHBOARD_AGGREGATE_MS,
+    }),
+  )
+}
+
+/** Pages of 200 (the API's most) read at most this many times by `useAllEvents`. */
+export const MAX_EVENT_PAGES = 25
+const ALL_PAGE = 200
+
+/** Every indexed event of `q`, newest first, with the first page's index state. */
+async function fetchAllEvents(q: EventQuery): Promise<IndexedEvents> {
+  const first = await getJson<IndexedEvents>(eventsUrl(q, { limit: String(ALL_PAGE) }), INDEX_REASONS)
+  const rows = [...first.rows]
+  let last = first.rows
+  for (let page = 1; last.length === ALL_PAGE; page++) {
+    if (page >= MAX_EVENT_PAGES) throw new FinalError(`the event index holds more than ${MAX_EVENT_PAGES * ALL_PAGE} such events, more than this page reads`)
+    last = (await getJson<IndexedEvents>(eventsUrl(q, { limit: String(ALL_PAGE), before: last[last.length - 1].id }), INDEX_REASONS)).rows
+    rows.push(...last)
+  }
+  return { ...first, rows }
+}
+
+/**
+ * Every indexed event of `q` (not one page), every 60 s: what a page derives a state from (the
+ * pausers, the RecoveryEscrow join). A history longer than `MAX_EVENT_PAGES` pages is refused, never
+ * shown in part.
+ */
+export function useAllEvents(q: EventQuery) {
+  const m = useManifest()
+  return withStale(
+    useQuery({
+      queryKey: ["dashboard", "events-all", m.network, ...queryKeyOf(q)],
+      queryFn: () => fetchAllEvents(q),
+      retry: (failures, error) => !(error instanceof FinalError) && failures < 1,
+      refetchInterval: DASHBOARD_AGGREGATE_MS,
+    }),
+  )
+}
+
+export type IndexedCounts = IndexedEvents & { counts: Record<string, number> }
+
+/** How many events the index holds per topic in `group` (every row, `?counts=1`), with the index state, every 60 s. */
+export function useEventCounts(group: IndexGroup) {
+  const m = useManifest()
+  return withStale(
+    useQuery({
+      queryKey: ["dashboard", "event-counts", m.network, group],
+      queryFn: async (): Promise<IndexedCounts> => {
+        const body = await getJson<IndexedEvents & { counts?: unknown }>(eventsUrl({ group }, { counts: "1", limit: "1" }), INDEX_REASONS)
+        const counts = body.counts
+        if (!counts || typeof counts !== "object" || Array.isArray(counts) || !Object.values(counts).every((n) => Number.isInteger(n)))
+          throw new FinalError("the event index answered without counts")
+        return { ...body, counts: counts as Record<string, number> }
+      },
+      retry: (failures, error) => !(error instanceof FinalError) && failures < 1,
+      refetchInterval: DASHBOARD_AGGREGATE_MS,
+    }),
+  )
+}
+
+const PAUSER_TOPICS = ["add_psr", "rm_psr"] as const
+
+/**
+ * RiskControl's pausers: `indexed`, from every indexed `add_psr`/`rm_psr` (60 s), and `live`, each
+ * of them confirmed with `is_pauser`, plus the admin (`fetchPausers`, 15 s). `events` is the index query.
+ */
+export function usePausers() {
+  const m = useManifest()
+  const events = useAllEvents({ group: "risk", topics: PAUSER_TOPICS })
+  const indexed = events.data && !events.stale ? indexedPausers(events.data.rows) : []
+  const accounts = indexed.map((p) => p.account)
+  const live = withStale(
+    useQuery({
+      queryKey: ["dashboard", "pausers", m.network, accounts.join(",")],
+      queryFn: () => fetchPausers(createRpcReader(m), m, accounts),
+      // The admin is read whatever the index says; the accounts wait for it.
+      enabled: events.data !== undefined || events.isError,
+      refetchInterval: DASHBOARD_LIVE_MS,
+    }),
+  )
+  return { events, indexed, live }
+}
+
+/** Every market's RecoveryEscrow (deduplicated), with the markets that use it. */
+function escrowsOf(m: ReturnType<typeof useManifest>): { escrow: string; marketIds: string[] }[] {
+  const byEscrow = new Map<string, string[]>()
+  for (const market of m.markets) {
+    const ids = byEscrow.get(market.contracts.recoveryEscrow)
+    if (ids) ids.push(market.marketId)
+    else byEscrow.set(market.contracts.recoveryEscrow, [market.marketId])
+  }
+  return [...byEscrow].map(([escrow, marketIds]) => ({ escrow, marketIds }))
+}
+
+/** Every RecoveryEscrow's records read live (`fetchEscrowRecords`, D-16), every 60 s (history). */
+export function useEscrowRecords() {
+  const m = useManifest()
+  return withStale(
+    useQuery({
+      queryKey: ["dashboard", "escrow-records", m.network, idsOf(m.markets.map((market) => market.marketId))],
+      queryFn: () => {
+        const reader = createRpcReader(m)
+        return Promise.all(escrowsOf(m).map(async (e) => ({ ...e, records: await fetchEscrowRecords(reader, e.escrow) })))
+      },
+      refetchInterval: DASHBOARD_AGGREGATE_MS,
+    }),
+  )
+}
+
+/** Every underlying asset's administrator and flags (`fetchAssetCompliance`), every 60 s, as /app reads them. */
+export function useAssetCompliance() {
+  const m = useManifest()
+  return withStale(
+    useQuery({
+      queryKey: ["dashboard", "assets", m.network, idsOf(m.markets.map((market) => market.marketId))],
+      queryFn: () => fetchAssetCompliance(createHorizon(m.horizonUrl), m.horizonUrl, createRpcReader(m), m),
       refetchInterval: DASHBOARD_AGGREGATE_MS,
     }),
   )

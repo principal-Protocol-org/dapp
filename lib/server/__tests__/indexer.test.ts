@@ -13,6 +13,7 @@ vi.mock("server-only", () => ({}))
 import { DatabaseConfigError, type Sql } from "@/lib/server/db"
 import {
   contractsOf,
+  getEventCounts,
   getIndexedEvent,
   getIndexedEvents,
   indexCursorName,
@@ -767,5 +768,39 @@ describe("getIndexedEvents", () => {
   it("one event by id carries its raw xdr", async () => {
     const db = readDb([])
     expect(await getIndexedEvent(db.sql, { network: "testnet", id: row.id })).toMatchObject({ id: row.id, group: "escrow", rawXdr: "AAAA" })
+  })
+
+  it("filters by topics in the query, so a page holds only those topics; no topic filter passes null", async () => {
+    const db = readDb(allCursors(DEPLOY + 20, null))
+    await getIndexedEvents(db.sql, { network: "testnet", group: "risk", topics: ["cb_limit", "ast_limit", "cb_window"], limit: 20 })
+    const i = db.texts.findIndex((t) => t.includes("from events"))
+    expect(db.texts[i]).toMatch(/topic = any\(\?::text\[\]\)/)
+    expect(db.values[i]).toContainEqual(["cb_limit", "ast_limit", "cb_window"])
+    const plain = readDb(allCursors(DEPLOY + 20, null))
+    await getIndexedEvents(plain.sql, { network: "testnet", group: "risk", limit: 20 })
+    const j = plain.texts.findIndex((t) => t.includes("from events"))
+    expect(plain.values[j]).not.toContainEqual(expect.any(Array))
+  })
+
+  it("counts every indexed event per topic for the group and pool asked, not only one page", async () => {
+    const db = readDb([])
+    const inner = db.sql
+    const sql = (async (strings: TemplateStringsArray, ...v: unknown[]) => {
+      const text = strings.join("?").replace(/\s+/g, " ").trim()
+      if (text.includes("group by topic")) {
+        db.texts.push(text)
+        db.values.push(v)
+        return [
+          { topic: "acc_grant", n: "37" },
+          { topic: "ast_grant", n: 68 },
+        ]
+      }
+      return (inner as unknown as (s: TemplateStringsArray, ...x: unknown[]) => Promise<unknown>)(strings, ...v)
+    }) as unknown as Sql
+    expect(await getEventCounts(sql, { network: "testnet", group: "permissioning" })).toEqual({ acc_grant: 37, ast_grant: 68 })
+    const i = db.texts.findIndex((t) => t.includes("group by topic"))
+    expect(db.texts[i]).toMatch(/count\(\*\)/)
+    expect(db.texts[i]).not.toMatch(/limit/)
+    expect(db.values[i]).toEqual(expect.arrayContaining(["testnet", "permissioning"]))
   })
 })

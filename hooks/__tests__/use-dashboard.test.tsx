@@ -12,11 +12,23 @@ const mocks = vi.hoisted(() => ({
   fetchOracleView: vi.fn(),
   fetchRiskView: vi.fn(),
   fetchPauses: vi.fn(),
+  fetchPausers: vi.fn(),
+  fetchEscrowRecords: vi.fn(),
+  fetchAssetCompliance: vi.fn(),
 }))
 
 vi.mock("@/components/app/manifest-provider", () => {
   // One object, as the provider gives: hooks depend on its identity.
-  const manifest = { network: "testnet", rpcUrl: "https://rpc.test", markets: [{ marketId: "m1" }, { marketId: "m2" }], shared: {} }
+  const manifest = {
+    network: "testnet",
+    rpcUrl: "https://rpc.test",
+    horizonUrl: "https://horizon.test",
+    markets: [
+      { marketId: "m1", contracts: { recoveryEscrow: "CESCROW" } },
+      { marketId: "m2", contracts: { recoveryEscrow: "CESCROW" } },
+    ],
+    shared: {},
+  }
   return { useManifest: () => manifest }
 })
 vi.mock("@/lib/protocol/reader", () => ({ createRpcReader: () => ({}) }))
@@ -29,13 +41,27 @@ vi.mock("@/lib/protocol/dashboard/protocol-state", () => ({
 vi.mock("@/lib/protocol/dashboard/oracle", () => ({ fetchOracleView: mocks.fetchOracleView }))
 vi.mock("@/lib/protocol/dashboard/risk", () => ({ fetchRiskView: mocks.fetchRiskView }))
 vi.mock("@/lib/protocol/dashboard/pauses", () => ({ fetchPauses: mocks.fetchPauses }))
+vi.mock("@/lib/protocol/dashboard/pausers", async (importActual) => ({ ...(await importActual<object>()), fetchPausers: mocks.fetchPausers }))
+vi.mock("@/lib/protocol/dashboard/compliance", async (importActual) => ({
+  ...(await importActual<object>()),
+  fetchEscrowRecords: mocks.fetchEscrowRecords,
+  fetchAssetCompliance: mocks.fetchAssetCompliance,
+}))
 
 import {
+  ALERTS_NOT_AVAILABLE,
   DASHBOARD_AGGREGATE_MS,
   DASHBOARD_LIVE_MS,
+  MAX_EVENT_PAGES,
   secondsToBlockNow,
+  useAllEvents,
+  useAssetCompliance,
   useComplianceEvents,
+  useEscrowRecords,
+  useEventCounts,
+  useEventPages,
   useIndexStatus,
+  usePausers,
   useMarketDashboard,
   useOpenAlerts,
   useOracleView,
@@ -120,7 +146,7 @@ describe("useMarketDashboard", () => {
   it("reads one market's figures (the detail page) every 15 s, keyed by network and market", async () => {
     const { result } = renderHook(() => useMarketDashboard("m2"), { wrapper })
     await waitFor(() => expect(result.current.data).toBeDefined())
-    expect(mocks.fetchMarketDashboard).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ network: "testnet" }), { marketId: "m2" })
+    expect(mocks.fetchMarketDashboard).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ network: "testnet" }), expect.objectContaining({ marketId: "m2" }))
     expect(mocks.fetchProtocolState).not.toHaveBeenCalled()
     expect(interval(["dashboard", "market", "testnet", "m2"])).toBe(DASHBOARD_LIVE_MS)
   })
@@ -146,7 +172,7 @@ describe("usePendingClaim", () => {
   it("reads the account's pending claim with the market's state, keyed by account, every 15 s", async () => {
     const { result } = renderHook(() => usePendingClaim("m1", ACCOUNT, ms), { wrapper })
     await waitFor(() => expect(result.current.data).toBeDefined())
-    expect(mocks.pendingClaim).toHaveBeenCalledWith(expect.anything(), { marketId: "m1" }, ACCOUNT, ms)
+    expect(mocks.pendingClaim).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ marketId: "m1" }), ACCOUNT, ms)
     expect(result.current.data).toEqual({ status: "live", value: 5n, ledger: 1 })
     expect(interval(["dashboard", "pending", "testnet", "m1", ACCOUNT])).toBe(DASHBOARD_LIVE_MS)
   })
@@ -298,7 +324,7 @@ describe("useOpenAlerts", () => {
     const fetchMock = vi.fn(async () => Response.json({ open, recent: [], lastTest: null }))
     vi.stubGlobal("fetch", fetchMock)
     const { result } = renderHook(() => useOpenAlerts(), { wrapper })
-    await waitFor(() => expect(result.current.data).toEqual({ open }))
+    await waitFor(() => expect(result.current.data).toEqual({ open, recent: [] }))
     expect(fetchMock).toHaveBeenCalledWith("/api/dashboard/alerts")
     expect(interval(["dashboard", "alerts", "testnet"])).toBe(DASHBOARD_AGGREGATE_MS)
   })
@@ -312,5 +338,132 @@ describe("useOpenAlerts", () => {
     const { result } = renderHook(() => useOpenAlerts(), { wrapper })
     await waitFor(() => expect(result.current.isError).toBe(true))
     expect(result.current.error?.message).toBe("the alerts answer is not in the expected shape")
+  })
+})
+
+describe("useOpenAlerts: the recent list (Task 9 adds it; optional until then)", () => {
+  const open: Alert[] = [{ kind: "risk_warning", subject: "CRISK", severity: "warning", openedAt: "2026-11-14T03:00:00.000Z", payload: {} }]
+  const closed = { kind: "risk_exhausted", subject: "CRISK", severity: "critical", openedAt: "2026-11-13T03:00:00.000Z", resolvedAt: "2026-11-13T04:00:00.000Z", payload: {} }
+
+  it("passes recent alerts through, with their close time", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ open, recent: [closed] })))
+    const { result } = renderHook(() => useOpenAlerts(), { wrapper })
+    await waitFor(() => expect(result.current.data).toEqual({ open, recent: [closed] }))
+  })
+
+  it("an answer without recent, or with one it cannot read, keeps the open list and no recent", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ open, recent: [{ kind: "x" }] })))
+    const { result } = renderHook(() => useOpenAlerts(), { wrapper })
+    await waitFor(() => expect(result.current.data).toEqual({ open }))
+  })
+
+  it("names the missing-route reason, so a page can say there is no alert data yet", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("<!DOCTYPE html>", { status: 404, headers: { "content-type": "text/html" } })))
+    const { result } = renderHook(() => useOpenAlerts(), { wrapper })
+    await waitFor(() => expect(result.current.isError).toBe(true))
+    expect(result.current.error?.message).toBe(ALERTS_NOT_AVAILABLE)
+  })
+})
+
+describe("useEventPages (EventList)", () => {
+  it("asks the group, pool and topics, then older pages by the last row's id; a full page has a next page", async () => {
+    const fetchMock = vi.fn(async (url: string) =>
+      Response.json(indexAnswer({ rows: url.includes("before=") ? [row("0000000000000000001-0000000000", 1, "risk", "cb_limit")] : [row("0000000000000000003-0000000000", 3, "risk", "cb_limit"), row("0000000000000000002-0000000000", 2, "risk", "cb_window")] })),
+    )
+    vi.stubGlobal("fetch", fetchMock)
+    const { result } = renderHook(() => useEventPages({ group: "risk", pool: "CPOOL", topics: ["cb_limit", "cb_window"] }, 2), { wrapper })
+    await waitFor(() => expect(result.current.data?.pages).toHaveLength(1))
+    expect(fetchMock).toHaveBeenCalledWith("/api/dashboard/events?group=risk&pool=CPOOL&topic=cb_limit%2Ccb_window&limit=2")
+    expect(result.current.hasNextPage).toBe(true)
+    await act(() => result.current.fetchNextPage())
+    await waitFor(() => expect(result.current.data?.pages).toHaveLength(2))
+    expect(fetchMock).toHaveBeenLastCalledWith("/api/dashboard/events?group=risk&pool=CPOOL&topic=cb_limit%2Ccb_window&limit=2&before=0000000000000000002-0000000000")
+    // A short page is the last.
+    expect(result.current.hasNextPage).toBe(false)
+    expect(interval(["dashboard", "events", "testnet", "risk", "CPOOL", "cb_limit,cb_window", 2])).toBe(DASHBOARD_AGGREGATE_MS)
+  })
+
+  it("every group when none is named", async () => {
+    const fetchMock = vi.fn(async () => Response.json(indexAnswer()))
+    vi.stubGlobal("fetch", fetchMock)
+    const { result } = renderHook(() => useEventPages({ topics: ["paused"] }, 20), { wrapper })
+    await waitFor(() => expect(result.current.data).toBeDefined())
+    expect(fetchMock).toHaveBeenCalledWith("/api/dashboard/events?topic=paused&limit=20")
+    expect(result.current.hasNextPage).toBe(false)
+  })
+})
+
+describe("useAllEvents", () => {
+  it("reads every page of 200 until a short one, oldest pages last", async () => {
+    const full = Array.from({ length: 200 }, (_, i) => row(`${String(1000 - i).padStart(19, "0")}-0000000000`, 1000 - i, "escrow", "recovery"))
+    const fetchMock = vi.fn(async (url: string) => Response.json(indexAnswer({ rows: url.includes("before=") ? [row("0000000000000000001-0000000000", 1, "escrow", "finalize")] : full })))
+    vi.stubGlobal("fetch", fetchMock)
+    const { result } = renderHook(() => useAllEvents({ group: "escrow", topics: ["recovery", "finalize"] }), { wrapper })
+    await waitFor(() => expect(result.current.data).toBeDefined())
+    expect(result.current.data?.rows).toHaveLength(201)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(fetchMock).toHaveBeenLastCalledWith(`/api/dashboard/events?group=escrow&topic=recovery%2Cfinalize&limit=200&before=${full[199].id}`)
+    expect(result.current.data?.indexedThrough).toBe(5_719_749)
+  })
+
+  it("refuses a history longer than it reads, rather than show part of it", async () => {
+    let n = 0
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        n++
+        return Response.json(indexAnswer({ rows: Array.from({ length: 200 }, (_, i) => row(`${String(10 ** 6 - n * 200 - i).padStart(19, "0")}-0000000000`, 1, "risk", "add_psr")) }))
+      }),
+    )
+    const { result } = renderHook(() => useAllEvents({ group: "risk", topics: ["add_psr", "rm_psr"] }), { wrapper })
+    await waitFor(() => expect(result.current.isError).toBe(true))
+    expect(n).toBe(MAX_EVENT_PAGES)
+    expect(result.current.error?.message).toBe(`the event index holds more than ${MAX_EVENT_PAGES * 200} such events, more than this page reads`)
+  })
+})
+
+describe("useEventCounts", () => {
+  it("asks the group's counts per topic, every 60 s", async () => {
+    const fetchMock = vi.fn(async () => Response.json({ ...indexAnswer(), counts: { acc_grant: 37, ast_grant: 68 } }))
+    vi.stubGlobal("fetch", fetchMock)
+    const { result } = renderHook(() => useEventCounts("permissioning"), { wrapper })
+    await waitFor(() => expect(result.current.data?.counts).toEqual({ acc_grant: 37, ast_grant: 68 }))
+    expect(fetchMock).toHaveBeenCalledWith("/api/dashboard/events?group=permissioning&counts=1&limit=1")
+    expect(interval(["dashboard", "event-counts", "testnet", "permissioning"])).toBe(DASHBOARD_AGGREGATE_MS)
+  })
+
+  it("an answer without counts is refused, never read as zero", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json(indexAnswer())))
+    const { result } = renderHook(() => useEventCounts("permissioning"), { wrapper })
+    await waitFor(() => expect(result.current.isError).toBe(true))
+  })
+})
+
+describe("usePausers", () => {
+  const A = "GBZXN7PIRZGNMHGA7MUUUF4GWPY5AYPV6LY4UV2GL6VJGIQRXFDNMADI"
+  it("lists the indexed pausers, then confirms each live every 15 s", async () => {
+    const added = { ...row("0000000000000000009-0000000000", 9, "risk", "add_psr"), data: { caller: "GADMIN", pauser: A } }
+    const fetchMock = vi.fn(async () => Response.json(indexAnswer({ rows: [added] })))
+    vi.stubGlobal("fetch", fetchMock)
+    mocks.fetchPausers.mockResolvedValue({ admin: { status: "live", value: "GADMIN", ledger: 1 }, adminIsPauser: { status: "live", value: true, ledger: 1 }, pausers: [] })
+    const { result } = renderHook(() => usePausers(), { wrapper })
+    await waitFor(() => expect(result.current.live.data).toBeDefined())
+    expect(fetchMock).toHaveBeenCalledWith("/api/dashboard/events?group=risk&topic=add_psr%2Crm_psr&limit=200")
+    expect(result.current.indexed.map((p) => p.account)).toEqual([A])
+    expect(mocks.fetchPausers).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ network: "testnet" }), [A])
+    expect(interval(["dashboard", "pausers", "testnet", A])).toBe(DASHBOARD_LIVE_MS)
+  })
+})
+
+describe("useEscrowRecords and useAssetCompliance", () => {
+  it("reads every escrow's records, and every asset's model, every 60 s", async () => {
+    mocks.fetchEscrowRecords.mockResolvedValue({ status: "live", value: [], ledger: 1 })
+    mocks.fetchAssetCompliance.mockResolvedValue([])
+    const records = renderHook(() => useEscrowRecords(), { wrapper })
+    const assets = renderHook(() => useAssetCompliance(), { wrapper })
+    await waitFor(() => expect(records.result.current.data).toBeDefined())
+    await waitFor(() => expect(assets.result.current.data).toBeDefined())
+    expect(interval(["dashboard", "escrow-records", "testnet", "m1,m2"])).toBe(DASHBOARD_AGGREGATE_MS)
+    expect(interval(["dashboard", "assets", "testnet", "m1,m2"])).toBe(DASHBOARD_AGGREGATE_MS)
   })
 })

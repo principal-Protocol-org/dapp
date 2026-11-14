@@ -9,6 +9,7 @@ const state = vi.hoisted(() => ({
   values: [] as unknown[][],
   events: [] as Record<string, unknown>[],
   cursors: [] as Record<string, unknown>[],
+  counts: [] as Record<string, unknown>[],
   DatabaseConfigError: class DatabaseConfigError extends Error {},
 }))
 vi.mock("@/lib/server/db", () => ({
@@ -19,6 +20,7 @@ vi.mock("@/lib/server/db", () => ({
     state.texts.push(text)
     state.values.push(values)
     if (text.includes("from ingest_cursor")) return state.cursors
+    if (text.includes("group by topic")) return state.counts
     if (text.includes("from events")) {
       if (text.includes("where network = ? and id = ?")) return state.events.filter((e) => e.id === values[1])
       // A list never selects raw_xdr: drop it as the database would.
@@ -60,6 +62,7 @@ beforeEach(() => {
   state.texts = []
   state.values = []
   state.events = [EVENT]
+  state.counts = []
   state.cursors = (["escrow", "oracle", "permissioning", "risk", "market"] as const).map((g) => ({
     name: `events:${g}:testnet`,
     ledger: "5707500",
@@ -122,7 +125,37 @@ describe("GET /api/dashboard/events", () => {
     expect(params).toEqual(expect.arrayContaining(["testnet", "escrow", POOL, before, 7]))
   })
 
+  it("passes ?topic= (a comma list) to the read model", async () => {
+    expect((await call("?group=risk&topic=cb_limit,ast_limit,cb_window")).status).toBe(200)
+    const params = state.values[state.texts.findIndex((t) => t.includes("from events"))]
+    expect(params).toContainEqual(["cb_limit", "ast_limit", "cb_window"])
+  })
+
+  it("?counts=1 adds every indexed event's count per topic to the answer, cached as the list", async () => {
+    state.counts = [
+      { topic: "acc_grant", n: "37" },
+      { topic: "ast_grant", n: "68" },
+    ]
+    const res = await call("?group=permissioning&counts=1&limit=1")
+    expect(res.status).toBe(200)
+    expect(res.headers.get("cache-control")).toBe(CACHED)
+    const body = await res.json()
+    expect(body.counts).toEqual({ acc_grant: 37, ast_grant: 68 })
+    expect(body.indexedThrough).toBe(5_707_500)
+    const params = state.values[state.texts.findIndex((t) => t.includes("group by topic"))]
+    expect(params).toEqual(expect.arrayContaining(["testnet", "permissioning"]))
+    // Without the flag no count is made.
+    state.texts = []
+    expect(await (await call("?group=permissioning")).json()).not.toHaveProperty("counts")
+    expect(state.texts.some((t) => t.includes("group by topic"))).toBe(false)
+  })
+
   it.each([
+    ["?topic=", "invalid_topic"],
+    ["?topic=cb_limit,", "invalid_topic"],
+    ["?topic=drop%20table", "invalid_topic"],
+    [`?topic=${Array.from({ length: 11 }, (_, i) => `t${i}`).join(",")}`, "invalid_topic"],
+    ["?counts=yes", "invalid_counts"],
     ["?group=pools", "invalid_group"],
     ["?pool=nope", "invalid_pool"],
     ["?before=123", "invalid_before"],
