@@ -8,7 +8,8 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@/lib/protocol/manifest-source", () => ({ activeManifest: () => ({ network: mocks.network }) }))
 vi.mock("next/navigation", () => ({ usePathname: () => mocks.pathname }))
 
-import { DASHBOARD_NAV, DashboardHeader } from "../dashboard-header"
+import { DashboardHeader } from "../dashboard-header"
+import { DASHBOARD_NAV } from "../dashboard-nav"
 
 beforeEach(() => {
   mocks.network = "testnet"

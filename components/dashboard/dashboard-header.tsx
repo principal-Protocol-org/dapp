@@ -8,9 +8,9 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { activeManifest } from "@/lib/protocol/manifest-source"
 import type { Network } from "@/lib/protocol/types"
+// DASHBOARD_NAV lives in the client module `./dashboard-nav`: import it from there (a server module
+// re-exporting a client module's constant would hand server code a client reference, not the array).
 import { DashboardNav, DashboardNavLinks } from "./dashboard-nav"
-
-export { DASHBOARD_NAV } from "./dashboard-nav"
 
 const BADGE_STATUS = { testnet: "soon", local: "dev", mainnet: "live" } as const
 
