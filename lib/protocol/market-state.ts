@@ -93,13 +93,15 @@ function parseReserves(raw: unknown): [bigint, bigint] {
   return [toBigint(raw[0]), toBigint(raw[1])]
 }
 
-function parseSource(raw: unknown): string | null {
+/** An oracle source id (`Option<BytesN<32>>`) as hex; null for `None`. */
+export function parseSource(raw: unknown): string | null {
   if (raw === null || raw === undefined) return null
   if (raw instanceof Uint8Array && raw.length === 32) return bytesToHex(raw)
   throw new Error("source id is not 32 bytes")
 }
 
-function parseRejection(raw: unknown): OracleRejection | null {
+/** `OracleAdapter.last_rejection()`; null for `None`. */
+export function parseRejection(raw: unknown): OracleRejection | null {
   if (raw === null || raw === undefined) return null
   const o = asObject<Record<string, unknown>>(raw, "last_rejection")
   if (typeof o.reason !== "string") throw new Error("rejection reason is not a symbol")
