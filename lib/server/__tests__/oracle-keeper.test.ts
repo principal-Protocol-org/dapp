@@ -3,6 +3,7 @@ import { Keypair, StrKey, Transaction, nativeToScVal, xdr } from "@stellar/stell
 import { describe, expect, it, vi } from "vitest"
 import localExample from "@/config/manifests/local.example.json"
 import { bytesToHex } from "@/lib/protocol/bytes"
+import * as classes from "@/lib/protocol/dashboard/rejections"
 import { isSignificantRejection } from "@/lib/protocol/dashboard/rejections"
 import { parseManifest } from "@/lib/protocol/manifest"
 import { buildInvocationEnvelope, type ContractInvocation } from "@/lib/protocol/stellar"
@@ -320,6 +321,8 @@ function fakeFeedChain(state: {
   sim?: { retval: unknown; events: xdr.DiagnosticEvent[] }
   simError?: Error
   returned?: unknown
+  /** The contract events the landed transaction carries (none when absent). */
+  landed?: xdr.DiagnosticEvent[]
 }) {
   const sent: { signer: string; invocation: ContractInvocation }[] = []
   const simulated: { source: string; invocation: ContractInvocation }[] = []
@@ -335,7 +338,8 @@ function fakeFeedChain(state: {
     }),
     send: vi.fn(async (signer, invocation) => {
       sent.push({ signer: signer.publicKey(), invocation })
-      return { hash: HASH, returnValue: "returned" in state ? state.returned : (state.sim?.retval ?? true) }
+      const returnValue = "returned" in state ? state.returned : (state.sim?.retval ?? true)
+      return state.landed ? { hash: HASH, returnValue, events: state.landed.map((d) => d.event) } : { hash: HASH, returnValue }
     }),
   }
   return { chain, sent, simulated }
@@ -346,8 +350,11 @@ describe("the rejection classes (D-21)", () => {
     expect(ROUTINE).toEqual(["stale_ts", "no_data"])
     expect(SIGNIFICANT).toEqual(["oob", "decrease", "deviate", "fb_value"])
     expect(BROKEN).toEqual(["bad_price", "rescale", "future_ts"])
-    // The same significant split as the dashboard and the alert check use.
+    // The same significant split as the dashboard and the alert check use, from their one source.
     for (const r of [...ROUTINE, ...SIGNIFICANT, ...BROKEN]) expect(isSignificantRejection(r), r).toBe((SIGNIFICANT as readonly string[]).includes(r))
+    expect(ROUTINE).toBe(classes.ROUTINE)
+    expect(SIGNIFICANT).toBe(classes.SIGNIFICANT)
+    expect(BROKEN).toBe(classes.BROKEN)
   })
 })
 
@@ -423,6 +430,29 @@ describe("tickFeed (D-21): sync_from_feed with a role-less key", () => {
     expect(sent).toEqual([])
   })
 
+  it("a submitted significant rejection takes its (reason, value) from the landed transaction's ref_rej", async () => {
+    // The feed moved between the simulation and the landing: the landed event is what is on-chain.
+    const { chain } = fakeFeedChain({
+      sim: { retval: false, events: [refRej(11_500_000n, 1_700_000_100n, "deviate")] },
+      landed: [refRej(9_000_000n, 1_700_000_200n, "decrease")],
+    })
+    expect(await tickFeed({ manifest, secret, chain })).toEqual({ ...run, status: "rejected", value: "9000000", timestamp: 1_700_000_200, hash: HASH, reason: "decrease" })
+  })
+
+  it("without the landed ref_rej (no events, or none of the oracle's), the simulated pair stands", async () => {
+    for (const landed of [[], [refRej(1n, 1n, "oob", FEED)]]) {
+      const { chain } = fakeFeedChain({ sim: { retval: false, events: [refRej(11_500_000n, 1_700_000_100n, "deviate")] }, landed })
+      expect(await tickFeed({ manifest, secret, chain })).toEqual({ ...run, status: "rejected", value: "11500000", timestamp: 1_700_000_100, hash: HASH, reason: "deviate" })
+    }
+  })
+
+  it("a simulated accept that lands false takes the landed ref_rej's reason; a sync takes the landed ref_set", async () => {
+    const rejected = fakeFeedChain({ sim: { retval: true, events: [refSet(10_000_000n, 1n)] }, returned: false, landed: [refRej(11_500_000n, 2n, "deviate")] })
+    expect(await tickFeed({ manifest, secret, chain: rejected.chain })).toEqual({ ...run, status: "rejected", value: "11500000", timestamp: 2, hash: HASH, reason: "deviate" })
+    const synced = fakeFeedChain({ sim: { retval: false, events: [refRej(11_500_000n, 1n, "deviate")] }, returned: true, landed: [refSet(10_100_000n, 3n)] })
+    expect(await tickFeed({ manifest, secret, chain: synced.chain })).toEqual({ ...run, status: "synced", value: "10100000", timestamp: 3, hash: HASH })
+  })
+
   it("the landed call decides: a simulated accept that lands false is a rejection (reason unknown), with the hash", async () => {
     const { chain } = fakeFeedChain({ sim: { retval: true, events: [refSet(10_000_000n, 1_700_000_000n)] }, returned: false })
     expect(await tickFeed({ manifest, secret, chain })).toEqual({ ...run, status: "rejected", value: null, timestamp: null, hash: HASH, reason: "unknown" })
@@ -440,12 +470,19 @@ describe("tickFeed (D-21): sync_from_feed with a role-less key", () => {
     expect(sent).toEqual([])
   })
 
-  it("not_configured when no feed is set (feed_source None), or when the simulation raises FeedNotConfigured (#15)", async () => {
+  it("not_configured when no feed is set (feed_source None), sending nothing", async () => {
     const none = fakeFeedChain({ feedSource: null })
-    await expect(tickFeed({ manifest, secret, chain: none.chain })).rejects.toThrow(OracleKeeperConfigError)
+    await expect(tickFeed({ manifest, secret, chain: none.chain })).rejects.toThrow("the oracle has no feed source (set_feed_source was never called).")
     expect(none.chain.simulate).not.toHaveBeenCalled()
+    expect(none.sent).toEqual([])
+  })
+
+  it("error #15 after feed_source() named a feed is the feed's error, not FeedNotConfigured: still not_configured, worded so", async () => {
     const fifteen = fakeFeedChain({ simError: new Error("HostError: Error(Contract, #15)") })
-    await expect(tickFeed({ manifest, secret, chain: fifteen.chain })).rejects.toThrow(OracleKeeperConfigError)
+    const error = await tickFeed({ manifest, secret, chain: fifteen.chain }).catch((e: unknown) => e)
+    expect(error).toBeInstanceOf(OracleKeeperConfigError)
+    expect((error as Error).message).toMatch(/the feed answered an error \(#15\)/)
+    expect((error as Error).message).not.toMatch(/no feed source/)
     expect(fifteen.sent).toEqual([])
   })
 
@@ -521,6 +558,14 @@ describe("the RPC feed chain", () => {
   it("a simulation error throws its text (the keeper matches #15 and MissingValue on it)", async () => {
     const chain = createFeedChain(manifest, ORACLE, { server: fakeRpc({ error: "HostError: Error(Contract, #15)", events: [], latestLedger: 1 }) })
     await expect(chain.simulate(keeper.publicKey(), SYNC)).rejects.toThrow("HostError: Error(Contract, #15)")
+  })
+
+  it("send hands back the landed transaction's contract events", async () => {
+    const server = fakeRpc({})
+    const landed = refRej(11_500_000n, 2n, "deviate").event
+    server.getTransaction.mockImplementation(async () => ({ status: "SUCCESS", events: { contractEventsXdr: [[landed]] } }) as never)
+    const sent = await createFeedChain(manifest, ORACLE, { server }).send(keeper, SYNC)
+    expect(sent.events).toEqual([landed])
   })
 
   it("reads feed_source through a simulation of the oracle it targets", async () => {

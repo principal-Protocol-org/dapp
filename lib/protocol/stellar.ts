@@ -79,6 +79,8 @@ type PollRpcServer = {
     returnValue?: xdr.ScVal;
     resultXdr?: xdr.TransactionResult;
     diagnosticEventsXdr?: xdr.DiagnosticEvent[];
+    /** The contract events of each operation (RPC 23+). */
+    events?: { contractEventsXdr?: xdr.ContractEvent[][] };
   }>;
 };
 
@@ -96,6 +98,8 @@ export type PolledTransactionResult = {
   decodeError?: string;
   /** FAILED: the transaction result and the diagnostic events, when RPC returned them (R49). */
   failure?: { result?: xdr.TransactionResult; diagnosticEvents?: readonly xdr.DiagnosticEvent[] };
+  /** SUCCESS: the contract events the transaction emitted, every operation's, when RPC returned them. */
+  contractEvents?: readonly xdr.ContractEvent[];
 };
 
 export function createRpcServer(rpcUrl: string) {
@@ -501,6 +505,7 @@ export async function pollTransactionStatus(params: {
       if (result.status === "FAILED") {
         found.failure = { result: result.resultXdr, diagnosticEvents: result.diagnosticEventsXdr };
       }
+      if (result.status === "SUCCESS" && result.events?.contractEventsXdr) found.contractEvents = result.events.contractEventsXdr.flat();
       return found;
     }
     if (attempt < attempts) await wait(intervalMs);

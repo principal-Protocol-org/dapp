@@ -9,7 +9,8 @@
  * - a newer feed price: `synced` with a hash, the oracle value is the price rescaled to 7 decimals,
  *   `last_update_was_feed()` is true;
  * - the same tick again: `skipped` (`stale_ts`), nothing sent;
- * - +15 %: `rejected` (`deviate`) with a hash; the same again: `rejected`, nothing sent;
+ * - +15 %: `rejected` (`deviate`) with a hash, its (reason, value) read from the landed transaction's
+ *   own `ref_rej`; the same again: `rejected`, nothing sent (feed-mode rejections answer 200);
  * - a price of 0: `rejected` (`bad_price`), nothing sent;
  * - `clear_price`: `skipped` (`no_data`), nothing sent;
  * - the manifest's own oracle (no `feed_source`, like 665bb67 on Testnet): 503 `not_configured`;
@@ -29,7 +30,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
 
 vi.mock("server-only", () => ({}))
 
-import { Keypair, xdr } from "@stellar/stellar-sdk"
+import { Keypair, scValToNative, StrKey, xdr } from "@stellar/stellar-sdk"
 import { fundWithFriendbot } from "@/lib/protocol/onboarding"
 import { createRpcServer, simulateContractRead } from "@/lib/protocol/stellar"
 import type { Manifest } from "@/lib/protocol/types"
@@ -191,7 +192,7 @@ describe.skipIf(skip !== null)("the keeper's feed mode on the local stack (D-21,
     await setPrice((ONE_FEED * 115n) / 100n, t2)
     const before = await sequence()
     const first = await tick()
-    expect(first.status).toBe(500)
+    expect(first.status).toBe(200)
     expect(first.body).toMatchObject({ status: "rejected", mode: "feed", value: "11500000", timestamp: t2, reason: "deviate" })
     expect(first.body.hash).toMatch(/^[0-9a-f]{64}$/)
     hashes.deviate = first.body.hash as string
@@ -201,10 +202,16 @@ describe.skipIf(skip !== null)("the keeper's feed mode on the local stack (D-21,
     expect(await view("last_rejection")).toMatchObject({ reason: "deviate", value: 11_500_000n, timestamp: BigInt(t2) })
     const landed = await createRpcServer(manifest.rpcUrl).getTransaction(hashes.deviate)
     expect(landed.status).toBe("SUCCESS")
+    // The landed transaction carries its own ref_rej, which the keeper recorded (fix round 1, item 5).
+    const ofOracle = (landed.status === "SUCCESS" ? landed.events.contractEventsXdr.flat() : []).filter(
+      (e) => e.contractId !== null && StrKey.encodeContract(Buffer.from(e.contractId.toBytes())) === oracle,
+    )
+    const landedRejections = ofOracle.filter((e) => e.body.value.topics[0]?.type === "scvSymbol" && String(e.body.value.topics[0].value) === "ref_rej")
+    expect(landedRejections.map((e) => scValToNative(e.body.value.data))).toEqual([[11_500_000n, BigInt(t2), "deviate"]])
 
     // The route reads its memory from oracle_ticks: the same (reason, value) is not sent again.
     const repeat = await tick()
-    expect(repeat.status).toBe(500)
+    expect(repeat.status).toBe(200)
     expect(repeat.body).toEqual({ status: "rejected", mode: "feed", signer: keeper.publicKey(), value: "11500000", timestamp: t2, reason: "deviate" })
     expect(await sequence()).toBe(before + 1n)
   }, 2 * MINUTE)
@@ -214,7 +221,7 @@ describe.skipIf(skip !== null)("the keeper's feed mode on the local stack (D-21,
     await setPrice(0n, t3)
     const before = await sequence()
     const { status, body } = await tick()
-    expect(status).toBe(500)
+    expect(status).toBe(200)
     expect(body).toEqual({ status: "rejected", mode: "feed", signer: keeper.publicKey(), value: "0", timestamp: t3, reason: "bad_price" })
     expect(await sequence()).toBe(before)
   }, MINUTE)

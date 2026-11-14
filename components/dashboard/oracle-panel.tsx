@@ -120,9 +120,13 @@ function SourceRow({ label, spec, view }: { label: string; spec: FigureSpec<stri
 
 const DECISION_WORD: Record<string, string> = { pushed: "Pushed", synced: "Synced from the feed", skipped: "Skipped: the value was already current" }
 
-/** What a recorded run did, in words: a rejection with its reason's words, an error with what the run recorded. */
+/**
+ * What a recorded run did, in words: a rejection with its reason's words, a feed-mode skip with its
+ * routine reason's (D-21), an error with what the run recorded.
+ */
 function tickWords(t: RecordedTick): string {
   if (t.decision === "rejected") return `Rejected: ${t.reason ? rejectionText(t.reason) : "no reason recorded"}`
+  if (t.decision === "skipped" && t.reason) return `Skipped: ${rejectionText(t.reason)}`
   if (t.decision === "error") {
     const reason = t.reason ?? ""
     if (reason.startsWith("not_configured: ")) return `Not configured: ${reason.slice("not_configured: ".length)}`

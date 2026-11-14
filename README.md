@@ -123,7 +123,7 @@ Copy `.env.example` to `.env.local`. Never commit real keys.
 | `ORACLE_ADMIN_SECRET` | Server only | Testnet and local only. The oracle admin key `GET`/`POST /api/cron/oracle` signs with (see Scheduler). It is the OracleAdapter's admin: besides pushing the value, it can change the oracle's window, deviation cap, sources and value bounds, and hand the role over. Never set on mainnet: the route refuses to run there. |
 | `ORACLE_KEEPER_MODE` | Server only | `push` (default) or `feed`: how `cron/oracle` keeps the oracle fresh (see "Keeper modes" under Scheduler). Any other value answers 503 `not_configured`. |
 | `ORACLE_KEEPER_SECRET` | Server only | Feed mode's key: funded, with no protocol role. It only pays the fee of `sync_from_feed`, which anyone may call, so feed mode may run on any network. In feed mode the alert check watches its XLM. |
-| `ORACLE_KEEPER_ORACLE_ID` | Server only | Optional, feed mode only, for tests and the local proof. The oracle `cron/oracle` syncs instead of the manifest's (for example the standalone oracle of `scripts/dev-stack/feed-oracle.sh`). Its runs are recorded under that oracle, so the dashboard and the alert check, which follow the manifest's oracle, do not show them. |
+| `ORACLE_KEEPER_ORACLE_ID` | Server only | Optional, feed mode only, for tests and the local proof. The oracle `cron/oracle` syncs instead of the manifest's (for example the standalone oracle of `scripts/dev-stack/feed-oracle.sh`). Its runs are recorded under that oracle, so the dashboard and the alert check, which follow the manifest's oracle, do not show them; each run logs a warning. Off the local network, any value other than the manifest's oracle answers 503 `not_configured`. |
 | `ALERT_WEBHOOK_URL` | Server only | Where `cron/alerts` posts each alert it opens or closes (Slack or Discord incoming webhook, or any http(s) endpoint). Never logged or answered. Unset, the check answers 503 `not_configured`. |
 | `ALERT_SIGNER_MIN_XLM` | Server only | Optional. The keeper signer's XLM floor for `signer_low` (default 20). |
 
@@ -211,27 +211,41 @@ as that key, and acts on the result. The reason comes from the simulation's `ref
 |---|---|---|---|
 | `true` | | Submits. | 200 `synced` with `value` (the oracle's, 7 decimals), `timestamp` and `hash` |
 | `false`, routine | `stale_ts` (no newer price), `no_data` (the feed has none) | Sends nothing, pays no fee. | 200 `skipped` with `reason` |
-| `false`, significant | `oob`, `decrease`, `deviate`, `fb_value` | Submits once per new (reason, value), so the rejection is on-chain with a hash; the same rejection again is not sent. | 500 `rejected` with `reason`, and `hash` when sent |
-| `false`, broken feed | `bad_price`, `rescale`, `future_ts` | Sends nothing. The alert check raises `feed_broken`. | 500 `rejected` with `reason` |
-| `false`, no `ref_rej` event | | Sends nothing. | 500 `rejected`, reason `unknown` |
+| `false`, significant | `oob`, `decrease`, `deviate`, `fb_value` | Submits once per new (reason, value), so the rejection is on-chain with a hash; the same rejection again is not sent. The alert check raises `oracle_rejection`. | 200 `rejected` with `reason`, and `hash` when sent |
+| `false`, broken feed | `bad_price`, `rescale`, `future_ts` | Sends nothing. The alert check raises `feed_broken`. | 200 `rejected` with `reason` |
+| `false`, no `ref_rej` event | | Sends nothing. | 200 `rejected`, reason `unknown` |
+
+A feed-mode `rejected` run answers 200, not 500, and is logged as a warning: the rejection is the
+feed's state, not a failed run, and the alert check reports it. A 5xx would make QStash retry the
+call, and each retry would record the same rejection again (counted in `rejected24h` and in the
+alert's `occurrences`). Push mode keeps its 500. `failed` (500) and `not_configured` (503) are the
+same in both modes.
 
 - **Its memory** of the last rejection it sent is the newest feed-mode `rejected` row of that oracle
   in `oracle_ticks` with a tx hash. Without a database (or when the read fails, logged by error
-  name), it has none, so every significant rejection is sent: one fee per run until the feed
-  recovers. That is the safe side, and the alert check still sees each one.
+  name), it has none, so every significant rejection is sent again on each scheduled run (every 30
+  minutes, one fee each; the 200 answer means no retries) until the feed recovers. That is the safe
+  side, and the alert check still sees each one.
 - **The call that lands decides.** If the feed moved between the simulation and the transaction, the
-  answer follows the landed return value (a rejection is then recorded with reason `unknown`; the
-  indexed `ref_rej` event keeps the real one).
+  answer follows the landed return value, and the recorded (reason, value) comes from the landed
+  transaction's own `ref_rej` (or `ref_set`) event when RPC returns its events. Without them, the
+  simulated pair stands, and a simulated accept that lands `false` is recorded with reason `unknown`
+  (the indexed `ref_rej` event keeps the real one).
 - **503 `not_configured`** also covers an oracle with no feed: its code predates `sync_from_feed` (it
-  has no `feed_source` function, as with 665bb67, our Testnet oracle today), `set_feed_source` was
-  never called, or the call raises `FeedNotConfigured` (error 15).
+  has no `feed_source` function, as with 665bb67, our Testnet oracle today), or `set_feed_source` was
+  never called (`feed_source()` is `None`). The oracle raises `FeedNotConfigured` (error 15) only then,
+  and the route reads `feed_source()` first, so an error 15 after it named a feed comes from the feed
+  contract: it is also 503, recorded as "the feed answered an error (#15)".
 - **Any network.** Feed mode runs on mainnet too; push mode keeps its refusal.
 - **Which oracle.** It syncs the manifest's oracle, or `ORACLE_KEEPER_ORACLE_ID` when set (tests and
-  the local proof only; see Environment variables).
+  the local proof only; see Environment variables). An override that differs from the manifest's
+  oracle logs a warning on every run, and off the local network it answers 503 `not_configured`.
 
 `scripts/dev-stack/feed-oracle.sh` proves it on the local stack: it deploys a SEP-40 mock feed and a
 standalone OracleAdapter of 24d980d wired to it, and `tests/integration/oracle-feed.test.ts` drives
-the route through each row of the table above (see `scripts/dev-stack/README.md`).
+the route through each row of the table above but the last (see `scripts/dev-stack/README.md`). The
+"no `ref_rej` event" row is covered by unit tests only: the 24d980d contract emits `ref_rej` on every
+rejection, so no local feed can produce it.
 
 #### Telemetry
 

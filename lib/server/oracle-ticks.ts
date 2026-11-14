@@ -13,9 +13,10 @@ import "server-only"
  *   reason is `not_configured: <the app's own words>` or `failed: <error name>`, never an error's
  *   text (RPC text may carry a provider URL).
  */
+import { SIGNIFICANT } from "@/lib/protocol/dashboard/rejections"
 import type { Network } from "@/lib/protocol/types"
 import type { Sql } from "./db"
-import { SIGNIFICANT, type KeeperMode, type OracleTick } from "./oracle-keeper"
+import type { KeeperMode, OracleTick } from "./oracle-keeper"
 
 /** The keeper's schedule: every 30 minutes (the oracle is fresh for its `max_stale_seconds`, 3,600 s on our deployments). */
 export const ORACLE_TICK_INTERVAL_SECONDS = 1_800

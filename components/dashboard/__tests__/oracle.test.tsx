@@ -397,6 +397,9 @@ describe("the keeper's health on the oracle page (D-19)", () => {
           tick({ id: "7", decision: "error", value: null, reason: "failed: TypeError", txHash: null }),
           tick({ id: "6", decision: "skipped", txHash: null }),
           tick({ id: "5", decision: "error", value: null, reason: "not_configured: ORACLE_ADMIN_SECRET is not set.", txHash: null, signer: null }),
+          // Feed mode (D-21): a routine rejection is skipped and keeps its reason.
+          tick({ id: "4", mode: "feed", decision: "skipped", reason: "stale_ts", txHash: null }),
+          tick({ id: "3", mode: "feed", decision: "skipped", value: null, reason: "no_data", txHash: null }),
         ],
         health: HEALTHY,
         intervalSeconds: 1_800,
@@ -414,6 +417,8 @@ describe("the keeper's health on the oracle page (D-19)", () => {
     expect(within(runs).getByText("Rejected: Moved more than the cap")).toBeTruthy()
     expect(within(runs).getByText("Failed: TypeError")).toBeTruthy()
     expect(within(runs).getByText("Skipped: the value was already current")).toBeTruthy()
+    expect(within(runs).getByText("Skipped: Not newer than the current value")).toBeTruthy()
+    expect(within(runs).getByText("Skipped: The feed had no price")).toBeTruthy()
     expect(within(runs).getByText("Not configured: ORACLE_ADMIN_SECRET is not set.")).toBeTruthy()
     expect(within(runs).getAllByRole("link", { name: `View transaction ${TX2} on stellar.expert` }).length).toBeGreaterThan(0)
     expect(within(runs).getAllByTitle(SIGNER).length).toBeGreaterThan(0)

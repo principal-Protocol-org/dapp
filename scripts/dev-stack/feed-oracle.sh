@@ -44,6 +44,19 @@ case "$PRINCIPAL_REPO" in /*) ;; *) PRINCIPAL_REPO="$DAPP_DIR/$PRINCIPAL_REPO" ;
 
 log() { echo "==> $*" >&2; }
 
+# The Stellar CLI's stderr is kept in a file and shown only when a call fails, with anything shaped
+# like a secret key redacted (S + 55 base32 characters), as tests/live/util.ts redacts.
+CLI_ERR="$(mktemp)"
+trap 'rm -f "$CLI_ERR"' EXIT
+redacted() { sed -E 's/S[A-Z2-7]{55}/S…[redacted]/g'; }
+# cli <stellar args...>: its stdout as is; on failure, its stderr (redacted) and its status.
+cli() {
+  stellar "$@" 2>"$CLI_ERR" && return 0
+  local status=$?
+  redacted <"$CLI_ERR" >&2
+  return "$status"
+}
+
 rpc_healthy || die "the local network is not answering on $RPC_URL. Run scripts/dev-stack/up.sh first."
 # The RPC must be the quickstart's own network, whatever RPC_URL says.
 PASSPHRASE="$(rpc_call getNetwork | jq -er '.result.passphrase')" || die "the RPC on $RPC_URL did not name its network"
@@ -54,7 +67,13 @@ ADMIN="$(stellar keys address "$ADMIN_KEY")"
 # ---------------------------------------------------------------------------------------------
 # Build
 # ---------------------------------------------------------------------------------------------
-log "Rust: $(rustc --version)"
+RUSTC_VERSION="$(rustc --version)"
+log "Rust: $RUSTC_VERSION"
+# The committed wasm hashes (mock a12b60b8…, OracleAdapter cf58bbd8…) were built with Rust 1.95.0.
+case "$RUSTC_VERSION" in
+  "rustc 1.95.0 "* | "rustc 1.95.0") ;;
+  *) echo "warning: built with '$RUSTC_VERSION', not rustc 1.95.0: the wasm hashes may differ from the documented ones" >&2 ;;
+esac
 MOCK_DIR="$DAPP_DIR/tests/fixtures/sep40-mock"
 log "Building the SEP-40 mock feed (cargo build --release --target wasm32v1-none --locked)"
 (cd "$MOCK_DIR" && cargo build --release --target wasm32v1-none --locked >&2) ||
@@ -87,14 +106,19 @@ fi
 deploy_wasm() {
   local file="$1" hash id
   [ -f "$file" ] || die "missing build artifact $file"
-  hash="$(stellar contract upload --wasm "$file" --source "$ADMIN_KEY" --network "$NETWORK" 2>/dev/null | tail -n1)"
+  hash="$(cli contract upload --wasm "$file" --source "$ADMIN_KEY" --network "$NETWORK" | tail -n1)"
   [[ "$hash" =~ ^[0-9a-f]{64}$ ]] || die "uploading $(basename "$file") returned an unexpected hash: '$hash'"
   log "  $(basename "$file"): wasm hash $hash"
-  id="$(stellar contract deploy --wasm-hash "$hash" --source "$ADMIN_KEY" --network "$NETWORK" 2>/dev/null | tail -n1)"
+  id="$(cli contract deploy --wasm-hash "$hash" --source "$ADMIN_KEY" --network "$NETWORK" | tail -n1)"
   [[ "$id" =~ ^C[A-Z2-7]{55}$ ]] || die "deploying $(basename "$file") returned an unexpected contract id: '$id'"
   echo "$id"
 }
-adm() { invoke "$ADMIN_KEY" "$@" >/dev/null 2>&1; } # adm <contract id> <fn> [args...]
+# adm <contract id> <fn> [args...]: as the local admin; on failure the CLI's stderr, redacted.
+adm() {
+  local id="$1"
+  shift
+  cli contract invoke --id "$id" --source "$ADMIN_KEY" --network "$NETWORK" -- "$@" >/dev/null
+}
 
 log "Deploying the mock feed"
 FEED="$(deploy_wasm "$FEED_WASM")"
@@ -106,7 +130,7 @@ ORACLE="$(deploy_wasm "$ORACLE_WASM")"
 adm "$ORACLE" initialize --admin "$ADMIN" --max_stale_seconds "$MAX_STALE_SECONDS" --max_deviation_bps "$MAX_DEVIATION_BPS" ||
   die "the oracle's initialize failed"
 adm "$ORACLE" set_feed_source --caller "$ADMIN" --feed "$FEED" --asset "$FEED_ASSET" || die "set_feed_source failed"
-SOURCE="$(invoke "$ADMIN_KEY" "$ORACLE" feed_source 2>/dev/null)" || die "feed_source could not be read"
+SOURCE="$(cli contract invoke --id "$ORACLE" --source "$ADMIN_KEY" --network "$NETWORK" -- feed_source)" || die "feed_source could not be read"
 log "  oracle $ORACLE: max_stale $MAX_STALE_SECONDS s, deviation cap $MAX_DEVIATION_BPS bps, feed_source $SOURCE"
 
 jq -cn --arg oracle "$ORACLE" --arg feed "$FEED" '{oracle: $oracle, feed: $feed}'

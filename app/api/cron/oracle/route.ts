@@ -12,10 +12,13 @@ import "server-only"
  *   `ORACLE_KEEPER_ORACLE_ID` when set (a test or local oracle), else the manifest's oracle, and reads
  *   its memory (the last rejection it submitted) from `oracle_ticks`.
  *
- * It answers the tick: 200 for `updated`, `unchanged`, `synced` or `skipped`; 500 with the reason for
- * a `rejected` one (the oracle refused the value, R4-8); 503 `not_configured` when the keeper cannot
- * run (an unknown mode, no key, a key that is not the oracle admin, mainnet in push mode, an oracle
- * with no feed); else 500 `failed`.
+ * It answers the tick: 200 for `updated`, `unchanged`, `synced` or `skipped`. A `rejected` one (the
+ * oracle refused the value, R4-8) answers 500 with the reason in push mode, and 200 in feed mode: a
+ * feed's rejection is the feed's state, not a failed run, and a 5xx would make QStash retry and record
+ * it again (the alert check raises `oracle_rejection` and `feed_broken` from the recorded runs). 503
+ * `not_configured` when the keeper cannot run (an unknown mode, no key, a key that is not the oracle
+ * admin, mainnet in push mode, an oracle with no feed, an override oracle off the local network);
+ * else 500 `failed`.
  *
  * Every run, whatever its outcome, writes one `oracle_ticks` row (spec 0004 D-19) under the oracle it
  * targeted, the dashboard's keeper telemetry. A row that cannot be written, or a memory that cannot
@@ -55,11 +58,21 @@ async function memory(network: Network, oracle: string): Promise<{ reason: strin
   }
 }
 
-/** The oracle feed mode targets: `ORACLE_KEEPER_ORACLE_ID` when set, else the manifest's. */
+/**
+ * The oracle feed mode targets: `ORACLE_KEEPER_ORACLE_ID` when set, else the manifest's. Another
+ * oracle than the manifest's is for local proofs only: each run warns that the dashboard and the
+ * alert check do not follow it, and off the local network it is refused.
+ */
 function feedOracle(manifest: Manifest): string {
   const id = process.env.ORACLE_KEEPER_ORACLE_ID?.trim()
-  if (!id) return manifest.shared.oracle
+  if (!id || id === manifest.shared.oracle) return manifest.shared.oracle
   if (!StrKey.isValidContract(id)) throw new OracleKeeperConfigError("ORACLE_KEEPER_ORACLE_ID is not a contract id.")
+  console.warn(
+    `oracle keeper: ORACLE_KEEPER_ORACLE_ID overrides the manifest's oracle (${manifest.shared.oracle}): this run syncs ${id}, which the dashboard and the alert check do not follow`,
+  )
+  if (manifest.network !== "local") {
+    throw new OracleKeeperConfigError("ORACLE_KEEPER_ORACLE_ID names another oracle than the manifest's: the override oracle is for local proofs only.")
+  }
   return id
 }
 
@@ -87,10 +100,17 @@ export async function GET(request: Request) {
     }
     outcome = tick
     if (tick.status === "rejected") {
-      // The scheduler sees a 500; the log says why. Public values only: the key is never in a tick.
+      // The log says why. Public values only: the key is never in a tick. Push: the scheduler sees a
+      // 500. Feed: a 200 and a warning (a retry would record the same rejection again).
       const tx = tick.hash ? `tx ${tick.hash}` : "not submitted"
-      console.error(`oracle keeper: the oracle rejected value ${tick.value ?? "unknown"} at timestamp ${tick.timestamp ?? "unknown"} (reason ${tick.reason}, ${tx})`)
-      response = json(tick, 500)
+      const line = `oracle keeper: the oracle rejected value ${tick.value ?? "unknown"} at timestamp ${tick.timestamp ?? "unknown"} (reason ${tick.reason}, ${tx})`
+      if (tick.mode === "feed") {
+        console.warn(line)
+        response = json(tick, 200)
+      } else {
+        console.error(line)
+        response = json(tick, 500)
+      }
     } else response = json(tick, 200)
   } catch (error) {
     // The config errors are this app's own words; anything else is logged by name only (RPC text

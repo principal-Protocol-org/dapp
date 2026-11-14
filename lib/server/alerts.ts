@@ -26,7 +26,7 @@ import { Keypair } from "@stellar/stellar-sdk"
 import { alertTitle, countsAsCritical, DEBOUNCED_KINDS, type Alert, type AlertSeverity, type RecentAlert } from "@/lib/app/alert-types"
 import { fetchOracleView, type OracleView } from "@/lib/protocol/dashboard/oracle"
 import { fetchPauses, type PauseView } from "@/lib/protocol/dashboard/pauses"
-import { isSignificantRejection, rejectionText } from "@/lib/protocol/dashboard/rejections"
+import { BROKEN, isSignificantRejection, rejectionText } from "@/lib/protocol/dashboard/rejections"
 import { fetchRiskView, type RiskView } from "@/lib/protocol/dashboard/risk"
 import { fetchAccount } from "@/lib/protocol/horizon"
 import { createRpcReader, isTransientRpcError, type ContractReader } from "@/lib/protocol/reader"
@@ -103,8 +103,8 @@ const RECENT_LIMIT = 200
  */
 export const EVENT_KINDS: readonly AlertKind[] = ["oracle_rejection", "feed_broken"]
 
-/** Reasons a pull-mode feed can give that mean its price is unusable (D-21): the keeper does not submit them. */
-const BROKEN_FEED = new Set(["bad_price", "rescale", "future_ts"])
+/** Reasons a pull-mode feed can give that mean its price is unusable (D-21, `BROKEN`): the keeper does not submit them. */
+const BROKEN_FEED: ReadonlySet<string> = new Set(BROKEN)
 
 const STROOPS_PER_XLM = 10_000_000n
 const DAY_MS = 86_400_000

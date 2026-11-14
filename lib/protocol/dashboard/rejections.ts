@@ -22,11 +22,22 @@ export function rejectionText(reason: string): string {
   return Object.hasOwn(WORDS, reason) ? WORDS[reason] : reason
 }
 
-/** Reasons that reflect an attempted disallowed value change: from 24d980d, the only ones `last_rejection()` keeps. */
-const SIGNIFICANT = new Set(["oob", "decrease", "deviate", "fb_value"])
+/**
+ * The OracleAdapter's nine rejection reasons, in the three classes of spec 0004 D-21. This is their
+ * one source: the feed keeper, the alert check and the dashboard read them from here.
+ * - Significant: an attempted disallowed value change, the contract's own split (24d980d
+ *   `reject(…, significant: true)`), so from 24d980d the only ones `last_rejection()` keeps.
+ * - Routine: no new data (push `stale_ts`; pull `stale_ts`, `no_data`).
+ * - Broken feed: a pull feed's own data is unusable; the contract counts these as not significant.
+ */
+export const SIGNIFICANT = ["oob", "decrease", "deviate", "fb_value"] as const
+export const ROUTINE = ["stale_ts", "no_data"] as const
+export const BROKEN = ["bad_price", "rescale", "future_ts"] as const
+
+const SIGNIFICANT_SET: ReadonlySet<string> = new Set(SIGNIFICANT)
 
 export function isSignificantRejection(reason: string): boolean {
-  return SIGNIFICANT.has(reason)
+  return SIGNIFICANT_SET.has(reason)
 }
 
 export type OracleWasmRejections = {
@@ -37,7 +48,8 @@ export type OracleWasmRejections = {
 }
 
 const PUSH_ROUTINE = ["stale_ts"] as const
-const PULL_ROUTINE = ["stale_ts", "no_data", "bad_price", "rescale", "future_ts"] as const
+/** Every pull reason that is not significant: the routine ones and the broken-feed ones. */
+const PULL_ROUTINE = [...ROUTINE, ...BROKEN] as const
 
 /**
  * What `last_rejection()` holds, by the oracle's wasm hash (sha256 of the uploaded wasm, as in
