@@ -546,7 +546,7 @@ describe("SafetyContent", () => {
     expect(row("Oracle fallback source")).toBe("None")
     expect(row("Oracle last rejected update")).toBe("Moved more than the cap (value 1.2000, 2m 0s ago)")
   })
-  it("says none when no update was ever rejected, and words every reason", () => {
+  it("says none when no update was ever rejected, and words every reason (all nine, spec 0004 D-18)", () => {
     mocks.ms = marketState()
     wrap(<SafetyContent marketId="m1" />)
     expect(screen.getByText("Oracle last rejected update").nextSibling?.textContent).toBe("None")
@@ -556,6 +556,11 @@ describe("SafetyContent", () => {
       stale_ts: "Not newer than the current value",
       oob: "Outside the value bounds",
       fb_value: "Fallback tried to change the value",
+      // The feed path's reasons (principal aae6cf8 and later), worded as the dashboard words them.
+      no_data: "The feed had no price",
+      bad_price: "The feed's price was zero or negative",
+      rescale: "The feed's price could not be converted to 7 decimals",
+      future_ts: "Dated after the current ledger time",
       other: "other",
     }
     for (const [reason, text] of Object.entries(words)) {

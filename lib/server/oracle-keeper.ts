@@ -102,11 +102,30 @@ export function createOracleChain(manifest: Manifest, deps: { server?: OracleRpc
   }
 }
 
-export type OracleTick =
+/** How the keeper feeds the oracle: it pushes a computed value (`set_reference_value`), or, from spec 0004 D-21, has the oracle read its feed. */
+export type KeeperMode = "push" | "feed"
+
+/**
+ * One keeper run's outcome. Every outcome names its `mode` and its `signer` (the keeper key's public
+ * key, never the secret), which the run's `oracle_ticks` row records (spec 0004 D-19).
+ */
+export type OracleTick = { mode: KeeperMode; signer: string } & (
   | { status: "unchanged"; value: string; timestamp: number }
   | { status: "updated"; value: string; timestamp: number; hash: string }
   /** The oracle refused the value (R4-8): the transaction succeeded, `set_reference_value` returned false. */
   | { status: "rejected"; value: string; timestamp: number; hash: string; reason: string }
+)
+
+/** The public key of the keeper's key, for a run's tick record; null when the key is unset or not a Stellar secret. */
+export function keeperSigner(secret: string | undefined): string | null {
+  const trimmed = secret?.trim()
+  if (!trimmed) return null
+  try {
+    return Keypair.fromSecret(trimmed).publicKey()
+  } catch {
+    return null
+  }
+}
 
 /** The source id (R4-8) from `get_primary_source()`: `Option<BytesN<32>>` decoded as bytes, or null. */
 function sourceHex(value: unknown): string | null {
@@ -138,6 +157,7 @@ export async function tickOracle(deps: { manifest: Manifest; secret: string | un
     throw new OracleKeeperConfigError("ORACLE_ADMIN_SECRET is not a valid Stellar secret key.")
   }
   const chain = deps.chain ?? createOracleChain(manifest)
+  const run = { mode: "push" as const, signer: keeper.publicKey() }
 
   const admin = await chain.read("get_admin")
   if (admin !== keeper.publicKey()) throw new OracleKeeperConfigError("ORACLE_ADMIN_SECRET is not the key of the oracle admin.")
@@ -146,7 +166,7 @@ export async function tickOracle(deps: { manifest: Manifest; secret: string | un
   const lastTimestamp = Number(await chain.read("get_reference_timestamp"))
   const now = await chain.ledgerTime()
   const next = nextReferenceValue({ current, lastTimestamp, now })
-  if (next === null) return { status: "unchanged", value: current.toString(), timestamp: lastTimestamp }
+  if (next === null) return { ...run, status: "unchanged", value: current.toString(), timestamp: lastTimestamp }
 
   const source = sourceHex(await chain.read("get_primary_source"))
   if (!source) throw new OracleKeeperConfigError("the oracle has no primary source (set_sources was never called, or it is a v1 oracle).")
@@ -162,6 +182,6 @@ export async function tickOracle(deps: { manifest: Manifest; secret: string | un
     ],
   })
   // A rejection is a successful transaction that returned false: never report it as an update (R4-8).
-  if (returnValue !== true) return { status: "rejected", value: next.toString(), timestamp: now, hash, reason: await rejectionReason(chain) }
-  return { status: "updated", value: next.toString(), timestamp: now, hash }
+  if (returnValue !== true) return { ...run, status: "rejected", value: next.toString(), timestamp: now, hash, reason: await rejectionReason(chain) }
+  return { ...run, status: "updated", value: next.toString(), timestamp: now, hash }
 }

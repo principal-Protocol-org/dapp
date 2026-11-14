@@ -87,7 +87,12 @@ describe("fetchOracleView", () => {
 
   it("path is unsupported on WasmVm, MissingValue (665bb67 oracle)", async () => {
     const view = await fetchOracleView(fakeReader(table()), manifest, TS)
-    expect(view.path).toEqual({ status: "unsupported" })
+    expect(view.path).toMatchObject({ status: "unsupported" })
+  })
+
+  it("an unsupported path keeps the call it attempted, so the drawer gives the command that shows MissingValue", async () => {
+    const view = await fetchOracleView(fakeReader(table()), manifest, TS)
+    expect(view.path).toEqual({ status: "unsupported", source: expect.objectContaining({ contractId: O, fn: "last_update_was_feed", args: [] }) })
   })
 
   it("path is push or feed when the view exists", async () => {

@@ -28,6 +28,38 @@ const RISK_WORDS: Record<string, string> = {
   rm_cons: "Consumer removed",
 }
 
+/**
+ * The market group's indexed events (the SY wrapper, the PrincipalManager and the MarketPool) and the
+ * OracleAdapter's, for the activity feed. `mint` is the manager's (PT and YT minted from SY): the PT
+ * and YT contracts are not indexed. `adm_xfer` is any contract's admin handover.
+ */
+const MARKET_WORDS: Record<string, string> = {
+  deposit: "Underlying deposited for SY",
+  withdraw: "SY withdrawn to underlying",
+  sy_xfer: "SY transferred",
+  seize: "SY seized",
+  mint: "PT and YT minted",
+  recombine: "PT and YT recombined",
+  redeem: "PT and YT redeemed",
+  yt_claim: "YT yield claimed",
+  settled: "Market settled",
+  fee_claim: "Fees claimed",
+  buy_pt: "PT bought",
+  sell_pt: "PT sold",
+  sell_yt: "YT sold",
+  flash_yt: "YT bought",
+  add_liq: "Liquidity added",
+  zap_liq: "Liquidity added from one token",
+  rem_liq: "Liquidity removed",
+  lp_xfer: "LP tokens transferred",
+  lp_seize: "LP tokens seized",
+  ref_set: "Oracle value set",
+  ref_rej: "Oracle update rejected",
+  src_set: "Oracle sources set",
+  feed_set: "Oracle feed set",
+  adm_xfer: "Admin handed over",
+}
+
 /** A `paused` event's state: only a decoded boolean says paused or unpaused; anything else is not guessed. */
 export function pausedWords(data: Record<string, unknown>): "Paused" | "Unpaused" | "Pause state not decoded" {
   return data.paused === true ? "Paused" : data.paused === false ? "Unpaused" : "Pause state not decoded"
@@ -36,11 +68,25 @@ export function pausedWords(data: Record<string, unknown>): "Paused" | "Unpaused
 /** Plain words for any indexed event this module knows; a topic not listed shows as it is. */
 export function eventWords(topic: string, data: Record<string, unknown> = {}): string {
   if (topic === "paused") return pausedWords(data)
-  return COMPLIANCE_WORDS[topic] ?? RISK_WORDS[topic] ?? topic
+  return COMPLIANCE_WORDS[topic] ?? RISK_WORDS[topic] ?? MARKET_WORDS[topic] ?? topic
 }
 
 /** The field naming who an event is about, when it is not `account`. */
-const SUBJECT_FIELD: Record<string, string> = { acc_batch: "caller", add_psr: "pauser", rm_psr: "pauser", add_cons: "consumer", rm_cons: "consumer" }
+const SUBJECT_FIELD: Record<string, string> = {
+  acc_batch: "caller",
+  add_psr: "pauser",
+  rm_psr: "pauser",
+  add_cons: "consumer",
+  rm_cons: "consumer",
+  fee_claim: "payee",
+  adm_xfer: "new_admin",
+  // The market's actions: who sent them.
+  ...Object.fromEntries(
+    ["deposit", "withdraw", "sy_xfer", "mint", "recombine", "redeem", "yt_claim", "buy_pt", "sell_pt", "sell_yt", "flash_yt", "add_liq", "zap_liq", "rem_liq", "lp_xfer"].map(
+      (t) => [t, "from"],
+    ),
+  ),
+}
 
 /** The account an event is about: `account`, the pauser or consumer, or the caller for a batch (whose accounts the event does not carry). */
 export function eventSubject(topic: string, data: Record<string, unknown>): string | null {

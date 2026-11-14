@@ -1,6 +1,6 @@
 "use client"
 
-import type { ReactNode } from "react"
+import type { ComponentProps, ReactNode } from "react"
 import { InfoIcon } from "lucide-react"
 import { cn } from "cn"
 import { UNAVAILABLE } from "@/components/app/live"
@@ -54,20 +54,22 @@ export function Figure<T>({ label, live, format, scale, read, className, render 
   return (
     <span className={cn("inline-flex max-w-full min-w-0 items-center gap-1.5", className)}>
       <span className="min-w-0 wrap-anywhere">{render && live.status === "live" ? render(live.value, display) : display}</span>
-      <VerifyDrawer
-        figure={figure}
-        scale={scale}
-        trigger={
-          <button
-            type="button"
-            aria-label={down ? `Why ${label} is unavailable, and how to verify it` : `How to verify ${label}`}
-            // A 24 px target (M11) around the 14 px icon, as InfoTip; the negative margin keeps the line's height.
-            className="-m-[5px] inline-flex size-6 shrink-0 items-center justify-center rounded-full text-ink-muted hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ring"
-          >
-            <InfoIcon aria-hidden="true" className="size-3.5" />
-          </button>
-        }
-      />
+      <VerifyDrawer figure={figure} scale={scale} trigger={<VerifyButton name={down ? `Why ${label} is unavailable, and how to verify it` : `How to verify ${label}`} />} />
     </span>
+  )
+}
+
+/** The info button that opens a How-to-verify drawer, named for assistive tech by `name`. */
+export function VerifyButton({ name, ...props }: { name: string } & Omit<ComponentProps<"button">, "type" | "aria-label" | "className" | "children">) {
+  return (
+    <button
+      type="button"
+      aria-label={name}
+      // A 24 px target (M11) around the 14 px icon, as InfoTip; the negative margin keeps the line's height.
+      className="-m-[5px] inline-flex size-6 shrink-0 items-center justify-center rounded-full text-ink-muted hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ring"
+      {...props}
+    >
+      <InfoIcon aria-hidden="true" className="size-3.5" />
+    </button>
   )
 }

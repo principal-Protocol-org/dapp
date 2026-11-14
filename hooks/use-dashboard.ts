@@ -16,13 +16,14 @@ import { fetchRiskView } from "@/lib/protocol/dashboard/risk"
 import { createRpcReader } from "@/lib/protocol/reader"
 import type { Live } from "@/lib/protocol/types"
 import type { IndexedEvent, IndexedEvents, IndexGroup } from "@/lib/server/indexer"
+import type { KeeperHealth, RecordedTick } from "@/lib/server/oracle-ticks"
 
 /** Live widgets (oracle, RiskControl, pauses) refresh every 15 s (D-6, TRANCHE_2_3 l.1077). */
 export const DASHBOARD_LIVE_MS = 15_000
 /** Aggregates (the every-market sweep and its totals) and history (the index) refresh every 60 s. */
 export const DASHBOARD_AGGREGATE_MS = 60_000
 
-export type { IndexedEvent, IndexedEvents, IndexGroup }
+export type { IndexedEvent, IndexedEvents, IndexGroup, KeeperHealth, RecordedTick }
 
 /**
  * The query, plus `stale`: a failed refetch keeps the old `data`, and `stale` tells callers not to
@@ -268,6 +269,69 @@ export function useOpenAlerts() {
   )
 }
 
+const TICK_REASONS: Reasons = {
+  notFound: "the keeper telemetry is not available on this server",
+  notConfigured: "the keeper telemetry is not configured on this server",
+  unavailable: "the keeper telemetry could not be read",
+}
+
+/** `GET /api/dashboard/oracle-ticks`: the keeper's recent runs, its health and its schedule. */
+export type OracleTicksAnswer = { ticks: RecordedTick[]; health: KeeperHealth; intervalSeconds: number }
+
+const isText = (v: unknown) => typeof v === "string"
+const isTextOrNull = (v: unknown) => v === null || typeof v === "string"
+const isCount = (v: unknown) => typeof v === "number" && Number.isInteger(v) && v >= 0
+
+/** The answer, checked field by field: anything else is refused, never read as a healthy keeper. */
+export function parseOracleTicks(body: unknown): OracleTicksAnswer {
+  const b = body as Partial<OracleTicksAnswer> | null
+  const h = b?.health as Partial<KeeperHealth> | undefined
+  const ticksOk =
+    Array.isArray(b?.ticks) &&
+    b.ticks.every(
+      (t) =>
+        t !== null &&
+        typeof t === "object" &&
+        isText(t.id) &&
+        isText(t.at) &&
+        isText(t.oracle) &&
+        isText(t.mode) &&
+        isText(t.decision) &&
+        [t.value, t.reason, t.txHash, t.signer].every(isTextOrNull),
+    )
+  const healthOk =
+    h !== undefined &&
+    h !== null &&
+    typeof h.healthy === "boolean" &&
+    isTextOrNull(h.lastSuccessAt) &&
+    isTextOrNull(h.lastTickAt) &&
+    isCount(h.rejected24h) &&
+    isCount(h.failures24h)
+  if (!ticksOk || !healthOk || !isCount(b?.intervalSeconds) || (b?.intervalSeconds as number) <= 0)
+    throw new Error("the keeper telemetry answered in an unexpected shape")
+  return b as OracleTicksAnswer
+}
+
+/** The keeper's telemetry (spec 0004 D-19): its `limit` latest runs and its health, every 60 s (history). */
+export function useOracleTicks(limit = 20) {
+  const m = useManifest()
+  return withStale(
+    useQuery({
+      queryKey: ["dashboard", "oracle-ticks", m.network, limit],
+      queryFn: async (): Promise<OracleTicksAnswer> => {
+        const body = await getJson<unknown>(`/api/dashboard/oracle-ticks?limit=${limit}`, TICK_REASONS)
+        try {
+          return parseOracleTicks(body)
+        } catch (error) {
+          throw new FinalError(error instanceof Error ? error.message : String(error))
+        }
+      },
+      retry: (failures, error) => !(error instanceof FinalError) && failures < 1,
+      refetchInterval: DASHBOARD_AGGREGATE_MS,
+    }),
+  )
+}
+
 /** Which indexed events a list shows: one group (every group when omitted), one pool, some topics. */
 export type EventQuery = { group?: IndexGroup; pool?: string; topics?: readonly string[] }
 
@@ -340,14 +404,17 @@ export function useAllEvents(q: EventQuery) {
 
 export type IndexedCounts = IndexedEvents & { counts: Record<string, number> }
 
-/** How many events the index holds per topic in `group` (every row, `?counts=1`), with the index state, every 60 s. */
-export function useEventCounts(group: IndexGroup) {
+/**
+ * How many events the index holds per topic (every row, `?counts=1`), in `group` (every group when
+ * omitted) and `pool` (every market when omitted), with the index state, every 60 s.
+ */
+export function useEventCounts(group?: IndexGroup, pool?: string) {
   const m = useManifest()
   return withStale(
     useQuery({
-      queryKey: ["dashboard", "event-counts", m.network, group],
+      queryKey: ["dashboard", "event-counts", m.network, group ?? "all", pool ?? "all"],
       queryFn: async (): Promise<IndexedCounts> => {
-        const body = await getJson<IndexedEvents & { counts?: unknown }>(eventsUrl({ group }, { counts: "1", limit: "1" }), INDEX_REASONS)
+        const body = await getJson<IndexedEvents & { counts?: unknown }>(eventsUrl({ group, pool }, { counts: "1", limit: "1" }), INDEX_REASONS)
         const counts = body.counts
         if (!counts || typeof counts !== "object" || Array.isArray(counts) || !Object.values(counts).every((n) => Number.isInteger(n)))
           throw new FinalError("the event index answered without counts")

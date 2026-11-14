@@ -20,6 +20,7 @@ on a local network. It is Deliverable 2 of Tranche 2 of SCF #45.
 | `GET` or `POST /api/cron/record` | The rate recorder, called by a scheduler. Both methods run the same checks. Refuses any other caller. |
 | `GET` or `POST /api/cron/index` | The event indexer, called by a scheduler. Same checks as the recorder. See "Event indexer". |
 | `GET /api/dashboard/events` | The indexed protocol events, public and read-only. See "Event indexer". |
+| `GET /api/dashboard/oracle-ticks` | The oracle keeper's recorded runs and its health, public and read-only. See "Scheduler". |
 
 ## Trade flows
 
@@ -178,10 +179,23 @@ answers:
 
 | Status | Body | When |
 |---|---|---|
-| 200 | `{ status: "updated" \| "unchanged", value, timestamp }` (`hash` when updated) | The value was pushed, or the ledger clock has not moved since the last one. |
-| 500 | `{ status: "rejected", value, timestamp, hash, reason }` | The oracle refused the value: `set_reference_value` returned `false` in a successful transaction. `reason` is from the oracle's `last_rejection()`. The route also logs it as an error. |
+| 200 | `{ status: "updated" \| "unchanged", mode, signer, value, timestamp }` (`hash` when updated) | The value was pushed, or the ledger clock has not moved since the last one. `mode` is `push`; `signer` is the key's public key. |
+| 500 | `{ status: "rejected", mode, signer, value, timestamp, hash, reason }` | The oracle refused the value: `set_reference_value` returned `false` in a successful transaction. `reason` is from the oracle's `last_rejection()`. The route also logs it as an error. |
 | 503 | `{ error: "not_configured" }` | No key, a key that is not the oracle admin, an oracle with no primary source, or mainnet. |
 | 500 | `{ error: "failed" }` | Anything else, including a v1 oracle, which has no `get_primary_source()`. |
+
+Every run, whatever its answer, writes one row to `oracle_ticks` (migration 0004): its time, mode,
+decision (`pushed`, `skipped`, `rejected` or `error`; `synced` is for the feed mode), value, reason,
+tx hash and signer (a public key). An error's reason is `not_configured: <the route's own words>` or
+`failed: <error name>`, never an error's text. A row that cannot be written (no `DATABASE_URL`, a
+database down) is logged by error name and never changes the answer.
+`GET /api/dashboard/oracle-ticks?limit=` (1 to 100, default 20) serves them, public and without a
+wallet, for this network's oracle: `{ ticks, health, intervalSeconds }`, newest first, cached 60 s
+at the edge, errors never cached (503 `not_configured` or `unavailable`). `health` is
+`{ healthy, lastSuccessAt, lastTickAt, rejected24h, failures24h }`: healthy while the last success
+(`pushed` or `synced`; a skipped run changes nothing, so it is none) is younger than
+2 × `intervalSeconds` (1,800 s, the schedule). `lastTickAt` null means no run is recorded: an unknown
+state, which the oracle page reads "No keeper run recorded yet".
 
 Do not create the mainnet schedule before the dApp supports Mainnet. `NEXT_PUBLIC_PRINCIPAL_NETWORK`
 accepts `testnet` or `local` only, so the recorder would write Testnet data into the mainnet database.

@@ -1,6 +1,5 @@
-import { ComingSoon } from "@/components/dashboard/coming-soon"
+import { ActivityPanel } from "@/components/dashboard/activity-panel"
 
-// Placeholder until the activity view lands (spec 0004 D-13); that task replaces this file.
 export default function DashboardActivityPage() {
-  return <ComingSoon title="Activity" summary="Every indexed protocol event, newest first, with its transaction, ledger and close time." />
+  return <ActivityPanel />
 }

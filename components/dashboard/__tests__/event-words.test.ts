@@ -26,6 +26,23 @@ describe("event words", () => {
     expect(eventSubject("add_cons", { caller: "GC", consumer: "CS" })).toBe("CS")
   })
 
+  it("words every market and oracle topic the index decodes (the activity feed), and names who acted", () => {
+    const market = ["deposit", "withdraw", "sy_xfer", "seize", "mint", "recombine", "redeem", "yt_claim", "settled", "fee_claim"]
+    const pool = ["buy_pt", "sell_pt", "sell_yt", "flash_yt", "add_liq", "zap_liq", "rem_liq", "lp_xfer", "lp_seize"]
+    const oracle = ["ref_set", "ref_rej", "src_set", "feed_set", "adm_xfer"]
+    for (const topic of [...market, ...pool, ...oracle]) expect(eventWords(topic), topic).not.toBe(topic)
+    expect(eventWords("buy_pt")).toBe("PT bought")
+    expect(eventWords("ref_rej")).toBe("Oracle update rejected")
+    // Topics the index stores undecoded show as they are.
+    expect(eventWords("esc_set")).toBe("esc_set")
+    for (const topic of ["deposit", "withdraw", "mint", "recombine", "redeem", "yt_claim", "buy_pt", "sell_pt", "sell_yt", "flash_yt", "add_liq", "zap_liq", "rem_liq", "sy_xfer", "lp_xfer"])
+      expect(eventSubject(topic, { from: "GF", to: "GT" }), topic).toBe("GF")
+    expect(eventSubject("seize", { caller: "GC", account: "GA" })).toBe("GA")
+    expect(eventSubject("fee_claim", { payee: "GP", owed: "1" })).toBe("GP")
+    expect(eventSubject("adm_xfer", { current_admin: "GO", new_admin: "GN" })).toBe("GN")
+    expect(eventSubject("ref_set", { value: "1", timestamp: "2" })).toBeNull()
+  })
+
   it("reads a close time as UTC, whole seconds", () => {
     expect(closeTimeText("2026-11-14T00:04:59.000Z")).toBe("2026-11-14 00:04:59 UTC")
     expect(closeTimeText("2026-11-14T00:04:59Z")).toBe("2026-11-14 00:04:59 UTC")

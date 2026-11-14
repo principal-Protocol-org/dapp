@@ -4,7 +4,7 @@
  */
 import { parseRejection, parseSource, type OracleRejection } from "../market-state"
 import { allLive, readLive, toBigint, toBool, unavailable, type ContractReader } from "../reader"
-import type { Live, Manifest } from "../types"
+import type { Live, Manifest, ReadSource } from "../types"
 
 export type Freshness = "fresh" | "warning" | "stale" | "unavailable"
 
@@ -28,8 +28,11 @@ export type OracleView = {
   /** `value_bounds()`: the sane range; null when none is set. */
   bounds: Live<{ min: bigint; max: bigint } | null>
   sources: { primary: OracleSourceView; fallback: OracleSourceView; active: OracleSourceView }
-  /** `last_update_was_feed()`, or unsupported when this oracle's code has no such view. */
-  path: Live<"push" | "feed"> | { status: "unsupported" }
+  /**
+   * `last_update_was_feed()`, or unsupported when this oracle's code has no such view; `source` is
+   * the call attempted, so a reader can repeat it and see the host's MissingValue answer.
+   */
+  path: Live<"push" | "feed"> | { status: "unsupported"; source?: Omit<ReadSource, "rawXdr" | "ledger"> }
   lastRejection: Live<OracleRejection | null>
   blockedWhenStale: typeof BLOCKED_WHEN_STALE
 }
@@ -98,7 +101,9 @@ export async function fetchOracleView(reader: ContractReader, manifest: Manifest
   const path: OracleView["path"] =
     wasFeed.status === "unavailable"
       ? MISSING_FUNCTION.test(wasFeed.error)
-        ? { status: "unsupported" }
+        ? wasFeed.source
+          ? { status: "unsupported", source: wasFeed.source }
+          : { status: "unsupported" }
         : wasFeed
       : { ...wasFeed, value: wasFeed.value ? "feed" : "push" }
 

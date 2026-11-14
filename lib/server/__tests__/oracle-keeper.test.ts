@@ -13,6 +13,7 @@ import {
   ORACLE_APY_PERCENT,
   OracleKeeperConfigError,
   createOracleChain,
+  keeperSigner,
   nextReferenceValue,
   tickOracle,
   type OracleChain,
@@ -80,7 +81,7 @@ describe("tickOracle", () => {
   it("pushes the grown value at the ledger time, signed by the oracle admin", async () => {
     const { chain, sent } = fakeChain(base)
     const tick = await tickOracle({ manifest, secret: keeper.secret(), chain })
-    expect(tick).toEqual({ status: "updated", value: "10000027", timestamp: 2_800, hash: "ab".repeat(32) })
+    expect(tick).toEqual({ status: "updated", mode: "push", signer: keeper.publicKey(), value: "10000027", timestamp: 2_800, hash: "ab".repeat(32) })
     expect(sent).toEqual([
       {
         signer: keeper.publicKey(),
@@ -102,6 +103,8 @@ describe("tickOracle", () => {
     const { chain } = fakeChain({ ...base, returned: false, rejection: { reason: "deviate", timestamp: 2_800n, value: 99n } })
     expect(await tickOracle({ manifest, secret: keeper.secret(), chain })).toEqual({
       status: "rejected",
+      mode: "push",
+      signer: keeper.publicKey(),
       value: "10000027",
       timestamp: 2_800,
       hash: "ab".repeat(32),
@@ -122,7 +125,7 @@ describe("tickOracle", () => {
 
   it("sends nothing when the ledger clock has not moved", async () => {
     const { chain, sent } = fakeChain({ ...base, now: 1_000 })
-    expect(await tickOracle({ manifest, secret: keeper.secret(), chain })).toEqual({ status: "unchanged", value: "10000000", timestamp: 1_000 })
+    expect(await tickOracle({ manifest, secret: keeper.secret(), chain })).toEqual({ status: "unchanged", mode: "push", signer: keeper.publicKey(), value: "10000000", timestamp: 1_000 })
     expect(sent).toEqual([])
   })
 
@@ -148,6 +151,16 @@ describe("tickOracle", () => {
     await expect(tickOracle({ manifest: mainnet, secret: keeper.secret(), chain })).rejects.toThrow(OracleKeeperConfigError)
     expect(chain.read).not.toHaveBeenCalled()
     expect(sent).toEqual([])
+  })
+})
+
+describe("keeperSigner", () => {
+  it("is the keeper key's public key, for the tick record; null without a key or with a bad one (never the secret)", () => {
+    expect(keeperSigner(keeper.secret())).toBe(keeper.publicKey())
+    expect(keeperSigner(`  ${keeper.secret()} `)).toBe(keeper.publicKey())
+    expect(keeperSigner(undefined)).toBeNull()
+    expect(keeperSigner("  ")).toBeNull()
+    expect(keeperSigner("SNOTAVALIDSECRETKEYATALL")).toBeNull()
   })
 })
 

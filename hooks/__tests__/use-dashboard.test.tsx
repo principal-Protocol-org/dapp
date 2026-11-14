@@ -64,6 +64,7 @@ import {
   usePausers,
   useMarketDashboard,
   useOpenAlerts,
+  useOracleTicks,
   useOracleView,
   usePauses,
   usePendingClaim,
@@ -431,7 +432,18 @@ describe("useEventCounts", () => {
     const { result } = renderHook(() => useEventCounts("permissioning"), { wrapper })
     await waitFor(() => expect(result.current.data?.counts).toEqual({ acc_grant: 37, ast_grant: 68 }))
     expect(fetchMock).toHaveBeenCalledWith("/api/dashboard/events?group=permissioning&counts=1&limit=1")
-    expect(interval(["dashboard", "event-counts", "testnet", "permissioning"])).toBe(DASHBOARD_AGGREGATE_MS)
+    expect(interval(["dashboard", "event-counts", "testnet", "permissioning", "all"])).toBe(DASHBOARD_AGGREGATE_MS)
+  })
+
+  it("over every group, or one market's pool, for the activity page's kinds", async () => {
+    const fetchMock = vi.fn(async () => Response.json({ ...indexAnswer(), counts: { deposit: 111 } }))
+    vi.stubGlobal("fetch", fetchMock)
+    const all = renderHook(() => useEventCounts(), { wrapper })
+    await waitFor(() => expect(all.result.current.data?.counts).toEqual({ deposit: 111 }))
+    expect(fetchMock).toHaveBeenLastCalledWith("/api/dashboard/events?counts=1&limit=1")
+    const pool = renderHook(() => useEventCounts("market", "CPOOL"), { wrapper })
+    await waitFor(() => expect(pool.result.current.data).toBeDefined())
+    expect(fetchMock).toHaveBeenLastCalledWith("/api/dashboard/events?group=market&pool=CPOOL&counts=1&limit=1")
   })
 
   it("an answer without counts is refused, never read as zero", async () => {
@@ -467,5 +479,47 @@ describe("useEscrowRecords and useAssetCompliance", () => {
     await waitFor(() => expect(assets.result.current.data).toBeDefined())
     expect(interval(["dashboard", "escrow-records", "testnet", "m1,m2"])).toBe(DASHBOARD_AGGREGATE_MS)
     expect(interval(["dashboard", "assets", "testnet", "m1,m2"])).toBe(DASHBOARD_AGGREGATE_MS)
+  })
+})
+
+describe("useOracleTicks (spec 0004 D-19)", () => {
+  const answer = {
+    ticks: [
+      { id: "9", at: "2026-11-14T12:00:00.000Z", oracle: "CORACLE", mode: "push", decision: "pushed", value: "10000919", reason: null, txHash: "ab".repeat(32), signer: "GSIGNER" },
+    ],
+    health: { healthy: true, lastSuccessAt: "2026-11-14T12:00:00.000Z", lastTickAt: "2026-11-14T12:00:00.000Z", rejected24h: 0, failures24h: 0 },
+    intervalSeconds: 1_800,
+  }
+
+  it("reads the keeper's runs and health, every 60 s", async () => {
+    const fetchMock = vi.fn(async () => Response.json(answer))
+    vi.stubGlobal("fetch", fetchMock)
+    const { result } = renderHook(() => useOracleTicks(), { wrapper })
+    await waitFor(() => expect(result.current.data).toEqual(answer))
+    expect(fetchMock).toHaveBeenCalledWith("/api/dashboard/oracle-ticks?limit=20")
+    expect(interval(["dashboard", "oracle-ticks", "testnet", 20])).toBe(DASHBOARD_AGGREGATE_MS)
+  })
+
+  it.each([
+    ["no ticks list", { ...answer, ticks: undefined }],
+    ["a tick without its decision", { ...answer, ticks: [{ ...answer.ticks[0], decision: 3 }] }],
+    ["health without its flag", { ...answer, health: { ...answer.health, healthy: "yes" } }],
+    ["a count that is not a whole number", { ...answer, health: { ...answer.health, rejected24h: -1 } }],
+    ["no interval", { ...answer, intervalSeconds: 0 }],
+  ])("refuses an answer it cannot read (%s), without asking again, rather than show a healthy keeper", async (_, body) => {
+    client = new QueryClient({ defaultOptions: { queries: { retry: 1, retryDelay: 0 } } })
+    const fetchMock = vi.fn(async () => Response.json(body))
+    vi.stubGlobal("fetch", fetchMock)
+    const { result } = renderHook(() => useOracleTicks(), { wrapper })
+    await waitFor(() => expect(result.current.isError).toBe(true))
+    expect(result.current.error?.message).toBe("the keeper telemetry answered in an unexpected shape")
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it("a server without a database says so", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ error: "not_configured" }, { status: 503 })))
+    const { result } = renderHook(() => useOracleTicks(), { wrapper })
+    await waitFor(() => expect(result.current.isError).toBe(true), { timeout: 3_000 })
+    expect(result.current.error?.message).toBe("the keeper telemetry is not configured on this server")
   })
 })

@@ -4,6 +4,7 @@ import { useAccountState } from "@/hooks/use-account-state"
 import { useLedgerClock } from "@/hooks/use-ledger-clock"
 import { useMarketState } from "@/hooks/use-market-state"
 import { useWallet } from "@/hooks/use-wallet"
+import { rejectionText } from "@/lib/protocol/dashboard/rejections"
 import { formatAmount, formatBps, formatRate, formatWindow, shorten } from "@/lib/protocol/format"
 import { getMarket } from "@/lib/protocol/manifest"
 import { useManifest } from "@/components/app/manifest-provider"
@@ -20,14 +21,6 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
       <dd className="font-mono text-sm tabular-nums">{children}</dd>
     </div>
   )
-}
-
-const REJECTION_WORDS: Record<string, string> = {
-  deviate: "Moved more than the cap",
-  decrease: "Lower than the current value",
-  stale_ts: "Not newer than the current value",
-  oob: "Outside the value bounds",
-  fb_value: "Fallback tried to change the value",
 }
 
 const pause = (paused: boolean) => (paused ? "Paused: new actions are refused" : "Not paused")
@@ -76,7 +69,7 @@ export function SafetyContent({ marketId }: { marketId: string }) {
     if (!ms) return UNAVAILABLE
     return <LiveFigure label="Oracle last rejected update" live={ms.oracleLastRejection} format={(r) => {
       if (r === null) return "None"
-      const why = REJECTION_WORDS[r.reason] ?? r.reason
+      const why = rejectionText(r.reason)
       const when = ledgerTime === null ? null : `${formatDuration(ledgerTime - Number(r.timestamp))} ago`
       return `${why} (value ${formatRate(r.value)}${when ? `, ${when}` : ""})`
     }} />
