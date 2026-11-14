@@ -142,12 +142,25 @@ function makeRpc(opts: { events: FakeEvent[]; oldest: number; latest: number; sc
 }
 
 type Row = Record<string, unknown>
-type CursorRow = { ledger: number; cursor: string | null; close_time: string | null }
+type CursorRow = {
+  ledger: number | null
+  cursor: string | null
+  close_time: string | null
+  gap_from?: number | null
+  gap_to?: number | null
+  members?: string[] | null
+  reconcile?: { at: string; results: unknown[] } | null
+}
+
+const least = (a: number | null | undefined, b: number | null | undefined) => (a == null ? (b ?? null) : b == null ? a : Math.min(a, b))
+const greatest = (a: number | null | undefined, b: number | null | undefined) => (a == null ? (b ?? null) : b == null ? a : Math.max(a, b))
+const sorted = (ids: string[]) => [...ids].sort()
 
 /**
  * The `events` and `ingest_cursor` tables in memory, keyed as the real ones (events by id, cursors by
- * name), with the statements' conflict rules: an event id is inserted once, and a cursor only moves
- * forward. `cursorHistory` records the stored value after every cursor write.
+ * name), with the statements' conflict rules: an event id is inserted once; a cursor only moves
+ * forward, and the move writes its members and widens the stored gap (Postgres `least`/`greatest`
+ * skip nulls). `cursorHistory` records the stored value after every cursor write.
  */
 function makeDb(opts: { cursors?: Record<string, CursorRow>; failWith?: unknown } = {}) {
   const events = new Map<string, Row>()
@@ -169,17 +182,40 @@ function makeDb(opts: { cursors?: Record<string, CursorRow>; failWith?: unknown 
       }
       return out
     }
-    if (/^select ledger, cursor, close_time from ingest_cursor where name = \?$/i.test(text)) {
+    if (/^select ledger, cursor, close_time, gap_from, gap_to, members from ingest_cursor where name = \?$/i.test(text)) {
       const row = cursors.get(values[0] as string)
-      return row ? [{ ...row, ledger: String(row.ledger) }] : []
+      // pg answers bigint columns as strings.
+      const str = (v: number | null | undefined) => (v == null ? null : String(v))
+      return row ? [{ ...row, ledger: str(row.ledger), gap_from: str(row.gap_from), gap_to: str(row.gap_to), members: row.members ?? null }] : []
     }
-    if (/^insert into ingest_cursor/i.test(text)) {
+    if (/^insert into ingest_cursor \(name, ledger, /i.test(text)) {
       // The cursor never moves backwards: an overlapping run that is behind cannot rewind it.
       expect(text).toMatch(/where ingest_cursor\.ledger is null or excluded\.ledger > ingest_cursor\.ledger/i)
-      const [name, ledger, cursor, closeTime] = values as [string, number, string | null, string | null]
+      // A gap travels with the move that passes it, and an open one is widened, never narrowed.
+      expect(text).toMatch(/gap_from = least\(ingest_cursor\.gap_from, excluded\.gap_from\)/i)
+      expect(text).toMatch(/gap_to = greatest\(ingest_cursor\.gap_to, excluded\.gap_to\)/i)
+      const [name, ledger, cursor, closeTime, gapFrom, gapTo, members] = values as [string, number, string | null, string | null, number | null, number | null, string[]]
       const current = cursors.get(name)
-      if (!current || ledger > current.ledger) cursors.set(name, { ledger, cursor, close_time: closeTime ?? current?.close_time ?? null })
-      cursorHistory.push({ name, attempted: ledger, stored: (cursors.get(name) as CursorRow).ledger })
+      if (!current || current.ledger === null || ledger > current.ledger) {
+        cursors.set(name, {
+          ...current,
+          ledger,
+          cursor,
+          close_time: closeTime ?? current?.close_time ?? null,
+          gap_from: least(current?.gap_from, gapFrom),
+          gap_to: greatest(current?.gap_to, gapTo),
+          members,
+        })
+      }
+      cursorHistory.push({ name, attempted: ledger, stored: (cursors.get(name) as CursorRow).ledger as number })
+      return []
+    }
+    if (/^insert into ingest_cursor \(name, reconcile\)/i.test(text)) {
+      expect(text).toMatch(/where ingest_cursor\.reconcile is null or ingest_cursor\.reconcile->>'at' <= excluded\.reconcile->>'at'/i)
+      const [name, json] = values as [string, string]
+      const reconcile = JSON.parse(json) as { at: string; results: unknown[] }
+      const current = cursors.get(name)
+      if (!current?.reconcile || current.reconcile.at <= reconcile.at) cursors.set(name, { ...(current ?? { ledger: null, cursor: null, close_time: null }), reconcile })
       return []
     }
     if (/^select count\(\*\)::int as n from events where network = \? and contract_id = \? and topic = 'recovery'$/i.test(text)) {
@@ -190,6 +226,11 @@ function makeDb(opts: { cursors?: Record<string, CursorRow>; failWith?: unknown 
   }) as unknown as Sql & ReturnType<typeof vi.fn>
   return { sql, events, cursors, cursorHistory, texts }
 }
+
+/** A stored oracle cursor whose members are the manifest's oracle. */
+const oracleCursor = (ledger: number, extra: Partial<CursorRow> = {}): Record<string, CursorRow> => ({
+  [indexCursorName("oracle", "testnet")]: { ledger, cursor: null, close_time: null, members: [manifest.shared.oracle], ...extra },
+})
 
 /** `record_count` per escrow; any other call fails. */
 function makeReader(counts: Record<string, bigint | Error>): ContractReader {
@@ -247,9 +288,12 @@ describe("indexEvents", () => {
     // The deploy left the window: start at the oldest ledger and record what is missing.
     const outside = makeRpc({ events: [], oldest: DEPLOY + 100, latest: DEPLOY + 150 })
     vi.spyOn(console, "warn").mockImplementation(() => {})
-    const r2 = await indexEvents(deps(makeDb().sql, outside.rpc), { deadline: FAR, groups: ["oracle"] })
+    const db2 = makeDb()
+    const r2 = await indexEvents(deps(db2.sql, outside.rpc), { deadline: FAR, groups: ["oracle"] })
     expect(outside.calls[0].startLedger).toBe(DEPLOY + 100)
     expect(groupOf(r2, "oracle")?.gap).toEqual({ from: DEPLOY, to: DEPLOY + 99 })
+    // Stored with the cursor that passed it.
+    expect(db2.cursors.get(indexCursorName("oracle", "testnet"))).toMatchObject({ ledger: DEPLOY + 150, gap_from: DEPLOY, gap_to: DEPLOY + 99 })
 
     // No deployLedger in the manifest (a local stack): from the oldest ledger, no gap claimed.
     const local = { ...manifest, deployLedger: undefined }
@@ -257,6 +301,23 @@ describe("indexEvents", () => {
     const r3 = await indexEvents(deps(makeDb().sql, none.rpc, { manifest: local }), { deadline: FAR, groups: ["oracle"] })
     expect(none.calls[0].startLedger).toBe(1_000)
     expect(groupOf(r3, "oracle")?.gap).toBeNull()
+  })
+
+  it("a gap is stored by the save that passes it, widening an open one; a run that saves nothing stores none", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {})
+    const db = makeDb({ cursors: oracleCursor(DEPLOY + 100, { gap_from: DEPLOY + 10, gap_to: DEPLOY + 20 }) })
+    const name = indexCursorName("oracle", "testnet")
+    // Cut before its first page: the cursor does not move, so the gap is not passed and not stored.
+    const cut = makeRpc({ events: [], oldest: DEPLOY + 500, latest: DEPLOY + 700 })
+    const r1 = await indexEvents(deps(db.sql, cut.rpc, { now: () => 1 }), { deadline: 0, groups: ["oracle"] })
+    expect(groupOf(r1, "oracle")).toMatchObject({ complete: false, indexedThrough: DEPLOY + 100, gap: { from: DEPLOY + 101, to: DEPLOY + 499 } })
+    expect(db.cursors.get(name)).toMatchObject({ ledger: DEPLOY + 100, gap_from: DEPLOY + 10, gap_to: DEPLOY + 20 })
+    // The next run passes it: the open gap is widened to cover both.
+    await indexEvents(deps(db.sql, cut.rpc), { deadline: FAR, groups: ["oracle"] })
+    expect(db.cursors.get(name)).toMatchObject({ ledger: DEPLOY + 700, gap_from: DEPLOY + 10, gap_to: DEPLOY + 499 })
+    // A later run with no gap keeps it.
+    await indexEvents(deps(db.sql, makeRpc({ events: [], oldest: DEPLOY + 500, latest: DEPLOY + 710 }).rpc), { deadline: FAR, groups: ["oracle"] })
+    expect(db.cursors.get(name)).toMatchObject({ ledger: DEPLOY + 710, gap_from: DEPLOY + 10, gap_to: DEPLOY + 499 })
   })
 
   it("inserts decoded rows with tx hash, close time and raw xdr", async () => {
@@ -285,8 +346,16 @@ describe("indexEvents", () => {
     expect(oracleRow).toMatchObject({ group_name: "oracle", topic: "ref_set", pool: null, data: { value: "10500000", timestamp: String(closeOf(DEPLOY + 11)) } })
     // Every group reached the tip; its cursor holds the tip and its close time.
     expect(result.groups.every((g) => g.complete && g.indexedThrough === DEPLOY + 20)).toBe(true)
-    expect(db.cursors.get(indexCursorName("oracle", "testnet"))).toMatchObject({ ledger: DEPLOY + 20, close_time: iso(closeOf(DEPLOY + 20)) })
+    expect(db.cursors.get(indexCursorName("oracle", "testnet"))).toMatchObject({ ledger: DEPLOY + 20, close_time: iso(closeOf(DEPLOY + 20)), gap_from: null, gap_to: null })
+    // Each cursor names the contracts it has read through its ledger.
+    expect(db.cursors.get(indexCursorName("market", "testnet"))?.members).toEqual(sorted([c.sy, c.manager, c.pool]))
+    expect(db.cursors.get(indexCursorName("escrow", "testnet"))?.members).toEqual([c.recoveryEscrow])
+    expect(db.cursors.get(indexCursorName("risk", "testnet"))?.members).toEqual([manifest.shared.riskControl])
     expect(result.reconcile).toEqual([{ escrow: c.recoveryEscrow, recordCount: 1, indexed: 1, ok: true }])
+    // The last reconcile is kept on the escrow cursor.
+    const stored = db.cursors.get(indexCursorName("escrow", "testnet"))?.reconcile
+    expect(stored?.results).toEqual(result.reconcile)
+    expect(Date.parse(stored?.at as string)).toBeGreaterThan(Date.now() - 60_000)
   })
 
   it("bytes are hex in the decoded data (the oracle's src_set source ids)", async () => {
@@ -308,7 +377,7 @@ describe("indexEvents", () => {
     expect(again.inserted).toBe(0)
     expect(db.events.size).toBe(3)
     // Re-reading from an older cursor (a re-index) inserts nothing either: the RPC event id is the key.
-    db.cursors.set(indexCursorName("oracle", "testnet"), { ledger: DEPLOY - 1, cursor: null, close_time: null })
+    db.cursors.set(indexCursorName("oracle", "testnet"), { ledger: DEPLOY - 1, cursor: null, close_time: null, members: [manifest.shared.oracle] })
     expect((await indexEvents(d, { deadline: FAR, groups: ["oracle"] })).inserted).toBe(0)
     expect(db.events.size).toBe(3)
   })
@@ -343,12 +412,13 @@ describe("indexEvents", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
     const kept = refSet(DEPLOY + 600, 10_000_000n)
     const { rpc, calls } = makeRpc({ events: [refSet(DEPLOY + 200, 1n), kept], oldest: DEPLOY + 500, latest: DEPLOY + 700 })
-    const db = makeDb({ cursors: { [indexCursorName("oracle", "testnet")]: { ledger: DEPLOY + 100, cursor: null, close_time: null } } })
+    const db = makeDb({ cursors: oracleCursor(DEPLOY + 100) })
     const result = await indexEvents(deps(db.sql, rpc), { deadline: FAR, groups: ["oracle"] })
     expect(groupOf(result, "oracle")).toEqual({ group: "oracle", indexedThrough: DEPLOY + 700, gap: { from: DEPLOY + 101, to: DEPLOY + 499 }, complete: true })
     expect(calls[0].startLedger).toBe(DEPLOY + 500)
     expect([...db.events.keys()]).toEqual([kept.id])
     expect(warn.mock.calls.flat().join(" ")).toMatch(/gap/i)
+    expect(db.cursors.get(indexCursorName("oracle", "testnet"))).toMatchObject({ ledger: DEPLOY + 700, gap_from: DEPLOY + 101, gap_to: DEPLOY + 499 })
   })
 
   it("a start refused because the oldest ledger moved on restarts there and widens the gap", async () => {
@@ -364,10 +434,94 @@ describe("indexEvents", () => {
         return h
       },
     }
-    const db = makeDb({ cursors: { [indexCursorName("oracle", "testnet")]: { ledger: DEPLOY + 50, cursor: null, close_time: null } } })
+    const db = makeDb({ cursors: oracleCursor(DEPLOY + 50) })
     const result = await indexEvents(deps(db.sql, rpc), { deadline: FAR, groups: ["oracle"] })
     expect(groupOf(result, "oracle")).toMatchObject({ gap: { from: DEPLOY + 51, to: DEPLOY + 299 }, complete: true, indexedThrough: DEPLOY + 400 })
     expect(base.calls.map((x) => x.startLedger)).toEqual([DEPLOY + 100, DEPLOY + 300])
+    expect(db.cursors.get(indexCursorName("oracle", "testnet"))).toMatchObject({ gap_from: DEPLOY + 51, gap_to: DEPLOY + 299 })
+  })
+
+  it("a pool added later is backfilled from deployLedger", async () => {
+    const second: Market = { ...market, marketId: "m2", contracts: { ...c, sy: randomContract(), manager: randomContract(), pool: randomContract(), recoveryEscrow: randomContract() } }
+    // The second market's first event is older than the cursor its group reaches without it.
+    const early = ev(DEPLOY + 5, second.contracts.pool, "paused", xdr.ScVal.scvBool(true))
+    const name = indexCursorName("market", "testnet")
+    const db = makeDb()
+    await indexEvents(deps(db.sql, makeRpc({ events: [early], oldest: DEPLOY, latest: DEPLOY + 50 }).rpc), { deadline: FAR, groups: ["market"] })
+    expect(db.events.has(early.id)).toBe(false)
+    expect(db.cursors.get(name)).toMatchObject({ ledger: DEPLOY + 50, members: sorted([c.sy, c.manager, c.pool]) })
+
+    const later = makeRpc({ events: [early], oldest: DEPLOY, latest: DEPLOY + 60 })
+    const result = await indexEvents(deps(db.sql, later.rpc, { markets: [market, second] }), { deadline: FAR, groups: ["market"] })
+    expect(db.events.get(early.id)).toMatchObject({ pool: second.contracts.pool, data: { paused: true } })
+    // The known contracts resume after the cursor; the new ones read from deployLedger in their own chunk.
+    expect(later.calls.filter((x) => x.startLedger !== undefined)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ startLedger: DEPLOY + 51, contractIds: [c.sy, c.manager, c.pool] }),
+        expect.objectContaining({ startLedger: DEPLOY, contractIds: [second.contracts.sy, second.contracts.manager, second.contracts.pool] }),
+      ]),
+    )
+    expect(groupOf(result, "market")).toMatchObject({ complete: true, indexedThrough: DEPLOY + 60, gap: null })
+    expect(db.cursors.get(name)).toMatchObject({
+      ledger: DEPLOY + 60,
+      members: sorted([c.sy, c.manager, c.pool, second.contracts.sy, second.contracts.manager, second.contracts.pool]),
+    })
+  })
+
+  it("a contract added after deployLedger left the window starts at the oldest ledger, and its gap is stored", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {})
+    const second: Market = { ...market, marketId: "m2", contracts: { ...c, sy: randomContract(), manager: randomContract(), pool: randomContract() } }
+    const db = makeDb()
+    await indexEvents(deps(db.sql, makeRpc({ events: [], oldest: DEPLOY, latest: DEPLOY + 50 }).rpc), { deadline: FAR, groups: ["market"] })
+    const later = makeRpc({ events: [], oldest: DEPLOY + 30, latest: DEPLOY + 60 })
+    const result = await indexEvents(deps(db.sql, later.rpc, { markets: [market, second] }), { deadline: FAR, groups: ["market"] })
+    expect(later.calls.find((x) => x.contractIds.includes(second.contracts.pool))?.startLedger).toBe(DEPLOY + 30)
+    expect(groupOf(result, "market")?.gap).toEqual({ from: DEPLOY, to: DEPLOY + 29 })
+    expect(db.cursors.get(indexCursorName("market", "testnet"))).toMatchObject({ ledger: DEPLOY + 60, gap_from: DEPLOY, gap_to: DEPLOY + 29 })
+  })
+
+  it("a seeds-fallback run does not advance cursors for registry pools it did not read", async () => {
+    const registry: Market = { ...market, marketId: "registry", contracts: { ...c, sy: randomContract(), manager: randomContract(), pool: randomContract(), recoveryEscrow: randomContract() } }
+    const reader = makeReader({ [c.recoveryEscrow]: 0n, [registry.contracts.recoveryEscrow]: 0n })
+    // The registry market's pool emits while the registry cannot be read.
+    const during = ev(DEPLOY + 30, registry.contracts.pool, "paused", xdr.ScVal.scvBool(true))
+    const groups: IndexGroup[] = ["market", "escrow"]
+    const db = makeDb()
+    await indexEvents(deps(db.sql, makeRpc({ events: [during], oldest: DEPLOY, latest: DEPLOY + 20 }).rpc, { markets: [market, registry], reader }), { deadline: FAR, groups })
+    expect(db.cursors.get(indexCursorName("escrow", "testnet"))?.members).toEqual(sorted([c.recoveryEscrow, registry.contracts.recoveryEscrow]))
+
+    // The registry read failed: the run lists the manifest seeds only.
+    const fallback = makeRpc({ events: [during], oldest: DEPLOY, latest: DEPLOY + 40 })
+    await indexEvents(deps(db.sql, fallback.rpc, { markets: [market], reader }), { deadline: FAR, groups })
+    expect(fallback.calls.flatMap((x) => x.contractIds)).not.toContain(registry.contracts.pool)
+    expect(db.events.has(during.id)).toBe(false)
+    // The cursors moved for the contracts the run read, and no longer claim the registry market's.
+    expect(db.cursors.get(indexCursorName("market", "testnet"))).toMatchObject({ ledger: DEPLOY + 40, members: sorted([c.sy, c.manager, c.pool]) })
+    expect(db.cursors.get(indexCursorName("escrow", "testnet"))).toMatchObject({ ledger: DEPLOY + 40, members: [c.recoveryEscrow] })
+
+    // Back in the list: its contracts are read again from deployLedger, so the event is not lost.
+    const back = makeRpc({ events: [during], oldest: DEPLOY, latest: DEPLOY + 45 })
+    await indexEvents(deps(db.sql, back.rpc, { markets: [market, registry], reader }), { deadline: FAR, groups })
+    expect(db.events.has(during.id)).toBe(true)
+    expect(back.calls.find((x) => x.contractIds.includes(registry.contracts.pool))?.startLedger).toBe(DEPLOY)
+  })
+
+  it("a manifest switch indexes the new shared contracts from deployLedger", async () => {
+    const db = makeDb()
+    const name = indexCursorName("oracle", "testnet")
+    await indexEvents(deps(db.sql, makeRpc({ events: [], oldest: DEPLOY, latest: DEPLOY + 500 }).rpc), { deadline: FAR, groups: ["oracle"] })
+    expect(db.cursors.get(name)).toMatchObject({ ledger: DEPLOY + 500, members: [manifest.shared.oracle] })
+
+    // A new deployment on the same network: a new oracle, deployed at DEPLOY + 200, before the cursor.
+    const newOracle = randomContract()
+    const switched: Manifest = { ...manifest, deployLedger: DEPLOY + 200, shared: { ...manifest.shared, oracle: newOracle } }
+    const first = ev(DEPLOY + 210, newOracle, "ref_set", xdr.ScVal.scvVec([i128(10_000_000n), u64(1n)]))
+    const rpc = makeRpc({ events: [first], oldest: DEPLOY, latest: DEPLOY + 520 })
+    const result = await indexEvents(deps(db.sql, rpc.rpc, { manifest: switched }), { deadline: FAR, groups: ["oracle"] })
+    expect(rpc.calls[0]).toMatchObject({ startLedger: DEPLOY + 200, contractIds: [newOracle] })
+    expect(db.events.get(first.id)).toMatchObject({ contract_id: newOracle, topic: "ref_set" })
+    expect(groupOf(result, "oracle")).toMatchObject({ complete: true, indexedThrough: DEPLOY + 520 })
+    expect(db.cursors.get(name)).toMatchObject({ ledger: DEPLOY + 520, members: [newOracle] })
   })
 
   it("stops at the deadline with complete:false, and the next run resumes from the saved ledger", async () => {
@@ -476,7 +630,7 @@ describe("indexEvents", () => {
 
   it("a run whose cursor is at the tip asks nothing and is complete", async () => {
     const { rpc, calls } = makeRpc({ events: [], oldest: DEPLOY, latest: DEPLOY + 10 })
-    const db = makeDb({ cursors: { [indexCursorName("oracle", "testnet")]: { ledger: DEPLOY + 10, cursor: null, close_time: null } } })
+    const db = makeDb({ cursors: oracleCursor(DEPLOY + 10) })
     const result = await indexEvents(deps(db.sql, rpc), { deadline: FAR, groups: ["oracle"] })
     expect(calls).toHaveLength(0)
     expect(groupOf(result, "oracle")).toEqual({ group: "oracle", indexedThrough: DEPLOY + 10, gap: null, complete: true })
@@ -523,7 +677,8 @@ describe("getIndexedEvents", () => {
     data: { id: "0" },
   }
 
-  function readDb(cursors: { name: string; ledger: string; close_time: Date | null }[]) {
+  type ReadCursor = { name: string; ledger: string; close_time: Date | null; gap_from?: string | null; gap_to?: string | null; reconcile?: unknown }
+  function readDb(cursors: ReadCursor[]) {
     const texts: string[] = []
     const values: unknown[][] = []
     const sql = (async (strings: TemplateStringsArray, ...v: unknown[]) => {
@@ -537,7 +692,7 @@ describe("getIndexedEvents", () => {
     return { sql, texts, values }
   }
 
-  const allCursors = (ledger: number, closeTime: Date | null) =>
+  const allCursors = (ledger: number, closeTime: Date | null): ReadCursor[] =>
     (["escrow", "oracle", "permissioning", "risk", "market"] as const).map((g) => ({ name: indexCursorName(g, "testnet"), ledger: String(ledger), close_time: closeTime }))
 
   it("lists rows newest first without raw xdr, with the indexed-through ledger and lag", async () => {
@@ -560,7 +715,11 @@ describe("getIndexedEvents", () => {
         },
       ],
       indexedThrough: tip,
+      // The close time of that ledger: a client recomputes the lag from it, whatever the cache's age.
+      indexedThroughCloseTime: iso(closeOf(tip)),
       lagSeconds: 42,
+      gaps: [],
+      reconcile: null,
     })
     const list = db.texts.find((t) => t.includes("from events")) as string
     expect(list).not.toMatch(/raw_xdr/)
@@ -574,6 +733,7 @@ describe("getIndexedEvents", () => {
     const before = eventId(DEPLOY + 15)
     const all = await getIndexedEvents(db.sql, { network: "testnet", pool: c.pool, before, limit: 10, now: closeOf(DEPLOY + 25) * 1000 })
     expect(all.indexedThrough).toBe(DEPLOY + 5)
+    expect(all.indexedThroughCloseTime).toBe(iso(closeOf(DEPLOY + 5)))
     expect(all.lagSeconds).toBe(100)
     const params = db.values[db.texts.findIndex((t) => t.includes("from events"))]
     expect(params).toEqual(expect.arrayContaining(["testnet", c.pool, before, 10]))
@@ -583,7 +743,25 @@ describe("getIndexedEvents", () => {
 
   it("a group never indexed: indexedThrough 0, lag unknown", async () => {
     const db = readDb([])
-    expect(await getIndexedEvents(db.sql, { network: "testnet", limit: 1 })).toMatchObject({ indexedThrough: 0, lagSeconds: null })
+    expect(await getIndexedEvents(db.sql, { network: "testnet", limit: 1 })).toMatchObject({ indexedThrough: 0, indexedThroughCloseTime: null, lagSeconds: null })
+  })
+
+  it("returns the stored gaps of the groups asked, and the last reconcile", async () => {
+    const cursors = allCursors(DEPLOY + 20, new Date(closeOf(DEPLOY + 20) * 1000))
+    const reconcile = { at: "2026-11-14T02:00:00.000Z", results: [{ escrow: c.recoveryEscrow, recordCount: 2, indexed: 1, ok: false }] }
+    cursors[0] = { ...cursors[0], gap_from: String(DEPLOY), gap_to: String(DEPLOY + 9), reconcile }
+    cursors[4] = { ...cursors[4], gap_from: String(DEPLOY + 3), gap_to: String(DEPLOY + 4) }
+    const db = readDb(cursors)
+    const all = await getIndexedEvents(db.sql, { network: "testnet", limit: 10 })
+    expect(all.gaps).toEqual([
+      { group: "escrow", from: DEPLOY, to: DEPLOY + 9 },
+      { group: "market", from: DEPLOY + 3, to: DEPLOY + 4 },
+    ])
+    expect(all.reconcile).toEqual(reconcile)
+    const oracle = await getIndexedEvents(db.sql, { network: "testnet", group: "oracle", limit: 10 })
+    expect(oracle.gaps).toEqual([])
+    // The reconcile is the escrow cursor's, whatever the group asked.
+    expect(oracle.reconcile).toEqual(reconcile)
   })
 
   it("one event by id carries its raw xdr", async () => {

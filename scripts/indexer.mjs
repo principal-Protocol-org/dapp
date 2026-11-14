@@ -1,25 +1,30 @@
 // The event indexer's operator commands (spec 0004 D-15, D-30). The scheduled job is
 // `/api/cron/index`; these run by hand.
 //
-//   pnpm indexer:reindex --network <n> --group <g> --from <ledger>   reset one group's cursor
-//   pnpm indexer:export  --out <file.jsonl> [--network <n>]           every events row and cursor, as JSON Lines
-//   pnpm indexer:import  --in <file.jsonl>                            upsert a file written by export (idempotent)
-//   pnpm indexer:capture --network <n> [--out <file.jsonl>]           index from the network's RPC into a local
-//                                                                      database, then export (default out:
-//                                                                      var/indexer-capture/<n>-<YYYYMMDD>.jsonl)
+//   pnpm indexer:reindex --network <n> --group <g> --from <ledger> [--force]   reset one group's cursor
+//   pnpm indexer:export  --out <file.jsonl> [--network <n>]                     events rows and cursors, as JSON Lines
+//   pnpm indexer:import  --network <n> --in <file.jsonl>                        upsert a file written by export
+//   pnpm indexer:capture --network <n> [--out <file.jsonl>]                     list the network's markets, index them
+//                                                                                into a local database, then export
+//                                                                                (default out:
+//                                                                                var/indexer-capture/<n>-<YYYYMMDD>.jsonl)
 //
 // Networks: local, testnet, mainnet. Groups: escrow, oracle, permissioning, risk, market.
 //
 // Database: --database-url <url>, else the DATABASE_URL of --env-file <path>, else DATABASE_URL in
 // the environment, else the DATABASE_URL of .env.local. `capture` writes only to a database on this
-// machine (localhost, 127.0.0.1, ::1 or a socket): its rows reach a shared database through `import`,
-// with the developer's go. This script never prints a connection string or any part of it.
+// machine (a host that resolves to loopback only, with no `host` query parameter): its rows reach a
+// shared database through `import`, with the developer's go. This script never prints a connection
+// string or any part of it.
 //
-// `capture` runs the app's own indexer (lib/server/indexer.ts) and needs Node's TypeScript transform
-// (`pnpm indexer:capture` passes --experimental-transform-types). On the RPC it only reads:
-// getHealth, getEvents, getLedgers and the simulation of RecoveryEscrow.record_count.
+// `capture` runs the app's own registry discovery and indexer (lib/server/registry.ts,
+// lib/server/indexer.ts) and needs Node's TypeScript transform (`pnpm indexer:capture` passes
+// --experimental-transform-types). On the network it only reads: getHealth, getEvents, getLedgers,
+// getLedgerEntries and simulations (each market's checks, RecoveryEscrow.record_count). It writes
+// only the local database: the registry's tables and the index.
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs"
-import { registerHooks } from "node:module"
+import { lookup } from "node:dns/promises"
+import { createRequire, registerHooks } from "node:module"
 import { dirname, join, relative, resolve } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import { parseEnv } from "node:util"
@@ -27,15 +32,20 @@ import pg from "pg"
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 
+/** pg's own connection-string parser (a dependency of pg), so the host checked is the host pg uses. */
+const require = createRequire(import.meta.url)
+const { parse: parseConnectionString } = createRequire(require.resolve("pg"))("pg-connection-string")
+
 const NETWORKS = ["local", "testnet", "mainnet"]
 const GROUPS = ["escrow", "oracle", "permissioning", "risk", "market"]
 const EVENT_ID = /^\d{19}-\d{10}$/
 const CONTRACT = /^C[A-Z2-7]{55}$/
 const CURSOR_NAME = new RegExp(`^events:(${GROUPS.join("|")}):(${NETWORKS.join("|")})$`)
 const FORMAT = "principal-indexer-export"
+const BOOLEAN_FLAGS = new Set(["force"])
 /** Events per insert statement on import. */
 const IMPORT_BATCH = 500
-/** Capture: one indexer run's deadline, and the whole capture's. */
+/** Capture: one discovery or indexer run's deadline, and the whole capture's. */
 const CAPTURE_RUN_MS = 120_000
 const CAPTURE_TOTAL_MS = 30 * 60_000
 
@@ -48,15 +58,21 @@ function fail(message) {
 
 // ---------------------------------------------------------------- arguments and connection
 
-function parseArgs(argv) {
+/** `<command> --flag value ... --force`: every flag takes a value but the boolean ones. */
+export function parseArgs(argv) {
   const [command, ...rest] = argv
   const flags = {}
   for (let i = 0; i < rest.length; i++) {
     const arg = rest[i]
     if (!arg.startsWith("--")) throw new UsageError(`unexpected argument "${arg}"`)
+    const key = arg.slice(2)
+    if (BOOLEAN_FLAGS.has(key)) {
+      flags[key] = true
+      continue
+    }
     const value = rest[i + 1]
     if (value === undefined || value.startsWith("--")) throw new UsageError(`${arg} needs a value`)
-    flags[arg.slice(2)] = value
+    flags[key] = value
     i++
   }
   return { command, flags }
@@ -93,15 +109,30 @@ export function databaseUrl(flags, env = process.env) {
   throw new UsageError("no database: pass --database-url or --env-file, or set DATABASE_URL (or .env.local)")
 }
 
-/** A database on this machine: a loopback host or a Unix socket. */
-export function isLocalDatabase(url) {
+const isLoopback = (address) => address === "::1" || /^127\./.test(address) || /^::ffff:127\./i.test(address)
+
+/**
+ * A database on this machine: the host pg would connect to (parsed as pg parses it) is named, is
+ * not a socket path, comes with no `host`/`hostaddr` query parameter (pg takes the query's host over
+ * the URL's), and resolves to loopback addresses only.
+ */
+export async function isLocalDatabase(url) {
+  let query
   let host
   try {
-    host = new URL(url).hostname
+    query = new URL(url).searchParams
+    host = parseConnectionString(url).host
   } catch {
     return false
   }
-  return host === "" || host === "localhost" || host === "127.0.0.1" || host === "[::1]" || host === "::1"
+  if (query.has("host") || query.has("hostaddr")) return false
+  if (typeof host !== "string" || host === "" || host.startsWith("/")) return false
+  try {
+    const addresses = await lookup(host.replace(/^\[|\]$/g, ""), { all: true })
+    return addresses.length > 0 && addresses.every((a) => isLoopback(a.address))
+  } catch {
+    return false
+  }
 }
 
 /** A database error's code, never its text (which can carry the host or the URL). */
@@ -126,20 +157,80 @@ function sqlOf(pool) {
 }
 
 const iso = (value) => (value === null || value === undefined ? null : new Date(value).toISOString())
+const num = (value) => (value === null || value === undefined ? null : Number(value))
+
+/** An `ingest_cursor` row as read by pg (bigints as strings), in the export's shape. */
+function cursorRow(r) {
+  return {
+    ledger: num(r.ledger),
+    cursor: r.cursor ?? null,
+    close_time: iso(r.close_time),
+    gap_from: num(r.gap_from),
+    gap_to: num(r.gap_to),
+    members: r.members ?? null,
+    reconcile: r.reconcile ?? null,
+  }
+}
+
+function readManifestJson(network) {
+  const path = join(root, "config", "manifests", `${network}.json`)
+  if (!existsSync(path)) throw new UsageError(`config/manifests/${network}.json does not exist`)
+  return JSON.parse(readFileSync(path, "utf8"))
+}
+
+/** The RPC's oldest ledger for `network` (its manifest's `rpcUrl`), or null when it cannot be read. */
+async function rpcOldestLedger(network) {
+  try {
+    const { rpcUrl } = readManifestJson(network)
+    const res = await fetch(rpcUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getHealth" }),
+      signal: AbortSignal.timeout(20_000),
+    })
+    const oldest = (await res.json())?.result?.oldestLedger
+    return Number.isInteger(oldest) ? oldest : null
+  } catch {
+    return null
+  }
+}
 
 // ---------------------------------------------------------------- reindex
 
 /**
- * Sets a group's cursor so the next indexer run reads again from `from`. Rows already indexed are
- * kept, and the events read again are not duplicated (the RPC event id is the key). It never moves
- * a cursor forward: that would skip events without recording a gap.
+ * Why a reindex must not run, or null. It never moves a cursor forward (that would skip events
+ * without recording a gap). A start older than the RPC's oldest ledger (or one that cannot be checked)
+ * needs `--force`: the next run would record those ledgers as a gap, which the index may hold already
+ * (an imported capture).
  */
-export async function reindex(pool, { network, group, from }) {
+export function reindexRefusal({ name, from, current, oldest, force }) {
+  if (current !== null && from - 1 > current) {
+    return `${name} is indexed through ledger ${current}; --from ${from} would skip ledgers ${current + 1}-${from - 1}`
+  }
+  if (force) return null
+  if (oldest === null) return `the RPC's oldest ledger could not be read to check --from ${from} against it; pass --force to reset anyway`
+  if (from < oldest) {
+    return (
+      `--from ${from} is older than the RPC's oldest ledger ${oldest}: the next run would record ledgers ${from}-${oldest - 1} ` +
+      "as a gap, which the index may already hold (an imported capture). Pass --force to do it anyway."
+    )
+  }
+  return null
+}
+
+/**
+ * Sets a group's cursor so the next indexer run reads again from `from`. Rows already indexed are
+ * kept, and the events read again are not duplicated (the RPC event id is the key). Its members and
+ * any stored gap are kept.
+ */
+export async function reindex(pool, { network, group, from, force, oldest }) {
   const name = `events:${group}:${network}`
   const { rows } = await pool.query("select ledger from ingest_cursor where name = $1", [name])
-  const current = rows[0]?.ledger == null ? null : Number(rows[0].ledger)
-  if (current !== null && from - 1 > current) {
-    throw new UsageError(`${name} is indexed through ledger ${current}; --from ${from} would skip ledgers ${current + 1}-${from - 1}`)
+  const current = num(rows[0]?.ledger)
+  const refusal = reindexRefusal({ name, from, current, oldest, force })
+  if (refusal) throw new UsageError(refusal)
+  if (oldest === null || from < oldest) {
+    console.warn(`reindex: warning: ledgers from ${from} to the RPC's oldest ledger ${oldest ?? "(unknown)"} will be recorded as a gap (--force)`)
   }
   await pool.query(
     `insert into ingest_cursor (name, ledger, cursor, close_time) values ($1, $2, null, null)
@@ -153,11 +244,12 @@ export async function reindex(pool, { network, group, from }) {
 
 /** Writes the cursors and every events row (of `network`, when given) to `out` as JSON Lines. */
 export async function exportRows(pool, { out, network }) {
+  const columns = "name, ledger, cursor, close_time, gap_from, gap_to, members, reconcile"
   const cursorRows = (
     await pool.query(
       network
-        ? "select name, ledger, cursor, close_time from ingest_cursor where name like $1 order by name"
-        : "select name, ledger, cursor, close_time from ingest_cursor where name like 'events:%' order by name",
+        ? `select ${columns} from ingest_cursor where name like $1 order by name`
+        : `select ${columns} from ingest_cursor where name like 'events:%' order by name`,
       network ? [`events:%:${network}`] : [],
     )
   ).rows.filter((r) => CURSOR_NAME.test(r.name))
@@ -170,7 +262,7 @@ export async function exportRows(pool, { out, network }) {
   ).rows
   const lines = [
     { kind: "meta", format: FORMAT, version: 1, exportedAt: new Date().toISOString(), network: network ?? null, events: eventRows.length, cursors: cursorRows.length },
-    ...cursorRows.map((r) => ({ kind: "cursor", name: r.name, ledger: Number(r.ledger), cursor: r.cursor, close_time: iso(r.close_time) })),
+    ...cursorRows.map((r) => ({ kind: "cursor", name: r.name, ...cursorRow(r) })),
     ...eventRows.map((r) => ({ kind: "event", ...r, ledger: Number(r.ledger), close_time: iso(r.close_time) })),
   ]
   mkdirSync(dirname(resolve(out)), { recursive: true })
@@ -195,50 +287,132 @@ function checkEvent(e, line) {
   if (typeof e.raw_xdr !== "string" || !/^[A-Za-z0-9+/]+={0,2}$/.test(e.raw_xdr)) throw bad("raw_xdr")
 }
 
+/** Checks a cursor line and fills the fields an older export lacks with null. */
 function checkCursor(c, line) {
   const bad = (field) => new UsageError(`line ${line}: cursor ${field} is not valid`)
   if (typeof c.name !== "string" || !CURSOR_NAME.test(c.name)) throw bad("name")
   if (!Number.isInteger(c.ledger) || c.ledger < 0) throw bad("ledger")
-  if (c.cursor !== null && typeof c.cursor !== "string") throw bad("cursor")
-  if (c.close_time !== null && (typeof c.close_time !== "string" || Number.isNaN(Date.parse(c.close_time)))) throw bad("close_time")
+  const out = { ...c, gap_from: c.gap_from ?? null, gap_to: c.gap_to ?? null, members: c.members ?? null, reconcile: c.reconcile ?? null }
+  if (out.cursor !== null && typeof out.cursor !== "string") throw bad("cursor")
+  if (out.close_time !== null && (typeof out.close_time !== "string" || Number.isNaN(Date.parse(out.close_time)))) throw bad("close_time")
+  const gapSet = out.gap_from !== null || out.gap_to !== null
+  if (gapSet && !(Number.isInteger(out.gap_from) && Number.isInteger(out.gap_to) && out.gap_from > 0 && out.gap_from <= out.gap_to)) throw bad("gap")
+  if (out.members !== null && !(Array.isArray(out.members) && out.members.every((m) => typeof m === "string" && CONTRACT.test(m)))) throw bad("members")
+  if (out.reconcile !== null && !(typeof out.reconcile === "object" && typeof out.reconcile.at === "string" && Array.isArray(out.reconcile.results))) {
+    throw bad("reconcile")
+  }
+  return out
 }
 
-/** Reads and checks a file written by `export`; nothing is written when any line is invalid. */
-export function readExport(path) {
+/** Reads and checks a file written by `export` for `network`; nothing is written when any line is invalid. */
+export function readExport(path, network) {
   if (!existsSync(path)) throw new UsageError("the --in file does not exist")
   const events = []
   const cursors = []
   const lines = readFileSync(path, "utf8").split("\n")
   lines.forEach((text, i) => {
     if (text.trim() === "") return
+    const line = i + 1
     let row
     try {
       row = JSON.parse(text)
     } catch {
-      throw new UsageError(`line ${i + 1} is not JSON`)
+      throw new UsageError(`line ${line} is not JSON`)
     }
     if (row.kind === "meta") {
-      if (row.format !== FORMAT || row.version !== 1) throw new UsageError(`line ${i + 1}: not a ${FORMAT} v1 file`)
+      if (row.format !== FORMAT || row.version !== 1) throw new UsageError(`line ${line}: not a ${FORMAT} v1 file`)
+      if (row.network !== null && row.network !== network) throw new UsageError(`line ${line}: the file is for network "${row.network}", not "${network}"`)
     } else if (row.kind === "event") {
-      checkEvent(row, i + 1)
+      checkEvent(row, line)
+      if (row.network !== network) throw new UsageError(`line ${line}: an event of network "${row.network}", not "${network}"`)
       events.push(row)
     } else if (row.kind === "cursor") {
-      checkCursor(row, i + 1)
-      cursors.push(row)
-    } else throw new UsageError(`line ${i + 1}: unknown kind`)
+      const cursor = checkCursor(row, line)
+      const of = CURSOR_NAME.exec(cursor.name)[2]
+      if (of !== network) throw new UsageError(`line ${line}: a cursor of network "${of}", not "${network}"`)
+      cursors.push(cursor)
+    } else throw new UsageError(`line ${line}: unknown kind`)
   })
   return { events, cursors }
 }
 
+const least = (a, b) => (a == null ? (b ?? null) : b == null ? a : Math.min(a, b))
+const greatest = (a, b) => (a == null ? (b ?? null) : b == null ? a : Math.max(a, b))
+const newer = (a, b) => (!a ? (b ?? null) : !b ? a : a.at >= b.at ? a : b)
+
 /**
- * Upserts a file written by `export`, in one transaction: each event once (by its RPC event id),
- * then each cursor, moved only forward (an older cursor in the file never rewinds the database).
+ * One imported cursor line against the database's row (`current`, null when there is none).
+ *
+ * - The cursor only moves forward: a file ahead brings its ledger, close time and members, and
+ *   widens the stored gap with its own; a file behind changes neither.
+ * - The database's gap is cleared when the file's rows fill it: the file's cursor is at or past the
+ *   gap's end, the file indexes every contract the database's cursor names, and the file has no gap
+ *   of its own over it.
+ * - The newer reconciliation is kept.
  */
-export async function importRows(pool, { path }) {
-  const { events, cursors } = readExport(path)
+export function mergeCursor(current, line) {
+  const fileGap = line.gap_from == null ? null : { from: line.gap_from, to: line.gap_to }
+  if (!current || current.ledger == null) {
+    return {
+      moved: true,
+      cleared: false,
+      row: {
+        ledger: line.ledger,
+        cursor: line.cursor,
+        close_time: line.close_time,
+        gap_from: fileGap?.from ?? null,
+        gap_to: fileGap?.to ?? null,
+        members: line.members ?? null,
+        reconcile: newer(current?.reconcile, line.reconcile),
+      },
+    }
+  }
+  let gapFrom = current.gap_from
+  let gapTo = current.gap_to
+  let cleared = false
+  const fills =
+    gapFrom != null &&
+    line.ledger >= gapTo &&
+    Array.isArray(current.members) &&
+    Array.isArray(line.members) &&
+    current.members.every((m) => line.members.includes(m)) &&
+    !(fileGap && fileGap.from <= gapTo && gapFrom <= fileGap.to)
+  if (fills) {
+    gapFrom = null
+    gapTo = null
+    cleared = true
+  }
+  const moved = line.ledger > current.ledger
+  const reconcile = newer(current.reconcile, line.reconcile)
+  if (!moved) {
+    return { moved, cleared, row: { ledger: current.ledger, cursor: current.cursor, close_time: current.close_time, gap_from: gapFrom, gap_to: gapTo, members: current.members, reconcile } }
+  }
+  return {
+    moved,
+    cleared,
+    row: {
+      ledger: line.ledger,
+      cursor: line.cursor,
+      close_time: line.close_time ?? current.close_time,
+      gap_from: least(gapFrom, fileGap?.from),
+      gap_to: greatest(gapTo, fileGap?.to),
+      members: line.members ?? null,
+      reconcile,
+    },
+  }
+}
+
+/**
+ * Upserts a file written by `export` for `network`, in one transaction: each event once (by its RPC
+ * event id), then each cursor through `mergeCursor` under a row lock (a scheduled run that saves
+ * meanwhile waits, then applies its own forward-only guard).
+ */
+export async function importRows(pool, { path, network }) {
+  const { events, cursors } = readExport(path, network)
   const client = await pool.connect()
   let inserted = 0
   let moved = 0
+  let cleared = 0
   try {
     await client.query("begin")
     for (let i = 0; i < events.length; i += IMPORT_BATCH) {
@@ -256,17 +430,22 @@ export async function importRows(pool, { path }) {
       inserted += res.rowCount ?? 0
     }
     for (const c of cursors) {
-      const res = await client.query(
-        `insert into ingest_cursor (name, ledger, cursor, close_time) values ($1, $2, $3, $4)
-         on conflict (name) do update set
-           ledger = excluded.ledger,
-           cursor = excluded.cursor,
-           close_time = coalesce(excluded.close_time, ingest_cursor.close_time)
-         where ingest_cursor.ledger is null or excluded.ledger > ingest_cursor.ledger
-         returning name`,
-        [c.name, c.ledger, c.cursor, c.close_time],
+      const { rows } = await client.query(
+        "select ledger, cursor, close_time, gap_from, gap_to, members, reconcile from ingest_cursor where name = $1 for update",
+        [c.name],
       )
-      moved += res.rowCount ?? 0
+      const merged = mergeCursor(rows[0] ? cursorRow(rows[0]) : null, c)
+      const r = merged.row
+      await client.query(
+        `insert into ingest_cursor (name, ledger, cursor, close_time, gap_from, gap_to, members, reconcile)
+         values ($1, $2, $3, $4, $5, $6, $7::text[], $8::jsonb)
+         on conflict (name) do update set
+           ledger = excluded.ledger, cursor = excluded.cursor, close_time = excluded.close_time,
+           gap_from = excluded.gap_from, gap_to = excluded.gap_to, members = excluded.members, reconcile = excluded.reconcile`,
+        [c.name, r.ledger, r.cursor, r.close_time, r.gap_from, r.gap_to, r.members, r.reconcile === null ? null : JSON.stringify(r.reconcile)],
+      )
+      if (merged.moved) moved++
+      if (merged.cleared) cleared++
     }
     await client.query("commit")
   } catch (error) {
@@ -275,7 +454,7 @@ export async function importRows(pool, { path }) {
   } finally {
     client.release()
   }
-  return { events: events.length, inserted, cursors: cursors.length, moved }
+  return { events: events.length, inserted, cursors: cursors.length, moved, cleared }
 }
 
 // ---------------------------------------------------------------- capture
@@ -311,37 +490,46 @@ function loadAppTypeScript() {
 const today = () => new Date().toISOString().slice(0, 10).replaceAll("-", "")
 
 /**
- * Indexes `network` from its manifest's RPC into this machine's database, run after run until every
- * group has reached the RPC's latest ledger, then exports that network's rows and cursors to `out`.
+ * Lists the network's markets as the app does (the registry's discovery from the Router's and the
+ * factory's events, then the seeds and the valid registry markets), indexes them from the manifest's
+ * RPC into this machine's database, run after run until every group has reached the RPC's latest
+ * ledger, then exports that network's rows and cursors (with any stored gap) to `out`.
  */
 async function capture(pool, { network, out }) {
   const load = loadAppTypeScript()
   const { parseManifest } = await load("lib/protocol/manifest.ts")
   const { indexEvents, INDEX_GROUPS } = await load("lib/server/indexer.ts")
-  const { resolvedMarkets, sqlRegistryStore } = await load("lib/server/registry.ts")
+  const { discover, resolvedMarkets, sqlRegistryStore } = await load("lib/server/registry.ts")
+  const { createRpcReader } = await load("lib/protocol/reader.ts")
   const { createRpcServer } = await load("lib/protocol/stellar.ts")
 
-  const manifest = parseManifest(JSON.parse(readFileSync(join(root, "config", "manifests", `${network}.json`), "utf8")))
+  const manifest = parseManifest(readManifestJson(network))
   if (manifest.network !== network) throw new UsageError(`config/manifests/${network}.json is for "${manifest.network}"`)
   const sql = sqlOf(pool)
-  const markets = await resolvedMarkets({ store: sqlRegistryStore(sql), manifest, timeoutMs: 10_000 })
+  const store = sqlRegistryStore(sql)
   const rpc = createRpcServer(manifest.rpcUrl)
-  console.log(
-    `capture: ${network} from ${new URL(manifest.rpcUrl).host} (deploy ledger ${manifest.deployLedger ?? "not set"}), ` +
-      `${markets.length} market(s): ${markets.map((m) => m.marketId).join(", ")}`,
-  )
+  console.log(`capture: ${network} from ${new URL(manifest.rpcUrl).host} (deploy ledger ${manifest.deployLedger ?? "not set"})`)
 
   const started = Date.now()
-  const gaps = new Map()
+  for (let run = 1; ; run++) {
+    const found = await discover({ store, reader: createRpcReader(manifest), rpc, manifest }, { deadline: Date.now() + CAPTURE_RUN_MS })
+    console.log(`capture: market discovery run ${run}: ${found.checked.length} pool(s) checked${found.gap ? ", with a registry gap" : ""}${found.complete ? "" : " (partial)"}`)
+    if (found.complete) break
+    if (run === 10) throw new Error("market discovery did not finish in 10 runs; run the capture again to resume")
+  }
+  const markets = await resolvedMarkets({ store, manifest, timeoutMs: 10_000 })
+  const seeds = new Set(manifest.markets.map((m) => m.contracts.pool))
+  console.log(`capture: ${markets.length} market(s) listed:`)
+  for (const m of markets) console.log(`  ${m.marketId}  pool ${m.contracts.pool}  (${seeds.has(m.contracts.pool) ? "manifest seed" : "registry"})`)
+
   let last
   let inserted = 0
   let failures = 0
   for (let run = 1; ; run++) {
     last = await indexEvents({ sql, rpc, manifest, markets }, { deadline: Date.now() + CAPTURE_RUN_MS })
     inserted += last.inserted
-    for (const g of last.groups) if (g.gap && !gaps.has(g.group)) gaps.set(g.group, g.gap)
     console.log(
-      `capture: run ${run}: +${last.inserted} rows; ` +
+      `capture: index run ${run}: +${last.inserted} rows; ` +
         last.groups.map((g) => `${g.group} through ${g.indexedThrough}${g.complete ? "" : g.error ? " (failed)" : " (partial)"}`).join(", "),
     )
     if (last.groups.every((g) => g.complete)) break
@@ -350,14 +538,25 @@ async function capture(pool, { network, out }) {
     if (Date.now() - started > CAPTURE_TOTAL_MS) throw new Error("the capture did not reach the latest ledger in 30 minutes; run it again to resume")
   }
 
-  const counts = await sql`select group_name, count(*)::int as n from events where network = ${network} group by group_name`
+  const counts = await sql`
+    select group_name, pool, count(*)::int as n from events where network = ${network} group by group_name, pool order by group_name, pool`
+  const cursors = await sql`select name, ledger, gap_from, gap_to from ingest_cursor where name like ${`events:%:${network}`}`
   const written = await exportRows(pool, { out, network })
   console.log(`capture: done in ${Math.round((Date.now() - started) / 1000)} s, ${inserted} new rows this capture`)
   for (const group of INDEX_GROUPS) {
-    const g = last.groups.find((x) => x.group === group)
-    const n = counts.find((c) => c.group_name === group)?.n ?? 0
-    const gap = gaps.get(group)
-    console.log(`  ${group.padEnd(13)} ${String(n).padStart(6)} rows, indexed through ledger ${g?.indexedThrough}${gap ? `, gap ${gap.from}-${gap.to}` : ", no gap"}`)
+    const n = counts.filter((c) => c.group_name === group).reduce((sum, c) => sum + c.n, 0)
+    const cursor = cursors.find((c) => c.name === `events:${group}:${network}`)
+    const gap = cursor?.gap_from == null ? "no gap" : `gap ${cursor.gap_from}-${cursor.gap_to}`
+    console.log(`  ${group.padEnd(13)} ${String(n).padStart(6)} rows, indexed through ledger ${cursor?.ledger ?? "none"}, ${gap}`)
+  }
+  const byPool = new Map()
+  for (const c of counts) {
+    const key = c.pool ?? "(shared contracts)"
+    byPool.set(key, [...(byPool.get(key) ?? []), `${c.group_name} ${c.n}`])
+  }
+  for (const [key, parts] of byPool) {
+    const market = markets.find((m) => m.contracts.pool === key)
+    console.log(`  ${key}${market ? ` (${market.marketId})` : ""}: ${parts.join(", ")}`)
   }
   for (const r of last.reconcile) {
     console.log(`  reconcile ${r.escrow}: record_count ${r.recordCount ?? "unreadable"}, indexed recovery events ${r.indexed} (${r.ok ? "ok" : "MISMATCH"})`)
@@ -380,14 +579,14 @@ async function main(argv) {
     if (!GROUPS.includes(group)) throw new UsageError(`--group must be one of ${GROUPS.join(", ")}`)
     const from = Number(requireFlag(flags, "from"))
     if (!Number.isInteger(from) || from < 1) throw new UsageError("--from must be a ledger number")
-    args = { network, group, from }
+    args = { network, group, from, force: flags.force === true, oldest: await rpcOldestLedger(network) }
   } else if (command === "export") {
     args = { out: requireFlag(flags, "out"), network: networkOf(flags, false) }
   } else if (command === "import") {
-    args = { path: requireFlag(flags, "in") }
+    args = { path: requireFlag(flags, "in"), network: networkOf(flags, true) }
   } else {
     const network = networkOf(flags, true)
-    if (!isLocalDatabase(db.url)) {
+    if (!(await isLocalDatabase(db.url))) {
       throw new UsageError(`capture writes only to a database on this machine; the one from ${db.from} is not (import its file into a shared database instead)`)
     }
     args = { network, out: flags.out ?? join("var", "indexer-capture", `${network}-${today()}.jsonl`) }
@@ -401,7 +600,7 @@ async function main(argv) {
       console.log(`export: ${r.events} events and ${r.cursors} cursors to ${args.out} (${r.bytes} bytes)`)
     } else if (command === "import") {
       const r = await importRows(pool, args)
-      console.log(`import: ${r.events} events (${r.inserted} new), ${r.cursors} cursors (${r.moved} moved forward)`)
+      console.log(`import: ${r.events} events (${r.inserted} new), ${r.cursors} cursors (${r.moved} moved forward, ${r.cleared} gaps cleared)`)
     } else await capture(pool, args)
   } finally {
     await pool.end().catch(() => {})

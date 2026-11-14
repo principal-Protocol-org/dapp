@@ -18,6 +18,15 @@ import "server-only"
  * (the upsert refuses an older ledger), so two overlapping runs (a scheduler retry over a slow run)
  * write no duplicate and never rewind it. `pnpm indexer:reindex` is the one write that moves it back.
  *
+ * A cursor also names the contracts it has read through its ledger (`members`). A contract of the
+ * group that is not among them (a market listed after its creation, a market a run could not list,
+ * a new deployment in the manifest) is read in its own chunks from the deploy ledger (or the RPC's
+ * oldest ledger) until it catches up; the cursor and its members move only when every chunk has.
+ *
+ * A gap (ledgers the RPC no longer holds) is stored on the cursor by the same guarded write that moves
+ * the cursor past it (`gap_from`, `gap_to`, widened when one is open), so a cursor never passes a gap
+ * without recording it. Only `pnpm indexer:import` clears one, when the imported rows fill it.
+ *
  * Each row keeps the event's value as the RPC sent it, base64 XDR of the `ScVal` (`raw_xdr`), and
  * the fields decoded for the emitting contract's role (`decodeEvent`): bigints as decimal strings,
  * bytes as hex. An unknown topic is kept with `data = {}`. Every indexed contract publishes a single
@@ -120,30 +129,57 @@ export type Reconcile = {
 
 export type IndexResult = { inserted: number; groups: GroupResult[]; reconcile: Reconcile[] }
 
+/** The last reconciliation, as stored on the escrow cursor. */
+export type StoredReconcile = { at: string; results: Reconcile[] }
+
 // ---------------------------------------------------------------- the cursor
 
-type SavedCursor = { ledger: number; cursor: string | null; closeTime: string | null }
+type SavedCursor = { ledger: number; members: string[] | null }
 
 async function readCursor(sql: Sql, name: string): Promise<SavedCursor | null> {
-  const [row] = await sql<{ ledger: string | number | null; cursor: string | null; close_time: Date | string | null }>`
-    select ledger, cursor, close_time from ingest_cursor where name = ${name}`
+  const [row] = await sql<{
+    ledger: string | number | null
+    cursor: string | null
+    close_time: Date | string | null
+    gap_from: string | number | null
+    gap_to: string | number | null
+    members: string[] | null
+  }>`
+    select ledger, cursor, close_time, gap_from, gap_to, members from ingest_cursor where name = ${name}`
   if (!row || row.ledger === null) return null
-  return { ledger: Number(row.ledger), cursor: row.cursor, closeTime: row.close_time === null ? null : new Date(row.close_time).toISOString() }
+  return { ledger: Number(row.ledger), members: row.members }
 }
 
 /**
- * Moves the cursor forward to `ledger`; an older or equal ledger changes nothing, so a run that is
- * behind never rewinds one that is ahead. `closeTime` (the close time of `ledger`, when known)
- * keeps the stored one otherwise.
+ * Moves the cursor forward to `ledger`, with the contracts it has now read through it (`members`)
+ * and any gap this run found: an older or equal ledger changes nothing, so a run that is behind never
+ * rewinds one that is ahead. The stored gap is widened, never narrowed (`least`/`greatest` skip
+ * nulls). `closeTime` (the close time of `ledger`, when known) keeps the stored one otherwise.
  */
-async function saveCursor(sql: Sql, name: string, ledger: number, cursor: string | null, closeTime: string | null): Promise<void> {
+async function saveCursor(
+  sql: Sql,
+  name: string,
+  save: { ledger: number; cursor: string | null; closeTime: string | null; gap: IndexGap | null; members: string[] },
+): Promise<void> {
   await sql`
-    insert into ingest_cursor (name, ledger, cursor, close_time) values (${name}, ${ledger}, ${cursor}, ${closeTime})
+    insert into ingest_cursor (name, ledger, cursor, close_time, gap_from, gap_to, members)
+    values (${name}, ${save.ledger}, ${save.cursor}, ${save.closeTime}, ${save.gap?.from ?? null}, ${save.gap?.to ?? null}, ${save.members}::text[])
     on conflict (name) do update set
       ledger = excluded.ledger,
       cursor = excluded.cursor,
-      close_time = coalesce(excluded.close_time, ingest_cursor.close_time)
+      close_time = coalesce(excluded.close_time, ingest_cursor.close_time),
+      gap_from = least(ingest_cursor.gap_from, excluded.gap_from),
+      gap_to = greatest(ingest_cursor.gap_to, excluded.gap_to),
+      members = excluded.members
     where ingest_cursor.ledger is null or excluded.ledger > ingest_cursor.ledger`
+}
+
+/** The last reconciliation, on the escrow cursor; an older one never replaces a newer. */
+async function saveReconcile(sql: Sql, name: string, reconcile: StoredReconcile): Promise<void> {
+  await sql`
+    insert into ingest_cursor (name, reconcile) values (${name}, ${JSON.stringify(reconcile)}::jsonb)
+    on conflict (name) do update set reconcile = excluded.reconcile
+    where ingest_cursor.reconcile is null or ingest_cursor.reconcile->>'at' <= excluded.reconcile->>'at'`
 }
 
 // ---------------------------------------------------------------- rows
@@ -204,7 +240,8 @@ type Ctx = {
 /** What a group run has done so far; read back when it fails part way. */
 type Progress = { inserted: number; saved: number | null; gap: IndexGap | null }
 
-type Chunk = { ids: string[]; cursor: string | null; through: number; done: boolean }
+/** One request's contracts: where it wanted to start, where it starts (the RPC's window allowing). */
+type Chunk = { ids: string[]; wanted: number; start: number; cursor: string | null; through: number; done: boolean }
 
 async function indexGroup(
   ctx: Ctx,
@@ -218,32 +255,52 @@ async function indexGroup(
   const network = manifest.network
   const name = indexCursorName(group, network)
   const byId = new Map(members.map((m) => [m.id, m]))
+  const memberIds = members.map((m) => m.id).sort()
+  let oldest = health.oldestLedger
 
-  // Where this group wants to start: after its cursor, or at the deploy on a first run (a manifest
-  // without `deployLedger`, the local stack, starts at the RPC's oldest ledger and claims no gap).
-  const wanted = saved ? saved.ledger + 1 : (manifest.deployLedger ?? health.oldestLedger)
-  let start = Math.max(wanted, health.oldestLedger)
-  const recordGap = (oldest: number) => {
-    if (wanted >= start) return
-    progress.gap = { from: wanted, to: start - 1 }
+  // The contracts this cursor has read through its ledger resume after it. Any other starts at the
+  // deploy (a manifest without `deployLedger`, the local stack, at the RPC's oldest ledger, claiming
+  // no gap), in chunks of its own, so the cursor moves only once it has caught up.
+  const known = new Set(saved?.members ?? [])
+  const resumed = saved ? members.filter((m) => known.has(m.id)) : []
+  const added = members.filter((m) => !resumed.includes(m))
+  const chunks: Chunk[] = []
+  const addChunks = (list: IndexMember[], wanted: number) => {
+    for (let i = 0; i < list.length; i += MAX_CONTRACTS_PER_REQUEST) {
+      const start = Math.max(wanted, oldest)
+      const ids = list.slice(i, i + MAX_CONTRACTS_PER_REQUEST).map((m) => m.id)
+      chunks.push({ ids, wanted, start, cursor: null, through: start - 1, done: start > health.latestLedger })
+    }
+  }
+  if (saved) addChunks(resumed, saved.ledger + 1)
+  addChunks(added, manifest.deployLedger ?? oldest)
+
+  /** The ledgers some chunk wanted but the RPC no longer holds, as one range. */
+  const recordGap = () => {
+    let from: number | null = null
+    let to: number | null = null
+    for (const c of chunks) {
+      if (c.wanted >= c.start) continue
+      from = from === null ? c.wanted : Math.min(from, c.wanted)
+      to = to === null ? c.start - 1 : Math.max(to, c.start - 1)
+    }
+    if (from === null || to === null || (progress.gap?.from === from && progress.gap?.to === to)) return
+    const gap: IndexGap = { from, to }
+    progress.gap = gap
     console.warn(
-      `indexer: gap: ${group} (${network}) ledgers ${wanted}-${start - 1} are older than the RPC's oldest ledger ${oldest}; ` +
+      `indexer: gap: ${group} (${network}) ledgers ${gap.from}-${gap.to} are older than the RPC's oldest ledger ${oldest}; ` +
         "indexing from there. Their events are missing until a capture is imported (pnpm indexer:import).",
     )
   }
-  recordGap(health.oldestLedger)
+  recordGap()
   const result = (complete: boolean): GroupResult => ({
     group,
-    indexedThrough: progress.saved ?? saved?.ledger ?? start - 1,
+    indexedThrough: progress.saved ?? saved?.ledger ?? (chunks.length > 0 ? Math.min(...chunks.map((c) => c.through)) : oldest - 1),
     gap: progress.gap,
     complete,
   })
-  if (start > health.latestLedger) return result(true)
+  if (chunks.every((c) => c.done)) return result(true)
 
-  const chunks: Chunk[] = []
-  for (let i = 0; i < members.length; i += MAX_CONTRACTS_PER_REQUEST) {
-    chunks.push({ ids: members.slice(i, i + MAX_CONTRACTS_PER_REQUEST).map((m) => m.id), cursor: null, through: start - 1, done: false })
-  }
   /** Close times known this run, by ledger: each event's, and the tip's from each page. */
   const closeTimes = new Map<number, string>()
   const closeTimeAt = (ledger: number): string | null => {
@@ -256,18 +313,23 @@ async function indexGroup(
     const filters = [{ type: "contract" as const, contractIds: chunk.ids }]
     if (chunk.cursor !== null) return rpc.getEvents({ cursor: chunk.cursor, filters, limit: ctx.pageSize })
     for (let attempt = 1; ; attempt++) {
-      const from = Math.max(start, chunk.through + 1)
+      const from = chunk.through + 1
       try {
         return await rpc.getEvents({ startLedger: from, filters, limit: ctx.pageSize })
       } catch (error) {
         // The RPC drops its oldest ledger as new ones close: a start read from `getHealth` a moment
-        // ago may be refused. Start again at its new oldest ledger, which widens the gap.
+        // ago may be refused. Every chunk not yet started starts again at the new oldest ledger,
+        // which widens the gap.
         if (attempt === START_ATTEMPTS) throw error
         const now = await rpc.getHealth()
         if (now.oldestLedger <= from) throw error
-        start = now.oldestLedger
-        recordGap(now.oldestLedger)
-        for (const c of chunks) c.through = Math.max(c.through, start - 1)
+        oldest = now.oldestLedger
+        for (const c of chunks) {
+          if (c.cursor !== null || c.start >= oldest) continue
+          c.start = oldest
+          c.through = Math.max(c.through, oldest - 1)
+        }
+        recordGap()
       }
     }
   }
@@ -347,9 +409,17 @@ async function indexGroup(
       chunk.cursor = res.cursor
       if (!full && (chunk.through >= latest || stalled || !readable)) chunk.done = true
 
+      // Every chunk has read through `through`, each from where it started (or a recorded gap):
+      // the cursor moves there with all the group's contracts as members, and this run's gap.
       const through = Math.min(...chunks.map((c) => c.through))
-      if (progress.saved === null ? through > (saved?.ledger ?? -1) : through > progress.saved) {
-        await saveCursor(sql, name, through, chunks.length === 1 ? res.cursor : null, closeTimeAt(through))
+      if (through > (progress.saved ?? saved?.ledger ?? -1)) {
+        await saveCursor(sql, name, {
+          ledger: through,
+          cursor: chunks.length === 1 ? res.cursor : null,
+          closeTime: closeTimeAt(through),
+          gap: progress.gap,
+          members: memberIds,
+        })
         progress.saved = through
       }
     }
@@ -416,9 +486,13 @@ export async function indexEvents(
     }),
   )
 
+  // The reconciliation runs when the escrow group finished within the deadline, and is kept on its cursor.
   const escrow = results.find((r) => r.group === "escrow")
-  const reconciled =
-    escrow?.complete && !ctx.late() ? await reconcile(sql, deps.reader ?? createRpcReader(manifest), network, markets) : []
+  let reconciled: Reconcile[] = []
+  if (escrow?.complete && !ctx.late()) {
+    reconciled = await reconcile(sql, deps.reader ?? createRpcReader(manifest), network, markets)
+    await saveReconcile(sql, indexCursorName("escrow", network), { at: new Date().toISOString(), results: reconciled })
+  }
   return { inserted: progress.reduce((n, p) => n + p.inserted, 0), groups: results, reconcile: reconciled }
 }
 
@@ -460,17 +534,33 @@ const toIndexed = (r: EventRowIn): IndexedEvent => ({
   data: r.data ?? {},
 })
 
+/** A stored gap of one group: ledgers whose events the index may lack (inclusive). */
+export type GroupGap = { group: IndexGroup; from: number; to: number }
+
+export type IndexedEvents = {
+  rows: IndexedEvent[]
+  /** The ledger the slowest group asked has indexed through; 0 when one never ran. */
+  indexedThrough: number
+  /** That ledger's close time (ISO): a client computes a fresh lag from it, whatever the cache's age. */
+  indexedThroughCloseTime: string | null
+  /** Seconds from that close time to now; null when unknown. */
+  lagSeconds: number | null
+  /** The stored gaps of the groups asked. */
+  gaps: GroupGap[]
+  /** The last RecoveryEscrow reconciliation; null before the first. */
+  reconcile: StoredReconcile | null
+}
+
 /**
  * Indexed events, newest first, without their raw XDR (lists stay small; one event's XDR is
  * `getIndexedEvent`). `before` is an event id: the rows strictly older (RPC event ids are fixed-width
- * TOIDs, so they sort as the chain does). `indexedThrough` is the ledger the slowest group asked has
- * indexed through (0 when one never ran), and `lagSeconds` how long ago that ledger closed (null when
- * unknown).
+ * TOIDs, so they sort as the chain does). The index's state comes with them: how far the groups asked
+ * are indexed and how long ago that ledger closed, their stored gaps, and the last reconciliation.
  */
 export async function getIndexedEvents(
   sql: Sql,
   q: { network: Network; group?: IndexGroup; pool?: string; before?: string; limit: number; /** ms; `Date.now()` by default. */ now?: number },
-): Promise<{ rows: IndexedEvent[]; indexedThrough: number; lagSeconds: number | null }> {
+): Promise<IndexedEvents> {
   const group = q.group ?? null
   const pool = q.pool ?? null
   const before = q.before ?? null
@@ -484,21 +574,44 @@ export async function getIndexedEvents(
     order by ledger desc, id desc
     limit ${q.limit}`
 
-  const names = (q.group ? [q.group] : INDEX_GROUPS).map((g) => indexCursorName(g, q.network))
-  const cursors = await sql<{ name: string; ledger: string | number | null; close_time: Date | string | null }>`
-    select name, ledger, close_time from ingest_cursor where name = any(${names}::text[])`
+  const asked = q.group ? [q.group] : INDEX_GROUPS
+  const escrowName = indexCursorName("escrow", q.network)
+  const names = [...new Set([...asked.map((g) => indexCursorName(g, q.network)), escrowName])]
+  const cursors = await sql<{
+    name: string
+    ledger: string | number | null
+    close_time: Date | string | null
+    gap_from: string | number | null
+    gap_to: string | number | null
+    reconcile: StoredReconcile | null
+  }>`
+    select name, ledger, close_time, gap_from, gap_to, reconcile from ingest_cursor where name = any(${names}::text[])`
   const byName = new Map(cursors.map((c) => [c.name, c]))
-  const mine = names.map((n) => byName.get(n))
+  const mine = asked.map((g) => byName.get(indexCursorName(g, q.network)))
   const now = q.now ?? Date.now()
   let indexedThrough = 0
+  let indexedThroughCloseTime: string | null = null
   let lagSeconds: number | null = null
-  if (mine.every((c) => c && c.ledger !== null)) {
+  if (mine.every((c) => c && c.ledger != null)) {
     indexedThrough = Math.min(...mine.map((c) => Number(c?.ledger)))
     if (mine.every((c) => c?.close_time != null)) {
-      lagSeconds = Math.max(...mine.map((c) => Math.max(0, Math.round((now - new Date(c?.close_time as Date | string).getTime()) / 1000))))
+      const closed = Math.min(...mine.map((c) => new Date(c?.close_time as Date | string).getTime()))
+      indexedThroughCloseTime = new Date(closed).toISOString()
+      lagSeconds = Math.max(0, Math.round((now - closed) / 1000))
     }
   }
-  return { rows: rows.map(toIndexed), indexedThrough, lagSeconds }
+  const gaps = asked.flatMap((g): GroupGap[] => {
+    const c = byName.get(indexCursorName(g, q.network))
+    return c && c.gap_from != null && c.gap_to != null ? [{ group: g, from: Number(c.gap_from), to: Number(c.gap_to) }] : []
+  })
+  return {
+    rows: rows.map(toIndexed),
+    indexedThrough,
+    indexedThroughCloseTime,
+    lagSeconds,
+    gaps,
+    reconcile: byName.get(escrowName)?.reconcile ?? null,
+  }
 }
 
 /** One indexed event with its raw XDR (base64 `ScVal`), or null when the index does not hold it. */

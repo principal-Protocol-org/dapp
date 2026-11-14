@@ -204,7 +204,7 @@ sub-daily crons at deploy time.
 ## Event indexer
 
 A scheduled job calls `/api/cron/index` (GET or POST) every 5 minutes. It reads the protocol's
-contract events with the RPC's `getEvents` into the `events` table (migrations 0004 and 0005), one
+contract events with the RPC's `getEvents` into the `events` table (migrations 0004 to 0006), one
 row per RPC event id, so a retry or two overlapping runs never duplicate a row. Each row keeps the
 contract, topic, ledger, close time, transaction hash, the market's pool, the decoded fields (`data`)
 and the event value as the RPC sent it (`raw_xdr`, base64 XDR of the `ScVal`; decode it with
@@ -226,11 +226,18 @@ Contracts are indexed in five groups, each with its own cursor in `ingest_cursor
 - Each run reads pages of 200 events (at most 5 contracts per request), saves the cursor after
   every page, and starts no page after its 50 s budget. The next run resumes there.
 - A cursor only moves forward. A run that is behind cannot rewind one that is ahead.
-- When a cursor is older than the RPC's oldest ledger, the run records the gap (`{ from, to }`,
-  in the answer and the server log) and goes on from the oldest ledger. It never skips silently.
-- Each run compares every RecoveryEscrow's `record_count` with its indexed `recovery` events.
-- A market listed after the `market` cursor has passed its creation misses its first events.
-  Re-index the group from the ledger before its creation.
+- A cursor names the contracts it has read through its ledger (`members`). Any other contract of
+  its group (a market listed after its creation, a market a run could not list because the registry
+  read failed, a new deployment in the manifest) is read in its own requests from the manifest's
+  `deployLedger` until it catches up. The cursor moves only once every contract has.
+- When a cursor (or `deployLedger`) is older than the RPC's oldest ledger, the run goes on from the
+  oldest ledger and records the gap. The save that moves the cursor past it also stores it on the
+  cursor (`gap_from`, `gap_to`, widened if one is already open), so a cursor never passes a gap
+  without recording it. It never skips silently. A stored gap stays until an import fills it; the
+  read API lists it (`gaps`), and monitoring reads it from `ingest_cursor` (`gap_from is not null`).
+- When the escrow group finishes within the budget, the run compares every RecoveryEscrow's
+  `record_count` with its indexed `recovery` events, and keeps the result on the escrow cursor
+  (`reconcile`, with its time). A run cut short by the budget skips it.
 
 The route answers:
 
@@ -242,43 +249,59 @@ The route answers:
 | 500 | The same body, a group with `error: "failed"`, or `{ error: "failed" }` | The RPC failed. The next run resumes at the cursor. |
 
 Schedule (ops, with the developer's go): a QStash schedule with cron `*/5 * * * *` to
-`https://<domain>/api/cron/index`, as for the recorder. Apply migrations 0004 and 0005 to the
+`https://<domain>/api/cron/index`, as for the recorder. Apply migrations 0004 to 0006 to the
 network's database first (`pnpm db:migrate --env-file .env.testnet`).
 
 `GET /api/dashboard/events` serves the index, public and without a wallet. `?group=`, `?pool=`,
 `?before=<event id>` (older rows, for paging) and `?limit=` (1 to 200, default 50) filter the list.
-It answers `{ rows, indexedThrough, lagSeconds }`, newest first and cached 60 s at the edge. Rows
-never carry the raw XDR; `?id=<event id>` answers `{ event }` with its `rawXdr`.
+It answers `{ rows, indexedThrough, indexedThroughCloseTime, lagSeconds, gaps, reconcile }`, newest
+first and cached 60 s at the edge: `indexedThrough` is the slowest group's cursor, and
+`indexedThroughCloseTime` its close time, from which a page computes a fresh lag whatever the cache's
+age. `gaps` lists the stored gaps (`{ group, from, to }`), and `reconcile` the last reconciliation.
+Rows never carry the raw XDR; `?id=<event id>` answers `{ event }` with its `rawXdr`.
 
 Operator commands (`scripts/indexer.mjs`). The database is `--database-url <url>`, else the
 `DATABASE_URL` of `--env-file <path>`, else `DATABASE_URL`, else `.env.local`'s. None prints it, but
 pnpm echoes the command line and the shell keeps it: use `--env-file` for a real database.
 
 ```bash
-pnpm indexer:reindex --network testnet --group escrow --from 5707342   # read the group again from that ledger
-pnpm indexer:export --network testnet --out events.jsonl                # events rows and cursors, as JSON Lines
-pnpm indexer:import --in events.jsonl --env-file .env.testnet           # upsert them: idempotent, cursors only move forward
-pnpm indexer:capture --network testnet                                  # index into the local database, then export
+pnpm indexer:reindex --network testnet --group escrow --from 5710000            # read the group again from that ledger
+pnpm indexer:export --network testnet --out events.jsonl                         # events rows and cursors, as JSON Lines
+pnpm indexer:import --network testnet --in events.jsonl --env-file .env.testnet  # upsert them (see below)
+pnpm indexer:capture --network testnet                                           # list the markets, index them locally, export
 ```
 
 - `reindex` sets the group's cursor to the ledger before `--from`. Rows already indexed are kept,
-  and the events read again are not duplicated. It refuses to move a cursor forward. Run it when no
+  and the events read again are not duplicated. It refuses to move a cursor forward. A `--from`
+  older than the RPC's oldest ledger (or one it cannot check) needs `--force`: the next run would
+  record those ledgers as a gap, which the index may already hold from an import. Run it when no
   indexer run is in progress, or that run may move the cursor on again.
-- `capture` indexes a network from its manifest's RPC into a database on this machine only (it
-  refuses any other), then exports that network's rows to
-  `var/indexer-capture/<network>-<YYYYMMDD>.jsonl` (`--out` to change it). `var/` is git-ignored.
-  It only reads from the RPC.
+- `import` needs `--network` and refuses a file, or a line, of another network. It runs in one
+  transaction: each event once, then each cursor, moved only forward (a file ahead brings its
+  members and widens the stored gap with its own). It clears a stored gap when the file's rows fill
+  it: the file's cursor is at or past the gap's end, it indexes every contract the database's cursor
+  names, and it has no gap of its own there.
+- `capture` first lists the network's markets as the app does (the registry's discovery from the
+  Router's and the factory's events, written to the local registry tables), then indexes them from
+  the manifest's RPC into a database on this machine only (a host that resolves to loopback, with no
+  `host` query parameter; it refuses any other), and exports that network's rows and cursors (with
+  any stored gap) to `var/indexer-capture/<network>-<YYYYMMDD>.jsonl` (`--out` to change it). `var/`
+  is git-ignored. On the network it only reads.
 
 **Testnet history capture (deadline 2026-11-20).** The RPC drops the official deployment's first
 events (the Permissioning grants, the oracle's `src_set` and first `ref_set`) around 2026-11-20
 09:00 UTC, and the two `cb_limit` changes around 2026-11-21. A capture taken before then keeps them.
 To load it into the Testnet database (with the developer's go):
 
-1. Run `pnpm indexer:capture --network testnet` again just before the import. It resumes from the
-   local cursors, so the file's cursors are recent. An old file's cursors would make the first
-   scheduled run record a gap from them to the RPC's oldest ledger.
+Until the import, re-run `pnpm indexer:capture --network testnet` at least every 6 days. The next
+run is due by 2026-11-20: the 2026-11-14 file's cursors leave the RPC's ~7-day window around
+2026-11-21, and a file whose cursors have left it makes the first scheduled run record a gap from
+them to the RPC's oldest ledger. Each run resumes from the local cursors and rewrites the day's file.
+
+1. Run `pnpm indexer:capture --network testnet` again just before the import, so the file's cursors
+   are recent.
 2. `pnpm db:migrate --env-file .env.testnet`, then
-   `pnpm indexer:import --in var/indexer-capture/testnet-<YYYYMMDD>.jsonl --env-file .env.testnet`.
+   `pnpm indexer:import --network testnet --in var/indexer-capture/testnet-<YYYYMMDD>.jsonl --env-file .env.testnet`.
 3. Create the `*/5 * * * *` schedule.
 
 If the schedule already ran before the import, the import fills the history and keeps the newer

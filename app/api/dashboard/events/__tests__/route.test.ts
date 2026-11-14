@@ -74,7 +74,9 @@ describe("GET /api/dashboard/events", () => {
     expect(res.status).toBe(200)
     expect(res.headers.get("cache-control")).toBe(CACHED)
     const body = await res.json()
-    expect(Object.keys(body).sort()).toEqual(["indexedThrough", "lagSeconds", "rows"])
+    expect(Object.keys(body).sort()).toEqual(["gaps", "indexedThrough", "indexedThroughCloseTime", "lagSeconds", "reconcile", "rows"])
+    expect(body.indexedThroughCloseTime).toBe("2026-11-13T10:08:20.000Z")
+    expect(body.gaps).toEqual([])
     expect(body.indexedThrough).toBe(5_707_500)
     expect(typeof body.lagSeconds).toBe("number")
     expect(body.rows).toEqual([

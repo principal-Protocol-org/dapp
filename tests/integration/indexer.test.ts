@@ -26,7 +26,7 @@ import { createRpcServer } from "@/lib/protocol/stellar"
 import type { Manifest, Market } from "@/lib/protocol/types"
 import { sql } from "@/lib/server/db"
 import { createStellarFaucetChain, resetFaucetStateForTests, runFaucet } from "@/lib/server/faucet"
-import { indexCursorName, indexEvents, type IndexGroup, type IndexResult } from "@/lib/server/indexer"
+import { getIndexedEvent, getIndexedEvents, indexCursorName, indexEvents, type IndexGroup, type IndexResult } from "@/lib/server/indexer"
 import { sacSetAuthorized, scAddress, scI128, seizeAllPositions, sendAs } from "../live/admin"
 import { keypairSigner } from "./keypair-signer"
 import { complianceKind, DAPP, eventually, faucetIssuerSecret, loadDatabaseUrl, MINUTE, readManifest, run, skipReason } from "./local-stack"
@@ -180,6 +180,23 @@ describe.skipIf(skip !== null)("event indexer on the local network", () => {
       select count(*)::int as n from events where network = 'local' and contract_id = ${market.contracts.recoveryEscrow} and topic = 'recovery'`
     expect(result.reconcile[0].indexed).toBe(n)
     expect(result.reconcile[0].recordCount).toBe(n)
+
+    // The cursor names its contract and keeps the reconcile; the read model serves both from Postgres.
+    const [escrowCursor] = await sql<{ members: string[]; gap_from: string | null }>`
+      select members, gap_from from ingest_cursor where name = ${indexCursorName("escrow", "local")}`
+    expect(escrowCursor).toEqual({ members: [market.contracts.recoveryEscrow], gap_from: null })
+    const served = await getIndexedEvents(sql, { network: "local", group: "escrow", pool: market.contracts.pool, limit: 5 })
+    log(`read model: indexedThrough ${served.indexedThrough}, closed ${served.indexedThroughCloseTime}, lag ${served.lagSeconds} s, gaps ${JSON.stringify(served.gaps)}`)
+    expect(served.rows[0]).toMatchObject({ id: recovery[0].id, group: "escrow", topic: "recovery", txHash: seize.hash, pool: market.contracts.pool })
+    expect(served.rows[0]).not.toHaveProperty("rawXdr")
+    expect(served.indexedThrough).toBeGreaterThanOrEqual(seize.ledger)
+    expect(Date.parse(served.indexedThroughCloseTime as string)).toBeGreaterThan(0)
+    expect(served.lagSeconds).toBeGreaterThanOrEqual(0)
+    expect(served.gaps).toEqual([])
+    expect(served.reconcile?.results).toEqual(result.reconcile)
+    const older = await getIndexedEvents(sql, { network: "local", group: "escrow", before: recovery[0].id as string, limit: 5 })
+    expect(older.rows.every((r) => r.id < (recovery[0].id as string))).toBe(true)
+    expect(await getIndexedEvent(sql, { network: "local", id: recovery[0].id as string })).toMatchObject({ rawXdr: recovery[0].raw_xdr })
   }, 5 * MINUTE)
 
   it("a second run inserts 0", async () => {
@@ -209,6 +226,10 @@ describe.skipIf(skip !== null)("event indexer on the local network", () => {
 
     // Moving a cursor forward would skip events silently: refused.
     await expect(script(["reindex", "--network", "local", "--group", "escrow", "--from", String(Number.MAX_SAFE_INTEGER)])).rejects.toThrow(/would skip ledgers/)
+    // A start below the RPC's oldest ledger would record a gap the index may hold: it needs --force.
+    await expect(script(["reindex", "--network", "local", "--group", "escrow", "--from", "1"])).rejects.toThrow(/older than the RPC's oldest ledger \d+.*--force/)
+    const [kept] = await sql<{ ledger: string }>`select ledger from ingest_cursor where name = ${indexCursorName("escrow", "local")}`
+    expect(Number(kept.ledger)).toBeGreaterThanOrEqual(seized.ledger)
   }, 3 * MINUTE)
 
   it("indexer:export then indexer:import restores the rows, and never rewinds a cursor", async () => {
@@ -230,7 +251,10 @@ describe.skipIf(skip !== null)("event indexer on the local network", () => {
     const [{ ledger: escrowCursor }] = await sql<{ ledger: string }>`select ledger from ingest_cursor where name = ${indexCursorName("escrow", "local")}`
     await sql`update ingest_cursor set ledger = ${Number(escrowCursor) + 1000} where name = ${indexCursorName("escrow", "local")}`
 
-    const imported = await script(["import", "--in", file])
+    // The import names its network and refuses a file of another.
+    await expect(script(["import", "--in", file])).rejects.toThrow(/--network is required/)
+    await expect(script(["import", "--network", "testnet", "--in", file])).rejects.toThrow(/network "local", not "testnet"/)
+    const imported = await script(["import", "--network", "local", "--in", file])
     log(imported)
     expect(imported).toMatch(new RegExp(`import: \\d+ events \\(${before.length} new\\)`))
     expect(await escrowRows(seized.ledger)).toEqual(before)
@@ -240,6 +264,15 @@ describe.skipIf(skip !== null)("event indexer on the local network", () => {
     await sql`update ingest_cursor set ledger = ${Number(escrowCursor)} where name = ${indexCursorName("escrow", "local")}`
 
     // Importing the same file again changes nothing.
-    expect(await script(["import", "--in", file])).toMatch(/\(0 new\), \d+ cursors \(0 moved forward\)/)
+    expect(await script(["import", "--network", "local", "--in", file])).toMatch(/\(0 new\), \d+ cursors \(0 moved forward, 0 gaps cleared\)/)
+
+    // A gap the file's rows fill (its cursor is past it, it indexes the same contracts, it has no gap
+    // there) is cleared by the import; the cursor itself does not move.
+    await sql`update ingest_cursor set gap_from = ${seized.ledger - 5}, gap_to = ${seized.ledger} where name = ${indexCursorName("escrow", "local")}`
+    expect((await getIndexedEvents(sql, { network: "local", group: "escrow", limit: 1 })).gaps).toEqual([{ group: "escrow", from: seized.ledger - 5, to: seized.ledger }])
+    expect(await script(["import", "--network", "local", "--in", file])).toMatch(/\(0 moved forward, 1 gaps cleared\)/)
+    const [filled] = await sql<{ ledger: string; gap_from: string | null; gap_to: string | null }>`
+      select ledger, gap_from, gap_to from ingest_cursor where name = ${indexCursorName("escrow", "local")}`
+    expect(filled).toEqual({ ledger: escrowCursor, gap_from: null, gap_to: null })
   }, 2 * MINUTE)
 })
