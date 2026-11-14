@@ -67,6 +67,22 @@ scripts/dev-stack/oracle-tick.sh                          # run this every 30 mi
   `rustc` is another version (the documented wasm hashes may then differ). A Stellar CLI call that
   fails shows its error, with anything shaped like a secret key redacted.
 
+- `drill.sh` gives the public dashboard real history (spec 0004 D-31): one compliance recovery (a
+  throwaway account onboarded, given 10 USDY of SY, deauthorized on the SAC by the SAC admin, then
+  `seize_all_positions`), one oracle value over the deviation cap (simulated first, it must answer
+  `false`; it lands as `ref_rej` `deviate`), one `oracle-tick.sh`, and a RiskControl pause of
+  `DRILL_PAUSE_SECONDS` (default 15, at most 30) then unpause. Locally it signs with
+  `principal-localdev-admin` and onboards with the issuer's own steps; the throwaway key
+  (`drill-<network>-<time>-<pid>`) is removed from the keystore at the end, and an exit trap unpauses
+  RiskControl on any failure or interruption. Every hash goes to stderr, and a JSON summary to stdout.
+  `DRILL_STEPS=recovery,oracle,pause` picks steps. On Testnet it is the developer's run only (the main
+  README, "The Testnet drill"): it refuses CI, overridden key names and a run without a terminal, and
+  asks for the market id before it signs.
+
+  ```bash
+  scripts/dev-stack/drill.sh                         # local, about 30 s
+  ```
+
 Outputs (both git-ignored; never commit them):
 
 - `config/manifests/local.json`: a v2 manifest (shared contracts, factory, `wasmHashes`, `routerFunctions` (every Router function the wasm exposes except the `quote_*` views), `testAsset`, one market, and `deployLedger`).
@@ -148,6 +164,7 @@ runs it for you). Call `GET /api/cron/record` with `Authorization: Bearer $CRON_
 | `history.test.ts` | The history queries, and the recorder writing one snapshot of the live market to `principal-pg` (the row is deleted afterwards). |
 | `oracle.test.ts` | The OracleAdapter v2 policy read through the app's reader (the primary source id above, no fallback, no rejection, 3,600 s, 1,000 bps), and one keeper tick (`tickOracle`, behind `/api/cron/oracle`) that reports `updated`. |
 | `oracle-feed.test.ts` | The keeper's feed mode (D-21) through `/api/cron/oracle`, with a fresh key that holds no role, against `feed-oracle.sh`'s mock feed and standalone oracle: `synced` (the price rescaled from 8 to 7 decimals), `skipped` `stale_ts`, a +15 % `deviate` submitted once then not again (both answered 200), `bad_price` never submitted, `skipped` `no_data`, `not_configured` on the market's own oracle (no `feed_source`), the indexed `ref_set` and `ref_rej`, and the alert check's `oracle_rejection` and `feed_broken`. It needs `principal-pg` migrated, deletes its rows afterwards and puts the oracle index cursor back. |
+| `drill.test.ts` | `drill.sh` on the local market: it exits 0, its key is gone, RiskControl is not paused and the oracle is fresh; the index then holds, for the drill's own transactions, one `recovery`, one `ref_rej` `deviate`, the tick's `ref_set` and two RiskControl `paused` rows. A second run stopped (SIGTERM) while paused is unpaused by its trap. Its rows stay in `principal-pg`. |
 | `lifecycle.test.ts` | The full lifecycle proof of plan 0001. Skipped unless `LIFECYCLE_REDEPLOY=1`. |
 | `wizard.test.ts` | The market-creation wizard's seven steps signed on the local network, then a fresh account trading the new market. Skipped unless `WIZARD_LIVE=1`. |
 

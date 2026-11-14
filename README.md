@@ -16,6 +16,9 @@ on a local network. It is Deliverable 2 of Tranche 2 of SCF #45.
 | `/app/history` | Your transactions, read from RPC events and a local log. |
 | `/app/manage` | Manager view: the markets where your wallet holds a role, with the actions that role can sign, and the half-finished markets you can resume. |
 | `/app/manage/new` | The market-creation wizard (seven steps). See "Manager view and the wizard". |
+| `/dashboard` | The public dashboard's overview, without a wallet. The six views are listed in "Dashboard". |
+| `/dashboard/markets`, `/dashboard/markets/[marketId]` | Every registry market, then one market's figures, fees and pending-yield lookup. |
+| `/dashboard/oracle`, `/dashboard/risk`, `/dashboard/compliance`, `/dashboard/activity` | The oracle, RiskControl, compliance and indexed-activity views. |
 | `POST /api/faucet` | Server route behind "Get test tokens". |
 | `GET` or `POST /api/cron/record` | The rate recorder, called by a scheduler. Both methods run the same checks. Refuses any other caller. |
 | `GET` or `POST /api/cron/index` | The event indexer, called by a scheduler. Same checks as the recorder. See "Event indexer". |
@@ -122,6 +125,45 @@ addresses, and where the market stands is read from the chain, never from a save
   `/app/manage` shows "Resume at step N" from any browser. Opening the link also resumes it.
 - **Publish.** The registry checks the market like any discovered one, and lists it as `published`
   only when it passes. A refresh of `/app` then shows it.
+
+## Dashboard
+
+`/dashboard` is the protocol's public dashboard (spec 0004): what the contracts answer now, and the
+history the event index holds. It needs no wallet: no page reads, asks for or signs with one. The
+app header's "Dashboard" link and the landing footer open it.
+
+| Route | What it shows |
+|---|---|
+| `/dashboard` | Overview: protocol totals (TVL, TVL in USD, markets, pool liquidity), safety (RiskControl capacity, pauses, the oracle's freshness and its time until operations block, open alerts), the latest compliance events and the event index's state. |
+| `/dashboard/markets` | Every registry market with its supplies, reserves, liquidity, TVL and unclaimed fees, and totals over them. |
+| `/dashboard/markets/[marketId]` | One market: its figures, settlement, fees, fee recipients, and the pending yield of any address. |
+| `/dashboard/oracle` | The OracleAdapter: value and freshness on ledger time, policy, sources, update path and last rejection, read live; the indexed update and rejection history; the keeper's health from its recorded runs. |
+| `/dashboard/risk` | RiskControl: circuit breaker, window and per-asset limits, every contract's pause and the pausers, read live; the indexed limit changes and pause history; the exhaustion history from the alerts. |
+| `/dashboard/compliance` | The underlying asset's administrator and issuer flags, every RecoveryEscrow record (an archived one from the index), the Permissioning counts and the seizure history. |
+| `/dashboard/activity` | Every indexed event, newest first, filtered by kind (the filters are in the URL, so a filtered view is a link). |
+
+- **Provenance and the drawer.** Every contract figure keeps the reads behind it: contract, function,
+  arguments, ledger, RPC endpoint and raw XDR. Its info button opens the How-to-verify drawer: those
+  fields, a stellar.expert link per contract (plain text on `local`), the status (Live, "Read across
+  ledgers X–Y" when the reads answered at different ledgers, or "Unavailable" with its reason), and a
+  copyable `stellar contract invoke … --send=no` command per read, which repeats it as a simulation:
+  nothing is signed. A read answered by one of the manifest's `rpcFallbackUrls` says "via fallback
+  <host>". "Copy evidence table" copies every figure of a page with its reads.
+- **Never a guess.** A figure that cannot be read shows "Unavailable" and why. A total over markets is
+  Unavailable when any market's figure is, never a partial sum. A refresh that fails never leaves the
+  old value showing as current.
+- **Cadence.** Live widgets (the oracle, RiskControl, pauses and pausers, one market's page) refresh
+  every 15 s; aggregates (the totals and the markets list) and history (the event index, keeper runs,
+  alerts, RecoveryEscrow records) every 60 s. `/app` keeps its 6 s. Each panel says when it was read
+  ("Ledger N · read 4s ago · Refreshes every 15 s"), and "Stale: no new read for over 30 s" past
+  twice the cadence.
+- **History** comes from the event index (`GET /api/dashboard/events`, see "Event indexer"). Each list
+  says how far it goes ("Indexed through ledger N"), its lag and any stored gap. The keeper's runs come
+  from `GET /api/dashboard/oracle-ticks` and the alerts from `GET /api/dashboard/alerts`. Without
+  `DATABASE_URL` those panels read "Unavailable" with the reason, and the live figures still work.
+- **Layout check.** `pnpm dashboard:layout --base <app>` checks every view at 375 px (no sideways
+  scroll, no table that hides columns, the drawer included); `--shots <dir>` also writes screenshots.
+  It runs by hand against a running app, never in CI.
 
 ## Environment variables
 
@@ -517,6 +559,84 @@ deployed yet." }` instead, like every API route. `keeper.healthy` is null while 
 run is recorded. `openAlerts.critical` counts an `oracle_unavailable` only once confirmed. An uptime
 monitor can watch the status code, `ledger.status`, `indexer.lagSeconds` or `openAlerts.critical`.
 
+## Operations for Tranche 3 go-live
+
+The developer's checklist for putting the dashboard and its monitoring live on Testnet, in order.
+Each step waits for the developer's go. No step needs a secret in this repository.
+
+1. **Migrate the Testnet database.** `pnpm db:migrate --env-file .env.testnet` applies 0004 to 0007
+   (events, ticks and alerts; the cursor's close time; gaps and members; the alerts' post flags). 0001
+   to 0003 are already applied there.
+2. **Load the history.** Run the capture once more just before the import (the next one is due by
+   2026-11-20 in any case, see "Event indexer"), then import it:
+   `pnpm indexer:capture --network testnet`, then
+   `pnpm indexer:import --network testnet --in var/indexer-capture/testnet-<YYYYMMDD>.jsonl --env-file .env.testnet`.
+3. **Set the alert variables** in Vercel, scoped to the `testnet` branch: `ALERT_WEBHOOK_URL` (the
+   channel's incoming webhook), and `ALERT_SIGNER_MIN_XLM` only to change the 20 XLM floor.
+4. **Deploy** this branch to `testnet` (the Vercel Preview behind `testnet.principalmarket.fi`).
+   `/dashboard`, the cron routes and `/api/health` exist from this deployment on. Check that
+   `/dashboard` loads and `GET /api/health` answers 200.
+5. **Schedule the indexer.** A QStash schedule, cron `*/5 * * * *`, to
+   `https://testnet.principalmarket.fi/api/cron/index`. Wait for its first run to complete:
+   `GET /api/health` then shows `indexer.status` `ok` and a `lagSeconds` under 3,600.
+6. **Schedule the alert check**, only after step 5: cron `*/5 * * * *` to
+   `https://testnet.principalmarket.fi/api/cron/alerts`. Before the first index run, the old or
+   missing cursors would open (and post) `indexer_lag` for every group.
+7. **Send a test alert.** One POST to `https://testnet.principalmarket.fi/api/cron/alerts?test=1`,
+   signed by QStash: publish one message to that exact URL from the QStash console, with retries set
+   to 0 (a 502 would otherwise be retried and send the test again). The signature is checked against
+   the URL the request came in on, `?test=1` included. A `CRON_SECRET` set in that environment works
+   too, with the curl in "Alerts". It answers 200 with `delivered: true` once the channel took it, and
+   `GET /api/dashboard/alerts` then shows it as `lastTest`.
+8. **Run the drill** from your own terminal (below). After the next `cron/index` run (at most 5
+   minutes, plus the API's 60 s cache) the dashboard shows its seizure, its rejection and its pause.
+
+Why this order: the cron routes and `?test=1` exist only on the new deployment, so the schedules and
+the test come after it. A Vercel variable applies only to deployments made after it is set, so it
+comes before. The tables must exist before the import and before the deployed code writes to them
+(`cron/oracle`, already scheduled, starts recording its runs in `oracle_ticks`). The drill comes last
+so the index and the alert check are watching when it runs.
+
+### The Testnet drill (`scripts/dev-stack/drill.sh`)
+
+On the official deployment nothing has been seized, refused or paused yet, so every history view on
+Testnet would stay empty. The drill makes one of each, as an operator would, and prints every
+transaction hash with its stellar.expert link. It is proven on the local stack first
+(`tests/integration/drill.test.ts`). It never runs in CI or from an agent: on Testnet it signs with
+the official keys.
+
+```bash
+PRINCIPAL_NETWORK=testnet scripts/dev-stack/drill.sh
+```
+
+| Step | What it does | Signed by |
+|---|---|---|
+| Recovery | A throwaway account (a key made for the run, funded by Friendbot) adds a USDY trustline, is onboarded by the app's public faucet, and deposits 10 USDY into the SY wrapper. It is then deauthorized on the USDY SAC, and `seize_all_positions` moves its SY to the RecoveryEscrow: one record, one `recovery` event. Its key is then removed from the keystore. | The throwaway key (trustline, deposit). `principal-testnet-admin`, the SAC admin and so the escrow's issuer authority (deauthorize, seize). |
+| Oracle | A value over the deviation cap (the cap plus 5 %: 15 % above the current value with the 1,000 bps cap), simulated first: the drill stops unless the simulation answers `false`. Sent, it returns `false` and the oracle emits `ref_rej` with reason `deviate`. Then one `oracle-tick.sh`, so the oracle is fresh again. | `principal-testnet-oracle`, the OracleAdapter admin. |
+| Pause | RiskControl `pause`, about 15 s, then `unpause`: two `paused` events. Every market refuses deposits and mints meanwhile. | `principal-testnet-admin`, the RiskControl admin. |
+
+- **Before it signs anything**, it refuses CI, any key name but the official ones and a run without a
+  terminal. It checks each key against the contract's own admin (`admin()`, `get_admin()`) and that
+  RiskControl is not already paused (it never unpauses a pause it did not make), shows what it will
+  sign, and asks you to type the market id.
+- **The pause always ends.** Once the pause is sent, an exit trap unpauses on any failure or Ctrl-C,
+  after waiting for a pause transaction still in flight. `DRILL_PAUSE_SECONDS` (0 to 30, default 15)
+  sets the wait, so the pause lasts under a minute; the drill prints how long it lasted in ledger time.
+- **Options.** `DRILL_STEPS=oracle,pause` runs only those steps, in the same order.
+  `DRILL_ONBOARD=issuer` onboards with `principal-testnet-issuer` (the faucet's own key, the classic
+  issuer and Permissioning admin) instead of the public faucet; `DRILL_FAUCET_ORIGIN` changes the
+  faucet's origin.
+- **No secret.** It passes identity names to the Stellar CLI, never a secret, discards `keys generate`'s
+  output and prints the CLI's errors with anything shaped like a secret key redacted. Progress and
+  hashes go to stderr, and a JSON summary (hashes, the throwaway account, the record id) to stdout.
+- **Alerts.** The `deviate` rejection opens `oracle_rejection` (warning, posted) for 24 h. An alert
+  check that happens to run during the pause opens and then closes `paused`.
+- **Finalization** needs the market's maturity (11 February 2027, 08:59:04 UTC for
+  `testnet-usdy-1802336344`), so it is not part of the drill. After maturity, settle the drill's record
+  (its id is in the summary) as the SAC admin:
+  `stellar contract invoke --id <recoveryEscrow> --source principal-testnet-admin --network testnet -- finalize_record --caller <that key's address> --id <record id>`.
+  For a demo before then, run the steps on a short-maturity market made with the wizard.
+
 ## Local network
 
 `scripts/dev-stack/` runs a local Stellar network with a real, seeded market, so every flow works
@@ -548,12 +668,15 @@ Use `pnpm`.
 `pnpm test:integration` needs the local stack running and a deployed `config/manifests/local.json`
 (`scripts/dev-stack/README.md`). If the network is not reachable, the suite skips and says why.
 
-- It runs the routes, curve, oracle, oracle feed, registry, recorder and indexer suites against the existing local market.
+- It runs the routes, curve, oracle, oracle feed, registry, recorder, indexer, alerts and drill suites against the existing local market.
   The indexer suite also needs the local Postgres migrated (`pnpm db:migrate`) and refuses a
   `DATABASE_URL` that is not on this machine: it seizes a throwaway account's positions and deletes
   and restores local `events` rows. The oracle feed suite (`oracle-feed.test.ts`) deploys its own
   mock feed and standalone oracle (`scripts/dev-stack/feed-oracle.sh`), needs Rust with
-  `wasm32v1-none` and the same local Postgres, and deletes its rows afterwards.
+  `wasm32v1-none` and the same local Postgres, and deletes its rows afterwards. The drill suite
+  (`drill.test.ts`) runs `scripts/dev-stack/drill.sh` on the local market (a throwaway account seized,
+  one `deviate` rejection, RiskControl paused for a few seconds, then stopped mid-pause to prove the
+  trap unpauses) and checks the indexed rows; its rows stay in the local database.
   It does not redeploy the stack or rewrite `local.json`.
 - It signs with throwaway local accounts (the stack's dev keys), never a real key.
 - It skips the cases that need a market near maturity, and says so.
