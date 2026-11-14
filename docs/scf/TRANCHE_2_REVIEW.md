@@ -39,7 +39,7 @@ Each status is one of:
 | Deliverable | Success criterion (part) | Status |
 |---|---|---|
 | 1 | All protocol contracts are deployed on Stellar Testnet and publicly visible | Met ([1.1](#11-all-protocol-contracts-are-deployed-and-publicly-visible)) |
-| 1 | deployment is scripted and repeatable | Met here and in the contracts repository ([1.2](#12-deployment-is-scripted-and-repeatable)); the description's pipeline items are met in the contracts repository, with stated caveats, except RiskControl limits ([1.6](#16-the-description-item-by-item)) |
+| 1 | deployment is scripted and repeatable | Met here and in the contracts repository ([1.2](#12-deployment-is-scripted-and-repeatable)); the description's pipeline items are met in the contracts repository, with stated caveats, and the RiskControl limit is set on the official deployment ([1.6](#16-the-description-item-by-item)) |
 | 1 | the complete PT/YT and AMM flows are operational | Met ([1.3](#13-the-complete-ptyt-and-amm-flows-are-operational)) |
 | 1 | SAC compliance controls and RecoveryEscrow are active on-chain | Met ([1.4](#14-sac-compliance-controls-and-recoveryescrow-are-active-on-chain)) |
 | 1 | oracle safety guards are working | Met: staleness on this deployment; deviation guard and availability block in the contracts repository, live on the contracts team's oracle ([1.5](#15-oracle-safety-guards-are-working)) |
@@ -161,7 +161,7 @@ The OracleAdapter safety extension is contract code in the contracts repository.
    - the one failing check is `git_tree_dirty`, because the deploy ran on an uncommitted tree on top of `665bb67`;
    - the 5 shared contracts' `deploy_tx` were not captured;
    - the market-creation transactions are not in the manifest;
-   - `RISK_CB_LIMIT=0`.
+   - `RISK_CB_LIMIT=0`: the circuit breaker is off on their deployment. The official one has a limit (1.6).
 
 **Status: Met** for "scripted and repeatable": here (the app team's `deploy.sh`, which made the official deployment),
 and in the contracts repository (the contracts team's pipeline, with the caveats above).
@@ -277,8 +277,8 @@ fallback configured.
 
 The success criteria are covered above. This table maps each part of the description to what exists, so nothing is
 claimed by omission. Each row says where the item is met: here, in the app team's deployment, or in the contracts
-repository, in the contracts team's pipeline at `aae6cf8` ([evidence §8](TRANCHE_2_EVIDENCE.md#8-the-contracts-teams-deployment-pipeline-at-aae6cf8)). The one item not met in either,
-RiskControl limits, is set to 0 on Testnet in both.
+repository, in the contracts team's pipeline at `aae6cf8` ([evidence §8](TRANCHE_2_EVIDENCE.md#8-the-contracts-teams-deployment-pipeline-at-aae6cf8)). The RiskControl limit
+has been set on the official deployment since 14 November 2026.
 
 | Description item | What exists | Status |
 |---|---|---|
@@ -289,7 +289,7 @@ RiskControl limits, is set to 0 on Testnet in both.
 | a post-deploy verification script asserting expected initial state | [`scripts/deploy/verify-deployment.sh`](https://github.com/principal-Protocol-org/principal/blob/aae6cf81346a51f600393e4267be45e65524ae4e/scripts/deploy/verify-deployment.sh) passes 64 of 65 checks. The one FAIL is `git_tree_dirty`: the deploy ran on an uncommitted tree on top of `665bb67`. Here, the same kind of assertions run at the start of Suites A and B ([1.2](#12-deployment-is-scripted-and-repeatable) step 3). | Met in the contracts repository, 64 of 65 |
 | idempotent re-deploy logic | The contracts team's `deploy.sh` reuses existing contracts unless `FORCE_REDEPLOY=true`: two back-to-back full runs created no new contracts. The app team's is not idempotent: every run deploys a new market. | Met in the contracts repository |
 | a testnet oracle rate submitted via set_reference_value | Genesis value 1.0 at deploy, signed by the oracle key | Done |
-| RiskControl limits | RiskControl is deployed and wired to SY and PrincipalManager in both deployments, but the circuit breaker is off: `get_cb_limit` returns 0 here (window 17,280 ledgers; the app's Safety tab shows "No limit (disabled)"), and the contracts team's `.env` sets `RISK_CB_LIMIT=0`. | Open: set to 0 on Testnet |
+| RiskControl limits | On the official deployment, the market admin set the protocol-wide limit on 14 November 2026 ([e152c4b9…acd3](https://stellar.expert/explorer/testnet/tx/e152c4b9d2fbca86ffafad75ec79a983efd6fbaee37a1a535c1842bf2bd4acd3), ledger 5718211). `get_cb_limit` returns 10000000000000: 1,000,000 USDY per window of 17,280 ledgers (about 24 h). The counted volume (SY deposits plus manager mints) on this market was 300,000 USDY for the deploy's seed (a 200,000 deposit and a 100,000 mint), then about 40,000 on the busiest test day, by the app team's tally, with a largest single operation of 500. So 1,000,000 never gets in the way of testers or of a seed the size of the deploy's, and using it up within one window would take ten full faucet grants of 100,000 USDY, all deposited. The per-asset (USDY) limit and the SY deposit cap stay off. The app's Safety tab shows the room left, and the app refuses an over-limit deposit or mint before signing. The contracts team's TR2 deployment keeps `RISK_CB_LIMIT=0`, and Suite B's throwaway markets keep 0 by design (`deploy.sh` `--cb_limit 0`). | Done on the official deployment |
 | a 90-day maturity for the first yield market | Maturity 1802336344 = 11 February 2027 08:59:04 UTC, 7,776,000 s (90 days) after the deploy's ledger time | Done |
 | Ongoing oracle freshness via manual/scripted rate updates | The app's keeper every 30 minutes, and `oracle-tick.sh` by hand ([1.5](#15-oracle-safety-guards-are-working) step 6) | Done |
 | OracleAdapter: configurable primary and fallback price sources | `set_sources` in the contract; the official oracle has a primary source and no fallback | Done in the contracts; fallback not configured here |
@@ -350,8 +350,10 @@ which landed at `aae6cf8` with its acceptance doc, [docs/TRANCHE_2_TESTNET_ACCEP
    History reads the pages use). A browser run of the whole walkthrough on the live site, every step landed, is
    recorded with its transaction hashes ([evidence §6.2](TRANCHE_2_EVIDENCE.md#62-the-browser-run-on-the-live-site)).
 
-**Status: Met.** The live site serves commit `a965753` of branch `testnet` (Vercel deployment
-`dpl_HZhpg6UfJY98m6vPigSiVrHoseDS`, 13 November 2026), the commit the first green CI run tested. One limit:
+**Status: Met.** The live site serves commit `4e69670` of branch `testnet` (Vercel deployment
+`dpl_6koz7rWXnQ5xgHWLnpBhJ59vWbwy`), the commit the fix pull request's green CI run tested. The walkthrough run
+([evidence §6.2](TRANCHE_2_EVIDENCE.md#62-the-browser-run-on-the-live-site)) used the earlier deployment of `a965753`.
+One limit:
 **redeem in the browser** is possible only after the official market matures (11 February 2027). Redemption is shown
 on Suite B's markets through the same protocol layer ([evidence §4.7](TRANCHE_2_EVIDENCE.md#47-redemption-at-maturity)),
 and the redeem panel is covered by
@@ -451,7 +453,9 @@ The next run did not pass. The first manual run from `main`
 to 21:56 UTC) checked out `testnet` as the nightly run does. Suite A passed 13 of 13. Suite B failed 3 of its 10
 tests: the public Testnet RPC was overloaded (`-32004`, "preflight queue full") for about a minute, and the read in
 the maturity oracle tick was not retried. Commit `625b722` makes the harness wait out an overloaded RPC, and a local
-Suite B run with it passed 10 of 10. The pull request that ships the fix runs both suites again
+Suite B run with it passed 10 of 10. The fix shipped in [pull request #3](https://github.com/principal-Protocol-org/dapp/pull/3), which passed both suites in CI
+([E2E Testnet run 43526612252](https://github.com/principal-Protocol-org/dapp/actions/runs/43526612252) on `4e69670`: Suite A 13 of 13, Suite B 10 of 10), its retries absorbing ten `-32004` reads. A second
+manual run from `main` ([E2E Testnet run 43529473706](https://github.com/principal-Protocol-org/dapp/actions/runs/43529473706), testing `testnet` at `4e69670`) passed both suites too: the nightly path is green
 ([evidence §2.2](TRANCHE_2_EVIDENCE.md#22-the-manual-run-from-main-and-its-fix)).
 
 "The live Testnet deployment": Suite A runs on the official deployment. Suite B runs on live Testnet too, on a market

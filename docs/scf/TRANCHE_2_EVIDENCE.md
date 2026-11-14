@@ -3,7 +3,8 @@
 The facts behind [TRANCHE_2_REVIEW.md](TRANCHE_2_REVIEW.md): deployed addresses, wasm hashes, transaction hashes, CI
 runs, screenshots and dates. Each section says where its data comes from. Written on 13 November 2026 and updated the
 same evening with the first green CI run and the live walkthrough run, then on 14 November 2026 with the contracts
-team's deployment pipeline and the first manual run from `main`; all times are UTC.
+team's deployment pipeline, the manual runs from `main`, the fix pull request and the RiskControl limit; all times are
+UTC.
 
 Every address here is public. No secret key, and no name of a key in a keystore, appears in this file.
 
@@ -85,9 +86,10 @@ What each key can do, from the contracts at `665bb67` and the asset's flags on H
 So the server cannot administer the market contracts or the SAC. With its two keys, though, it controls the oracle's
 settings and values, and which accounts may hold and use USDY, PT and YT.
 
-### 1.4 Live reads, 13 November 2026
+### 1.4 Live reads, 13 and 14 November 2026
 
-Read between 18:00 and 18:40 UTC with `stellar contract invoke … --send=no` (a simulation; nothing signed) and Horizon.
+Read on 13 November between 18:00 and 18:40 UTC, and for the rows marked 14 November on 14 November, with
+`stellar contract invoke … --send=no` (a simulation; nothing signed) and Horizon.
 
 | Read | Result |
 |---|---|
@@ -99,7 +101,8 @@ Read between 18:00 and 18:40 UTC with `stellar contract invoke … --send=no` (a
 | OracleAdapter `get_primary_source` | `8f157e8dfc6b0bef22553de5a980e24fc7c7c9eacc8bccbb8df0f2cab866b3b4` = SHA-256 of `principal-oracle-source:testnet:USDY:app-team:keeper` |
 | OracleAdapter `get_fallback_source` | `null` |
 | OracleAdapter `last_rejection` | `null` (no update has been rejected) |
-| RiskControl `get_cb_limit`, `get_window_ledgers` | `0` (circuit breaker off), `17280` |
+| RiskControl `get_cb_limit`, `get_window_ledgers` | on 13 November: `0` (circuit breaker off), `17280`. On 14 November, after `set_cb_limit` ([e152c4b9…acd3](https://stellar.expert/explorer/testnet/tx/e152c4b9d2fbca86ffafad75ec79a983efd6fbaee37a1a535c1842bf2bd4acd3), ledger 5718211, 00:04:59 UTC, signed by the market admin): `10000000000000` (1,000,000 USDY per window), `17280` (about 24 h) |
+| RiskControl `get_asset_limit(USDY SAC)`, SYWrapper `deposit_cap`, 14 November | `0`, `0` (both off) |
 | `recovery_escrow` on SYWrapper, PTToken, YTToken, MarketPool | each `CAMOWBMTMDLFJLFOSTULXQO7MUK2PT3XAQ62CA4L5DGPQKZFJWEKN24Q` |
 | USDY SAC `admin` | `GBLPAJ2GVSFUWCUIFMEV4EOV2XIOEWMJRIQ3LOM2Z42TNIY3J6ACB7UA` |
 
@@ -121,7 +124,8 @@ and the [README's CI section](https://github.com/principal-Protocol-org/dapp/blo
 | First manual run from `main` | [E2E Testnet run 43511581261](https://github.com/principal-Protocol-org/dapp/actions/runs/43511581261), `workflow_dispatch` from `main` (`f6bf73c`), 13 November 2026 21:32:23 to 21:55:57 UTC: **failed**. Both jobs checked out `testnet` (log: `ref: testnet`), the path the nightly run takes. Suite A passed 13 of 13 tests in 162 s; Suite B passed 7 of 10 while the public RPC was overloaded ([§2.2](#22-the-manual-run-from-main-and-its-fix)). |
 | Fix | commits `625b722` (the test harness retries reads and simulations, within bounds, and never resends a transaction except through the sequence-number proof), `3f96e77` and `b1bd606` (the app shows "The Stellar network is busy. Try again in a moment." instead of the RPC's raw text or "[object Object]") |
 | Suite B with the fix, run locally | 13 November 2026 22:21:48 to 22:43:35 UTC: 10 of 10 tests in 1,307 s, 14 transactions, its four run keys removed ([§2.2](#22-the-manual-run-from-main-and-its-fix)) |
-| Fix pull request | run link added after it runs |
+| Fix pull request | [pull request #3](https://github.com/principal-Protocol-org/dapp/pull/3), fast-forwarded into `testnet` at `4e69670` on 13 November 2026 at 23:45:12 UTC. [CI run 43526612021](https://github.com/principal-Protocol-org/dapp/actions/runs/43526612021): green. [E2E Testnet run 43526612252](https://github.com/principal-Protocol-org/dapp/actions/runs/43526612252) on `4e69670`: Suite A 13 of 13 tests in 165 s, Suite B 10 of 10 in 1,289 s, its four run keys removed. In Suite B the RPC answered `-32004` on ten reads; each was retried and the run passed ([§2.2](#22-the-manual-run-from-main-and-its-fix)). |
+| Second manual run from `main` | [E2E Testnet run 43529473706](https://github.com/principal-Protocol-org/dapp/actions/runs/43529473706), `workflow_dispatch` from `main` (`f6bf73c`), checked out `testnet` at `4e69670`, 13 November 2026 23:45:35 UTC to 14 November 00:07:45 UTC: **passed**. Suite A 13 of 13 tests in 176 s; Suite B 10 of 10 in 1,300 s, its four run keys removed. The green proof of the nightly path. |
 
 ### 2.1 The Linux wasm comparison
 
@@ -157,7 +161,11 @@ Run 43511581261 is stated in full because it failed.
   - the maturity tick, ledger 5717231, [57068ef4…c911](https://stellar.expert/explorer/testnet/tx/57068ef4c86f60b2c648de92598c3b2b42670a32a3a50c339389e12789e7c911);
   - the redemption, ledger 5717233, [cb83348b…5406](https://stellar.expert/explorer/testnet/tx/cb83348b5151eed777d8bde9677ba2eb752cebf127de7efc950add5159b75406);
   - `finalize_record`, ledger 5717234, [eddc82f6…1d28](https://stellar.expert/explorer/testnet/tx/eddc82f6db2e28ac9c3dc0ca0d45876245f7770944d52dc616a278bf24da1d28).
-- **The pull request that ships the fix** runs both suites again. Its run is added to the table above after it runs.
+- **The pull request that ships the fix**, [pull request #3](https://github.com/principal-Protocol-org/dapp/pull/3), ran both suites green on `4e69670` ([E2E Testnet run 43526612252](https://github.com/principal-Protocol-org/dapp/actions/runs/43526612252)): Suite A 13 of 13 in
+  165 s, Suite B 10 of 10 in 1,289 s. In Suite B the RPC answered `-32004` on ten reads (`get_asset_volume`, `get_cb_volume`, `get_fallback_source`, `get_reference_value`, `is_allowed_for_asset`, `is_frozen`, `last_claimed_index`, `last_rejection`, `lp_balance` and `swap_fee_tier_bps`); each was retried,
+  and the run passed.
+- **A second manual run from `main`** ([E2E Testnet run 43529473706](https://github.com/principal-Protocol-org/dapp/actions/runs/43529473706)) checked out `testnet` at `4e69670` and passed: Suite A 13 of 13 in
+  176 s, Suite B 10 of 10 in 1,300 s. The nightly path is green.
 
 ## 3. Suite A: the live journey on the official market
 
@@ -476,7 +484,8 @@ Caveats the doc states itself:
 - **5 `deploy_tx` were not captured**, those of the shared contracts (OracleAdapter, Permissioning, RiskControl,
   Router, MarketFactory). An earlier run of the script lost them before its fix, and later runs reused the contracts.
 - **The market-creation transactions are not in the manifest's `transactions[]`.** The doc lists them from its run logs.
-- **`RISK_CB_LIMIT=0`**: the circuit breaker is disabled on Testnet, as on our deployment.
+- **`RISK_CB_LIMIT=0`**: the circuit breaker is disabled on their Testnet deployment. Ours has had a limit since
+  14 November 2026 ([§1.4](#14-live-reads-13-and-14-november-2026)).
 
 **Two deployments.** This market is a throwaway proof of the pipeline. The doc says it "supersedes nothing", and
 nothing runs on it. The app, the walkthrough and the CI suites run on our market `testnet-usdy-1802336344`
@@ -491,8 +500,6 @@ the doc built them with Rust 1.94.1 on another machine, and the bytes depend on 
 | Item | Owner | Reason |
 |---|---|---|
 | The pipeline deployment's own caveats: `git_tree_dirty`, 5 shared-contract `deploy_tx` not captured, market-creation transactions not in the manifest | contracts team | Stated in its acceptance doc ([§8](#8-the-contracts-teams-deployment-pipeline-at-aae6cf8)). |
-| RiskControl limits | app team and contracts team | Set to 0 on Testnet in both deployments: the circuit breaker is off (`get_cb_limit` 0 here, `RISK_CB_LIMIT=0` there). |
-| The fix pull request's CI run ([§2.2](#22-the-manual-run-from-main-and-its-fix)) | app team | Added after it runs. |
 | The deviation guard on the official oracle | none needed | It has not fired: no update was rejected (`last_rejection` is `null`). Its live proof is in the contracts repository ([§7](#7-oracle-safety-in-the-contracts-repository)). |
 | Redeem in the browser, and its screenshots | app team | Possible only after 11 February 2027 08:59:04 UTC. |
 | Nested transfers whose amounts come from the pool's reserves can fail with `Error(Auth, InvalidAction)` when another trade moves the pool between simulation and inclusion | contracts team | A known contract-level limit; only the network fee is lost, and a retry works. |
