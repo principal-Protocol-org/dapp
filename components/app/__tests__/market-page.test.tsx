@@ -43,7 +43,7 @@ vi.mock("@/components/app/manifest-provider", () => {
   }
 })
 // Server side: generateStaticParams reads the static seeds, MarketRoute the resolved markets.
-vi.mock("@/lib/protocol/manifest-source", () => ({ activeManifest: () => ({ network: mocks.network, markets: [MARKET] }) }))
+vi.mock("@/lib/protocol/manifest-source", () => ({ activeManifest: () => ({ network: mocks.network, markets: [MARKET] }), manifestPending: () => false }))
 vi.mock("@/lib/server/manifest", () => ({
   resolvedManifest: async () => ({ network: mocks.network, markets: [MARKET, { ...MARKET, marketId: "testnet-sta-registry" }] }),
 }))
@@ -160,11 +160,11 @@ describe("market page route", () => {
   })
   it("renders the market for a known id", async () => {
     const el = await MarketRoute({ params: Promise.resolve({ marketId: "m1" }) })
-    expect(el.props.marketId).toBe("m1")
+    expect(el!.props.marketId).toBe("m1")
   })
   it("renders a registry market too: known ids are the resolved markets, not only the seeds", async () => {
     const el = await MarketRoute({ params: Promise.resolve({ marketId: "testnet-sta-registry" }) })
-    expect(el.props.marketId).toBe("testnet-sta-registry")
+    expect(el!.props.marketId).toBe("testnet-sta-registry")
     expect(mocks.notFound).not.toHaveBeenCalled()
   })
 })

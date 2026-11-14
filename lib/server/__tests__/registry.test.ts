@@ -212,6 +212,7 @@ import {
   validateMarket,
   MAX_RESUMABLE,
   resumableSalts,
+  sqlRegistryStore,
   type RegistryRow,
   type RegistryStore,
   type SaltRow,
@@ -243,9 +244,11 @@ function memoryStore() {
       const phase = prev && phaseRank[prev.phase] > phaseRank[row.phase] ? prev.phase : row.phase
       salts.set(`${row.factory}:${row.salt}`, { ...row, phase, ledger: Math.max(row.ledger, prev?.ledger ?? 0) })
     },
-    async rows() {
+    async rows(opts) {
       if (store.fail) throw store.fail
-      return [...rows.values()].map((r) => structuredClone(r))
+      const all = [...rows.values()].map((r) => structuredClone(r))
+      // As the SQL store's bounded read: `valid is true`, plus the named pools' own rows.
+      return opts ? all.filter((r) => r.valid === true || opts.listed.includes(r.pool)) : all
     },
     async record(row) {
       store.writes++
@@ -873,6 +876,7 @@ vi.mock("next/server", () => ({ connection: async () => {} }))
 
 import { GET, POST } from "@/app/api/markets/route"
 import { resetPublishLimitsForTests } from "@/lib/server/registry"
+import type { Sql } from "@/lib/server/db"
 
 describe("POST /api/markets", () => {
   const post = (body: unknown, ip = "203.0.113.7") =>
@@ -978,19 +982,86 @@ describe("GET /api/markets", () => {
     ])
     const res = await GET()
     expect(res.status).toBe(200)
-    expect(res.headers.get("cache-control")).toBe("no-store")
     expect((await res.json()).markets.map((m: Market) => m.marketId)).toEqual([seed.marketId, "local-usdy-extra"])
   })
 
-  it("falls back to the seeds when the database is down", async () => {
+  it("is cached 60 s at the CDN when the registry answered (D-26 item 1)", async () => {
+    routeMocks.manifest = manifestWith([seedMarket(chain.deploy(10))])
+    routeMocks.sql.mockReset()
+    routeMocks.sql.mockResolvedValue([])
+    const res = await GET()
+    expect(res.status).toBe(200)
+    expect(res.headers.get("cache-control")).toBe("public, s-maxage=60, stale-while-revalidate=300")
+  })
+
+  it("falls back to the seeds when the database is down, and that answer is never cached", async () => {
     const seed = seedMarket(chain.deploy(10))
     routeMocks.manifest = manifestWith([seed])
     routeMocks.sql.mockReset()
     routeMocks.sql.mockRejectedValue(Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }))
     const res = await GET()
     expect(res.status).toBe(200)
+    expect(res.headers.get("cache-control")).toBe("no-store")
     expect((await res.json()).markets).toEqual([seed])
     expect(error).toHaveBeenCalled()
+  })
+
+  it("an error is 500 failed and never cached", async () => {
+    // A manifest whose markets cannot be read: the route's own failure, not the database's.
+    routeMocks.manifest = Object.defineProperty({ ...manifestWith([]) }, "markets", {
+      get() {
+        throw new Error("boom")
+      },
+    })
+    const res = await GET()
+    expect(res.status).toBe(500)
+    expect(res.headers.get("cache-control")).toBe("no-store")
+    expect(await res.json()).toMatchObject({ error: "failed" })
+  })
+})
+
+describe("bounded registry reads (D-26 item 1)", () => {
+  const sqlOf = () => routeMocks.sql as unknown as Sql
+  const queries = () => routeMocks.sql.mock.calls.map(([strings, ...values]) => ({ text: (strings as string[]).join("?"), values }))
+  const row = (m: Market, valid: boolean | null, source = "discovered") => ({
+    pool: m.contracts.pool,
+    market_id: m.marketId,
+    source,
+    valid,
+    reason: valid === false ? "it did not pass" : null,
+    market: m,
+    updated_at: null,
+  })
+
+  beforeEach(() => {
+    routeMocks.sql.mockReset()
+    routeMocks.sql.mockResolvedValue([])
+  })
+
+  it("resolvedMarkets reads where valid is true, plus the seeds' own rows, never every row", async () => {
+    const seed = seedMarket(chain.deploy(10))
+    await resolvedMarkets({ store: sqlRegistryStore(sqlOf()), manifest: manifestWith([seed]) })
+    const [read] = queries()
+    expect(read.text).toMatch(/from market_registry\s+where valid is true or pool = any\(\?::text\[\]\)/)
+    expect(read.values).toEqual([[seed.contracts.pool]])
+  })
+
+  it("a seed whose verdict is valid = false stays hidden under the bounded read", async () => {
+    const seed = seedMarket(chain.deploy(10))
+    const extra = { ...seedMarket(contractsOf(20)), marketId: "local-usdy-extra" }
+    routeMocks.sql.mockResolvedValue([row(seed, false, "seed"), row(extra, true)])
+    const markets = await resolvedMarkets({ store: sqlRegistryStore(sqlOf()), manifest: manifestWith([seed]) })
+    expect(markets.map((m) => m.marketId)).toEqual(["local-usdy-extra"])
+  })
+
+  it("the recorder's re-check, discovery, publishing and the manager view still read every row, invalid ones too", async () => {
+    const manifest = manifestWith([seedMarket(chain.deploy(10))])
+    const sqlStore = sqlRegistryStore(sqlOf())
+    await revalidate({ store: sqlStore, reader: chain.reader, rpc: chain.rpc, manifest })
+    await invalidMarkets({ store: sqlStore, manifest })
+    const reads = queries().filter((q) => /from market_registry/.test(q.text))
+    expect(reads.length).toBeGreaterThanOrEqual(2)
+    for (const q of reads) expect(q.text).not.toMatch(/where valid/)
   })
 })
 

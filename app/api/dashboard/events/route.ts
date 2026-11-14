@@ -16,9 +16,9 @@ import "server-only"
  * `not_configured` without `DATABASE_URL`, 503 `unavailable` when the database fails). It reads the
  * request, so under Cache Components it runs at request time.
  */
-import { activeManifest } from "@/lib/protocol/manifest-source"
 import { DatabaseConfigError, sql } from "@/lib/server/db"
 import { getEventCounts, getIndexedEvent, getIndexedEvents, INDEX_GROUPS, type IndexGroup } from "@/lib/server/indexer"
+import { deployedManifest } from "@/lib/server/mainnet-pending"
 
 const CACHED = "public, s-maxage=60, stale-while-revalidate=300"
 
@@ -70,7 +70,9 @@ export async function GET(request: Request) {
 
   try {
     // Inside the try: a manifest that cannot be read is a 503, never an unhandled 500.
-    const network = activeManifest().network
+    const manifest = deployedManifest()
+    if (manifest instanceof Response) return manifest
+    const network = manifest.network
     if (id !== null) {
       const event = await getIndexedEvent(sql, { network, id })
       return event ? json({ event }, 200, CACHED) : json({ error: "not_found" }, 404)

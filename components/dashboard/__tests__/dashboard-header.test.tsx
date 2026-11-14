@@ -5,7 +5,7 @@ const mocks = vi.hoisted(() => ({
   network: "testnet" as "testnet" | "local" | "mainnet",
   pathname: "/dashboard",
 }))
-vi.mock("@/lib/protocol/manifest-source", () => ({ activeManifest: () => ({ network: mocks.network }) }))
+vi.mock("@/lib/protocol/manifest-source", () => ({ activeNetwork: () => mocks.network }))
 vi.mock("next/navigation", () => ({ usePathname: () => mocks.pathname }))
 
 import { DashboardHeader } from "../dashboard-header"

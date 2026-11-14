@@ -235,6 +235,40 @@ describe("useRoute", () => {
     expect(step2.deadline).toBe(BigInt(LEDGER + 300))
   })
 
+  describe("step 2's fresh quote against the route preview (D-26 item 4)", () => {
+    const toStep2 = async (preview: { step: number; amount: bigint; token: "pt" } | undefined) => {
+      mocks.exec.execute.mockImplementation(async (review: Review) => success(review, amountOut(998n * S)))
+      const hook = setup()
+      act(() => hook.result.current.start(buyPt, plansFor(buyPt), preview))
+      await untilReview(hook.result, 1)
+      // Step 1 is never compared: its own quote is what the preview showed.
+      expect(hook.result.current.state.quoteWarning).toBeUndefined()
+      act(() => hook.result.current.sign())
+      await untilReview(hook.result, 2)
+      return hook
+    }
+
+    it("warns when step 2's quote (1 010 PT) is below the preview (1 020 PT) by more than 50 bps, and signing stays possible", async () => {
+      const { result } = await toStep2({ step: 2, amount: 1_020n * S, token: "pt" })
+      expect(result.current.state.quoteWarning).toBe(true)
+      // The preview is logged with the run, so a reload still compares.
+      expect(loggedRun()?.preview).toEqual({ step: 2, amount: 1_020n * S, token: "pt" })
+      act(() => result.current.sign())
+      await waitFor(() => expect(result.current.state.phase).toBe("done"))
+      expect(mocks.exec.execute).toHaveBeenCalledTimes(2)
+    })
+
+    it("does not warn within the slippage setting, or without a preview", async () => {
+      const within = await toStep2({ step: 2, amount: 1_012n * S, token: "pt" })
+      expect(within.result.current.state.quoteWarning).toBeUndefined()
+      within.unmount()
+      localStorage.clear()
+      const none = await toStep2(undefined)
+      expect(none.result.current.state.quoteWarning).toBeUndefined()
+      expect(loggedRun()?.preview).toBeUndefined()
+    })
+  })
+
   it("interrupted route reports holdings", async () => {
     mocks.exec.execute.mockImplementation(async (review: Review) => {
       if (review.input.action === "buy_pt") throw new Error("The wallet declined the request.")

@@ -15,9 +15,9 @@ import "server-only"
  * reads no request data, and a prerendered answer would never change.
  */
 import { connection } from "next/server"
-import { activeManifest } from "@/lib/protocol/manifest-source"
 import { listAlerts } from "@/lib/server/alerts"
 import { DatabaseConfigError, sql } from "@/lib/server/db"
+import { deployedManifest } from "@/lib/server/mainnet-pending"
 
 const CACHED = "public, s-maxage=30, stale-while-revalidate=30"
 
@@ -27,7 +27,9 @@ export async function GET() {
   await connection()
   try {
     // Inside the try: a manifest that cannot be read is a 503, never an unhandled 500.
-    const { network } = activeManifest()
+    const manifest = deployedManifest()
+    if (manifest instanceof Response) return manifest
+    const { network } = manifest
     return json(await listAlerts(sql, network), 200, CACHED)
   } catch (error) {
     if (error instanceof DatabaseConfigError) return json({ error: "not_configured" }, 503)

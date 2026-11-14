@@ -6,13 +6,15 @@ import "server-only"
  * the answer is 200 with empty sparks and `stale: true`.
  * Cached 60 s at the CDN (stale-while-revalidate 300 s) when the answer came from the database.
  */
-import { activeManifest } from "@/lib/protocol/manifest-source"
+import { SPARKS_CHUNK } from "@/lib/app/history-types"
 import { sql } from "@/lib/server/db"
 import { getSparks, type Spark } from "@/lib/server/history"
+import { deployedManifest } from "@/lib/server/mainnet-pending"
 import { resolvedMarkets, sqlRegistryStore } from "@/lib/server/registry"
 
 const POOL = /^C[A-Z2-7]{55}$/
-const MAX_POOLS = 50
+/** The client asks for its pools in chunks of this size (`useSparks`, D-26 item 2). */
+const MAX_POOLS = SPARKS_CHUNK
 
 const CACHED = "public, s-maxage=60, stale-while-revalidate=300"
 
@@ -21,6 +23,8 @@ const json = (body: unknown, status = 200, cache = "no-store") =>
   Response.json(body, { status, headers: { "cache-control": cache } })
 
 export async function GET(request: Request) {
+  const manifest = deployedManifest()
+  if (manifest instanceof Response) return manifest
   const raw = new URL(request.url).searchParams.get("pools") ?? ""
   const pools = [...new Set(raw.split(",").filter(Boolean))]
   if (pools.length === 0 || pools.length > MAX_POOLS || !pools.every((p) => POOL.test(p))) {
@@ -29,7 +33,7 @@ export async function GET(request: Request) {
 
   // Seeds and valid registry markets (R2-33): a discovered pool has a maturity too.
   const maturities: Record<string, number> = {}
-  for (const m of await resolvedMarkets({ store: sqlRegistryStore(sql), manifest: activeManifest() })) maturities[m.contracts.pool] = m.maturity
+  for (const m of await resolvedMarkets({ store: sqlRegistryStore(sql), manifest })) maturities[m.contracts.pool] = m.maturity
 
   try {
     const sparks = await getSparks(sql, pools, maturities)

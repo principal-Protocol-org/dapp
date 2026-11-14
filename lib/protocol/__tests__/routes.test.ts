@@ -8,6 +8,7 @@ import { previewDeposit } from "../previews"
 import {
   describeHoldings,
   planRoute,
+  quoteWorseThanPreview,
   resolveStep,
   routeHoldings,
   FLASH_BUY_YT,
@@ -514,5 +515,43 @@ describe("route holdings (spec §4 interruption)", () => {
     const u = unwindFrom(undefined)
     expect(u.available).toBe(false)
     if (!u.available) expect(u.reason).toMatch(/could not read/)
+  })
+})
+
+describe("a later step's fresh quote against the route preview (D-26 item 4)", () => {
+  const S = 10_000_000n
+  const preview = { step: 2, amount: 1_000n * S, token: "pt" as const }
+  const pt = (value: bigint): ActionOutput => ({ kind: "amount", value })
+  const worse = (output: ActionOutput | undefined, over: Partial<Parameters<typeof quoteWorseThanPreview>[0]> = {}) =>
+    quoteWorseThanPreview({ preview, step: 2, action: "buy_pt", output, slippageBps: 50n, ...over })
+
+  it("warns when the step's quote is below the preview by more than the slippage setting", () => {
+    // 50 bps of 1 000 PT is 5 PT: 994.9999999 PT is worse than that, 995 PT is not.
+    expect(worse(pt(995n * S - 1n))).toBe(true)
+    expect(worse(pt(995n * S))).toBe(false)
+    expect(worse(pt(1_010n * S))).toBe(false)
+    // A wider setting tolerates more.
+    expect(worse(pt(990n * S), { slippageBps: 100n })).toBe(false)
+  })
+
+  it("compares only the step the preview names, in the token it names", () => {
+    expect(worse(pt(900n * S), { step: 1 })).toBe(false)
+    expect(worse(pt(900n * S), { step: 3 })).toBe(false)
+    // A deposit pays SY, not the PT the preview names.
+    expect(worse(pt(900n * S), { action: "deposit" })).toBe(false)
+    expect(worse(undefined)).toBe(false)
+    expect(worse(pt(900n * S), { preview: undefined })).toBe(false)
+  })
+
+  it("reads each later step's own output: YT out, LP minted, USDY withdrawn or redeemed", () => {
+    const yt = { ...preview, token: "yt" as const }
+    expect(worse({ kind: "buy_yt", yt_out: 900n * S, sy_back: 5n * S }, { preview: yt, action: "buy_yt" })).toBe(true)
+    const lp = { ...preview, token: "lp" as const }
+    expect(worse({ kind: "add_liquidity", pt_used: 1n, sy_used: 1n, lp: 900n * S }, { preview: lp, action: "add_liquidity_sy" })).toBe(true)
+    const usdy = { ...preview, token: "underlying" as const }
+    expect(worse(pt(900n * S), { preview: usdy, action: "withdraw" })).toBe(true)
+    expect(worse({ kind: "redeem", underlying_from_pt: 600n * S, underlying_from_yt: 400n * S }, { preview: usdy, action: "redeem" })).toBe(false)
+    // Removing liquidity pays two tokens: never compared.
+    expect(worse({ kind: "remove_liquidity", pt: 1n, sy: 1n }, { preview: { ...preview, token: "sy" }, action: "remove_liquidity" })).toBe(false)
   })
 })

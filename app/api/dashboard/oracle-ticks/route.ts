@@ -15,8 +15,8 @@ import "server-only"
  * `not_configured` without `DATABASE_URL`, 503 `unavailable` when the database fails). It reads the
  * request, so under Cache Components it runs at request time.
  */
-import { activeManifest } from "@/lib/protocol/manifest-source"
 import { DatabaseConfigError, sql } from "@/lib/server/db"
+import { deployedManifest } from "@/lib/server/mainnet-pending"
 import { keeperHealth, listTicks, ORACLE_TICK_INTERVAL_SECONDS } from "@/lib/server/oracle-ticks"
 
 const CACHED = "public, s-maxage=60, stale-while-revalidate=300"
@@ -33,7 +33,8 @@ export async function GET(request: Request) {
 
   try {
     // Inside the try: a manifest that cannot be read is a 503, never an unhandled 500.
-    const manifest = activeManifest()
+    const manifest = deployedManifest()
+    if (manifest instanceof Response) return manifest
     const { network } = manifest
     const oracle = manifest.shared.oracle
     const [ticks, health] = await Promise.all([

@@ -370,7 +370,8 @@ function AssetGroup({
   ledgerTime: number | null
   clockLoading: boolean
   defaultOpen: boolean
-  sparks: { map: Record<string, Spark> | undefined; isPending: boolean; failed: boolean }
+  /** `failed`: every pool's sparks failed (the whole read), else only those in `failedPools` (their chunk). */
+  sparks: { map: Record<string, Spark> | undefined; isPending: boolean; failed: boolean; failedPools: ReadonlySet<string> }
 }) {
   const [open, setOpen] = useState(defaultOpen)
   const listId = useId()
@@ -442,7 +443,11 @@ function AssetGroup({
               slot={slots[i]}
               ledgerTime={ledgerTime}
               clockLoading={clockLoading}
-              sparks={{ spark: sparks.map?.[market.contracts.pool], isPending: sparks.isPending, failed: sparks.failed }}
+              sparks={{
+                spark: sparks.map?.[market.contracts.pool],
+                isPending: sparks.isPending,
+                failed: sparks.failed || sparks.failedPools.has(market.contracts.pool),
+              }}
             />
           ))}
         </ul>
@@ -450,6 +455,8 @@ function AssetGroup({
     </li>
   )
 }
+
+const NO_POOLS: ReadonlySet<string> = new Set()
 
 export function MarketGroups() {
   const manifest = useManifest()
@@ -479,7 +486,12 @@ export function MarketGroups() {
             ledgerTime={ledgerTime}
             clockLoading={clockLoading}
             defaultOpen={groups.length === 1}
-            sparks={{ map: sparks.data?.sparks, isPending: sparks.isPending && sparks.fetchStatus !== "idle", failed: sparks.isError }}
+            sparks={{
+              map: sparks.data?.sparks,
+              isPending: sparks.isPending && sparks.fetchStatus !== "idle",
+              failed: sparks.isError,
+              failedPools: sparks.data?.failed ?? NO_POOLS,
+            }}
           />
         ))}
       </ul>

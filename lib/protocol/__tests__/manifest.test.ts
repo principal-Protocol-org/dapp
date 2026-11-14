@@ -5,7 +5,8 @@ import { describe, expect, it } from "vitest"
 import testnetJson from "@/lib/protocol/__tests__/fixtures/testnet-interim.json"
 import committedTestnetJson from "@/config/manifests/testnet.json"
 import localExample from "@/config/manifests/local.example.json"
-import { getMarket, parseManifest, validateManifest } from "../manifest"
+import mainnetJson from "@/config/manifests/mainnet.json"
+import { getMarket, MainnetPendingError, parseManifest, validateManifest } from "../manifest"
 import type { Manifest } from "../types"
 
 const testnet = (): Manifest => parseManifest(structuredClone(testnetJson))
@@ -231,5 +232,49 @@ describe("manifest monitoring fields", () => {
     for (const s of m.oracleSources ?? []) {
       expect(createHash("sha256").update(s.preimage).digest("hex")).toBe(s.hash)
     }
+  })
+})
+
+describe("deployLedger off local (Task 2, carried to Task 11)", () => {
+  const base = () => structuredClone(committedTestnetJson) as Record<string, unknown>
+
+  it("refuses a testnet or mainnet manifest without deployLedger", () => {
+    const testnetFile = base()
+    delete testnetFile.deployLedger
+    expect(() => parseManifest(testnetFile)).toThrow(/deployLedger: Required on testnet/)
+    const mainnetFile: Record<string, unknown> = { ...base(), network: "mainnet", networkPassphrase: "Public Global Stellar Network ; September 2015" }
+    delete mainnetFile.deployLedger
+    expect(() => parseManifest(mainnetFile)).toThrow(/deployLedger: Required on mainnet/)
+  })
+
+  it("leaves it optional on local", () => {
+    expect(parseManifest(localExample).deployLedger).toBeUndefined()
+  })
+
+  it("the committed testnet.json carries it", () => {
+    expect(parseManifest(committedTestnetJson).deployLedger).toBe(5707342)
+  })
+})
+
+describe("the pending Mainnet stub (D-24)", () => {
+  it("is exactly { network: mainnet, pending: true } and parses to MainnetPendingError", () => {
+    expect(mainnetJson).toEqual({ network: "mainnet", pending: true })
+    expect(() => parseManifest(mainnetJson)).toThrow(MainnetPendingError)
+    expect(() => parseManifest(mainnetJson)).toThrow("Mainnet contracts are not deployed yet.")
+  })
+
+  it("refuses a pending stub that carries an address or a market", () => {
+    const withShared = { network: "mainnet", pending: true, shared: { router: "C".padEnd(56, "A") } }
+    const withMarkets = { network: "mainnet", pending: true, markets: [] }
+    const withRpc = { network: "mainnet", pending: true, rpcUrl: "https://rpc.example.org" }
+    for (const stub of [withShared, withMarkets, withRpc]) {
+      expect(() => parseManifest(stub)).toThrow(/Invalid manifest: a pending stub/)
+      expect(() => parseManifest(stub)).not.toThrow(MainnetPendingError)
+    }
+  })
+
+  it("refuses a pending stub for another network, and a full manifest that says pending", () => {
+    expect(() => parseManifest({ network: "testnet", pending: true })).toThrow(/Invalid manifest: a pending stub/)
+    expect(() => parseManifest({ ...structuredClone(committedTestnetJson), pending: false })).toThrow(/Invalid manifest: a pending stub/)
   })
 })

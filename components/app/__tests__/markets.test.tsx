@@ -244,6 +244,14 @@ describe("MarketGroups", () => {
     expect(within(card).getAllByText("Unavailable").length).toBeGreaterThanOrEqual(2)
   })
 
+  it("a failed sparks chunk marks only its own pools' sparks unavailable (D-26 item 2)", () => {
+    mocks.sparks = { sparks: { [POOL1]: spark() }, stale: false, failed: new Set([POOL2]) }
+    renderList()
+    const sparkTip = { name: "More about Fixed APY, 30 d (unavailable)" }
+    expect(within(marketCard("m1")).queryByRole("button", sparkTip)).toBeNull()
+    expect(within(marketCard("m2")).getByRole("button", sparkTip)).toBeTruthy()
+  })
+
   it("shows the window since the first point when history is shorter than 7 days (R2-44)", () => {
     mocks.history = {
       [POOL1]: history({

@@ -382,8 +382,8 @@ describe("/dashboard/markets/[marketId]", () => {
       await expect(DashboardMarketRoute({ params: Promise.resolve({ marketId: "nope" }) })).rejects.toThrow("NEXT_NOT_FOUND")
       expect(mocks.notFound).toHaveBeenCalledTimes(1)
       const element = await DashboardMarketRoute({ params: Promise.resolve({ marketId: market.marketId }) })
-      expect(element.type).toBe(MarketPanel)
-      expect(element.props).toEqual({ marketId: market.marketId })
+      expect(element!.type).toBe(MarketPanel)
+      expect(element!.props).toEqual({ marketId: market.marketId })
     })
 
     it("the dashboard's not-found page points back to the markets", () => {

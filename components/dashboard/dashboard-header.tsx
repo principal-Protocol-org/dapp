@@ -6,7 +6,7 @@ import { Container } from "@/components/landing/layout"
 import { ThemeToggle } from "@/components/landing/theme-toggle"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { activeManifest } from "@/lib/protocol/manifest-source"
+import { activeNetwork } from "@/lib/protocol/manifest-source"
 import type { Network } from "@/lib/protocol/types"
 // DASHBOARD_NAV lives in the client module `./dashboard-nav`: import it from there (a server module
 // re-exporting a client module's constant would hand server code a client reference, not the array).
@@ -32,7 +32,8 @@ function NetworkBadge({ network, className }: { network: Network; className?: st
  * links, so the first row keeps the logo, the theme switch and "Open the app" within 375 px.
  */
 export function DashboardHeader() {
-  const { network } = activeManifest()
+  // The network alone (never the parsed manifest): the header frames the pending Mainnet page too.
+  const network = activeNetwork()
   return (
     <header className="sticky top-0 z-20 border-b border-line bg-ground/86 backdrop-blur-md">
       <Container className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 py-2 min-[900px]:min-h-16">

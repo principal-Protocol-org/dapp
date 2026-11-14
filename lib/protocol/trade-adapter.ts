@@ -51,7 +51,7 @@ import { settlementOf } from "./position"
 import { previewAddLiquidity, previewAddLiquiditySingleSy, previewDeposit, previewMint, previewRecombine, previewRedeemPt, previewRemoveLiquidity, previewSellYt, previewWithdraw } from "./previews"
 import { priceImpactPpm, ptSpot, ytSpot, type Spot } from "./prices"
 import { apyAfterTrade, effectiveFixedApy, effectiveImpliedApy, fixedPayoffUsd, leverage } from "./rates"
-import { planRoute, singleStepFor, type RouteContext, type RouteDisabled, type RouteKind, type RouteRequest, type StepPlan, type Token } from "./routes"
+import { planRoute, singleStepFor, type RouteContext, type RouteDisabled, type RouteKind, type RouteRequest, type StepPlan, type StepPreview, type Token } from "./routes"
 import type { Live } from "./types"
 import { solveBuyYt, type YtSolution } from "./yt-solver"
 
@@ -1058,6 +1058,42 @@ function planKeepYt(req: TradeRequest, ctx: PlanContext, route: RouteRequest, ba
 }
 
 export const currentContractsAdapter: TradeAdapter = { quote, plan }
+
+/**
+ * The route preview's figure for the later step whose own output is the trade's `out` (D-26 item 4),
+ * so the step review can warn when that step's fresh quote is worse by more than the slippage
+ * setting. Undefined for a one-step route, and where no single step makes `out`: an LP withdraw to SY
+ * (the SY removed plus the sale's), one after maturity (the redeem plus a withdraw).
+ */
+export function stepPreview(req: TradeRequest, q: TradeQuote, plans: StepPlan[]): StepPreview | undefined {
+  if (plans.length < 2 || q.out <= 0n) return undefined
+  const at = (action: ActionId) => plans.findIndex((p) => p.action === action) + 1
+  const last = plans.length
+  const lastIs = (action: ActionId) => plans[last - 1].action === action
+  let step = 0
+  switch (req.kind) {
+    case "buy_pt":
+      step = at("buy_pt")
+      break
+    case "buy_yt":
+      step = at("buy_yt")
+      break
+    case "lp_keep_yt":
+      step = at("add_liquidity")
+      break
+    case "lp_only":
+      step = at("add_liquidity_sy")
+      break
+    case "sell_pt":
+    case "sell_yt":
+      step = req.receive === "underlying" && lastIs("withdraw") ? last : 0
+      break
+    case "lp_withdraw":
+      step = req.receive === "underlying" && lastIs("withdraw") && !plans.some((p) => p.action === "redeem") ? last : 0
+      break
+  }
+  return step >= 2 ? { step, amount: q.out, token: q.outToken } : undefined
+}
 
 // ---------------------------------------------------------------------------------------------
 // Max

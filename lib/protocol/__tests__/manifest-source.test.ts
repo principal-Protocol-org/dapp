@@ -2,7 +2,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 import localJson from "@/config/manifests/local.json"
 import testnetJson from "@/config/manifests/testnet.json"
-import { activeManifest } from "../manifest-source"
+import { MainnetPendingError } from "../manifest"
+import { activeManifest, activeNetwork, manifestPending } from "../manifest-source"
 
 afterEach(() => {
   vi.unstubAllEnvs()
@@ -26,8 +27,29 @@ describe("activeManifest (M8)", () => {
   })
 
   it("refuses an unknown network every time, never caching the failure", () => {
-    vi.stubEnv("NEXT_PUBLIC_PRINCIPAL_NETWORK", "mainnet")
-    expect(() => activeManifest()).toThrow('NEXT_PUBLIC_PRINCIPAL_NETWORK must be "testnet" or "local", got "mainnet".')
+    vi.stubEnv("NEXT_PUBLIC_PRINCIPAL_NETWORK", "futurenet")
+    expect(() => activeManifest()).toThrow('NEXT_PUBLIC_PRINCIPAL_NETWORK must be "testnet", "local" or "mainnet", got "futurenet".')
     expect(() => activeManifest()).toThrow("must be")
+    expect(() => activeNetwork()).toThrow("must be")
+  })
+})
+
+describe("the Mainnet branch (D-24)", () => {
+  it("throws MainnetPendingError for the committed stub, every time", () => {
+    vi.stubEnv("NEXT_PUBLIC_PRINCIPAL_NETWORK", "mainnet")
+    expect(() => activeManifest()).toThrow(MainnetPendingError)
+    expect(() => activeManifest()).toThrow("Mainnet contracts are not deployed yet.")
+    expect(manifestPending()).toBe(true)
+  })
+
+  it("names the network without parsing its manifest, for the static shell", () => {
+    vi.stubEnv("NEXT_PUBLIC_PRINCIPAL_NETWORK", "mainnet")
+    expect(activeNetwork()).toBe("mainnet")
+    vi.stubEnv("NEXT_PUBLIC_PRINCIPAL_NETWORK", "local")
+    expect(activeNetwork()).toBe("local")
+    expect(manifestPending()).toBe(false)
+    vi.stubEnv("NEXT_PUBLIC_PRINCIPAL_NETWORK", undefined)
+    expect(activeNetwork()).toBe("testnet")
+    expect(manifestPending()).toBe(false)
   })
 })

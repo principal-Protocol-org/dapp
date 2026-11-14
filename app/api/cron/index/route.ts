@@ -11,11 +11,11 @@ import "server-only"
  * It reads the request and touches the network, so under Cache Components it runs at request time
  * and is never prerendered. No `runtime` export: the default Node.js runtime.
  */
-import { activeManifest } from "@/lib/protocol/manifest-source"
 import { createRpcServer } from "@/lib/protocol/stellar"
 import { DatabaseConfigError, sql } from "@/lib/server/db"
 import { cronAuthorized, cronJson as json } from "@/lib/server/cron-auth"
 import { indexEvents } from "@/lib/server/indexer"
+import { deployedManifest } from "@/lib/server/mainnet-pending"
 import { resolvedMarkets, sqlRegistryStore } from "@/lib/server/registry"
 
 // Pages of 200 events per group until the deadline, then one record_count read per escrow.
@@ -30,7 +30,8 @@ export async function GET(request: Request) {
   if (!(await cronAuthorized(request))) return json({ error: "unauthorized" }, 401)
 
   const deadline = Date.now() + BUDGET_MS
-  const manifest = activeManifest()
+  const manifest = deployedManifest()
+  if (manifest instanceof Response) return manifest
   try {
     const markets = await resolvedMarkets({ store: sqlRegistryStore(sql), manifest, timeoutMs: ROWS_TIMEOUT_MS })
     const result = await indexEvents({ sql, rpc: createRpcServer(manifest.rpcUrl), manifest, markets }, { deadline })

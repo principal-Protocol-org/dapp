@@ -15,7 +15,7 @@ import { previewAddLiquidity, previewAddLiquiditySingleSy, previewDeposit, previ
 import { priceImpactPpm, ptSpot } from "../prices"
 import { effectiveFixedApy, effectiveImpliedApy, fixedPayoffUsd, leverage } from "../rates"
 import { planRoute, resolveStep, type RouteRequest, type StepPlan } from "../routes"
-import { currentContractsAdapter, maxSpend, sizeKeepYtShares, toRouteRequest, type PlanContext, type TradeQuote, type TradeRequest } from "../trade-adapter"
+import { currentContractsAdapter, maxSpend, sizeKeepYtShares, stepPreview, toRouteRequest, type PlanContext, type TradeQuote, type TradeRequest } from "../trade-adapter"
 import type { Live } from "../types"
 import { solveBuyYt, type YtSolution } from "../yt-solver"
 
@@ -1284,5 +1284,38 @@ describe("trade adapter #1 — LP withdraw to USDY in one call (R5-6)", () => {
     const plans = currentContractsAdapter.plan(withdrawLp("underlying"), { ...ALL, ms }) as StepPlan[]
     const q = quoted(quote(withdrawLp("underlying"), { ms, plans, firstStep: { action: "remove_liquidity_underlying", output: { kind: "amount", value: 7_654_321_000n } } }))
     expect(q).toMatchObject({ out: 7_654_321_000n, exactness: "simulated", minOut: minAfterSlippage(7_654_321_000n, 50n) })
+  })
+})
+
+describe("the route preview a later step's fresh quote is checked against (D-26 item 4)", () => {
+  const previewFor = (req: TradeRequest, ms: MarketState = market()) => {
+    const plans = plansFor(req, ms)
+    return { plans, preview: stepPreview(req, quoted(quote(req, { ms, plans })), plans) }
+  }
+
+  it("Buy PT with USDY: step 2's PT is the preview's PT out", () => {
+    const { plans, preview } = previewFor(buy("underlying"))
+    expect(plans.map((p) => p.action)).toEqual(["deposit", "buy_pt"])
+    expect(preview).toEqual({ step: 2, amount: quoted(quote(buy("underlying"))).out, token: "pt" })
+  })
+
+  it("Sell PT to USDY: step 2's withdraw is the preview's USDY out", () => {
+    const { plans, preview } = previewFor(sell("underlying"))
+    expect(plans.map((p) => p.action)).toEqual(["sell_pt", "withdraw"])
+    expect(preview).toMatchObject({ step: 2, token: "underlying" })
+  })
+
+  it("LP withdraw to USDY: the last withdraw; to SY or after maturity no single step makes the out, so no preview", () => {
+    expect(previewFor(withdrawLp("underlying")).preview).toMatchObject({ step: 3, token: "underlying" })
+    expect(previewFor(withdrawLp("sy")).preview).toBeUndefined()
+    const matured = market({ poolState: live({ ...A, secondsToMaturity: 0n }), settledRate: live(ORACLE) })
+    const plans = currentContractsAdapter.plan(withdrawLp("underlying"), { ...CTX, matured: true, ms: matured }) as StepPlan[]
+    expect(plans.map((p) => p.action)).toContain("redeem")
+    expect(stepPreview(withdrawLp("underlying"), quoted(quote(withdrawLp("underlying"), { ms: matured, plans })), plans)).toBeUndefined()
+  })
+
+  it("a one-step route has no later step", () => {
+    const plans = oneStep(buy("underlying"))
+    expect(stepPreview(buy("underlying"), quoted(quote(buy("underlying"), { plans })), plans)).toBeUndefined()
   })
 })

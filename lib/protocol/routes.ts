@@ -1,6 +1,6 @@
 import type { ActionId } from "./actions"
 import { formatAmount } from "./format"
-import type { ActionOutput } from "./guards"
+import { minAfterSlippage, type ActionOutput } from "./guards"
 import { previewDeposit } from "./previews"
 
 /**
@@ -364,6 +364,60 @@ export function resolveStep(
     ...(plan.secondaryAmount ? { secondaryAmount: resolveSource(plan.secondaryAmount, input, outputs) } : {}),
     ...(plan.desired ? { desired: plan.desired } : {}),
   }
+}
+
+// --- A later step's fresh quote against the route preview (D-26 item 4) ---
+
+/**
+ * What the route preview showed for the output of one of its steps (1-based), in `token`: the figure
+ * a later step's fresh quote is checked against. Set only where one step alone makes the preview's
+ * figure (`stepPreview` in the trade adapter); a route without it is never compared.
+ */
+export type StepPreview = { step: number; amount: bigint; token: Holding }
+
+/** The one token a step's output pays, and how much: undefined when it pays two (a removal) or does not belong to the action. */
+function stepTakes(action: ActionId, out: ActionOutput): { token: Holding; amount: bigint } | undefined {
+  const value = out.kind === "amount" ? out.value : undefined
+  switch (action) {
+    case "deposit":
+    case "sell_pt":
+    case "sell_yt":
+    case "recombine":
+      return value === undefined ? undefined : { token: "sy", amount: value }
+    case "withdraw":
+      return value === undefined ? undefined : { token: "underlying", amount: value }
+    case "buy_pt":
+      return value === undefined ? undefined : { token: "pt", amount: value }
+    case "buy_yt":
+      return out.kind === "buy_yt" ? { token: "yt", amount: out.yt_out } : undefined
+    case "add_liquidity":
+    case "add_liquidity_sy":
+      return out.kind === "add_liquidity" ? { token: "lp", amount: out.lp } : undefined
+    case "redeem":
+      return out.kind === "redeem" ? { token: "underlying", amount: out.underlying_from_pt + out.underlying_from_yt } : undefined
+    default:
+      return undefined
+  }
+}
+
+/**
+ * A later step is signed with the floor from its own fresh simulation, which the step review shows.
+ * True when that quote (`output`, of step `step`) is worse than the route preview's figure for the
+ * step by more than the slippage setting: the review then warns, and the user may still sign. False
+ * whenever the two cannot be compared (no preview, another step, another token): never a guess.
+ */
+export function quoteWorseThanPreview(p: {
+  preview: StepPreview | undefined
+  step: number
+  action: ActionId
+  output: ActionOutput | undefined
+  slippageBps: bigint
+}): boolean {
+  const { preview, output } = p
+  if (!preview || !output || p.step < 2 || preview.step !== p.step || preview.amount <= 0n) return false
+  const quote = stepTakes(p.action, output)
+  if (!quote || quote.token !== preview.token) return false
+  return quote.amount < minAfterSlippage(preview.amount, p.slippageBps)
 }
 
 // --- What an interrupted route leaves with the user (spec §4 "Interruption") ---

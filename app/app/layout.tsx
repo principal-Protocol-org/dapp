@@ -4,8 +4,10 @@ import { ManifestProvider } from "@/components/app/manifest-provider"
 import { Providers } from "@/components/app/providers"
 import { AppHeader } from "@/components/app/shell/app-header"
 import { AppShellFallback } from "@/components/app/shell/app-shell-fallback"
+import { MainnetPendingApp } from "@/components/app/shell/mainnet-pending"
 import { TestnetBanner } from "@/components/app/shell/testnet-banner"
 import { Container } from "@/components/landing/layout"
+import { manifestPending } from "@/lib/protocol/manifest-source"
 import { resolvedManifest } from "@/lib/server/manifest"
 
 export const metadata: Metadata = {
@@ -32,7 +34,12 @@ async function ResolvedApp({ children }: { children: React.ReactNode }) {
   )
 }
 
+/**
+ * While the Mainnet manifest is the pending stub (D-24), `/app` is one static page saying so: no
+ * page below it renders, and nothing is read.
+ */
 export default function AppLayout({ children }: { children: React.ReactNode }) {
+  if (manifestPending()) return <MainnetPendingApp />
   return (
     <>
       <TestnetBanner />

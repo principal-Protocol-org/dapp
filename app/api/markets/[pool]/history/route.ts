@@ -7,9 +7,9 @@ import "server-only"
  * pool that is not a known market (a seed or a valid registry market, R2-33) is 404. Params are
  * async in this Next; the route is dynamic.
  */
-import { activeManifest } from "@/lib/protocol/manifest-source"
 import { sql } from "@/lib/server/db"
 import { getHistory, RANGES, type MarketHistory, type Range } from "@/lib/server/history"
+import { deployedManifest } from "@/lib/server/mainnet-pending"
 import { resolvedMarkets, sqlRegistryStore } from "@/lib/server/registry"
 
 const POOL = /^C[A-Z2-7]{55}$/
@@ -23,12 +23,14 @@ const json = (body: unknown, status = 200, cache = "no-store") =>
 const EMPTY: MarketHistory = { fixedApy: [], underlyingApy7d: [], liquidity: [], latestAt: null, stale: true, underlyingWindowSeconds: null }
 
 export async function GET(request: Request, { params }: { params: Promise<{ pool: string }> }) {
+  const manifest = deployedManifest()
+  if (manifest instanceof Response) return manifest
   const { pool } = await params
   const range = new URL(request.url).searchParams.get("range") ?? "7d"
   if (!POOL.test(pool)) return json({ error: "invalid_pool" }, 400)
   if (!RANGES.includes(range as Range)) return json({ error: "invalid_range" }, 400)
 
-  const markets = await resolvedMarkets({ store: sqlRegistryStore(sql), manifest: activeManifest() })
+  const markets = await resolvedMarkets({ store: sqlRegistryStore(sql), manifest })
   const market = markets.find((m) => m.contracts.pool === pool)
   if (!market) return json({ error: "unknown_market" }, 404)
 

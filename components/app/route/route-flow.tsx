@@ -13,7 +13,7 @@ import { useRoute, type UseRouteOptions } from "@/hooks/use-route"
 import { noticeForError, noticeForResult, type TxNotice } from "@/lib/app/tx-notice"
 import type { Blocker } from "@/lib/protocol/gates"
 import type { RestoreReview } from "@/lib/protocol/review"
-import type { RouteKind, RouteRequest, StepPlan } from "@/lib/protocol/routes"
+import type { RouteKind, RouteRequest, StepPlan, StepPreview } from "@/lib/protocol/routes"
 import { useManifest } from "@/components/app/manifest-provider"
 
 export type RouteFlowProps = {
@@ -36,6 +36,11 @@ export type RouteFlowProps = {
   /** The route the form builds, for the button's label while `request` is still null. */
   kind?: RouteKind
   plans: StepPlan[]
+  /**
+   * The trade's preview of a later step's output (`stepPreview`), logged with the run: that step's
+   * review warns when its fresh quote is worse by more than the slippage setting (D-26 item 4).
+   */
+  preview?: StepPreview
   /** The form is valid and every gate passes for starting. */
   canStart: boolean
   /** Why starting is off (shown while idle). */
@@ -155,7 +160,11 @@ export function RouteFlow(props: RouteFlowProps) {
   }
 
   const reviewing = state.phase === "reviewing" || state.phase === "signing"
-  const start = () => props.request && route.start(props.request, props.plans)
+  const start = () => {
+    if (!props.request) return
+    if (props.preview) route.start(props.request, props.plans, props.preview)
+    else route.start(props.request, props.plans)
+  }
   // A closed form keeps the route mounted, so a run resumed from the log shows; until then, nothing.
   if (state.phase === "idle" && props.showStart === false) return null
 
@@ -195,6 +204,7 @@ export function RouteFlow(props: RouteFlowProps) {
           phase={state.phase as "reviewing" | "signing"}
           signing={state.phase === "signing"}
           blockers={state.blockers ?? []}
+          quoteWarning={state.quoteWarning === true}
           onSign={route.sign}
           onClose={route.dismiss}
         />

@@ -1,3 +1,4 @@
+import { StrKey } from "@stellar/stellar-sdk"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { renderHook, waitFor } from "@testing-library/react"
 import type { ReactNode } from "react"
@@ -39,5 +40,49 @@ describe("useSparks", () => {
     const { result } = renderHook(() => useSparks([POOL]), { wrapper })
     await waitFor(() => expect(result.current.data?.sparks[POOL].changePts).toBeNull())
     expect(fetchMock).toHaveBeenCalledWith(`/api/markets/sparks?pools=${POOL}`)
+    expect(result.current.data?.failed.size).toBe(0)
+  })
+
+  // 120 distinct contract ids, sorted as the hook sorts them.
+  const pools = Array.from({ length: 120 }, (_, i) => StrKey.encodeContract(Buffer.alloc(32, i + 1))).sort()
+  const poolsOf = (url: string) => new URL(url, "http://x").searchParams.get("pools")!.split(",")
+  const spark = { points: [], changePts: 0.5, stale: false }
+
+  it("asks for 120 pools in 3 requests of at most 50, and merges the answers (D-26 item 2)", async () => {
+    const fetchMock = vi.fn(async (url: string) => Response.json({ sparks: Object.fromEntries(poolsOf(url).map((p) => [p, spark])), stale: false }))
+    vi.stubGlobal("fetch", fetchMock)
+    const { result } = renderHook(() => useSparks(pools), { wrapper })
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    const asked = fetchMock.mock.calls.map(([url]) => poolsOf(url))
+    expect(asked.map((c) => c.length)).toEqual([50, 50, 20])
+    expect(asked.flat()).toEqual(pools)
+    expect(Object.keys(result.current.data!.sparks)).toHaveLength(120)
+    expect(result.current.data!.failed.size).toBe(0)
+  })
+
+  it("a failed chunk marks only its own pools as failed", async () => {
+    const second = new Set(pools.slice(50, 100))
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        const asked = poolsOf(url)
+        if (second.has(asked[0])) return new Response("{}", { status: 500 })
+        return Response.json({ sparks: Object.fromEntries(asked.map((p) => [p, spark])), stale: false })
+      }),
+    )
+    const { result } = renderHook(() => useSparks(pools), { wrapper })
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+    const data = result.current.data!
+    expect([...data.failed].sort()).toEqual([...second].sort())
+    expect(Object.keys(data.sparks)).toHaveLength(70)
+    expect(data.sparks[pools[0]]).toEqual(spark)
+    expect(data.sparks[pools[60]]).toBeUndefined()
+  })
+
+  it("is an error only when every chunk failed", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("{}", { status: 500 })))
+    const { result } = renderHook(() => useSparks(pools), { wrapper })
+    await waitFor(() => expect(result.current.isError).toBe(true))
   })
 })

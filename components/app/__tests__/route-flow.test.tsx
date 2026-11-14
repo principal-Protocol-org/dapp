@@ -126,6 +126,32 @@ describe("RouteFlow", () => {
     expect(controls.start).toHaveBeenCalledWith(REQUEST, PLANS)
   })
 
+  it("starts the route with the trade's preview, for the later steps' quote check (D-26 item 4)", () => {
+    setup({})
+    const preview = { step: 2, amount: 50n, token: "yt" as const }
+    render(<RouteFlow {...base} preview={preview} />)
+    fireEvent.click(screen.getByRole("button", { name: "Review Buy YT" }))
+    expect(controls.start).toHaveBeenCalledWith(REQUEST, PLANS, preview)
+  })
+
+  it("a later step's quote worse than the preview shows the warning above the sign button, and Sign stays on (D-26 item 4)", () => {
+    const WARNING = "This step's quote is worse than the route preview by more than your slippage setting."
+    setup({ phase: "reviewing", step: 2, of: 3, run: run(["confirmed", "pending", "pending"]), review: review(), quoteWarning: true })
+    render(<RouteFlow {...base} />)
+    const warning = screen.getByText(WARNING)
+    const sign = screen.getByRole("button", { name: "Sign step 2 of 3" }) as HTMLButtonElement
+    expect(warning.compareDocumentPosition(sign) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(sign.disabled).toBe(false)
+    fireEvent.click(sign)
+    expect(controls.sign).toHaveBeenCalled()
+  })
+
+  it("no warning when the step's quote is within the slippage setting", () => {
+    setup({ phase: "reviewing", step: 2, of: 3, run: run(["confirmed", "pending", "pending"]), review: review() })
+    render(<RouteFlow {...base} />)
+    expect(screen.queryByText(/worse than the route preview/)).toBeNull()
+  })
+
   it('sign button reads "Sign step 1 of 3" and signs', () => {
     setup({ phase: "reviewing", step: 1, of: 3, run: run(["pending", "pending", "pending"]), review: review() })
     render(<RouteFlow {...base} />)

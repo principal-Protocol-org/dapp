@@ -96,7 +96,13 @@ export type SaltRow = { factory: string; salt: string; underlying: string; phase
 type SaltEvent = Omit<SaltRow, "underlying">
 
 export type RegistryStore = {
-  rows(): Promise<RegistryRow[]>
+  /**
+   * Every row, invalid ones too (discovery, re-validation, publishing, the manager view). With
+   * `listed`, the bounded read pages use (D-26 item 1): the rows with `valid = true`, plus those
+   * pools' own rows (the seeds), so a seed whose verdict is `valid = false` stays hidden. Junk
+   * factory markets add invalid rows that this read never returns.
+   */
+  rows(opts?: { listed: string[] }): Promise<RegistryRow[]>
   /** The salts `factory` started, newest first (by the ledger of the furthest phase seen). */
   salts(factory: string): Promise<SaltRow[]>
   /** Upserts by factory and salt, keeping the furthest phase and the latest ledger. */
@@ -822,14 +828,22 @@ function currentPins(manifest: Manifest): Record<string, string> | undefined {
  * manifest's Router and oracle (a row left from another deployment is not listed). Ids are unique,
  * seeds first. A registry market carries the manifest's current pins, never stored ones: the
  * restore path trusts them (R29b, R2-40). With the database down, not configured, or slower than
- * `timeoutMs`, the seeds alone (R2-36, R2-40).
+ * `timeoutMs`, the seeds alone (R2-36, R2-40), and `fromRegistry` is false.
+ *
+ * The registry read is bounded (D-26 item 1): `where valid is true`, plus the seeds' own rows for
+ * their verdicts. Invalid rows are never read here.
  */
-export async function resolvedMarkets(deps: { store: RegistryStore; manifest: Manifest; timeoutMs?: number }): Promise<Market[]> {
+export async function listedMarkets(deps: {
+  store: RegistryStore
+  manifest: Manifest
+  timeoutMs?: number
+}): Promise<{ markets: Market[]; fromRegistry: boolean }> {
   const { store, manifest } = deps
   const seeds = manifest.markets
+  const seedPools = new Set(seeds.map((m) => m.contracts.pool))
   let rows: RegistryRow[]
   try {
-    rows = await within(store.rows(), deps.timeoutMs ?? ROWS_TIMEOUT_MS)
+    rows = await within(store.rows({ listed: [...seedPools] }), deps.timeoutMs ?? ROWS_TIMEOUT_MS)
   } catch (error) {
     if (error instanceof RegistryTimeout) console.error("registry: the markets read timed out; listing the manifest seeds")
     else if (!(error instanceof DatabaseConfigError)) console.error(`registry: markets could not be read (${dbCode(error)}); listing the manifest seeds`)
@@ -837,11 +851,10 @@ export async function resolvedMarkets(deps: { store: RegistryStore; manifest: Ma
       loggedNotConfigured = true
       console.error("registry: DATABASE_URL is not set; listing the manifest seeds")
     }
-    return seeds
+    return { markets: seeds, fromRegistry: false }
   }
   const pins = currentPins(manifest)
   const verdicts = new Map(rows.map((r) => [r.pool, r.valid]))
-  const seedPools = new Set(seeds.map((m) => m.contracts.pool))
   const listed = seeds.filter((m) => verdicts.get(m.contracts.pool) !== false)
   const ids = new Set(seeds.map((m) => m.marketId))
   for (const row of rows) {
@@ -862,7 +875,12 @@ export async function resolvedMarkets(deps: { store: RegistryStore; manifest: Ma
     if (pins) current.wasmHashes = pins
     listed.push(current)
   }
-  return listed
+  return { markets: listed, fromRegistry: true }
+}
+
+/** `listedMarkets`' list alone: what pages, the recorder, the indexer and the faucet read. */
+export async function resolvedMarkets(deps: { store: RegistryStore; manifest: Manifest; timeoutMs?: number }): Promise<Market[]> {
+  return (await listedMarkets(deps)).markets
 }
 
 /** A registry market the app does not list, with why (R2-38): this app's own words, never RPC text. */
@@ -1000,8 +1018,8 @@ export const resetPublishLimitsForTests = (): void => publishLimiter.reset()
 /** `market_registry`, `ingest_cursor` and `market_salts` (db/migrations 0001 to 0003) behind `RegistryStore`. */
 export function sqlRegistryStore(sql: Sql): RegistryStore {
   return {
-    async rows() {
-      const rows = await sql<{
+    async rows(opts) {
+      type Row = {
         pool: string
         market_id: string | null
         source: RegistrySource
@@ -1009,8 +1027,14 @@ export function sqlRegistryStore(sql: Sql): RegistryStore {
         reason: string | null
         market: unknown
         updated_at: Date | string | null
-      }>`
-        select pool, market_id, source, valid, reason, market, updated_at from market_registry order by market_id nulls last, pool`
+      }
+      const rows = opts
+        ? await sql<Row>`
+            select pool, market_id, source, valid, reason, market, updated_at from market_registry
+            where valid is true or pool = any(${opts.listed}::text[])
+            order by market_id nulls last, pool`
+        : await sql<Row>`
+            select pool, market_id, source, valid, reason, market, updated_at from market_registry order by market_id nulls last, pool`
       return rows.map((r) => ({
         pool: r.pool,
         marketId: r.market_id,

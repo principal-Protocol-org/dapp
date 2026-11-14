@@ -124,4 +124,27 @@ describe("market registry on the local stack", () => {
       await env.sql`delete from market_registry where pool = ${THROWAWAY}`
     }
   }, 30_000)
+
+  it("the bounded read (D-26 item 1) returns valid rows and the named pools' own rows, never other invalid rows", async (ctx) => {
+    if (!ready) return ctx.skip()
+    const INVALID = "C" + "X".repeat(55)
+    const NAMED = "C" + "W".repeat(55)
+    const market = (pool: string, marketId: string) => ({ ...env.manifest.markets[0], marketId, contracts: { ...env.manifest.markets[0].contracts, pool } })
+    try {
+      await env.store.record({ pool: THROWAWAY, source: "published", valid: true, reason: null, market: market(THROWAWAY, "local-usdy-throwaway") })
+      await env.store.record({ pool: INVALID, source: "discovered", valid: false, reason: "junk", market: null })
+      await env.store.record({ pool: NAMED, source: "seed", valid: false, reason: "hidden seed", market: market(NAMED, "local-usdy-named") })
+      const pools = (await env.store.rows({ listed: [NAMED] })).map((r) => r.pool)
+      expect(pools).toContain(THROWAWAY)
+      expect(pools).toContain(NAMED)
+      expect(pools).not.toContain(INVALID)
+      const none = (await env.store.rows({ listed: [] })).map((r) => r.pool)
+      expect(none).toContain(THROWAWAY)
+      expect(none).not.toContain(NAMED)
+      // The full read still has every row.
+      expect((await env.store.rows()).map((r) => r.pool)).toEqual(expect.arrayContaining([THROWAWAY, INVALID, NAMED]))
+    } finally {
+      await env.sql`delete from market_registry where pool = any(${[THROWAWAY, INVALID, NAMED]}::text[])`
+    }
+  }, 30_000)
 })

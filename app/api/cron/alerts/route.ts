@@ -16,14 +16,15 @@ import "server-only"
  * `?test=1` only sends a clearly marked test alert, stores it (`test = true`, resolved at once: the
  * alert-test evidence) and answers 200 when the webhook took it, 502 when it did not.
  *
- * 503 `not_configured` without `ALERT_WEBHOOK_URL` (an http or https URL) or `DATABASE_URL`. The
+ * 503 `not_configured` without `ALERT_WEBHOOK_URL` (an http or https URL) or `DATABASE_URL`, and
+ * while the Mainnet manifest is the pending stub (D-24). The
  * webhook URL is never logged or answered: the poster keeps it in its closure, errors are logged by
  * name, and the answer carries post failures as a count.
  */
-import { activeManifest } from "@/lib/protocol/manifest-source"
 import { runAlertCheck, sendTestAlert, webhookPoster } from "@/lib/server/alerts"
 import { cronAuthorized, cronJson as json } from "@/lib/server/cron-auth"
 import { DatabaseConfigError, sql } from "@/lib/server/db"
+import { deployedManifest } from "@/lib/server/mainnet-pending"
 
 // About 25 contract reads, a Horizon read and a few queries side by side (all done by 30 s), the
 // state written, then posts that all end by 50 s (alerts.ts READ_BUDGET_MS, POST_DEADLINE_MS).
@@ -56,7 +57,8 @@ export async function GET(request: Request) {
   const test = new URL(request.url).searchParams.get("test") === "1"
 
   try {
-    const manifest = activeManifest()
+    const manifest = deployedManifest()
+    if (manifest instanceof Response) return manifest
     const post = webhookPoster(url)
     if (test) {
       const sent = await sendTestAlert(sql, manifest.network, post, Date.now())
