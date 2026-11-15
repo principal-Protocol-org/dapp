@@ -45,9 +45,11 @@
 # account, key, keyRemoved, recordIds, mint, record, rejection, pausedSeconds, txs: [{ step, hash, url }] }).
 #
 # Testnet is the developer's run only: it signs with the official keys. It refuses CI, an agent session
-# (CLAUDECODE), Stellar CLI variables that would change the network, config, source, signer or sending
-# (SOROBAN_* included), any key name but the official ones, DRILL_MANIFEST, and a run without a
-# terminal; it then checks that the CLI's own `testnet` is the SDF one, each key's role on chain, that
+# (CLAUDECODE), a `.env` in the working directory or any parent (the CLI would load it), Stellar CLI
+# variables that would change the network, config, source, signer or sending (SOROBAN_* included), any
+# key name but the official ones, DRILL_MANIFEST, and a run without a terminal. It runs every command
+# from a fresh temporary directory (whose parents hold no `.env` either), checks that the CLI's own
+# `testnet` is the SDF one (failing closed on a list it cannot read in full), each key's role on chain, that
 # RiskControl is not paused and the oracle is fresh, shows what it will sign, and asks for the market id
 # before the first transaction.
 set -euo pipefail
@@ -95,11 +97,29 @@ CLI_OVERRIDES="STELLAR_RPC_URL STELLAR_RPC_HEADERS STELLAR_NETWORK_PASSPHRASE ST
 STELLAR_SIGN_WITH_KEY STELLAR_SIGN_WITH_LEDGER STELLAR_SIGN_WITH_LAB STELLAR_SEND STELLAR_INVOKE_VIEW STELLAR_CONFIG_HOME \
 $(compgen -e | grep '^SOROBAN_' | tr '\n' ' ' || true)"
 
+# dotenv_above <dir>: the first `.env` in <dir> or any of its parents, or nothing. The Stellar CLI loads
+# one from its working directory or any parent (dotenvy), and its STELLAR_* / SOROBAN_* lines would
+# reach the CLI without this script ever seeing them. Only its existence is checked: it is never read.
+dotenv_above() {
+  local d="$1"
+  while :; do
+    if [ -e "$d/.env" ]; then
+      echo "${d%/}/.env"
+      return 0
+    fi
+    [ "$d" != / ] || return 0
+    d="$(dirname "$d")"
+  done
+}
+DOTENV_ADVICE="it could point the Stellar CLI at another RPC or network. Move or rename it (it is not read here). Nothing was signed."
+
 if [ "$NETWORK" = testnet ]; then
   # Every refusal here comes before the keystore or the network is touched.
   [ -z "${CI:-}" ] && [ -z "${GITHUB_ACTIONS:-}" ] ||
     die "drill.sh never runs from CI on testnet: it signs with the official keys. Run it from your own terminal."
   [ -z "${CLAUDECODE:-}" ] || die "The Testnet drill is run by the developer, not by an agent."
+  DOTENV="$(dotenv_above "$PWD")"
+  [ -z "$DOTENV" ] || die "$DOTENV exists: the Stellar CLI loads a .env from the working directory or any parent, and $DOTENV_ADVICE"
   for var in $CLI_OVERRIDES; do
     [ -z "${!var:-}" ] || die "$var is set: on testnet the drill uses the Stellar CLI's own testnet settings only. Unset $var."
   done
@@ -110,8 +130,6 @@ if [ "$NETWORK" = testnet ]; then
   [ "$ADMIN_KEY" = principal-testnet-admin ] || die "ADMIN_KEY names another key: on testnet the drill signs with principal-testnet-admin only. Unset ADMIN_KEY."
   [ "$ORACLE_KEY" = principal-testnet-oracle ] || die "ORACLE_KEY names another key: on testnet the drill signs with principal-testnet-oracle only. Unset ORACLE_KEY."
   [ "$ISSUER_KEY" = principal-testnet-issuer ] || die "ISSUER_KEY names another key: on testnet the drill uses principal-testnet-issuer only. Unset ISSUER_KEY."
-  [ -t 0 ] && [ -t 2 ] ||
-    die "drill.sh on testnet needs a terminal: it shows what it will sign and asks you to type the market id first."
 fi
 # shellcheck disable=SC2086 # a list of names
 unset $CLI_OVERRIDES
@@ -121,30 +139,29 @@ need jq "brew install jq"
 need curl ""
 need node "Install Node.js (oracle-tick.sh needs it)."
 
-# On testnet, the CLI's own `testnet` (built in, or from a config file: the default one, XDG_CONFIG_HOME's)
-# must be the SDF Testnet: a user-defined `testnet` with another RPC or passphrase would sign elsewhere.
-if [ "$NETWORK" = testnet ]; then
-  CLI_TESTNET="$(stellar network ls --long 2>/dev/null | awk '
-    /^Name: / { name = substr($0, 7) }
-    name == "testnet" && /^RPC url: / { print "rpc " substr($0, 10) }
-    name == "testnet" && /^Network passphrase: / { print "pass " substr($0, 21) }')" ||
-    die "could not list the Stellar CLI's networks"
-  [ -n "$CLI_TESTNET" ] || die "the Stellar CLI lists no testnet network"
-  while read -r kind value; do
-    case "$kind" in
-      rpc) [ "${value%/}" = "${RPC_URL%/}" ] ||
-        die "the Stellar CLI's testnet uses the RPC '$value', not $RPC_URL: a config file defines another testnet. Nothing was signed." ;;
-      pass) [ "$value" = "$NETWORK_PASSPHRASE" ] ||
-        die "the Stellar CLI's testnet has the passphrase '$value': a config file defines another testnet. Nothing was signed." ;;
-    esac
-  done <<<"$CLI_TESTNET"
+# ---------------------------------------------------------------------------------------------
+# The work directory: every command from here on runs in it
+# ---------------------------------------------------------------------------------------------
+# A fresh temporary directory holds no `.env`, so the CLI loads none from the caller's directory; on
+# testnet its parents are checked too. Every path the drill uses is absolute (DAPP_DIR, DEV_STACK_DIR,
+# MANIFEST, WORK), DRILL_MANIFEST included once resolved here.
+if [ -n "${DRILL_MANIFEST:-}" ]; then
+  DRILL_MANIFEST="$(cd "$(dirname "$DRILL_MANIFEST")" 2>/dev/null && pwd)/$(basename "$DRILL_MANIFEST")" ||
+    die "the directory of DRILL_MANIFEST does not exist"
 fi
+TMP_ROOT="${TMPDIR:-/tmp}"
+WORK="$(mktemp -d "${TMP_ROOT%/}/drill.XXXXXX")" # an explicit template: macOS mktemp ignores TMPDIR without one
+trap 'rm -rf "$WORK"' EXIT                       # replaced by the full exit trap below
+CLI_ERR="$WORK/cli.err"
+if [ "$NETWORK" = testnet ]; then
+  DOTENV="$(dotenv_above "$WORK")"
+  [ -z "$DOTENV" ] || die "$DOTENV exists above the drill's work directory: $DOTENV_ADVICE"
+fi
+cd "$WORK"
 
 # ---------------------------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------------------------
-WORK="$(mktemp -d)"
-CLI_ERR="$WORK/cli.err"
 log() { echo "$*" >&2; }
 scalar() { tr -d '"[:space:]'; }
 # Anything shaped like a secret key (S + 55 base32 characters) is redacted, as tests/live/util.ts does.
@@ -229,6 +246,32 @@ flag() {
 tx_close_time() {
   rpc_call getTransaction "{\"hash\":\"$1\"}" | jq -er '.result | select(.status == "SUCCESS") | .createdAt | tonumber'
 }
+
+# On testnet, the CLI's own `testnet` (built in, or from a config file: the default one, XDG_CONFIG_HOME's)
+# must be the SDF Testnet: a user-defined `testnet` with another RPC or passphrase would sign elsewhere.
+# Every `testnet` block must show both lines, or the check cannot be made: it fails closed. It reads the
+# CLI's network list only (no key, no network), so it comes before the terminal check.
+if [ "$NETWORK" = testnet ]; then
+  NETLS="$(cli network ls --long)" || die "could not list the Stellar CLI's networks (stellar network ls --long)"
+  CLI_TESTNET="$(awk '
+    /^Name: / { name = substr($0, 7); if (name == "testnet") blocks++ }
+    name == "testnet" && /^RPC url: / { rpc++; print "rpc " substr($0, 10) }
+    name == "testnet" && /^Network passphrase: / { pass++; print "pass " substr($0, 21) }
+    END { printf "count %d %d %d\n", blocks, rpc, pass }' <<<"$NETLS")"
+  read -r _ BLOCKS RPCS PASSES <<<"$(grep '^count ' <<<"$CLI_TESTNET")"
+  [ "$BLOCKS" -ge 1 ] && [ "$RPCS" = "$BLOCKS" ] && [ "$PASSES" = "$BLOCKS" ] ||
+    die "the Stellar CLI's network list does not show testnet's RPC and passphrase ($BLOCKS testnet blocks, $RPCS RPC lines, $PASSES passphrase lines): the drill cannot check where it would sign. Nothing was signed."
+  while read -r kind value; do
+    case "$kind" in
+      rpc) [ "${value%/}" = "${RPC_URL%/}" ] ||
+        die "the Stellar CLI's testnet uses the RPC '$value', not $RPC_URL: a config file defines another testnet. Nothing was signed." ;;
+      pass) [ "$value" = "$NETWORK_PASSPHRASE" ] ||
+        die "the Stellar CLI's testnet has the passphrase '$value': a config file defines another testnet. Nothing was signed." ;;
+    esac
+  done <<<"$CLI_TESTNET"
+  [ -t 0 ] && [ -t 2 ] ||
+    die "drill.sh on testnet needs a terminal: it shows what it will sign and asks you to type the market id first."
+fi
 
 # ---------------------------------------------------------------------------------------------
 # The exit trap: unpause if the pause was sent, remove the throwaway key, delete the work files

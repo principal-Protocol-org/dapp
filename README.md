@@ -653,14 +653,18 @@ PRINCIPAL_NETWORK=testnet scripts/dev-stack/drill.sh
 | Pause | RiskControl `pause`, about 15 s, then `unpause`: two `paused` events. Every market refuses deposits and mints meanwhile. | `principal-testnet-admin`, the RiskControl admin. |
 
 - **Before it signs anything**, it refuses CI, an agent session (`CLAUDECODE`: "The Testnet drill is
-  run by the developer, not by an agent."), the Stellar CLI variables that would change the network,
+  run by the developer, not by an agent."), a `.env` file in the working directory or any parent (the
+  Stellar CLI loads one, and its `STELLAR_*` or `SOROBAN_*` lines would reach it unseen: the drill names
+  the file and never reads it; it then runs every command from a fresh temporary directory, whose
+  parents it checks the same way), the Stellar CLI variables that would change the network,
   the config, the default source, the signer or the sending (`STELLAR_RPC_URL`, `STELLAR_RPC_HEADERS`,
   `STELLAR_NETWORK_PASSPHRASE`, `STELLAR_NETWORK`, `STELLAR_ACCOUNT`, `STELLAR_SIGN_WITH_KEY`,
   `STELLAR_SIGN_WITH_LEDGER`, `STELLAR_SIGN_WITH_LAB`, `STELLAR_SEND`, `STELLAR_INVOKE_VIEW`,
   `STELLAR_CONFIG_HOME`, and every `SOROBAN_*` variable, which the CLI reads as its `STELLAR_*` twin; it
   unsets them on every network, so `oracle-tick.sh` never inherits one), any key name but the official
   ones, `DRILL_MANIFEST`, and a run without a terminal. It checks that the CLI's own `testnet` network
-  (built in, or from a config file) is the SDF RPC and passphrase, each key against the contract's own
+  (built in, or from a config file) is the SDF RPC and passphrase (a list it cannot read in full stops
+  the run), each key against the contract's own
   admin (`admin()`, `get_admin()`), that RiskControl is not already paused (it never unpauses a pause
   it did not make) and that the oracle reads as fresh (the mint needs it: a stale or unreadable oracle
   stops the run; it is checked again right before the mint, where it stops the run before the admin
@@ -680,7 +684,10 @@ PRINCIPAL_NETWORK=testnet scripts/dev-stack/drill.sh
 - **When no trap can run** (SIGKILL, a `kill -STOP`, the machine asleep or off), check and unpause by
   hand (a stopped drill can also be resumed with `fg`). RiskControl
   is `shared.riskControl` of `config/manifests/testnet.json` (`jq -r .shared.riskControl
-  config/manifests/testnet.json`), `CCRZ55SG273OTUZSFME6A6XXXEZ3GM5IMVRLF4NEEWNC54NGCRHIMHJC` today:
+  config/manifests/testnet.json`), `CCRZ55SG273OTUZSFME6A6XXXEZ3GM5IMVRLF4NEEWNC54NGCRHIMHJC` today.
+  These commands have the same exposure as the drill: run them where no `.env` sits in the directory or
+  any parent (the CLI would load it and could send them to another RPC), with no `STELLAR_*` or
+  `SOROBAN_*` variable set:
 
   ```bash
   RC=$(jq -r .shared.riskControl config/manifests/testnet.json)

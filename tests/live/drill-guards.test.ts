@@ -4,44 +4,88 @@
  * Task 12): it signs with the official keys, so it refuses CI, any key name but the official ones, and
  * a run without a terminal to confirm on. These checks run the script with `stellar` and `curl`
  * replaced by stubs that record any call: each refusal must come before the keystore or the network
- * is touched. Nothing here reaches Testnet; the local run is `tests/integration/drill.test.ts`.
+ * is touched. The only call allowed before the terminal check is `stellar network ls --long` (the CLI's
+ * network list: no key, no network), which the stub answers from a fixture, so the check of the CLI's
+ * own `testnet` is tested here too. Nothing here reaches Testnet; the local run is
+ * `tests/integration/drill.test.ts`.
  */
 import { execFile } from "node:child_process"
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterAll, beforeAll, describe, expect, it } from "vitest"
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest"
 
 const DRILL = join(process.cwd(), "scripts", "dev-stack", "drill.sh")
 
 let dir: string
 let marker: string
 let stubs: string
+let netls: Record<string, string>
+
+/** `stellar network ls --long` as Stellar CLI 30.0.1 prints it on a default config. */
+const TESTNET_BLOCK = "Name: testnet\nRPC url: https://soroban-testnet.stellar.org/\nRPC headers: not set\nNetwork passphrase: Test SDF Network ; September 2015\n"
+const OTHERS =
+  "Name: local\nRPC url: http://localhost:8000/rpc\nRPC headers: not set\nNetwork passphrase: Standalone Network ; February 2017\n\n" +
+  "Name: futurenet\nRPC url: https://rpc-futurenet.stellar.org/\nRPC headers: not set\nNetwork passphrase: Test SDF Future Network ; October 2022\n\n"
+const NETLS: Record<string, string> = {
+  good: `${OTHERS}${TESTNET_BLOCK}`,
+  // A config file's own `testnet`, listed before the built-in one.
+  shadow: `${TESTNET_BLOCK.replace("https://soroban-testnet.stellar.org/", "https://rpc.attacker.example/")}\n${OTHERS}${TESTNET_BLOCK}`,
+  // Partial or unknown output: the check fails closed.
+  noRpcLine: `${OTHERS}${TESTNET_BLOCK.replace(/^RPC url: .*\n/m, "")}`,
+  rpcLabelRenamed: `${OTHERS}${TESTNET_BLOCK.replace("RPC url:", "RPC URL:")}`,
+  noPassLine: `${OTHERS}${TESTNET_BLOCK.replace(/^Network passphrase: .*\n/m, "")}`,
+  passLabelRenamed: `${OTHERS}${TESTNET_BLOCK.replace("Network passphrase:", "Passphrase:")}`,
+  noTestnet: OTHERS,
+}
 
 beforeAll(() => {
   dir = mkdtempSync(join(tmpdir(), "drill-guards-"))
   marker = join(dir, "calls.log")
   stubs = join(dir, "bin")
   mkdirSync(stubs)
-  for (const tool of ["stellar", "curl"]) {
-    const path = join(stubs, tool)
-    writeFileSync(path, `#!/bin/sh\necho "${tool} $*" >> "${marker}"\nexit 97\n`)
-    chmodSync(path, 0o755)
+  netls = {}
+  for (const [name, text] of Object.entries(NETLS)) {
+    netls[name] = join(dir, `netls-${name}.txt`)
+    writeFileSync(netls[name], text)
   }
+  // `stellar network ls` answers from $STUB_NETLS (stderr and exit code on demand); any other call fails.
+  writeFileSync(
+    join(stubs, "stellar"),
+    `#!/bin/sh\necho "stellar $*" >> "${marker}"\n` +
+      `if [ "$1" = network ] && [ "$2" = ls ]; then\n` +
+      `  [ -z "$STUB_NETLS_STDERR" ] || echo "$STUB_NETLS_STDERR" >&2\n` +
+      `  [ -z "$STUB_NETLS" ] || cat "$STUB_NETLS"\n` +
+      `  exit "\${STUB_NETLS_EXIT:-0}"\n` +
+      `fi\nexit 97\n`,
+  )
+  writeFileSync(join(stubs, "curl"), `#!/bin/sh\necho "curl $*" >> "${marker}"\nexit 97\n`)
+  for (const tool of ["stellar", "curl"]) chmodSync(join(stubs, tool), 0o755)
+})
+
+beforeEach(() => {
+  rmSync(marker, { force: true })
 })
 
 afterAll(() => {
   if (dir) rmSync(dir, { recursive: true, force: true })
 })
 
-/** Runs drill.sh with stdin, stdout and stderr on pipes (no terminal) and the stubs first on PATH. */
-function drill(env: Record<string, string | undefined>, script: string = DRILL): Promise<{ code: number; stderr: string; stdout: string }> {
-  const base: Record<string, string> = { PATH: `${stubs}:${process.env.PATH ?? ""}`, HOME: process.env.HOME ?? dir }
+/**
+ * Runs drill.sh with stdin, stdout and stderr on pipes (no terminal) and the stubs first on PATH, from
+ * `cwd` (default: this repository). The stub's `network ls` answers the good list unless `STUB_NETLS` says.
+ */
+function drill(
+  env: Record<string, string | undefined>,
+  script: string = DRILL,
+  cwd: string = process.cwd(),
+): Promise<{ code: number; stderr: string; stdout: string }> {
+  const base: Record<string, string> = { PATH: `${stubs}:${process.env.PATH ?? ""}`, HOME: process.env.HOME ?? dir, STUB_NETLS: netls.good }
   const full: Record<string, string | undefined> = { ...base, ...env }
   for (const k of Object.keys(full)) if (full[k] === undefined) delete full[k]
   return new Promise((resolve) => {
     // Only these variables: CI, GITHUB_ACTIONS and key names of the test run never leak in.
-    execFile("bash", [script], { env: full as NodeJS.ProcessEnv, timeout: 20_000, encoding: "utf8" }, (error, stdout, stderr) => {
+    execFile("bash", [script], { cwd, env: full as NodeJS.ProcessEnv, timeout: 20_000, encoding: "utf8" }, (error, stdout, stderr) => {
       const code = error ? (typeof error.code === "number" ? error.code : 1) : 0
       resolve({ code, stdout, stderr })
     })
@@ -49,6 +93,8 @@ function drill(env: Record<string, string | undefined>, script: string = DRILL):
 }
 
 const calls = () => (existsSync(marker) ? readFileSync(marker, "utf8") : "")
+/** The only call allowed before the terminal check: the CLI's network list. */
+const NETWORK_LIST_ONLY = "stellar network ls --long\n"
 
 describe("drill.sh on testnet refuses before touching the keystore or the network", () => {
   it("refuses to run from CI", async () => {
@@ -118,12 +164,79 @@ describe("drill.sh on testnet refuses before touching the keystore or the networ
     }
   })
 
-  it("refuses to run without a terminal", async () => {
+  it("refuses to run without a terminal (after the CLI's testnet passed its check)", async () => {
     const r = await drill({ PRINCIPAL_NETWORK: "testnet" })
     expect(r.code).not.toBe(0)
-    expect(r.stderr).toMatch(/terminal/i)
+    expect(r.stderr).toMatch(/needs a terminal/i)
     expect(r.stdout).toBe("")
+    expect(calls()).toBe(NETWORK_LIST_ONLY)
+  })
+
+  it("refuses a .env in the working directory or any parent, naming it, before any call", async () => {
+    // The Stellar CLI loads it (dotenvy): its STELLAR_* / SOROBAN_* lines would never reach this check.
+    const root = mkdtempSync(join(dir, "withenv-"))
+    writeFileSync(join(root, ".env"), "STELLAR_RPC_URL=x\n")
+    const deeper = join(root, "sub", "deeper")
+    mkdirSync(deeper, { recursive: true })
+    for (const cwd of [root, deeper]) {
+      rmSync(marker, { force: true })
+      const r = await drill({ PRINCIPAL_NETWORK: "testnet" }, DRILL, cwd)
+      expect(r.code, cwd).not.toBe(0)
+      expect(r.stderr).toMatch(/\.env exists: the Stellar CLI loads a \.env from the working directory or any parent/)
+      expect(r.stderr).toContain(`${root.split("/").pop()}/.env`)
+      expect(r.stderr).not.toContain("STELLAR_RPC_URL=x")
+      expect(calls()).toBe("")
+    }
+  })
+
+  it("refuses a .env above its work directory (TMPDIR's parents), before any call", async () => {
+    const tmpRoot = mkdtempSync(join(dir, "tmproot-"))
+    writeFileSync(join(tmpRoot, ".env"), "SOROBAN_RPC_URL=x\n")
+    const tmp = join(tmpRoot, "T")
+    mkdirSync(tmp)
+    const r = await drill({ PRINCIPAL_NETWORK: "testnet", TMPDIR: `${tmp}/` })
+    expect(r.code).not.toBe(0)
+    expect(r.stderr).toMatch(/\.env exists above the drill's work directory/)
+    expect(r.stderr).toContain(`${tmpRoot.split("/").pop()}/.env`)
     expect(calls()).toBe("")
+    // The early exit trap removed the work directory.
+    expect(readdirSync(tmp)).toEqual([])
+  })
+})
+
+describe("drill.sh on testnet checks the Stellar CLI's own testnet, and fails closed", () => {
+  it("passes the SDF testnet (then stops at the terminal check)", async () => {
+    const r = await drill({ PRINCIPAL_NETWORK: "testnet", STUB_NETLS: netls.good })
+    expect(r.stderr).toMatch(/needs a terminal/)
+    expect(calls()).toBe(NETWORK_LIST_ONLY)
+  })
+
+  it("refuses a config file's own testnet with another RPC", async () => {
+    const r = await drill({ PRINCIPAL_NETWORK: "testnet", STUB_NETLS: netls.shadow })
+    expect(r.code).not.toBe(0)
+    expect(r.stderr).toContain("the Stellar CLI's testnet uses the RPC 'https://rpc.attacker.example/'")
+    expect(r.stderr).not.toMatch(/needs a terminal/)
+    expect(calls()).toBe(NETWORK_LIST_ONLY)
+  })
+
+  it("refuses a list it cannot read in full (a missing or renamed line, no testnet)", async () => {
+    for (const name of ["noRpcLine", "rpcLabelRenamed", "noPassLine", "passLabelRenamed", "noTestnet"]) {
+      rmSync(marker, { force: true })
+      const r = await drill({ PRINCIPAL_NETWORK: "testnet", STUB_NETLS: netls[name] })
+      expect(r.code, name).not.toBe(0)
+      expect(r.stderr, name).toMatch(/does not show testnet's RPC and passphrase \(\d+ testnet blocks, \d+ RPC lines, \d+ passphrase lines\)/)
+      expect(r.stderr, name).not.toMatch(/needs a terminal/)
+      expect(calls()).toBe(NETWORK_LIST_ONLY)
+    }
+  })
+
+  it("shows why `network ls` failed, with a secret-shaped string redacted", async () => {
+    const secret = `S${"A".repeat(55)}`
+    const r = await drill({ PRINCIPAL_NETWORK: "testnet", STUB_NETLS: "", STUB_NETLS_EXIT: "2", STUB_NETLS_STDERR: `error: bad config near ${secret}` })
+    expect(r.code).not.toBe(0)
+    expect(r.stderr).toContain("error: bad config near S…[redacted]")
+    expect(r.stderr).not.toContain(secret)
+    expect(r.stderr).toMatch(/could not list the Stellar CLI's networks/)
   })
 
   it("refuses mainnet and any other network", async () => {
