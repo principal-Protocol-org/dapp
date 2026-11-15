@@ -171,7 +171,7 @@ Copy `.env.example` to `.env.local`. Never commit real keys.
 
 | Variable | Where | Purpose |
 |---|---|---|
-| `NEXT_PUBLIC_PRINCIPAL_NETWORK` | Browser and server | `testnet` (default) or `local`. |
+| `NEXT_PUBLIC_PRINCIPAL_NETWORK` | Browser and server | `testnet` (default), `local` or `mainnet`. `mainnet` reads the pending stub until the Mainnet contracts are deployed: one "not deployed yet" page, and 503 from every API route (see Network selection). |
 | `FAUCET_ISSUER_SECRET` | Server only | Required for "Get test tokens". Secret key of the test asset issuer. |
 | `FAUCET_PERMISSIONING_ADMIN_SECRET` | Server only | Optional. Defaults to the issuer key. |
 | `DATABASE_URL` | Server only | Postgres for the market recorder (pooled string on Neon; the local stack writes one for `principal-pg`). |
@@ -180,7 +180,7 @@ Copy `.env.example` to `.env.local`. Never commit real keys.
 | `QSTASH_CURRENT_SIGNING_KEY`, `QSTASH_NEXT_SIGNING_KEY` | Server only | Verify Upstash QStash signatures on the cron routes. |
 | `ORACLE_ADMIN_SECRET` | Server only | Testnet and local only. The oracle admin key `GET`/`POST /api/cron/oracle` signs with (see Scheduler). It is the OracleAdapter's admin: besides pushing the value, it can change the oracle's window, deviation cap, sources and value bounds, and hand the role over. Never set on mainnet: the route refuses to run there. |
 | `ORACLE_KEEPER_MODE` | Server only | `push` (default) or `feed`: how `cron/oracle` keeps the oracle fresh (see "Keeper modes" under Scheduler). Any other value answers 503 `not_configured`. |
-| `ORACLE_KEEPER_SECRET` | Server only | Feed mode's key: funded, with no protocol role. It only pays the fee of `sync_from_feed`, which anyone may call, so feed mode may run on any network. In feed mode the alert check watches its XLM. |
+| `ORACLE_KEEPER_SECRET` | Server only | Feed mode's key: funded, with no protocol role. It only pays the fee of `sync_from_feed`, which anyone may call, so feed mode may run on any network. The oracle admin's key is refused (503 `not_configured`). In feed mode the alert check watches its XLM. |
 | `ORACLE_KEEPER_ORACLE_ID` | Server only | Optional, feed mode only, for tests and the local proof. The oracle `cron/oracle` syncs instead of the manifest's (for example the standalone oracle of `scripts/dev-stack/feed-oracle.sh`). Its runs are recorded under that oracle, so the dashboard and the alert check, which follow the manifest's oracle, do not show them; each run logs a warning. Off the local network, any value other than the manifest's oracle answers 503 `not_configured`. |
 | `ALERT_WEBHOOK_URL` | Server only | Where `cron/alerts` posts each alert it opens or closes (Slack or Discord incoming webhook, or any http(s) endpoint). Never logged or answered. Unset, the check answers 503 `not_configured`. |
 | `ALERT_SIGNER_MIN_XLM` | Server only | Optional. The keeper signer's XLM floor for `signer_low` (default 20). |
@@ -294,6 +294,10 @@ same in both modes.
   never called (`feed_source()` is `None`). The oracle raises `FeedNotConfigured` (error 15) only then,
   and the route reads `feed_source()` first, so an error 15 after it named a feed comes from the feed
   contract: it is also 503, recorded as "the feed answered an error (#15)".
+- **Never the admin's key.** Each run reads the oracle's `get_admin()`. When `ORACLE_KEEPER_SECRET` is
+  that key (copied from `ORACLE_ADMIN_SECRET`, say), the run sends nothing and answers 503
+  `not_configured`, recorded as "ORACLE_KEEPER_SECRET is the oracle admin's key". The call would work,
+  since `sync_from_feed` needs no auth, but the admin key must not sit in a server variable (D-21).
 - **Any network.** Feed mode runs on mainnet too; push mode keeps its refusal.
 - **Which oracle.** It syncs the manifest's oracle, or `ORACLE_KEEPER_ORACLE_ID` when set (tests and
   the local proof only; see Environment variables). An override that differs from the manifest's
@@ -322,8 +326,9 @@ at the edge, errors never cached (503 `not_configured` or `unavailable`). `healt
 state, which the oracle page reads "No keeper run recorded yet". The answer is cached, so the page
 measures the last success's age itself, on the ledger clock, with the same rule.
 
-Do not create the mainnet schedule before the dApp supports Mainnet. `NEXT_PUBLIC_PRINCIPAL_NETWORK`
-accepts `testnet` or `local` only, so the recorder would write Testnet data into the mainnet database.
+Do not create the mainnet schedule before the Mainnet contracts are deployed. Until then
+`config/manifests/mainnet.json` is the pending stub, and with `NEXT_PUBLIC_PRINCIPAL_NETWORK=mainnet`
+every cron route answers 503 `not_configured` and records nothing.
 
 Vercel Cron also works, on Production only: add
 `{ "crons": [{ "path": "/api/cron/record", "schedule": "*/15 * * * *" }] }` to `vercel.json` and set
@@ -366,14 +371,24 @@ Contracts are indexed in five groups, each with its own cursor in `ingest_cursor
   every page, and starts no page after its 50 s budget. The next run resumes there.
 - A cursor only moves forward. A run that is behind cannot rewind one that is ahead.
 - A cursor names the contracts it has read through its ledger (`members`). Any other contract of
-  its group (a market listed after its creation, a market a run could not list because the registry
-  read failed, a new deployment in the manifest) is read in its own requests from the manifest's
-  `deployLedger` until it catches up. The cursor moves only once every contract has.
-- When a cursor (or `deployLedger`) is older than the RPC's oldest ledger, the run goes on from the
-  oldest ledger and records the gap. The save that moves the cursor past it also stores it on the
-  cursor (`gap_from`, `gap_to`, widened if one is already open), so a cursor never passes a gap
-  without recording it. It never skips silently. A stored gap stays until an import fills it; the
-  read API lists it (`gaps`), and monitoring reads it from `ingest_cursor` (`gap_from is not null`).
+  its group (a market listed after its creation, a market dropped from the list and listed again, a
+  new deployment in the manifest) is read in its own requests until it catches up. It starts at its
+  market's creation ledger when that is known and later than `deployLedger`, else at `deployLedger`.
+  The cursor moves only once every contract has.
+- A market's creation ledger (`createdLedger` in its registry row) is the earliest ledger at which
+  discovery saw the factory build it: its salt's `mkt_tok`, `mkt_eng` or `mkt_new`, in the page of
+  events that named the pool, or else the salt index's ledger for it (its `mkt_new`). A market the
+  wizard publishes takes it from the salt index when the recorder has already seen its build, or
+  from the next discovery run that sees it. The seeds have none: they start at `deployLedger`.
+- When the registry cannot be read (the market list is the manifest seeds alone), the run skips the
+  `market` and `escrow` groups and says so (`skipped`). Their cursors keep every market, so no market
+  is read again from its start, and no gap is recorded for it, when the list comes back.
+- When a cursor (or a new contract's start) is older than the RPC's oldest ledger, the run goes on
+  from the oldest ledger and records the gap. The save that moves the cursor past it also stores it
+  on the cursor (`gap_from`, `gap_to`, widened if one is already open), so a cursor never passes a gap
+  without recording it. It never skips silently. A stored gap stays until an import fills it, or the
+  operator clears one known to be false (`indexer:clear-gap`, below). The read API lists it (`gaps`),
+  and monitoring reads it from `ingest_cursor` (`gap_from is not null`).
 - When the escrow group finishes within the budget, the run compares every RecoveryEscrow's
   `record_count` with its indexed `recovery` events, and keeps the result on the escrow cursor
   (`reconcile`, with its time). A run cut short by the budget skips it.
@@ -382,10 +397,10 @@ The route answers:
 
 | Status | Body | When |
 |---|---|---|
-| 200 | `{ inserted, groups, reconcile }` | Each group: `indexedThrough`, `gap`, `complete` (false when the budget ran out). Each escrow: `recordCount`, `indexed`, `ok`. |
+| 200 | `{ inserted, groups, reconcile }`, plus `skipped` | Each group: `indexedThrough`, `gap`, `complete` (false when the budget ran out). Each escrow: `recordCount`, `indexed`, `ok`. `skipped` (`{ groups, reason }`) only when the registry could not be read: the `market` and `escrow` groups wait for the next run. |
 | 401 | | The caller sent neither a valid `Authorization: Bearer $CRON_SECRET` nor a valid QStash signature. |
 | 503 | `{ error: "not_configured" }` | `DATABASE_URL` is missing. |
-| 500 | The same body, a group with `error: "failed"`, or `{ error: "failed" }` | The RPC failed. The next run resumes at the cursor. |
+| 500 | The same body, a group with `error: "failed"`, or `{ error: "failed" }` | The RPC failed, or the manifest could not be read. The next run resumes at the cursor. |
 
 Schedule (ops, with the developer's go): a QStash schedule with cron `*/5 * * * *` to
 `https://<domain>/api/cron/index`, as for the recorder. Apply migrations 0004 to 0006 to the
@@ -396,10 +411,11 @@ network's database first (`pnpm db:migrate --env-file .env.testnet`).
 `?before=<event id>` (older rows, for paging) and `?limit=` (1 to 200, default 50) filter the list.
 `?counts=1` adds `counts`: the number of indexed events per topic for the group and pool asked, over
 every row, not one page (the compliance page's Permissioning counts).
-It answers `{ rows, indexedThrough, indexedThroughCloseTime, lagSeconds, gaps, reconcile }`, newest
-first and cached 60 s at the edge: `indexedThrough` is the slowest group's cursor, and
-`indexedThroughCloseTime` its close time, from which a page computes a fresh lag whatever the cache's
-age. `gaps` lists the stored gaps (`{ group, from, to }`), and `reconcile` the last reconciliation.
+It answers `{ rows, indexedThrough, indexedThroughCloseTime, lagSeconds, gaps, pendingGroups, reconcile }`,
+newest first and cached 60 s at the edge: `indexedThrough` is the slowest group's cursor (0 while a
+group has none), and `indexedThroughCloseTime` its close time, from which a page computes a fresh lag
+whatever the cache's age. `gaps` lists the stored gaps (`{ group, from, to }`), `pendingGroups` the
+groups no run has indexed yet, and `reconcile` the last reconciliation.
 Rows never carry the raw XDR; `?id=<event id>` answers `{ event }` with its `rawXdr`.
 
 Operator commands (`scripts/indexer.mjs`). The database is `--database-url <url>`, else the
@@ -408,6 +424,7 @@ pnpm echoes the command line and the shell keeps it: use `--env-file` for a real
 
 ```bash
 pnpm indexer:reindex --network testnet --group escrow --from 5710000            # read the group again from that ledger
+pnpm indexer:clear-gap --network testnet --group market --env-file .env.testnet  # print a stored gap; add --yes to clear it
 pnpm indexer:export --network testnet --out events.jsonl                         # events rows and cursors, as JSON Lines
 pnpm indexer:import --network testnet --in events.jsonl --env-file .env.testnet  # upsert them (see below)
 pnpm indexer:capture --network testnet                                           # list the markets, index them locally, export
@@ -418,6 +435,14 @@ pnpm indexer:capture --network testnet                                          
   older than the RPC's oldest ledger (or one it cannot check) needs `--force`: the next run would
   record those ledgers as a gap, which the index may already hold from an import. Run it when no
   indexer run is in progress, or that run may move the cursor on again.
+- `clear-gap` is for a gap known to be false: the contracts it names had no events in those
+  ledgers. One case: a market created inside the RPC's window but indexed before its creation ledger
+  was known (the wizard published it, and an index run listed it before discovery saw its build),
+  which starts it at `deployLedger`. It prints the stored gap first. On a database that is not on this
+  machine (the Testnet one) it clears nothing without `--yes`, so run it once to read the gap, then
+  again with `--yes`. It clears exactly the gap it printed (one an indexer run widened meanwhile is
+  refused) and keeps the cursor and its members. The next `cron/alerts` run then closes the open
+  `indexer_gap` alert and posts the close. A real gap is filled by an import instead.
 - `import` needs `--network` and refuses a file, or a line, of another network. It runs in one
   transaction: each event once, then each cursor, moved only forward (a file ahead brings its
   members and widens the stored gap with its own). It clears a stored gap when the file's rows fill
@@ -461,7 +486,7 @@ table is also the evidence store: every alert's open and close times, and every 
 |---|---|---|---|
 | `oracle_warning` | warning | The oracle value's age is at least 75% of `max_stale_seconds`. | The OracleAdapter's views at the latest ledger time (age in ledger time). |
 | `oracle_stale` | critical | The age is over `max_stale_seconds`, or the contract's own `is_available()` is false. It replaces the warning. | The same. |
-| `oracle_unavailable` | critical | The oracle, or the latest ledger, cannot be read by this server. It opens at once but is posted, and counts as critical, only once the next check still cannot read it (`payload.confirmedAt`); one that clears before then closes without a post. | The same. |
+| `oracle_unavailable` | critical | The oracle, or the latest ledger, cannot be read by this server. It opens at once but is posted, and counts as critical, only once a check at least 120 s after it opened still cannot read it (`payload.confirmedAt`); one that clears before then closes without a post. A scheduler retry seconds later never confirms it. | The same. |
 | `oracle_rejection` | warning | A significant rejection (`oob`, `decrease`, `deviate`, `fb_value`) in the last 24 h, one alert per reason (the payload names the newest value). It closes, without a post, 24 h after its last occurrence. | The indexed `ref_rej` events, and the keeper's `rejected` runs in `oracle_ticks`. |
 | `feed_broken` | warning | A keeper run with reason `bad_price`, `rescale` or `future_ts` in the last 2 × the keeper interval (3,600 s). It closes without a post. | `oracle_ticks` (feed mode). |
 | `keeper_unhealthy` | critical | Keeper runs are recorded and the last success (`pushed` or `synced`) is 2 × the interval (3,600 s) old or more. No run recorded is unknown: no alert. | `oracle_ticks`. |
@@ -546,14 +571,17 @@ page's exhaustion history (the last 7 days) read it.
 ```json
 { "network": "testnet",
   "ledger": { "status": "ok", "sequence": 5720000, "closeTime": "2026-11-14T12:00:00.000Z" },
-  "indexer": { "status": "ok", "indexedThrough": 5719940, "indexedThroughCloseTime": "…", "lagSeconds": 300, "gaps": [] },
+  "indexer": { "status": "ok", "indexedThrough": 5719940, "indexedThroughCloseTime": "…", "lagSeconds": 300, "gaps": [], "pendingGroups": [] },
   "keeper": { "status": "ok", "healthy": true, "lastSuccessAt": "…", "lastTickAt": "…" },
   "openAlerts": { "status": "ok", "count": 1, "critical": 0 } }
 ```
 
 Each part is read on its own, within 4 s. A part that fails or hangs reads
-`{ "status": "unavailable", "reason": "…" }` and the others still answer. When every part is
-unavailable it answers 503 (not cached), with the same body. While the Mainnet manifest is the
+`{ "status": "unavailable", "reason": "…" }` and the others still answer. Before the first run of a
+group (no cursor yet, for example `market` and `escrow` before the first market) the indexer reads
+`{ "status": "pending", "reason": "no index run yet", …, "pendingGroups": ["escrow", "market"] }`,
+with `indexedThrough` 0 and `lagSeconds` null. Pending is not unavailable: it changes no status code.
+When every part is unavailable it answers 503 (not cached), with the same body. While the Mainnet manifest is the
 pending stub it answers 503 `{ "error": "not_configured", "message": "Mainnet contracts are not
 deployed yet." }` instead, like every API route. `keeper.healthy` is null while no keeper
 run is recorded. `openAlerts.critical` counts an `oracle_unavailable` only once confirmed. An uptime
@@ -578,10 +606,15 @@ Each step waits for the developer's go. No step needs a secret in this repositor
    `/dashboard` loads and `GET /api/health` answers 200.
 5. **Schedule the indexer.** A QStash schedule, cron `*/5 * * * *`, to
    `https://testnet.principalmarket.fi/api/cron/index`. Wait for its first run to complete:
-   `GET /api/health` then shows `indexer.status` `ok` and a `lagSeconds` under 3,600.
+   `GET /api/health` then shows `indexer.status` `ok` and a `lagSeconds` under 3,600. Until every
+   group has run once it shows `pending`, with the reason "no index run yet" and the groups still to
+   run (`pendingGroups`).
 6. **Schedule the alert check**, only after step 5: cron `*/5 * * * *` to
-   `https://testnet.principalmarket.fi/api/cron/alerts`. Before the first index run, the old or
-   missing cursors would open (and post) `indexer_lag` for every group.
+   `https://testnet.principalmarket.fi/api/cron/alerts`, with retries set to 0. The route answers 500
+   while a critical alert is open, so the scheduler's own failure alert fires too. With retries, each
+   500 would be run again seconds later: a full check each time, and a failure log that fills for as
+   long as the critical lasts. The schedule runs it again in 5 minutes anyway. Before the first index
+   run, the old or missing cursors would open (and post) `indexer_lag` for every group.
 7. **Send a test alert.** One POST to `https://testnet.principalmarket.fi/api/cron/alerts?test=1`,
    signed by QStash: publish one message to that exact URL from the QStash console, with retries set
    to 0 (a 502 would otherwise be retried and send the test again). The signature is checked against
@@ -590,12 +623,16 @@ Each step waits for the developer's go. No step needs a secret in this repositor
    `GET /api/dashboard/alerts` then shows it as `lastTest`.
 8. **Run the drill** from your own terminal (below). After the next `cron/index` run (at most 5
    minutes, plus the API's 60 s cache) the dashboard shows its seizure, its rejection and its pause.
+9. **Publish the docs**, last: push `org/docs` `main` (8979cd3, "the public dashboard"), only after
+   the app deployment of step 4. The page tells readers to open **Dashboard** from the app's header,
+   which exists only from that deployment on. Vercel deploys the docs site from the push.
 
 Why this order: the cron routes and `?test=1` exist only on the new deployment, so the schedules and
 the test come after it. A Vercel variable applies only to deployments made after it is set, so it
 comes before. The tables must exist before the import and before the deployed code writes to them
-(`cron/oracle`, already scheduled, starts recording its runs in `oracle_ticks`). The drill comes last
-so the index and the alert check are watching when it runs.
+(`cron/oracle`, already scheduled, starts recording its runs in `oracle_ticks`). The drill comes after
+them so the index and the alert check are watching when it runs. The docs come last: they point at a
+dashboard that must be live.
 
 ### The Testnet drill (`scripts/dev-stack/drill.sh`)
 
@@ -684,8 +721,9 @@ PRINCIPAL_NETWORK=testnet scripts/dev-stack/drill.sh
 
   It answers `(underlying_from_pt, underlying_from_yt)` and emits `finalize`. A record without PT or YT
   (a drill run on a matured market, where the mint is skipped and said) has nothing to settle:
-  `finalize_record` refuses it with `NothingToFinalize`. For a demo before February 2027, run the drill
-  on a short-maturity market.
+  `finalize_record` refuses it with `NothingToFinalize`. A demo of the finalization before February 2027
+  works on the local stack only: run the drill there with `DRILL_MANIFEST` on a short-maturity market. On
+  Testnet the official market matures on 2027-02-11, so finalize its record after that date.
 
 ## Local network
 
@@ -906,3 +944,18 @@ place; the others are still open.
 - **Browser read concurrency.** The dashboard's markets page fires about 28 reads per market at
   once every 60 s (853 for 30 markets, with shared reads de-duplicated). Add a concurrency cap
   (e.g. 8 at a time) before many markets or a rate-limited RPC.
+- **An events index for the alert check and the reconciliation.** Open. The `events` table has no
+  index on `(network, contract_id, topic)`. The RecoveryEscrow reconciliation and the alert check's
+  rejection read filter by contract and topic, and `GET /api/dashboard/events?counts=1` counts by
+  topic. Fine at Testnet's few hundred rows; add the index (a new migration) before Mainnet volume.
+- **RPC fallbacks.** Open, and inert while no manifest sets `rpcFallbackUrls`. Before one does:
+  - when every endpoint fails, report the primary's error, not the last fallback's;
+  - narrow the transient rule (`isTransientRpcError` in `lib/protocol/reader.ts`): today any
+    `TypeError` counts as transient, so a bug in the client code would also fall over to the next
+    endpoint;
+  - remember a primary that is down for a short while, so each read stops waiting about 20 s for it
+    first. Pair it with the browser read concurrency cap above.
+- **"Unavailable" with its reason in every `/app` figure.** Open. Spec 0004 D-27 says the reason is
+  shown everywhere. The `/app` Safety and Details rows show it (`showLiveReason`), but 26 other
+  `showLive` sites in `/app` still show "Unavailable" alone. Move them to `showLiveReason` with
+  `UnavailableTip`.
