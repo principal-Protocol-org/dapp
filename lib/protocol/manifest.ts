@@ -51,6 +51,8 @@ const marketSchema = z.object({
   }),
   /** Optional (spec §1): the Wasm hash (hex) each contract runs, by contract name. The only trust anchor for restoring contract code (R29b). */
   wasmHashes: z.record(z.string().min(1), hexHash).optional(),
+  /** Optional, registry markets: the ledger discovery saw the factory build it at (the indexer's start for it). */
+  createdLedger: z.number().int().positive().optional(),
 })
 
 const envelope = {

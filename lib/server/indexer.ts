@@ -19,13 +19,18 @@ import "server-only"
  * write no duplicate and never rewind it. `pnpm indexer:reindex` is the one write that moves it back.
  *
  * A cursor also names the contracts it has read through its ledger (`members`). A contract of the
- * group that is not among them (a market listed after its creation, a market a run could not list,
- * a new deployment in the manifest) is read in its own chunks from the deploy ledger (or the RPC's
- * oldest ledger) until it catches up; the cursor and its members move only when every chunk has.
+ * group that is not among them (a market listed after its creation, a market dropped from the list
+ * and listed again, a new deployment in the manifest) is read in its own chunks from where it can
+ * first have emitted until it catches up: its market's `createdLedger` (the ledger discovery saw the
+ * factory build it at) when known and later than the deploy ledger, else the deploy ledger (or the
+ * RPC's oldest ledger). The cursor and its members move only when every chunk has. A run whose market
+ * list is the seeds alone (the registry could not be read) leaves the market and escrow groups for
+ * the next run (`runGroups`), so their members never drop a market for a run.
  *
  * A gap (ledgers the RPC no longer holds) is stored on the cursor by the same guarded write that moves
  * the cursor past it (`gap_from`, `gap_to`, widened when one is open), so a cursor never passes a gap
- * without recording it. Only `pnpm indexer:import` clears one, when the imported rows fill it.
+ * without recording it. `pnpm indexer:import` clears one when the imported rows fill it, and
+ * `pnpm indexer:clear-gap` clears one the operator knows to be false.
  *
  * Each row keeps the event's value as the RPC sent it, base64 XDR of the `ScVal` (`raw_xdr`), and
  * the fields decoded for the emitting contract's role (`decodeEvent`): bigints as decimal strings,
@@ -45,8 +50,30 @@ export type IndexGroup = "escrow" | "oracle" | "permissioning" | "risk" | "marke
 
 export const INDEX_GROUPS: readonly IndexGroup[] = ["escrow", "oracle", "permissioning", "risk", "market"]
 
-/** One indexed contract: the role its events are decoded for, and its market's pool when it has one. */
-export type IndexMember = { id: string; role: Role; pool?: string }
+/** The groups whose members are the listed markets' contracts. */
+const MARKET_GROUPS: readonly IndexGroup[] = ["escrow", "market"]
+
+/** Why a run left groups out, for its answer and log. */
+export type SkippedGroups = { groups: IndexGroup[]; reason: string }
+
+export const SEEDS_ONLY_REASON = "The markets list could not be read, so only the manifest seeds were known. The market and escrow groups wait for the next run."
+
+/**
+ * The groups one run indexes, from how its market list was read (`listedMarkets`' `fromRegistry`).
+ * A list from the registry: every group. The seeds alone (the registry read failed or timed out):
+ * the shared groups only, so the market and escrow cursors keep every registry market as a member
+ * and record no gap for it when the list comes back.
+ */
+export function runGroups(fromRegistry: boolean): { groups: IndexGroup[]; skipped: SkippedGroups | null } {
+  if (fromRegistry) return { groups: [...INDEX_GROUPS], skipped: null }
+  return { groups: INDEX_GROUPS.filter((g) => !MARKET_GROUPS.includes(g)), skipped: { groups: [...MARKET_GROUPS], reason: SEEDS_ONLY_REASON } }
+}
+
+/**
+ * One indexed contract: the role its events are decoded for, its market's pool when it has one, and
+ * that market's `createdLedger` when discovery saw it built (no event of it is older).
+ */
+export type IndexMember = { id: string; role: Role; pool?: string; createdLedger?: number }
 
 /** Events per `getEvents` page. */
 export const EVENTS_PAGE = 200
@@ -64,10 +91,11 @@ export function contractsOf(manifest: Manifest, markets: Market[]): Record<Index
   }
   for (const market of markets) {
     const k = market.contracts
-    add("market", { id: k.sy, role: "sy", pool: k.pool })
-    add("market", { id: k.manager, role: "manager", pool: k.pool })
-    add("market", { id: k.pool, role: "pool", pool: k.pool })
-    add("escrow", { id: k.recoveryEscrow, role: "escrow", pool: k.pool })
+    const created = market.createdLedger === undefined ? {} : { createdLedger: market.createdLedger }
+    add("market", { id: k.sy, role: "sy", pool: k.pool, ...created })
+    add("market", { id: k.manager, role: "manager", pool: k.pool, ...created })
+    add("market", { id: k.pool, role: "pool", pool: k.pool, ...created })
+    add("escrow", { id: k.recoveryEscrow, role: "escrow", pool: k.pool, ...created })
   }
   add("oracle", { id: manifest.shared.oracle, role: "oracle" })
   add("permissioning", { id: manifest.shared.permissioning, role: "permissioning" })
@@ -258,12 +286,16 @@ async function indexGroup(
   const memberIds = members.map((m) => m.id).sort()
   let oldest = health.oldestLedger
 
-  // The contracts this cursor has read through its ledger resume after it. Any other starts at the
-  // deploy (a manifest without `deployLedger`, the local stack, at the RPC's oldest ledger, claiming
-  // no gap), in chunks of its own, so the cursor moves only once it has caught up.
+  // The contracts this cursor has read through its ledger resume after it. Any other starts where it
+  // can first have emitted: its market's creation ledger when discovery saw it built after the deploy,
+  // else the deploy (a manifest without `deployLedger`, the local stack, at the RPC's oldest ledger,
+  // claiming no gap). It reads in chunks of its own, one start per chunk, so the cursor moves only
+  // once it has caught up, and a gap is claimed only below that start.
   const known = new Set(saved?.members ?? [])
   const resumed = saved ? members.filter((m) => known.has(m.id)) : []
   const added = members.filter((m) => !resumed.includes(m))
+  const base = manifest.deployLedger ?? oldest
+  const startOf = (m: IndexMember) => (m.createdLedger === undefined ? base : Math.max(base, m.createdLedger))
   const chunks: Chunk[] = []
   const addChunks = (list: IndexMember[], wanted: number) => {
     for (let i = 0; i < list.length; i += MAX_CONTRACTS_PER_REQUEST) {
@@ -273,7 +305,12 @@ async function indexGroup(
     }
   }
   if (saved) addChunks(resumed, saved.ledger + 1)
-  addChunks(added, manifest.deployLedger ?? oldest)
+  for (const wanted of [...new Set(added.map(startOf))].sort((a, b) => a - b)) {
+    addChunks(
+      added.filter((m) => startOf(m) === wanted),
+      wanted,
+    )
+  }
 
   /** The ledgers some chunk wanted but the RPC no longer holds, as one range. */
   const recordGap = () => {
@@ -547,6 +584,8 @@ export type IndexedEvents = {
   lagSeconds: number | null
   /** The stored gaps of the groups asked. */
   gaps: GroupGap[]
+  /** The groups asked that no run has indexed yet (no cursor ledger): `indexedThrough` is 0 while any is. */
+  pendingGroups: IndexGroup[]
   /** The last RecoveryEscrow reconciliation; null before the first. */
   reconcile: StoredReconcile | null
 }
@@ -616,12 +655,14 @@ export async function getIndexedEvents(
     const c = byName.get(indexCursorName(g, q.network))
     return c && c.gap_from != null && c.gap_to != null ? [{ group: g, from: Number(c.gap_from), to: Number(c.gap_to) }] : []
   })
+  const pendingGroups = asked.filter((g, i) => mine[i]?.ledger == null)
   return {
     rows: rows.map(toIndexed),
     indexedThrough,
     indexedThroughCloseTime,
     lagSeconds,
     gaps,
+    pendingGroups,
     reconcile: byName.get(escrowName)?.reconcile ?? null,
   }
 }

@@ -275,4 +275,19 @@ describe.skipIf(skip !== null)("event indexer on the local network", () => {
       select ledger, gap_from, gap_to from ingest_cursor where name = ${indexCursorName("escrow", "local")}`
     expect(filled).toEqual({ ledger: escrowCursor, gap_from: null, gap_to: null })
   }, 2 * MINUTE)
+
+  it("indexer:clear-gap prints a gap known to be false, then clears it on this machine's database; the cursor stays", async () => {
+    const name = indexCursorName("market", "local")
+    const [{ ledger }] = await sql<{ ledger: string }>`select ledger from ingest_cursor where name = ${name}`
+    await sql`update ingest_cursor set gap_from = ${Number(ledger) - 20}, gap_to = ${Number(ledger) - 10} where name = ${name}`
+    // pnpm's bare -- is passed through: the script skips it.
+    const out = await script(["clear-gap", "--", "--network", "local", "--group", "market"])
+    log(out)
+    expect(out).toContain(`clear-gap: ${name} stores a gap: ledgers ${Number(ledger) - 20}-${Number(ledger) - 10}`)
+    expect(out).toMatch(/cleared ledgers .* The next cron\/alerts run closes the open indexer_gap alert/)
+    const [after] = await sql<{ ledger: string; gap_from: string | null; gap_to: string | null }>`select ledger, gap_from, gap_to from ingest_cursor where name = ${name}`
+    expect(after).toEqual({ ledger, gap_from: null, gap_to: null })
+    expect(await script(["clear-gap", "--network", "local", "--group", "market"])).toMatch(/stores no gap; nothing to clear/)
+    await expect(script(["clear-gap", "--network", "local", "--group", "nope"])).rejects.toThrow(/--group must be one of/)
+  }, MINUTE)
 })

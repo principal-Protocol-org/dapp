@@ -2,8 +2,8 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterAll, describe, expect, it } from "vitest"
-import { isLocalDatabase, mergeCursor, parseArgs, readExport, reindexRefusal } from "../../../scripts/indexer.mjs"
+import { afterAll, describe, expect, it, vi } from "vitest"
+import { clearGap, clearGapRefusal, isLocalDatabase, mergeCursor, parseArgs, readExport, reindexRefusal } from "../../../scripts/indexer.mjs"
 
 const POOL = "CB3JI6H2HZ3PMWKLEKDPQUURFSKJSFTLNFNBU4CFEHAZXMWL5SNNS6OJ"
 const ESCROW = "CAMOWBMTMDLFJLFOSTULXQO7MUK2PT3XAQ62CA4L5DGPQKZFJWEKN24Q"
@@ -30,6 +30,91 @@ describe("parseArgs", () => {
   it("--force takes no value; other flags need one", () => {
     expect(parseArgs(["reindex", "--force", "--group", "escrow"])).toEqual({ command: "reindex", flags: { force: true, group: "escrow" } })
     expect(() => parseArgs(["reindex", "--group"])).toThrow(/--group needs a value/)
+  })
+
+  it("--yes takes no value either, and pnpm's bare -- is skipped", () => {
+    expect(parseArgs(["clear-gap", "--", "--network", "testnet", "--group", "market", "--yes"])).toEqual({
+      command: "clear-gap",
+      flags: { network: "testnet", group: "market", yes: true },
+    })
+  })
+})
+
+describe("clear-gap (a stored gap known to be false)", () => {
+  /** An `ingest_cursor` of one row behind pg's `pool.query`, with the update's guard. */
+  function fakePool(row: { ledger: number; gap_from: number | null; gap_to: number | null } | null, opts: { widenBeforeUpdate?: boolean } = {}) {
+    const queries: { text: string; values: unknown[] }[] = []
+    const state = row ? { ...row } : null
+    const pool = {
+      async query(text: string, values: unknown[]) {
+        queries.push({ text: text.replace(/\s+/g, " "), values })
+        if (text.startsWith("select ledger, gap_from, gap_to from ingest_cursor")) {
+          // pg answers bigint columns as strings.
+          return { rows: state ? [{ ledger: String(state.ledger), gap_from: state.gap_from === null ? null : String(state.gap_from), gap_to: state.gap_to === null ? null : String(state.gap_to) }] : [], rowCount: state ? 1 : 0 }
+        }
+        if (text.startsWith("update ingest_cursor set gap_from = null, gap_to = null")) {
+          if (opts.widenBeforeUpdate && state) state.gap_from = (state.gap_from as number) - 10
+          const [, from, to] = values as [string, number, number | null]
+          if (!state || state.gap_from !== from || state.gap_to !== to) return { rows: [], rowCount: 0 }
+          state.gap_from = null
+          state.gap_to = null
+          return { rows: [], rowCount: 1 }
+        }
+        throw new Error(`unexpected SQL: ${text}`)
+      },
+    }
+    return { pool, queries, state }
+  }
+  const NAME = "events:market:testnet"
+
+  it("off this machine it needs --yes; on this machine, or with --yes, it may clear", () => {
+    expect(clearGapRefusal({ name: NAME, local: false, yes: false, from: "--env-file" })).toMatch(/not on this machine.*--yes/)
+    expect(clearGapRefusal({ name: NAME, local: false, yes: false, from: "--env-file" })).toContain("--env-file")
+    expect(clearGapRefusal({ name: NAME, local: false, yes: true, from: "--env-file" })).toBeNull()
+    expect(clearGapRefusal({ name: NAME, local: true, yes: false, from: ".env.local" })).toBeNull()
+  })
+
+  it("prints the gap before anything, then refuses without --yes off this machine, clearing nothing", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {})
+    const { pool, queries, state } = fakePool({ ledger: 5_800_000, gap_from: 5_707_342, gap_to: 5_790_000 })
+    await expect(clearGap(pool, { network: "testnet", group: "market", local: false, yes: false, from: "--env-file" })).rejects.toThrow(/--yes/)
+    expect(log.mock.calls.flat().join("\n")).toContain(`${NAME} stores a gap: ledgers 5707342-5790000 (indexed through 5800000)`)
+    expect(queries.map((q) => q.text.split(" ")[0])).toEqual(["select"])
+    expect(state).toMatchObject({ gap_from: 5_707_342, gap_to: 5_790_000 })
+    log.mockRestore()
+  })
+
+  it("with --yes it clears exactly the gap it printed, keeping the cursor, and says the alert closes on the next check", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {})
+    const { pool, queries, state } = fakePool({ ledger: 5_800_000, gap_from: 5_707_342, gap_to: 5_790_000 })
+    expect(await clearGap(pool, { network: "testnet", group: "market", local: false, yes: true, from: "--env-file" })).toEqual({
+      cleared: true,
+      gap: { from: 5_707_342, to: 5_790_000 },
+    })
+    expect(queries[1].values).toEqual([NAME, 5_707_342, 5_790_000])
+    expect(queries[1].text).toMatch(/where name = \$1 and gap_from = \$2 and gap_to is not distinct from \$3/)
+    expect(state).toEqual({ ledger: 5_800_000, gap_from: null, gap_to: null })
+    expect(log.mock.calls.flat().join("\n")).toMatch(/next cron\/alerts run closes the open indexer_gap alert/)
+    log.mockRestore()
+  })
+
+  it("a gap the indexer widened between the read and the clear is refused, to be read again", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {})
+    const { pool, state } = fakePool({ ledger: 5_800_000, gap_from: 5_707_342, gap_to: 5_790_000 }, { widenBeforeUpdate: true })
+    await expect(clearGap(pool, { network: "testnet", group: "market", local: true, yes: false, from: ".env.local" })).rejects.toThrow(/changed while it was read/)
+    expect(state?.gap_from).toBe(5_707_332)
+    vi.restoreAllMocks()
+  })
+
+  it("no stored gap (or no cursor): nothing to clear, no write", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {})
+    for (const row of [{ ledger: 5_800_000, gap_from: null, gap_to: null }, null]) {
+      const { pool, queries } = fakePool(row)
+      expect(await clearGap(pool, { network: "testnet", group: "escrow", local: false, yes: false, from: "--env-file" })).toEqual({ cleared: false })
+      expect(queries).toHaveLength(1)
+    }
+    expect(log.mock.calls.flat().join("\n")).toMatch(/stores no gap; nothing to clear/)
+    log.mockRestore()
   })
 })
 

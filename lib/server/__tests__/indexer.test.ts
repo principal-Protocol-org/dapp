@@ -18,6 +18,7 @@ import {
   getIndexedEvents,
   indexCursorName,
   indexEvents,
+  runGroups,
   type IndexerRpc,
   type IndexGroup,
   type IndexResult,
@@ -274,6 +275,12 @@ describe("contractsOf", () => {
   it("a contract listed twice is indexed once", () => {
     expect(contractsOf(manifest, [market, market]).market).toHaveLength(3)
   })
+
+  it("a market's creation ledger travels with each of its contracts", () => {
+    const groups = contractsOf(manifest, [{ ...market, createdLedger: DEPLOY + 40 }])
+    expect(groups.market.map((m) => m.createdLedger)).toEqual([DEPLOY + 40, DEPLOY + 40, DEPLOY + 40])
+    expect(groups.escrow).toEqual([{ id: c.recoveryEscrow, role: "escrow", pool: c.pool, createdLedger: DEPLOY + 40 }])
+  })
 })
 
 // ---------------------------------------------------------------- indexEvents
@@ -469,7 +476,7 @@ describe("indexEvents", () => {
     })
   })
 
-  it("a contract added after deployLedger left the window starts at the oldest ledger, and its gap is stored", async () => {
+  it("a market with no known creation ledger, added after deployLedger left the window, starts at the oldest ledger, and its gap is stored", async () => {
     vi.spyOn(console, "warn").mockImplementation(() => {})
     const second: Market = { ...market, marketId: "m2", contracts: { ...c, sy: randomContract(), manager: randomContract(), pool: randomContract() } }
     const db = makeDb()
@@ -481,7 +488,7 @@ describe("indexEvents", () => {
     expect(db.cursors.get(indexCursorName("market", "testnet"))).toMatchObject({ ledger: DEPLOY + 60, gap_from: DEPLOY, gap_to: DEPLOY + 29 })
   })
 
-  it("a seeds-fallback run does not advance cursors for registry pools it did not read", async () => {
+  it("a run that lists fewer markets (one marked invalid) does not advance cursors for the pools it did not read", async () => {
     const registry: Market = { ...market, marketId: "registry", contracts: { ...c, sy: randomContract(), manager: randomContract(), pool: randomContract(), recoveryEscrow: randomContract() } }
     const reader = makeReader({ [c.recoveryEscrow]: 0n, [registry.contracts.recoveryEscrow]: 0n })
     // The registry market's pool emits while the registry cannot be read.
@@ -491,7 +498,7 @@ describe("indexEvents", () => {
     await indexEvents(deps(db.sql, makeRpc({ events: [during], oldest: DEPLOY, latest: DEPLOY + 20 }).rpc, { markets: [market, registry], reader }), { deadline: FAR, groups })
     expect(db.cursors.get(indexCursorName("escrow", "testnet"))?.members).toEqual(sorted([c.recoveryEscrow, registry.contracts.recoveryEscrow]))
 
-    // The registry read failed: the run lists the manifest seeds only.
+    // The registry market is not in this run's list (the route never runs these groups on the seeds alone: runGroups).
     const fallback = makeRpc({ events: [during], oldest: DEPLOY, latest: DEPLOY + 40 })
     await indexEvents(deps(db.sql, fallback.rpc, { markets: [market], reader }), { deadline: FAR, groups })
     expect(fallback.calls.flatMap((x) => x.contractIds)).not.toContain(registry.contracts.pool)
@@ -505,6 +512,108 @@ describe("indexEvents", () => {
     await indexEvents(deps(db.sql, back.rpc, { markets: [market, registry], reader }), { deadline: FAR, groups })
     expect(db.events.has(during.id)).toBe(true)
     expect(back.calls.find((x) => x.contractIds.includes(registry.contracts.pool))?.startLedger).toBe(DEPLOY)
+  })
+
+  it("a market listed after deployLedger left the window, created inside it, starts at its creation ledger: no gap (I-1)", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    const second: Market = { ...market, marketId: "m2", createdLedger: DEPLOY + 40, contracts: { ...c, sy: randomContract(), manager: randomContract(), pool: randomContract(), recoveryEscrow: randomContract() } }
+    const seeded = ev(DEPLOY + 45, second.contracts.pool, "paused", xdr.ScVal.scvBool(false))
+    const recorded = recovery(DEPLOY + 50, 0n, second.contracts.recoveryEscrow)
+    const groups: IndexGroup[] = ["market", "escrow"]
+    const reader = makeReader({ [c.recoveryEscrow]: 0n, [second.contracts.recoveryEscrow]: 1n })
+    const db = makeDb()
+    await indexEvents(deps(db.sql, makeRpc({ events: [], oldest: DEPLOY, latest: DEPLOY + 35 }).rpc), { deadline: FAR, groups })
+    // The RPC has dropped deployLedger since (the cursors are still inside its window); the new market was built at DEPLOY + 40.
+    const later = makeRpc({ events: [seeded, recorded], oldest: DEPLOY + 30, latest: DEPLOY + 60 })
+    const result = await indexEvents(deps(db.sql, later.rpc, { markets: [market, second], reader }), { deadline: FAR, groups })
+    expect(later.calls.find((x) => x.contractIds.includes(second.contracts.pool))?.startLedger).toBe(DEPLOY + 40)
+    expect(later.calls.find((x) => x.contractIds.includes(second.contracts.recoveryEscrow))?.startLedger).toBe(DEPLOY + 40)
+    expect(groupOf(result, "market")).toMatchObject({ gap: null, complete: true, indexedThrough: DEPLOY + 60 })
+    expect(groupOf(result, "escrow")).toMatchObject({ gap: null, complete: true, indexedThrough: DEPLOY + 60 })
+    expect(db.events.has(seeded.id) && db.events.has(recorded.id)).toBe(true)
+    for (const g of groups) expect(db.cursors.get(indexCursorName(g, "testnet"))).toMatchObject({ ledger: DEPLOY + 60, gap_from: null, gap_to: null })
+    expect(db.cursors.get(indexCursorName("market", "testnet"))?.members).toEqual(
+      sorted([c.sy, c.manager, c.pool, second.contracts.sy, second.contracts.manager, second.contracts.pool]),
+    )
+    expect(warn).not.toHaveBeenCalled()
+  })
+
+  it("a creation ledger outside the window still records a real gap, from that ledger, not from deployLedger (I-1)", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {})
+    const second: Market = { ...market, marketId: "m2", createdLedger: DEPLOY + 10, contracts: { ...c, sy: randomContract(), manager: randomContract(), pool: randomContract() } }
+    const db = makeDb()
+    await indexEvents(deps(db.sql, makeRpc({ events: [], oldest: DEPLOY, latest: DEPLOY + 50 }).rpc), { deadline: FAR, groups: ["market"] })
+    const later = makeRpc({ events: [], oldest: DEPLOY + 30, latest: DEPLOY + 60 })
+    const result = await indexEvents(deps(db.sql, later.rpc, { markets: [market, second] }), { deadline: FAR, groups: ["market"] })
+    expect(later.calls.find((x) => x.contractIds.includes(second.contracts.pool))?.startLedger).toBe(DEPLOY + 30)
+    expect(groupOf(result, "market")?.gap).toEqual({ from: DEPLOY + 10, to: DEPLOY + 29 })
+    expect(db.cursors.get(indexCursorName("market", "testnet"))).toMatchObject({ ledger: DEPLOY + 60, gap_from: DEPLOY + 10, gap_to: DEPLOY + 29 })
+  })
+
+  it("a creation ledger before deployLedger changes nothing: the market starts at deployLedger", async () => {
+    const second: Market = { ...market, marketId: "m2", createdLedger: DEPLOY - 100, contracts: { ...c, sy: randomContract(), manager: randomContract(), pool: randomContract() } }
+    const db = makeDb()
+    await indexEvents(deps(db.sql, makeRpc({ events: [], oldest: DEPLOY, latest: DEPLOY + 50 }).rpc), { deadline: FAR, groups: ["market"] })
+    const later = makeRpc({ events: [], oldest: DEPLOY, latest: DEPLOY + 60 })
+    const result = await indexEvents(deps(db.sql, later.rpc, { markets: [market, second] }), { deadline: FAR, groups: ["market"] })
+    expect(later.calls.find((x) => x.contractIds.includes(second.contracts.pool))?.startLedger).toBe(DEPLOY)
+    expect(groupOf(result, "market")?.gap).toBeNull()
+  })
+
+  it("two new markets built at different ledgers each start at their own, in chunks of their own", async () => {
+    const make = (id: string, createdLedger: number): Market => ({ ...market, marketId: id, createdLedger, contracts: { ...c, sy: randomContract(), manager: randomContract(), pool: randomContract() } })
+    const [a, b] = [make("a", DEPLOY + 35), make("b", DEPLOY + 55)]
+    const db = makeDb()
+    await indexEvents(deps(db.sql, makeRpc({ events: [], oldest: DEPLOY, latest: DEPLOY + 32 }).rpc), { deadline: FAR, groups: ["market"] })
+    const later = makeRpc({ events: [], oldest: DEPLOY + 30, latest: DEPLOY + 60 })
+    const result = await indexEvents(deps(db.sql, later.rpc, { markets: [market, a, b] }), { deadline: FAR, groups: ["market"] })
+    const starts = later.calls.filter((x) => x.startLedger !== undefined)
+    expect(starts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ startLedger: DEPLOY + 33, contractIds: [c.sy, c.manager, c.pool] }),
+        expect.objectContaining({ startLedger: DEPLOY + 35, contractIds: [a.contracts.sy, a.contracts.manager, a.contracts.pool] }),
+        expect.objectContaining({ startLedger: DEPLOY + 55, contractIds: [b.contracts.sy, b.contracts.manager, b.contracts.pool] }),
+      ]),
+    )
+    expect(groupOf(result, "market")).toMatchObject({ gap: null, complete: true, indexedThrough: DEPLOY + 60 })
+  })
+
+  it("a seeds-fallback run, then a registry run: no gap, and the members are unchanged (I-1, runGroups)", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {})
+    const registry: Market = { ...market, marketId: "registry", contracts: { ...c, sy: randomContract(), manager: randomContract(), pool: randomContract(), recoveryEscrow: randomContract() } }
+    const reader = makeReader({ [c.recoveryEscrow]: 0n, [registry.contracts.recoveryEscrow]: 0n })
+    const during = ev(DEPLOY + 30, registry.contracts.pool, "paused", xdr.ScVal.scvBool(true))
+    const marketCursor = indexCursorName("market", "testnet")
+    const escrowCursor = indexCursorName("escrow", "testnet")
+    const db = makeDb()
+    // A registry run: every group, both markets.
+    const all = runGroups(true)
+    expect(all).toEqual({ groups: ["escrow", "oracle", "permissioning", "risk", "market"], skipped: null })
+    await indexEvents(deps(db.sql, makeRpc({ events: [], oldest: DEPLOY, latest: DEPLOY + 28 }).rpc, { markets: [market, registry], reader }), { deadline: FAR, groups: all.groups })
+    const before = { market: { ...db.cursors.get(marketCursor) }, escrow: { ...db.cursors.get(escrowCursor) } }
+    expect(before.market.members).toEqual(sorted([c.sy, c.manager, c.pool, registry.contracts.sy, registry.contracts.manager, registry.contracts.pool]))
+
+    // The registry read fails: the seeds alone. The market and escrow groups are left for the next run.
+    const fallback = runGroups(false)
+    expect(fallback.groups).toEqual(["oracle", "permissioning", "risk"])
+    expect(fallback.skipped?.groups).toEqual(["escrow", "market"])
+    const seedsOnly = makeRpc({ events: [during], oldest: DEPLOY, latest: DEPLOY + 40 })
+    const skippedRun = await indexEvents(deps(db.sql, seedsOnly.rpc, { markets: [market], reader }), { deadline: FAR, groups: fallback.groups })
+    expect(skippedRun.groups.map((g) => g.group)).toEqual(["oracle", "permissioning", "risk"])
+    expect(skippedRun.reconcile).toEqual([])
+    expect(seedsOnly.calls.flatMap((x) => x.contractIds)).not.toContain(c.pool)
+    expect(db.cursors.get(marketCursor)).toEqual(before.market)
+    expect(db.cursors.get(escrowCursor)).toEqual(before.escrow)
+
+    // The registry is back, and the RPC has dropped deployLedger meanwhile: nothing was ever dropped, so no gap.
+    const back = makeRpc({ events: [during], oldest: DEPLOY + 25, latest: DEPLOY + 45 })
+    const result = await indexEvents(deps(db.sql, back.rpc, { markets: [market, registry], reader }), { deadline: FAR, groups: all.groups })
+    for (const g of ["market", "escrow"] as const) expect(groupOf(result, g)).toMatchObject({ gap: null, complete: true, indexedThrough: DEPLOY + 45 })
+    expect(db.cursors.get(marketCursor)).toMatchObject({ ledger: DEPLOY + 45, gap_from: null, gap_to: null, members: before.market.members })
+    expect(db.cursors.get(escrowCursor)).toMatchObject({ ledger: DEPLOY + 45, gap_from: null, gap_to: null, members: before.escrow.members })
+    // The registry market resumed with the others, after the cursor: its event during the fallback is indexed.
+    expect(back.calls.find((x) => x.contractIds.includes(registry.contracts.pool))?.startLedger).toBe(DEPLOY + 29)
+    expect(db.events.has(during.id)).toBe(true)
   })
 
   it("a manifest switch indexes the new shared contracts from deployLedger", async () => {
@@ -720,6 +829,7 @@ describe("getIndexedEvents", () => {
       indexedThroughCloseTime: iso(closeOf(tip)),
       lagSeconds: 42,
       gaps: [],
+      pendingGroups: [],
       reconcile: null,
     })
     const list = db.texts.find((t) => t.includes("from events")) as string
@@ -742,9 +852,18 @@ describe("getIndexedEvents", () => {
     expect(one.indexedThrough).toBe(DEPLOY + 20)
   })
 
-  it("a group never indexed: indexedThrough 0, lag unknown", async () => {
+  it("a group never indexed: indexedThrough 0, lag unknown, and the groups no run has indexed are named", async () => {
     const db = readDb([])
-    expect(await getIndexedEvents(db.sql, { network: "testnet", limit: 1 })).toMatchObject({ indexedThrough: 0, indexedThroughCloseTime: null, lagSeconds: null })
+    expect(await getIndexedEvents(db.sql, { network: "testnet", limit: 1 })).toMatchObject({
+      indexedThrough: 0,
+      indexedThroughCloseTime: null,
+      lagSeconds: null,
+      pendingGroups: ["escrow", "oracle", "permissioning", "risk", "market"],
+    })
+    // Only market and escrow have no cursor (no market listed yet): those two are pending.
+    const shared = readDb(allCursors(DEPLOY + 20, new Date(closeOf(DEPLOY + 20) * 1000)).filter((x) => !/:(market|escrow):/.test(x.name)))
+    expect((await getIndexedEvents(shared.sql, { network: "testnet", limit: 1 })).pendingGroups).toEqual(["escrow", "market"])
+    expect((await getIndexedEvents(shared.sql, { network: "testnet", group: "oracle", limit: 1 })).pendingGroups).toEqual([])
   })
 
   it("returns the stored gaps of the groups asked, and the last reconcile", async () => {

@@ -51,9 +51,9 @@ class Chain {
     })
   }
 
-  /** Deploys a fully wired market running the pinned code, registered with the Router. */
-  deploy(n: number, opts: { register?: boolean; maturity?: number } = {}): Contracts {
-    const c = contractsOf(n)
+  /** Deploys a fully wired market running the pinned code, registered with the Router (at `contracts` when given). */
+  deploy(n: number, opts: { register?: boolean; maturity?: number; contracts?: Contracts } = {}): Contracts {
+    const c = opts.contracts ?? contractsOf(n)
     const maturity = BigInt(opts.maturity ?? MATURITY)
     const set = (id: string, fn: string, v: Answer) => this.views.set(`${id}.${fn}`, v)
     set(c.pool, "config_address", c.config)
@@ -701,6 +701,12 @@ describe("discover and resolvedMarkets", () => {
 
 // ---------------------------------------------------------------- publish (POST /api/markets)
 
+/** The seven contracts `salt` gives on the manifest's factory. */
+function saltContracts(manifest: Manifest, salt: Buffer): Contracts {
+  const d = deriveMarketContracts(manifest, hex(salt))
+  return { sy: d.sy, pt: d.pt, yt: d.yt, config: d.config, manager: d.manager, pool: d.pool, recoveryEscrow: d.recoveryEscrow }
+}
+
 describe("half-finished markets by salt (spec 0002 §5 \"Resuming\"): the factory's mkt_tok, mkt_eng and mkt_new", () => {
   const OTHER_ISSUER = Keypair.fromRawEd25519Seed(Buffer.alloc(32, 8)).publicKey()
   const FOREIGN_SAC = new Asset("SPAM", OTHER_ISSUER).contractId(PASSPHRASES.local)
@@ -831,6 +837,98 @@ describe("half-finished markets by salt (spec 0002 §5 \"Resuming\"): the factor
     expect(salts[0]).toBe(`19${"ab".repeat(31)}`)
   })
 
+  /** A market the factory builds from `salt`: its seven contracts at the addresses the salt gives, wired and pinned. */
+  function builtFrom(manifest: Manifest, salt: Buffer, opts: { register?: boolean } = {}): Contracts {
+    return chain.deploy(0, { ...opts, contracts: saltContracts(manifest, salt) })
+  }
+  /** The factory's three events for `salt`, at `at`, `at + 5` and `at + 10`. */
+  const build = (salt: ReturnType<typeof saltOf>, c: Contracts, at: number) => [mktTok(salt, c.sy, at), mktEng(salt, c.manager, at + 5), mktNew(c.pool, c.recoveryEscrow, at + 10, salt)]
+  const createdOf = (pool: string) => (store.rowsMap.get(pool)?.market as Market | null | undefined)?.createdLedger
+
+  it("a market built and registered in one page keeps its first factory event's ledger (mkt_tok) as createdLedger (I-1)", async () => {
+    const manifest = manifestWith([])
+    const c = builtFrom(manifest, saltOf(30))
+    chain.events = [...build(saltOf(30), c, 290), reg(c.pool, 305)]
+    expect((await discover(depsFor(manifest))).checked).toEqual([c.pool])
+    expect(store.rowsMap.get(c.pool)).toMatchObject({ valid: true })
+    expect(createdOf(c.pool)).toBe(290)
+    // The list carries it to the indexer.
+    expect((await resolvedMarkets({ store, manifest })).find((m) => m.contracts.pool === c.pool)?.createdLedger).toBe(290)
+  })
+
+  it("a market registered in a later run than its build takes the salt index's ledger (its mkt_new), never mkt_reg's (I-1)", async () => {
+    const manifest = manifestWith([])
+    const c = builtFrom(manifest, saltOf(31), { register: false })
+    chain.events = build(saltOf(31), c, 290)
+    await discover(depsFor(manifest))
+    // Not registered yet: invalid, no market stored to carry a ledger.
+    expect(store.rowsMap.get(c.pool)).toMatchObject({ valid: false })
+    chain.registered.add(c.pool)
+    // A later run: the chain has moved on past the first run's cursor.
+    chain.latestLedger = 1_100
+    chain.events = [...chain.events, reg(c.pool, 1_050)]
+    await discover(depsFor(manifest))
+    expect(store.rowsMap.get(c.pool)).toMatchObject({ valid: true })
+    expect(createdOf(c.pool)).toBe(300)
+  })
+
+  it("a later event naming the pool keeps the earlier createdLedger; re-validation keeps it too", async () => {
+    const manifest = manifestWith([])
+    const c = builtFrom(manifest, saltOf(32))
+    chain.events = [...build(saltOf(32), c, 290), reg(c.pool, 305)]
+    await discover(depsFor(manifest))
+    chain.latestLedger = 1_100
+    chain.events = [...chain.events, unreg(c.pool, 1_040)]
+    await discover(depsFor(manifest))
+    expect(store.rowsMap.get(c.pool)).toMatchObject({ valid: false })
+    chain.latestLedger = 1_200
+    chain.events = [...chain.events, reg(c.pool, 1_150)]
+    await discover(depsFor(manifest))
+    expect(store.rowsMap.get(c.pool)).toMatchObject({ valid: true })
+    expect(createdOf(c.pool)).toBe(290)
+    await revalidate(depsFor(manifest))
+    expect(createdOf(c.pool)).toBe(290)
+  })
+
+  it("a seed never takes a createdLedger: the indexer reads the seeds from deployLedger", async () => {
+    const probe = manifestWith([])
+    const c = builtFrom(probe, saltOf(33))
+    const manifest = manifestWith([seedMarket(c)])
+    chain.events = [...build(saltOf(33), c, 290), reg(c.pool, 305)]
+    await discover(depsFor(manifest))
+    expect(createdOf(c.pool)).toBeUndefined()
+    expect((await resolvedMarkets({ store, manifest }))[0].createdLedger).toBeUndefined()
+  })
+
+  it("a market discovery never saw built (registered only) gets no createdLedger: the indexer keeps its old start", async () => {
+    const c = chain.deploy(40)
+    chain.events = [reg(c.pool, 305)]
+    await discover(depsFor(manifestWith([])))
+    expect(store.rowsMap.get(c.pool)).toMatchObject({ valid: true })
+    expect(createdOf(c.pool)).toBeUndefined()
+  })
+
+  it("a salt index that cannot be read leaves the market without one, logged by its code; discovery goes on", async () => {
+    const manifest = manifestWith([])
+    const c = builtFrom(manifest, saltOf(34), { register: false })
+    chain.events = build(saltOf(34), c, 290)
+    await discover(depsFor(manifest))
+    chain.registered.add(c.pool)
+    // A later run: the chain has moved on past the first run's cursor.
+    chain.latestLedger = 1_100
+    chain.events = [...chain.events, reg(c.pool, 1_050)]
+    const salts = store.salts
+    store.salts = async () => {
+      throw Object.assign(new Error("connect ECONNREFUSED 10.0.0.5"), { code: "ECONNREFUSED" })
+    }
+    await discover(depsFor(manifest))
+    store.salts = salts
+    expect(store.rowsMap.get(c.pool)).toMatchObject({ valid: true })
+    expect(createdOf(c.pool)).toBeUndefined()
+    expect(JSON.stringify(error.mock.calls)).toMatch(/ECONNREFUSED/)
+    expect(JSON.stringify(error.mock.calls)).not.toMatch(/10\.0\.0\.5/)
+  })
+
   it("resumableSalts says it is unavailable when the registry cannot be read, and lists nothing without a factory", async () => {
     store.fail = Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" })
     expect(await resumableSalts({ store, manifest: manifestWith([]) })).toEqual({ status: "unavailable" })
@@ -862,6 +960,19 @@ describe("publishMarket", () => {
     expect(result).toMatchObject({ status: "valid", market: { contracts: { pool: c.pool } } })
     expect(store.rowsMap.get(c.pool)).toMatchObject({ source: "published", valid: true })
     expect((await resolvedMarkets({ store, manifest })).map((m) => m.contracts.pool)).toEqual([c.pool])
+    // Nothing in the salt index names it: no creation ledger (the indexer keeps its old start).
+    expect((store.rowsMap.get(c.pool)?.market as Market).createdLedger).toBeUndefined()
+  })
+
+  it("a published market whose build is in the salt index takes that ledger as createdLedger (I-1)", async () => {
+    const manifest = manifestWith([])
+    const salt = Buffer.alloc(32, 41)
+    const c = chain.deploy(0, { contracts: saltContracts(manifest, salt) })
+    await store.recordSalt({ factory: SHARED.factory, salt: hex(salt), underlying: SAC, phase: "pool", ledger: 300 })
+    const result = await publishMarket(depsFor(manifest), c.pool)
+    expect(result).toMatchObject({ status: "valid", market: { createdLedger: 300 } })
+    expect((store.rowsMap.get(c.pool)?.market as Market).createdLedger).toBe(300)
+    expect((await resolvedMarkets({ store, manifest }))[0].createdLedger).toBe(300)
   })
 })
 

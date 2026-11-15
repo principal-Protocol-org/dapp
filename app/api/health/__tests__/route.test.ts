@@ -25,7 +25,7 @@ import { GET, HEALTH_PART_TIMEOUT_MS } from "../route"
 
 const MANIFEST = parseManifest(testnetJson)
 const CLOSE = 1_794_657_600 // 2026-11-14T12:00:00Z
-const INDEX = { rows: [], indexedThrough: 5_719_749, indexedThroughCloseTime: "2026-11-14T11:55:00.000Z", lagSeconds: 300, gaps: [], reconcile: null }
+const INDEX = { rows: [], indexedThrough: 5_719_749, indexedThroughCloseTime: "2026-11-14T11:55:00.000Z", lagSeconds: 300, gaps: [], pendingGroups: [], reconcile: null }
 const KEEPER = { healthy: true, lastSuccessAt: "2026-11-14T11:30:00.000Z", lastTickAt: "2026-11-14T11:30:00.000Z", rejected24h: 0, failures24h: 0 }
 
 describe("GET /api/health", () => {
@@ -55,13 +55,40 @@ describe("GET /api/health", () => {
     expect(await res.json()).toEqual({
       network: "testnet",
       ledger: { status: "ok", sequence: 5_720_000, closeTime: "2026-11-14T12:00:00.000Z" },
-      indexer: { status: "ok", indexedThrough: 5_719_749, indexedThroughCloseTime: "2026-11-14T11:55:00.000Z", lagSeconds: 300, gaps: [] },
+      indexer: { status: "ok", indexedThrough: 5_719_749, indexedThroughCloseTime: "2026-11-14T11:55:00.000Z", lagSeconds: 300, gaps: [], pendingGroups: [] },
       keeper: { status: "ok", healthy: true, lastSuccessAt: "2026-11-14T11:30:00.000Z", lastTickAt: "2026-11-14T11:30:00.000Z" },
       openAlerts: { status: "ok", count: 2, critical: 1 },
     })
     expect(mocks.getIndexedEvents.mock.calls[0][1]).toMatchObject({ network: "testnet", limit: 1 })
     expect(mocks.keeperHealth.mock.calls[0]).toEqual([expect.anything(), "testnet", 1_800, { oracle: MANIFEST.shared.oracle }])
     expect(mocks.openAlertCounts.mock.calls[0][1]).toBe("testnet")
+  })
+
+  it("before the first run of a group the indexer reads pending, with the reason and the groups, never ok; still 200 (M-7)", async () => {
+    // market and escrow have no cursor yet (no market listed, as on Mainnet before its first market).
+    mocks.getIndexedEvents.mockResolvedValue({ ...INDEX, indexedThrough: 0, indexedThroughCloseTime: null, lagSeconds: null, pendingGroups: ["escrow", "market"] })
+    const res = await GET()
+    expect(res.status).toBe(200)
+    expect(res.headers.get("cache-control")).toBe("public, s-maxage=15, stale-while-revalidate=15")
+    expect((await res.json()).indexer).toEqual({
+      status: "pending",
+      reason: "no index run yet",
+      indexedThrough: 0,
+      indexedThroughCloseTime: null,
+      lagSeconds: null,
+      gaps: [],
+      pendingGroups: ["escrow", "market"],
+    })
+  })
+
+  it("a pending indexer is not unavailable: with every other part down the answer is still 200", async () => {
+    mocks.getIndexedEvents.mockResolvedValue({ ...INDEX, indexedThrough: 0, indexedThroughCloseTime: null, lagSeconds: null, pendingGroups: ["escrow", "oracle", "permissioning", "risk", "market"] })
+    mocks.getLedgerClock.mockRejectedValue(new Error("rpc down"))
+    mocks.keeperHealth.mockRejectedValue(new Error("db down"))
+    mocks.openAlertCounts.mockRejectedValue(new Error("db down"))
+    const res = await GET()
+    expect(res.status).toBe(200)
+    expect((await res.json()).indexer.status).toBe("pending")
   })
 
   it("no keeper run recorded reads healthy null: unknown, not unhealthy", async () => {

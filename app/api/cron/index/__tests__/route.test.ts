@@ -6,11 +6,14 @@ vi.mock("server-only", () => ({}))
 const mocks = vi.hoisted(() => ({
   indexEvents: vi.fn(),
   verify: vi.fn(),
+  sql: vi.fn(),
+  manifestError: null as Error | null,
   DatabaseConfigError: class DatabaseConfigError extends Error {},
 }))
-vi.mock("@/lib/server/indexer", () => ({ indexEvents: mocks.indexEvents }))
-// The registry is real; its SQL answers nothing, so the markets are the manifest seeds.
-vi.mock("@/lib/server/db", () => ({ sql: vi.fn(async () => []), DatabaseConfigError: mocks.DatabaseConfigError }))
+// The indexer's run is faked; its group choice (runGroups) is the real one.
+vi.mock("@/lib/server/indexer", async (importActual) => ({ ...(await importActual<object>()), indexEvents: mocks.indexEvents }))
+// The registry is real; its SQL answers nothing, so the markets are the manifest seeds (read from the registry).
+vi.mock("@/lib/server/db", () => ({ sql: mocks.sql, DatabaseConfigError: mocks.DatabaseConfigError }))
 vi.mock("@upstash/qstash", () => ({
   Receiver: class {
     verify = mocks.verify
@@ -20,7 +23,12 @@ vi.mock("@/lib/protocol/manifest-source", async () => {
   const { parseManifest } = await import("@/lib/protocol/manifest")
   const json = (await import("@/config/manifests/testnet.json")).default
   const m = parseManifest(json)
-  return { activeManifest: () => m }
+  return {
+    activeManifest: () => {
+      if (mocks.manifestError) throw mocks.manifestError
+      return m
+    },
+  }
 })
 vi.mock("@/lib/protocol/stellar", () => ({ createRpcServer: () => ({ rpc: "fake" }) }))
 
@@ -46,12 +54,15 @@ describe("/api/cron/index", () => {
     mocks.indexEvents.mockReset()
     mocks.indexEvents.mockResolvedValue(RESULT)
     mocks.verify.mockReset()
+    mocks.sql.mockReset().mockResolvedValue([])
+    mocks.manifestError = null
   })
   afterEach(() => {
     delete process.env.CRON_SECRET
     delete process.env.QSTASH_CURRENT_SIGNING_KEY
     delete process.env.QSTASH_NEXT_SIGNING_KEY
     delete process.env.VERCEL
+    vi.restoreAllMocks()
   })
 
   it("401 without credentials, and nothing runs", async () => {
@@ -79,6 +90,39 @@ describe("/api/cron/index", () => {
     expect(deps.rpc).toEqual({ rpc: "fake" })
     expect(opts.deadline).toBeGreaterThanOrEqual(before + 50_000)
     expect(opts.deadline).toBeLessThanOrEqual(Date.now() + 50_000)
+    // The list came from the registry: every group runs, and nothing is skipped.
+    expect(opts.groups).toEqual(["escrow", "oracle", "permissioning", "risk", "market"])
+  })
+
+  it("a registry that cannot be read (the seeds alone): the market and escrow groups wait, and the answer says why (I-1)", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {})
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    mocks.sql.mockRejectedValue(Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }))
+    const res = await call(auth)
+    expect(res.status).toBe(200)
+    const [deps, opts] = mocks.indexEvents.mock.calls[0]
+    expect(deps.markets).toEqual(deps.manifest.markets)
+    expect(opts.groups).toEqual(["oracle", "permissioning", "risk"])
+    const body = await res.json()
+    expect(body).toEqual({
+      ...RESULT,
+      skipped: {
+        groups: ["escrow", "market"],
+        reason: "The markets list could not be read, so only the manifest seeds were known. The market and escrow groups wait for the next run.",
+      },
+    })
+    expect(warn.mock.calls.flat().join(" ")).toMatch(/skipped the escrow and market groups/)
+  })
+
+  it("a manifest that cannot be read answers the route's JSON 500, never a bare one (M-6)", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {})
+    mocks.manifestError = new Error('NEXT_PUBLIC_PRINCIPAL_NETWORK must be "testnet", "local" or "mainnet", got "x".')
+    const res = await call(auth)
+    expect(res.status).toBe(500)
+    expect(res.headers.get("cache-control")).toBe("no-store")
+    expect(await res.json()).toEqual({ error: "failed" })
+    expect(error.mock.calls.flat().join(" ")).toBe("index route failed: Error")
+    expect(mocks.indexEvents).not.toHaveBeenCalled()
   })
 
   it("a QStash POST runs the same checks", async () => {

@@ -537,15 +537,28 @@ function saltOf(data: unknown): string | null {
   return first instanceof Uint8Array && first.length === 32 ? bytesToHex(first) : null
 }
 
+/** The pool a salt gives on this manifest's factory; null for one it cannot derive. */
+function poolOfSalt(manifest: Manifest, salt: string): string | null {
+  try {
+    return deriveMarketContracts(manifest, salt).pool
+  } catch {
+    return null
+  }
+}
+
 /**
  * One page's events as steps: the last event per pool wins, in the order of those last events. The
- * factory's events also name the salts it started, each at the furthest phase seen (spec 0002 §5).
+ * factory's events also name the salts it started, each at the furthest phase seen (spec 0002 §5),
+ * and `built` holds, by the pool each salt gives (and the pool `mkt_new` names), the earliest ledger of
+ * those events in the page.
  */
-function stepsOf(manifest: Manifest, events: RawEvent[]): { steps: Step[]; salts: SaltEvent[] } {
+function stepsOf(manifest: Manifest, events: RawEvent[]): { steps: Step[]; salts: SaltEvent[]; built: Map<string, number> } {
   const router = manifest.shared.router
   const factory = manifest.shared.factory
   const steps = new Map<string, Step>()
   const salts = new Map<string, SaltEvent>()
+  const built = new Map<string, number>()
+  const pools = new Map<string, string | null>()
   for (const e of [...events].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))) {
     if (e.inSuccessfulContractCall === false) continue
     const from = idOf(e.contractId)
@@ -572,9 +585,50 @@ function stepsOf(manifest: Manifest, events: RawEvent[]): { steps: Step[]; salts
         phase: prev && PHASE_RANK[prev.phase] > PHASE_RANK[phase] ? prev.phase : phase,
         ledger: Math.max(prev?.ledger ?? 0, e.ledger),
       })
+      if (!pools.has(salt)) pools.set(salt, poolOfSalt(manifest, salt))
+      // The pool the salt gives, and the one `mkt_new` names (the same for this factory's own events).
+      const named = topic === "mkt_new" && Array.isArray(data) && isContract(data[1]) ? data[1] : null
+      for (const pool of new Set([pools.get(salt), named])) if (pool) built.set(pool, Math.min(built.get(pool) ?? e.ledger, e.ledger))
     }
   }
-  return { steps: [...steps.values()], salts: [...salts.values()] }
+  return { steps: [...steps.values()], salts: [...salts.values()], built }
+}
+
+/**
+ * Where discovery has seen the factory build each market, by pool: its salt's `market_salts` ledger
+ * (the furthest phase seen, its `mkt_new` once built). Best effort, as the salt index itself: a failed
+ * read is logged by its code and answers none.
+ */
+async function storedBuildLedgers(store: RegistryStore, manifest: Manifest): Promise<Map<string, number>> {
+  const out = new Map<string, number>()
+  const factory = manifest.shared.factory
+  if (!factory) return out
+  try {
+    for (const row of await store.salts(factory)) {
+      const pool = poolOfSalt(manifest, row.salt)
+      if (pool) out.set(pool, Math.min(out.get(pool) ?? row.ledger, row.ledger))
+    }
+  } catch (error) {
+    console.error(`registry: the salts could not be read (${dbCode(error)}); the markets checked now get no creation ledger`)
+  }
+  return out
+}
+
+/**
+ * The market of `outcome` with the earliest ledger the factory was seen building it at
+ * (`createdLedger`, spec 0004 D-14), kept when it is already earlier. A seed never takes one: the
+ * indexer reads the seeds from `deployLedger`.
+ *
+ * The bound holds for every contract of a market made by the wizard: its pool and RecoveryEscrow are
+ * built at `mkt_new`, and its SY and manager emit nothing before someone calls them, which the
+ * wizard does only from the seed step on, after `mkt_new`. With the factory's three events in the
+ * page that names the pool, it is their first one (`mkt_tok`).
+ */
+function withCreatedLedger(outcome: Outcome, ledgers: (number | undefined)[]): Outcome {
+  const seen = ledgers.filter((l): l is number => l !== undefined)
+  if (seen.length === 0 || !outcome.market) return outcome
+  const createdLedger = Math.min(outcome.market.createdLedger ?? Infinity, ...seen)
+  return { ...outcome, market: { ...outcome.market, createdLedger } } as Outcome
 }
 
 /**
@@ -696,6 +750,7 @@ export async function discover(deps: RegistryDeps, opts: { deadline?: number } =
   const checked: string[] = []
   let rows: RegistryRow[] | null = null
   let known: Market[] = []
+  let builtBefore: Map<string, number> | null = null
   const save = (cursor: string, latestLedger: number) => store.saveCursor(name, Math.min(cursorLedger(cursor) || latestLedger, latestLedger), cursor)
 
   for (let page = 0; page < MAX_EVENT_PAGES; page++) {
@@ -730,7 +785,12 @@ export async function discover(deps: RegistryDeps, opts: { deadline?: number } =
         await store.record({ pool: step.pool, source, valid: false, reason: "Unregistered from the Router.", market: null })
       } else {
         const stored = storedMarket(rows.find((r) => r.pool === step.pool)?.market)
-        const outcome = await check(deps, step.pool, known, stored)
+        let outcome = await check(deps, step.pool, known, stored)
+        if (source !== "seed" && outcome.market) {
+          // A market built over several runs (its pool registered after the run that saw mkt_new) has its build in the salt index.
+          builtBefore ??= await storedBuildLedgers(store, manifest)
+          outcome = withCreatedLedger(outcome, [found.built.get(step.pool), builtBefore.get(step.pool)])
+        }
         // A market built in this run holds its id for the next one (R2-37 collisions).
         if (outcome.market && !known.some((m) => m.contracts.pool === step.pool)) known.push(outcome.market)
         await write(store, step.pool, source, outcome)
@@ -997,9 +1057,12 @@ function dbCode(error: unknown): string {
 export async function publishMarket(deps: RegistryDeps, pool: string): Promise<Outcome> {
   const rows = await deps.store.rows()
   const stored = storedMarket(rows.find((r) => r.pool === pool)?.market)
-  const outcome = await check(deps, pool, knownMarkets(deps.manifest, rows), stored)
+  const checked = await check(deps, pool, knownMarkets(deps.manifest, rows), stored)
+  const seed = sourceFor(deps.manifest, pool) === "seed"
+  // The wizard publishes before the next discovery run: the salt index may already hold its build.
+  const outcome = checked.status === "valid" && !seed ? withCreatedLedger(checked, [(await storedBuildLedgers(deps.store, deps.manifest)).get(pool)]) : checked
   if (outcome.status === "valid") {
-    await deps.store.record({ pool, source: sourceFor(deps.manifest, pool) === "seed" ? "seed" : "published", valid: true, reason: null, market: outcome.market })
+    await deps.store.record({ pool, source: seed ? "seed" : "published", valid: true, reason: null, market: outcome.market })
   }
   return outcome
 }

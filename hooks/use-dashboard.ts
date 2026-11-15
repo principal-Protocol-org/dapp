@@ -217,6 +217,8 @@ function mergeAnswers(answers: IndexedEvents[], limit: number): IndexedEvents {
     indexedThroughCloseTime: closeTimes.some((t) => t === null) ? null : [...(closeTimes as string[])].sort()[0],
     lagSeconds: lags.some((l) => l === null) ? null : Math.max(...(lags as number[])),
     gaps: answers.flatMap((a) => a.gaps),
+    // An answer from a server before this field has none.
+    pendingGroups: answers.flatMap((a) => a.pendingGroups ?? []),
     reconcile: answers.find((a) => a.reconcile)?.reconcile ?? null,
   }
 }

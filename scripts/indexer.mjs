@@ -2,6 +2,7 @@
 // `/api/cron/index`; these run by hand.
 //
 //   pnpm indexer:reindex --network <n> --group <g> --from <ledger> [--force]   reset one group's cursor
+//   pnpm indexer:clear-gap --network <n> --group <g> [--yes]                    clear a stored gap known to be false
 //   pnpm indexer:export  --out <file.jsonl> [--network <n>]                     events rows and cursors, as JSON Lines
 //   pnpm indexer:import  --network <n> --in <file.jsonl>                        upsert a file written by export
 //   pnpm indexer:capture --network <n> [--out <file.jsonl>]                     list the network's markets, index them
@@ -15,7 +16,8 @@
 // the environment, else the DATABASE_URL of .env.local. `capture` writes only to a database on this
 // machine (a host that resolves to loopback only, with no `host` query parameter): its rows reach a
 // shared database through `import`, with the developer's go. This script never prints a connection
-// string or any part of it.
+// string or any part of it. `clear-gap` prints the gap first, and on a database that is not on this
+// machine it clears it only with --yes.
 //
 // `capture` runs the app's own registry discovery and indexer (lib/server/registry.ts,
 // lib/server/indexer.ts) and needs Node's TypeScript transform (`pnpm indexer:capture` passes
@@ -42,7 +44,7 @@ const EVENT_ID = /^\d{19}-\d{10}$/
 const CONTRACT = /^C[A-Z2-7]{55}$/
 const CURSOR_NAME = new RegExp(`^events:(${GROUPS.join("|")}):(${NETWORKS.join("|")})$`)
 const FORMAT = "principal-indexer-export"
-const BOOLEAN_FLAGS = new Set(["force"])
+const BOOLEAN_FLAGS = new Set(["force", "yes"])
 /** Events per insert statement on import. */
 const IMPORT_BATCH = 500
 /** Capture: one discovery or indexer run's deadline, and the whole capture's. */
@@ -58,12 +60,13 @@ function fail(message) {
 
 // ---------------------------------------------------------------- arguments and connection
 
-/** `<command> --flag value ... --force`: every flag takes a value but the boolean ones. */
+/** `<command> --flag value ... --force`: every flag takes a value but the boolean ones. A bare `--` (pnpm's separator) is skipped. */
 export function parseArgs(argv) {
   const [command, ...rest] = argv
   const flags = {}
   for (let i = 0; i < rest.length; i++) {
     const arg = rest[i]
+    if (arg === "--") continue
     if (!arg.startsWith("--")) throw new UsageError(`unexpected argument "${arg}"`)
     const key = arg.slice(2)
     if (BOOLEAN_FLAGS.has(key)) {
@@ -238,6 +241,46 @@ export async function reindex(pool, { network, group, from, force, oldest }) {
     [name, from - 1],
   )
   console.log(`reindex: ${name} was indexed through ${current ?? "nothing"}; the next run reads from ledger ${from}`)
+}
+
+// ---------------------------------------------------------------- clear-gap
+
+/**
+ * Why a gap must not be cleared yet, or null. On a database that is not on this machine (the shared
+ * Testnet one) it needs `--yes`, so the operator has read the gap the command printed first.
+ */
+export function clearGapRefusal({ name, local, yes, from }) {
+  if (local || yes) return null
+  return `the database from ${from} is not on this machine: read the gap above, then run again with --yes to clear it on ${name}`
+}
+
+/**
+ * Clears a group's stored gap (`gap_from`, `gap_to`) when the operator knows it is false: the
+ * contracts it names had no events in those ledgers (a market built after the RPC's window began,
+ * listed before its creation ledger was known). A real gap is filled by an import instead. It prints
+ * the gap first, then clears exactly that gap: one the indexer widened in between is refused, to be
+ * read again. The cursor and its members are kept. The next `cron/alerts` run closes the open
+ * `indexer_gap` alert and posts its close.
+ */
+export async function clearGap(pool, { network, group, local, yes, from }) {
+  const name = `events:${group}:${network}`
+  const { rows } = await pool.query("select ledger, gap_from, gap_to from ingest_cursor where name = $1", [name])
+  const row = rows[0]
+  if (!row || row.gap_from === null || row.gap_from === undefined) {
+    console.log(`clear-gap: ${name} stores no gap; nothing to clear`)
+    return { cleared: false }
+  }
+  const gap = { from: num(row.gap_from), to: num(row.gap_to) }
+  console.log(`clear-gap: ${name} stores a gap: ledgers ${gap.from}-${gap.to ?? gap.from} (indexed through ${num(row.ledger) ?? "nothing"})`)
+  const refusal = clearGapRefusal({ name, local, yes, from })
+  if (refusal) throw new UsageError(refusal)
+  const cleared = await pool.query(
+    "update ingest_cursor set gap_from = null, gap_to = null where name = $1 and gap_from = $2 and gap_to is not distinct from $3",
+    [name, gap.from, gap.to],
+  )
+  if (cleared.rowCount === 0) throw new UsageError(`the gap on ${name} changed while it was read (an indexer run widened it); run clear-gap again`)
+  console.log(`clear-gap: cleared ledgers ${gap.from}-${gap.to ?? gap.from} on ${name}. The next cron/alerts run closes the open indexer_gap alert.`)
+  return { cleared: true, gap }
 }
 
 // ---------------------------------------------------------------- export
@@ -568,8 +611,8 @@ async function capture(pool, { network, out }) {
 
 async function main(argv) {
   const { command, flags } = parseArgs(argv)
-  if (!["reindex", "export", "import", "capture"].includes(command)) {
-    throw new UsageError("usage: indexer.mjs reindex|export|import|capture [--flags]; see the comment at the top of scripts/indexer.mjs")
+  if (!["reindex", "clear-gap", "export", "import", "capture"].includes(command)) {
+    throw new UsageError("usage: indexer.mjs reindex|clear-gap|export|import|capture [--flags]; see the comment at the top of scripts/indexer.mjs")
   }
   const db = databaseUrl(flags)
   let args
@@ -580,6 +623,11 @@ async function main(argv) {
     const from = Number(requireFlag(flags, "from"))
     if (!Number.isInteger(from) || from < 1) throw new UsageError("--from must be a ledger number")
     args = { network, group, from, force: flags.force === true, oldest: await rpcOldestLedger(network) }
+  } else if (command === "clear-gap") {
+    const network = networkOf(flags, true)
+    const group = requireFlag(flags, "group")
+    if (!GROUPS.includes(group)) throw new UsageError(`--group must be one of ${GROUPS.join(", ")}`)
+    args = { network, group, yes: flags.yes === true, local: await isLocalDatabase(db.url), from: db.from }
   } else if (command === "export") {
     args = { out: requireFlag(flags, "out"), network: networkOf(flags, false) }
   } else if (command === "import") {
@@ -595,6 +643,7 @@ async function main(argv) {
   const pool = new pg.Pool({ connectionString: db.url, max: 5, connectionTimeoutMillis: 10_000 })
   try {
     if (command === "reindex") await reindex(pool, args)
+    else if (command === "clear-gap") await clearGap(pool, args)
     else if (command === "export") {
       const r = await exportRows(pool, args)
       console.log(`export: ${r.events} events and ${r.cursors} cursors to ${args.out} (${r.bytes} bytes)`)

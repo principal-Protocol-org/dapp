@@ -7,15 +7,17 @@ import "server-only"
  * ```
  * { network,
  *   ledger:     { status: "ok", sequence, closeTime },
- *   indexer:    { status: "ok", indexedThrough, indexedThroughCloseTime, lagSeconds, gaps },
+ *   indexer:    { status: "ok", indexedThrough, indexedThroughCloseTime, lagSeconds, gaps, pendingGroups },
  *   keeper:     { status: "ok", healthy, lastSuccessAt, lastTickAt },
  *   openAlerts: { status: "ok", count, critical } }
  * ```
  *
  * Each part is read on its own, at most `HEALTH_PART_TIMEOUT_MS`: a part that fails or hangs reads
  * `{ status: "unavailable", reason }` (this app's words, never an error's text) and the others still
- * answer. `keeper.healthy` is null while no keeper run is recorded (unknown, not unhealthy). When every
- * part is unavailable it answers 503 (not cached), so an uptime monitor sees the server is blind.
+ * answer. `keeper.healthy` is null while no keeper run is recorded (unknown, not unhealthy). The indexer
+ * reads `{ status: "pending", reason: "no index run yet", … }` while a group has no cursor yet
+ * (`pendingGroups` names them): not ok, and not unavailable either. When every part is unavailable it
+ * answers 503 (not cached), so an uptime monitor sees the server is blind.
  * `connection()` keeps it out of the build's prerender.
  */
 import { connection } from "next/server"
@@ -36,6 +38,9 @@ const CACHED = "public, s-maxage=15, stale-while-revalidate=15"
 
 type Unavailable = { status: "unavailable"; reason: string }
 type Part<T> = ({ status: "ok" } & T) | Unavailable
+
+/** Health's word for an indexer with a group no run has indexed yet. */
+const NO_INDEX_RUN_YET = "no index run yet"
 
 const TIMED_OUT = Symbol("timed out")
 
@@ -77,7 +82,7 @@ export async function GET() {
     }, "the RPC could not be read"),
     part(async () => {
       const ix = await getIndexedEvents(sql, { network, limit: 1 })
-      return { indexedThrough: ix.indexedThrough, indexedThroughCloseTime: ix.indexedThroughCloseTime, lagSeconds: ix.lagSeconds, gaps: ix.gaps }
+      return { indexedThrough: ix.indexedThrough, indexedThroughCloseTime: ix.indexedThroughCloseTime, lagSeconds: ix.lagSeconds, gaps: ix.gaps, pendingGroups: ix.pendingGroups }
     }, "the database could not be read"),
     part(async () => {
       const k = await keeperHealth(sql, network, ORACLE_TICK_INTERVAL_SECONDS, { oracle })
@@ -85,6 +90,8 @@ export async function GET() {
     }, "the database could not be read"),
     part(() => openAlertCounts(sql, network), "the database could not be read"),
   ])
-  const blind = [ledger, indexer, keeper, openAlerts].every((p) => p.status === "unavailable")
-  return Response.json({ network, ledger, indexer, keeper, openAlerts }, blind ? { status: 503, headers: { "cache-control": "no-store" } } : { headers: { "cache-control": CACHED } })
+  // Before the first run of a group the index is not "ok": it says so, with the groups still to run.
+  const index = indexer.status === "ok" && indexer.pendingGroups.length > 0 ? { ...indexer, status: "pending" as const, reason: NO_INDEX_RUN_YET } : indexer
+  const blind = [ledger, index, keeper, openAlerts].every((p) => p.status === "unavailable")
+  return Response.json({ network, ledger, indexer: index, keeper, openAlerts }, blind ? { status: 503, headers: { "cache-control": "no-store" } } : { headers: { "cache-control": CACHED } })
 }

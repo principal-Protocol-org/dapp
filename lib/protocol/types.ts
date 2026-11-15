@@ -37,6 +37,13 @@ export type Market = {
   contracts: MarketContracts
   /** Wasm hash (hex) each contract runs, by contract name; optional in the manifest. */
   wasmHashes?: Record<string, string>
+  /**
+   * Registry markets only: the earliest ledger at which discovery saw the factory build this market
+   * (its salt's `mkt_tok`, `mkt_eng` or `mkt_new`, in the page of events that named its pool). The
+   * indexer reads a newly listed market from there instead of `deployLedger` (spec 0004 D-14).
+   * Absent for the manifest seeds and for a market discovery has not seen built.
+   */
+  createdLedger?: number
 }
 
 export type Manifest = {
