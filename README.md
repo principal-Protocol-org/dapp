@@ -617,20 +617,31 @@ PRINCIPAL_NETWORK=testnet scripts/dev-stack/drill.sh
 
 - **Before it signs anything**, it refuses CI, an agent session (`CLAUDECODE`: "The Testnet drill is
   run by the developer, not by an agent."), the Stellar CLI variables that would change the network,
-  the default source, the signer or the sending (`STELLAR_RPC_URL`, `STELLAR_RPC_HEADERS`,
+  the config, the default source, the signer or the sending (`STELLAR_RPC_URL`, `STELLAR_RPC_HEADERS`,
   `STELLAR_NETWORK_PASSPHRASE`, `STELLAR_NETWORK`, `STELLAR_ACCOUNT`, `STELLAR_SIGN_WITH_KEY`,
-  `STELLAR_SEND`, `STELLAR_INVOKE_VIEW`; it unsets them on every network, so `oracle-tick.sh` never
-  inherits one), any key name but the official ones, `DRILL_MANIFEST`, and a run without a terminal. It
-  checks each key against the contract's own admin (`admin()`, `get_admin()`), that RiskControl is not
-  already paused (it never unpauses a pause it did not make) and that the oracle reads as fresh (the
-  mint needs it: a stale or unreadable oracle stops the run), shows what it will sign, and asks you to
-  type the market id.
-- **The pause always ends.** Once the pause is sent, an exit trap unpauses on any failure, Ctrl-C, TERM
-  or `Ctrl-\` (QUIT). It decides from the pause's own transaction, waiting for one still in flight, not from an
-  `is_paused` read that may lag. While it cleans up it ignores further interrupts, so a second Ctrl-C
-  cannot cut the unpause short. `DRILL_PAUSE_SECONDS` (0 to 30, default 15) sets the wait, so the pause
-  lasts under a minute; the drill prints how long it lasted in ledger time.
-- **When no trap can run** (SIGKILL, the machine asleep or off), check and unpause by hand. RiskControl
+  `STELLAR_SIGN_WITH_LEDGER`, `STELLAR_SIGN_WITH_LAB`, `STELLAR_SEND`, `STELLAR_INVOKE_VIEW`,
+  `STELLAR_CONFIG_HOME`, and every `SOROBAN_*` variable, which the CLI reads as its `STELLAR_*` twin; it
+  unsets them on every network, so `oracle-tick.sh` never inherits one), any key name but the official
+  ones, `DRILL_MANIFEST`, and a run without a terminal. It checks that the CLI's own `testnet` network
+  (built in, or from a config file) is the SDF RPC and passphrase, each key against the contract's own
+  admin (`admin()`, `get_admin()`), that RiskControl is not already paused (it never unpauses a pause
+  it did not make) and that the oracle reads as fresh (the mint needs it: a stale or unreadable oracle
+  stops the run; it is checked again right before the mint, where it stops the run before the admin
+  key signs anything), shows what it will sign, and asks you to type the market id.
+- **The pause always ends.** Once the pause is sent, an exit trap unpauses on any failure, Ctrl-C, TERM,
+  `Ctrl-\` (QUIT) or the terminal closing (HUP). It decides from the pause's own transaction, waiting for
+  one still in flight, not from an `is_paused` read that may lag. While it cleans up it ignores further
+  interrupts (INT, TERM, QUIT, HUP, a closed output's PIPE, Ctrl-Z), so a second Ctrl-C, or Ctrl-C then
+  closing the terminal tab, cannot cut the unpause short. Ctrl-Z is ignored while RiskControl is paused.
+  `DRILL_PAUSE_SECONDS` (0 to 30, default 15) sets the wait, so the pause lasts under a minute; the drill
+  prints how long it lasted in ledger time. A Ctrl-C during the unpause itself sends a second, harmless
+  unpause (a third `paused` event).
+- **Other pausers.** RiskControl's admin and any registered pauser can pause it. The drill refuses to
+  start when RiskControl is already paused, but a pause made by someone else during the drill's own
+  window is undone by the drill's unpause. Tell the other pausers before you run it, and after it, check
+  the risk page's pause history for a pause that was not the drill's.
+- **When no trap can run** (SIGKILL, a `kill -STOP`, the machine asleep or off), check and unpause by
+  hand (a stopped drill can also be resumed with `fg`). RiskControl
   is `shared.riskControl` of `config/manifests/testnet.json` (`jq -r .shared.riskControl
   config/manifests/testnet.json`), `CCRZ55SG273OTUZSFME6A6XXXEZ3GM5IMVRLF4NEEWNC54NGCRHIMHJC` today:
 
@@ -657,7 +668,9 @@ PRINCIPAL_NETWORK=testnet scripts/dev-stack/drill.sh
     deposit) and Friendbot's XLM, unspendable once its key is deleted;
   - its Permissioning grants (the account, and each market's PT and YT);
   - one RecoveryEscrow record (the USDY from its SY, and its PT and YT until finalized);
-  - one `ref_rej` `deviate`, one keeper `ref_set` and two RiskControl `paused` events;
+  - one `ref_rej` `deviate`, one keeper `ref_set` and two RiskControl `paused` events (plus a
+    `ref_rej` `stale_ts` when the keeper tick was retried, and a third `paused` event after a Ctrl-C
+    during the unpause);
   - an `oracle_rejection` alert (warning, posted) open for 24 h. An alert check that happens to run
     during the pause also opens and then closes `paused`.
 - **Finalization.** `finalize_record` settles the record's PT and YT into USDY, and only after the

@@ -74,7 +74,24 @@ describe("drill.sh on testnet refuses before touching the keystore or the networ
   })
 
   it("refuses Stellar CLI variables that would change the network, source, signer or sending", async () => {
-    for (const name of ["STELLAR_RPC_URL", "STELLAR_NETWORK_PASSPHRASE", "STELLAR_NETWORK", "STELLAR_ACCOUNT", "STELLAR_RPC_HEADERS", "STELLAR_SIGN_WITH_KEY", "STELLAR_SEND", "STELLAR_INVOKE_VIEW"]) {
+    for (const name of [
+      "STELLAR_RPC_URL",
+      "STELLAR_NETWORK_PASSPHRASE",
+      "STELLAR_NETWORK",
+      "STELLAR_ACCOUNT",
+      "STELLAR_RPC_HEADERS",
+      "STELLAR_SIGN_WITH_KEY",
+      "STELLAR_SIGN_WITH_LEDGER",
+      "STELLAR_SIGN_WITH_LAB",
+      "STELLAR_SEND",
+      "STELLAR_INVOKE_VIEW",
+      // Another config directory: another `testnet`, another keystore.
+      "STELLAR_CONFIG_HOME",
+      // The CLI reads every SOROBAN_* name as its STELLAR_* twin: any of them is refused, known or not.
+      "SOROBAN_RPC_URL",
+      "SOROBAN_NETWORK_PASSPHRASE",
+      "SOROBAN_SOMETHING_NEW",
+    ]) {
       const r = await drill({ PRINCIPAL_NETWORK: "testnet", [name]: "x" })
       expect(r.code, name).not.toBe(0)
       expect(r.stderr, name).toContain(`${name} is set`)

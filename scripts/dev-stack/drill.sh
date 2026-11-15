@@ -25,9 +25,10 @@
 #             refused as stale_ts (the scheduled keeper landed in the same second) is retried once.
 #   pause     RiskControl pause, DRILL_PAUSE_SECONDS (default 15, at most 30) of wait, then unpause: two
 #             `paused` events. While it is paused every market refuses deposits and mints. Once the pause
-#             is sent, the exit trap unpauses on any failure or interruption (Ctrl-C, TERM or Ctrl-\
-#             unpause at once; the cleanup itself ignores further interrupts). Nothing can trap SIGKILL
-#             or a lost machine: the README gives the command to unpause by hand.
+#             is sent, the exit trap unpauses on any failure or interruption (Ctrl-C, TERM, Ctrl-\ or
+#             the terminal closing unpause at once; Ctrl-Z is ignored while paused; the cleanup itself
+#             ignores further interrupts). Nothing can trap SIGKILL, SIGSTOP or a lost machine: the
+#             README gives the command to unpause by hand.
 #
 # Keys, by identity name in the Stellar CLI keystore (a secret is never read, passed or printed):
 #   local    principal-localdev-admin: the dev stack's one key (issuer, SAC admin, every admin).
@@ -44,9 +45,10 @@
 # account, key, keyRemoved, recordIds, mint, record, rejection, pausedSeconds, txs: [{ step, hash, url }] }).
 #
 # Testnet is the developer's run only: it signs with the official keys. It refuses CI, an agent session
-# (CLAUDECODE), Stellar CLI variables that would change the network, source, signer or sending, any key
-# name but the official ones, DRILL_MANIFEST, and a run without a terminal; it then checks each key's
-# role on chain and that RiskControl is not paused, shows what it will sign, and asks for the market id
+# (CLAUDECODE), Stellar CLI variables that would change the network, config, source, signer or sending
+# (SOROBAN_* included), any key name but the official ones, DRILL_MANIFEST, and a run without a
+# terminal; it then checks that the CLI's own `testnet` is the SDF one, each key's role on chain, that
+# RiskControl is not paused and the oracle is fresh, shows what it will sign, and asks for the market id
 # before the first transaction.
 set -euo pipefail
 # shellcheck source=common.sh
@@ -86,7 +88,12 @@ FAUCET_ORIGIN="${FAUCET_ORIGIN%/}"
 # Stellar CLI variables that would change what a call reads, signs or sends (another RPC or network, a
 # default source, another signer, a simulation instead of a send). Refused on testnet; unset below on
 # every network, so neither the CLI calls nor oracle-tick.sh inherit them.
-CLI_OVERRIDES="STELLAR_RPC_URL STELLAR_RPC_HEADERS STELLAR_NETWORK_PASSPHRASE STELLAR_NETWORK STELLAR_ACCOUNT STELLAR_SIGN_WITH_KEY STELLAR_SEND STELLAR_INVOKE_VIEW"
+# The CLI also reads every SOROBAN_* name as its STELLAR_* twin (SOROBAN_RPC_URL overrides --network),
+# and STELLAR_CONFIG_HOME points it at another config directory (another `testnet`, another keystore):
+# every exported SOROBAN_* variable is added to the list.
+CLI_OVERRIDES="STELLAR_RPC_URL STELLAR_RPC_HEADERS STELLAR_NETWORK_PASSPHRASE STELLAR_NETWORK STELLAR_ACCOUNT \
+STELLAR_SIGN_WITH_KEY STELLAR_SIGN_WITH_LEDGER STELLAR_SIGN_WITH_LAB STELLAR_SEND STELLAR_INVOKE_VIEW STELLAR_CONFIG_HOME \
+$(compgen -e | grep '^SOROBAN_' | tr '\n' ' ' || true)"
 
 if [ "$NETWORK" = testnet ]; then
   # Every refusal here comes before the keystore or the network is touched.
@@ -113,6 +120,25 @@ need stellar "Install the Stellar CLI."
 need jq "brew install jq"
 need curl ""
 need node "Install Node.js (oracle-tick.sh needs it)."
+
+# On testnet, the CLI's own `testnet` (built in, or from a config file: the default one, XDG_CONFIG_HOME's)
+# must be the SDF Testnet: a user-defined `testnet` with another RPC or passphrase would sign elsewhere.
+if [ "$NETWORK" = testnet ]; then
+  CLI_TESTNET="$(stellar network ls --long 2>/dev/null | awk '
+    /^Name: / { name = substr($0, 7) }
+    name == "testnet" && /^RPC url: / { print "rpc " substr($0, 10) }
+    name == "testnet" && /^Network passphrase: / { print "pass " substr($0, 21) }')" ||
+    die "could not list the Stellar CLI's networks"
+  [ -n "$CLI_TESTNET" ] || die "the Stellar CLI lists no testnet network"
+  while read -r kind value; do
+    case "$kind" in
+      rpc) [ "${value%/}" = "${RPC_URL%/}" ] ||
+        die "the Stellar CLI's testnet uses the RPC '$value', not $RPC_URL: a config file defines another testnet. Nothing was signed." ;;
+      pass) [ "$value" = "$NETWORK_PASSPHRASE" ] ||
+        die "the Stellar CLI's testnet has the passphrase '$value': a config file defines another testnet. Nothing was signed." ;;
+    esac
+  done <<<"$CLI_TESTNET"
+fi
 
 # ---------------------------------------------------------------------------------------------
 # Helpers
@@ -297,10 +323,11 @@ unpause_in_trap() {
 
 cleanup() {
   local status=$?
-  # Once cleaning up, a second Ctrl-C (or TERM, or Ctrl-\) must not cut the unpause short: the shell and
-  # every command it starts from here (the Stellar CLI included) ignore them.
+  # Once cleaning up, nothing may cut the unpause short: a second Ctrl-C, TERM, Ctrl-\, the terminal
+  # closing (HUP; then PIPE for a closed output), Ctrl-Z. The shell and every command it starts from
+  # here (the Stellar CLI included) ignore them.
   trap - EXIT
-  trap '' INT TERM QUIT
+  trap '' INT TERM QUIT HUP PIPE TSTP
   set +e
   if [ -n "$SLEEP_PID" ]; then
     # Never waited for: a kill that lands while the background sleep is still starting can be lost, and
@@ -323,6 +350,7 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 131' QUIT
+trap 'exit 129' HUP
 
 # ---------------------------------------------------------------------------------------------
 # Preflight: manifest, network, keys and their roles on chain (reads only)
@@ -584,6 +612,9 @@ step_recovery() {
       mint --from "$ACCOUNT" --sy_shares "$MINT_SHARES" || die "the PT and YT mint failed"
     log "  minted from $MINT_SHARES SY shares: $(jq -c . <<<"$SENT_OUT" 2>/dev/null || echo "$SENT_OUT")"
     MINT="$(jq -cn --argjson s "$MINT_SHARES" '{ done: true, syShares: $s }')"
+  elif [ "$NETWORK" = testnet ] && [[ "$skip" != *matured* ]]; then
+    # The record must hold PT and YT on testnet. No admin or oracle key has signed yet: stop here.
+    die "no PT and YT mint ($skip): the run stops before the admin key signs anything. The throwaway account keeps its 10 SY (its key is removed). Run the drill again once the oracle is fresh."
   else
     log "  no PT and YT mint: $skip. The record will hold SY only, unwrapped at seizure: finalize_record has nothing to settle."
     MINT="$(jq -cn --arg r "$skip" '{ done: false, reason: $r }')"
@@ -681,7 +712,10 @@ step_pause() {
   log "==> 3. RiskControl pause for about $PAUSE_SECONDS s, then unpause"
   state="$(flag "$RISK" is_paused)" || die "could not read whether RiskControl is paused"
   [ "$state" = false ] || die "RiskControl is already paused: the drill stops."
-  PAUSED=1 # from here on the exit trap unpauses (it reads is_paused first)
+  # From here on the exit trap unpauses (it first settles the pause's own transaction), and Ctrl-Z is
+  # ignored: a drill suspended in the middle would leave RiskControl paused.
+  PAUSED=1
+  trap '' TSTP
   : >"$CLI_ERR" # so the trap never takes an earlier call's hash for the pause's
   send pause contract invoke --id "$RISK" --source "$ADMIN_KEY" --network "$NETWORK" -- pause --caller "$ADMIN" ||
     die "the pause failed"
@@ -700,6 +734,7 @@ step_pause() {
     die "the unpause failed (the exit trap tries again)"
   unpause_hash="$SENT_HASH"
   PAUSED=0
+  trap - TSTP
   state="$(flag "$RISK" is_paused)" || die "could not read is_paused after the unpause"
   [ "$state" = false ] || die "RiskControl still reads paused after the unpause"
   if from="$(tx_close_time "$pause_hash")" && to="$(tx_close_time "$unpause_hash")"; then

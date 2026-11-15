@@ -199,7 +199,13 @@ describe.skipIf(skip !== null)("drill.sh on the local network", () => {
         expect(data).toMatchObject({ pt_amount: "0", yt_amount: "0" })
       }
 
-      const rejections = rows.filter((r) => r.topic === "ref_rej")
+      // Exactly one deviate rejection. A keeper tick refused as stale_ts (the drill retries it once) is a
+      // ref_rej of the drill's own too: it may only come from that refused tick.
+      const rejections = rows.filter((r) => r.topic === "ref_rej" && r.data.reason === "deviate")
+      const refusedTicks = out.txs.filter((t) => t.step === "oracle_tick (refused: stale_ts)").map((t) => t.hash)
+      const others = rows.filter((r) => r.topic === "ref_rej" && r.data.reason !== "deviate")
+      for (const r of others) expect(r, "a non-deviate rejection is the retried tick's stale_ts").toMatchObject({ data: { reason: "stale_ts" } })
+      expect(others.map((r) => r.tx_hash).sort()).toEqual([...refusedTicks].sort())
       expect(rejections).toHaveLength(1)
       expect(rejections[0]).toMatchObject({
         group_name: "oracle",
