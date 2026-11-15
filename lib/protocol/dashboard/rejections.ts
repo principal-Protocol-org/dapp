@@ -62,8 +62,12 @@ const PULL_ROUTINE = [...ROUTINE, ...BROKEN] as const
  * - `f5c8a129…`: principal aae6cf8 built by the contracts team; the TR2 Testnet oracle
  *   (principal 24d980d `deployments/testnet/deployment-manifest.json`).
  * - `cf58bbd8…`: principal 24d980d built with the same app-team toolchain as `adb87f76…`. No
- *   oracle runs it yet: it is the hash our deploy would produce at 24d980d. A build by another
- *   toolchain hashes differently and falls to the unknown-hash note.
+ *   oracle runs it yet: it is the hash our deploy would produce at 24d980d.
+ * - `93eb1ae6…`: principal 24d980d built by the contracts team (their toolchain); the oracle of
+ *   their fresh TR2 Testnet redeploy (`CDE77D…`, principal dcb957b
+ *   `deployments/testnet/deployment-manifest.json`, whose oracle source equals 24d980d's).
+ *
+ * A build by another toolchain hashes differently and falls to the unknown-hash note.
  *
  * 665bb67 is push only (`set_reference_value`: `oob`, `stale_ts`, `fb_value`, `decrease`,
  * `deviate`); aae6cf8 adds the feed path (`sync_from_feed`) and its four reasons.
@@ -72,6 +76,7 @@ export const ORACLE_WASM_LAST_REJECTION: Record<string, OracleWasmRejections> = 
   adb87f76c1bafd93c67489645fe49df771ede639edc0d1919233563ffae86bce: { commit: "665bb67", keeps: "every", routine: PUSH_ROUTINE },
   f5c8a129c5aad53aff733b325a9949926a4fd4abf185a4dd0aec53476bf45253: { commit: "aae6cf8", keeps: "every", routine: PULL_ROUTINE },
   cf58bbd831957b817f8bfa7bf52313a8e9ba6256344ad34ab0c69916c8b1f85d: { commit: "24d980d", keeps: "significant", routine: PULL_ROUTINE },
+  "93eb1ae6d6affd455d0878d1ce66849788eb34924f0f084a28e79b7c4eafee88": { commit: "24d980d", keeps: "significant", routine: PULL_ROUTINE },
 }
 
 const lower = (text: string) => text.charAt(0).toLowerCase() + text.slice(1)

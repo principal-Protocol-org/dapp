@@ -92,6 +92,15 @@ describe("lastRejectionNote", () => {
     expect(note).not.toMatch(/may/)
   })
 
+  it("the contracts team's 24d980d build (their TR2 redeploy's oracle) keeps only significant reasons", () => {
+    const hash = "93eb1ae6d6affd455d0878d1ce66849788eb34924f0f084a28e79b7c4eafee88"
+    expect(hash).toMatch(/^[0-9a-f]{64}$/)
+    expect(ORACLE_WASM_LAST_REJECTION[hash]).toMatchObject({ commit: "24d980d", keeps: "significant" })
+    expect([...ORACLE_WASM_LAST_REJECTION[hash].routine]).toEqual([...ROUTINE, ...BROKEN])
+    expect(lastRejectionNote(hash)).toBe(lastRejectionNote("cf58bbd831957b817f8bfa7bf52313a8e9ba6256344ad34ab0c69916c8b1f85d"))
+    expect(lastRejectionNote(hash)).not.toMatch(/may/)
+  })
+
   it("an unknown hash may keep only significant reasons", () => {
     const note = lastRejectionNote("00".repeat(32))
     expect(note).toMatch(/may keep only significant/)
