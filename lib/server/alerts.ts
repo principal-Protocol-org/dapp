@@ -95,6 +95,11 @@ export const READ_BUDGET_MS = 30_000
 export const MAX_POSTS_PER_RUN = 25
 /** `GET /api/dashboard/alerts`'s history: alerts open at some time in the last 7 days. */
 export const RECENT_ALERT_DAYS = 7
+/**
+ * A debounced alert (`oracle_unavailable`) is confirmed (posted, and critical) only by a run at least
+ * this long after it opened: a scheduler retry seconds later is not a second look.
+ */
+export const DEBOUNCE_MIN_AGE_MS = 120_000
 const RECENT_LIMIT = 200
 
 /**
@@ -625,8 +630,9 @@ export type SyncOptions = {
  * `now` (ms) stamps `opened_at`, `resolved_at` and a debounced alert's `confirmedAt`.
  *
  * - A debounced kind (`oracle_unavailable`) opens at once but is posted, and counts as critical, only
- *   once a later run still wants it: that run writes `payload.confirmedAt`. One that clears before is
- *   closed with both notices marked delivered, and nothing is sent.
+ *   once a run at least `DEBOUNCE_MIN_AGE_MS` (120 s) after it opened still wants it: that run writes
+ *   `payload.confirmedAt`. One that clears before is closed with both notices marked delivered, and
+ *   nothing is sent.
  * - An event kind (`oracle_rejection`, `feed_broken`) closes silently: its close is marked delivered.
  */
 export async function syncAlerts(sql: Sql, network: Network, desired: readonly DesiredAlert[], post: PostAlert, now: number, opts: SyncOptions = {}): Promise<SyncResult> {
@@ -651,8 +657,10 @@ export async function syncAlerts(sql: Sql, network: Network, desired: readonly D
   const resolved: AlertRef[] = []
   for (const r of before) {
     if (wanted.has(key(r.kind, r.subject))) {
-      // Still wanted by a later run than the one that opened it: a debounced alert is now confirmed.
-      if (unconfirmed(r)) await sql`update alerts set payload = payload || jsonb_build_object('confirmedAt', ${at}::text) where id = ${r.id} and resolved_at is null`
+      // Still wanted by a run at least DEBOUNCE_MIN_AGE_MS after it opened: a debounced alert is now
+      // confirmed. A younger one waits, unposted and not critical, for a later run.
+      const aged = now - new Date(r.opened_at).getTime() >= DEBOUNCE_MIN_AGE_MS
+      if (unconfirmed(r) && aged) await sql`update alerts set payload = payload || jsonb_build_object('confirmedAt', ${at}::text) where id = ${r.id} and resolved_at is null`
       continue
     }
     if (held.has(r.kind)) continue

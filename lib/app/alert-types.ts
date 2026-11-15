@@ -41,8 +41,8 @@ export const alertTitle = (kind: string): string => (Object.hasOwn(KIND_WORDS, k
 
 /**
  * Kinds that only say "this server's read failed" (`oracle_unavailable`): such an alert opens at once
- * but is posted, and counts as critical, only once a later check confirms it (`payload.confirmedAt`).
- * One that clears before then closes without a word.
+ * but is posted, and counts as critical, only once a later check, at least 120 s after it opened,
+ * confirms it (`payload.confirmedAt`). One that clears before then closes without a word.
  */
 export const DEBOUNCED_KINDS: readonly string[] = ["oracle_unavailable"]
 

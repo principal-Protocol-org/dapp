@@ -43,7 +43,7 @@ import { addTrustline, fundWithFriendbot } from "@/lib/protocol/onboarding"
 import { createRpcReader, readLive } from "@/lib/protocol/reader"
 import type { Manifest } from "@/lib/protocol/types"
 import { countsAsCritical } from "@/lib/app/alert-types"
-import { runAlertCheck, webhookPoster, type AlertCheckResult, type AlertRef, type WebhookPayload } from "@/lib/server/alerts"
+import { DEBOUNCE_MIN_AGE_MS, runAlertCheck, webhookPoster, type AlertCheckResult, type AlertRef, type WebhookPayload } from "@/lib/server/alerts"
 import { sql } from "@/lib/server/db"
 import { createStellarFaucetChain, resetFaucetStateForTests, runFaucet } from "@/lib/server/faucet"
 import { scAddress, scI128, sendAs } from "../live/admin"
@@ -284,7 +284,8 @@ describe.skipIf(skip !== null)("the alert check on the local stack", () => {
 
   it("oracle_unavailable is debounced: a one-run blip is never posted; two failed runs post it once, then its close", async () => {
     const dead = { ...manifest, rpcUrl: await deadRpcUrl(), rpcFallbackUrls: undefined }
-    const blindCheck = () => runAlertCheck({ sql, manifest: dead, env: {}, post: webhookPoster(HOOK) })
+    // `now` stamps the run: a later one stands for a scheduled run DEBOUNCE_MIN_AGE_MS on (M-2).
+    const blindCheck = (now?: number) => runAlertCheck({ sql, manifest: dead, env: {}, post: webhookPoster(HOOK), ...(now === undefined ? {} : { now }) })
     const before = posted("oracle_unavailable").length
 
     const blip = await blindCheck()
@@ -301,7 +302,13 @@ describe.skipIf(skip !== null)("the alert check on the local stack", () => {
     expect(blipRow.payload.confirmedAt).toBeUndefined()
 
     const first = await blindCheck()
-    const second = await blindCheck()
+    // A retry seconds later (QStash's, on the 500) is no second look: still unconfirmed, nothing posted.
+    const retry = await blindCheck()
+    const young = retry.open.find((a) => a.kind === "oracle_unavailable")
+    expect(young?.payload.confirmedAt).toBeUndefined()
+    expect(countsAsCritical(young!)).toBe(false)
+    expect(posted("oracle_unavailable").length - before).toBe(0)
+    const second = await blindCheck(Date.now() + DEBOUNCE_MIN_AGE_MS)
     out.log(`outage, run 2 (still dead): ${brief(second)}`)
     const confirmed = second.open.find((a) => a.kind === "oracle_unavailable")
     expect(typeof confirmed?.payload.confirmedAt).toBe("string")

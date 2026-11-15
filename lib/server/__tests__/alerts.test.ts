@@ -19,6 +19,7 @@ import {
   ALERT_KINDS,
   alertTitle,
   CRITICAL,
+  DEBOUNCE_MIN_AGE_MS,
   runAlertCheck,
   evaluateAlerts,
   heldKinds,
@@ -736,6 +737,37 @@ describe("oracle_unavailable is debounced: posted and critical only once a secon
 
     await syncAlerts(db.sql, "testnet", [], post, NOW + 900_000)
     expect(sent.map((p) => p.status)).toEqual(["opened", "resolved"])
+  })
+
+  it("a run under 120 s after it opened (a scheduler retry) never confirms it: not posted, not critical; one at 120 s does (M-2)", async () => {
+    expect(DEBOUNCE_MIN_AGE_MS).toBe(120_000)
+    const db = alertsDb()
+    const { post, sent } = poster()
+    await syncAlerts(db.sql, "testnet", [UNAVAILABLE], post, NOW)
+    // Two retries seconds apart, then one just under the minimum age: still failing, still unconfirmed.
+    for (const later of [5_000, 30_000, 119_999]) {
+      const retry = await syncAlerts(db.sql, "testnet", [UNAVAILABLE], post, NOW + later)
+      expect(retry.open[0].payload.confirmedAt).toBeUndefined()
+      expect(retry.open.some(countsAsCritical)).toBe(false)
+    }
+    expect(await openAlertCounts(db.sql, "testnet")).toEqual({ count: 1, critical: 0 })
+    expect(sent).toHaveLength(0)
+
+    const aged = await syncAlerts(db.sql, "testnet", [UNAVAILABLE], post, NOW + 120_000)
+    expect(aged.open[0].payload.confirmedAt).toBe(iso(NOW + 120_000))
+    expect(aged.open.some(countsAsCritical)).toBe(true)
+    expect(sent.map((p) => p.status)).toEqual(["opened"])
+  })
+
+  it("a young alert that clears closes silently, as a blip, even after a retry saw it", async () => {
+    const db = alertsDb()
+    const { post, sent } = poster()
+    await syncAlerts(db.sql, "testnet", [UNAVAILABLE], post, NOW)
+    await syncAlerts(db.sql, "testnet", [UNAVAILABLE], post, NOW + 10_000)
+    const cleared = await syncAlerts(db.sql, "testnet", [], post, NOW + 300_000)
+    expect(cleared.resolved).toHaveLength(1)
+    expect(sent).toHaveLength(0)
+    expect(db.rows[0]).toMatchObject({ opened_posted: true, resolved_posted: true })
   })
 })
 

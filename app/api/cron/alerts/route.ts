@@ -9,7 +9,7 @@ import "server-only"
  * the indexed rejections, the index cursors and the keeper signer's XLM, then opens and closes the
  * alerts in the `alerts` table (each opens once and closes once) and posts every opening and close to
  * `ALERT_WEBHOOK_URL` (5 s per post; a failed post is sent again by the next run). It answers 500
- * while a critical alert is open (`oracle_stale`, `oracle_unavailable` once a second run confirms it,
+ * while a critical alert is open (`oracle_stale`, `oracle_unavailable` once a run 120 s or more after it opened confirms it,
  * `keeper_unhealthy`, `risk_exhausted`, `indexer_gap`), so the scheduler's own failure alert fires
  * too; 200 otherwise.
  *
