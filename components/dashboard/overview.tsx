@@ -26,6 +26,7 @@ import { TVL_LABEL } from "@/lib/protocol/dashboard/protocol-state"
 import type { Remaining } from "@/lib/protocol/dashboard/risk"
 import type { VerifiableFigure } from "@/lib/protocol/dashboard/verify"
 import { formatAmountFixed } from "@/lib/protocol/format"
+import { allLive } from "@/lib/protocol/reader"
 import type { Network } from "@/lib/protocol/types"
 import { AsOf, readsOf } from "./as-of"
 import { CopyEvidence } from "./copy-evidence"
@@ -264,9 +265,10 @@ export function Overview() {
     read: readOf(pauses, DASHBOARD_LIVE_MS),
   }
   const view = oracle.stale ? undefined : oracle.data
+  // As the oracle page's Freshness: is_available() can turn the line Stale (or, unread, Unavailable), so its read is listed too.
   const oracleFreshness: FigureSpec<number> = {
     label: "Oracle freshness",
-    live: current(oracle, (o) => o.view.timeToBlock, noClock),
+    live: current(oracle, (o) => allLive([o.view.timeToBlock, o.view.available] as const, ([seconds]) => seconds), noClock),
     format: (seconds) => (view ? oracleLine(view.view, secondsToBlockNow(view.view.timeToBlock, view.ledgerTime, ledgerTime) ?? seconds) : String(seconds)),
     scale: "Seconds: the oracle timestamp + max_stale_seconds − ledger time",
     read: readOf(oracle, DASHBOARD_LIVE_MS),

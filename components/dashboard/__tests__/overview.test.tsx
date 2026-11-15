@@ -73,7 +73,7 @@ function oracleView(over: Record<string, unknown> = {}) {
     contractId: "CORACLE",
     value: live(10_000_946n),
     timestamp: live(BigInt(LEDGER_TIME - 708)),
-    available: live(true),
+    available: live(true, "is_available"),
     freshness: "fresh",
     timeToBlock: { status: "live", value: 2892, ledger: 5_720_087, sources: [src("get_reference_timestamp"), src("max_stale_seconds")] },
     maxStale: live(3600n),
@@ -368,6 +368,27 @@ describe("the overview (/dashboard)", () => {
     )
     render(wrap(<Overview />))
     expect(await region("Safety").findByText("Stale · mint, trade, single-sided liquidity and redemption are blocked")).toBeTruthy()
+  })
+
+  it("a Stale line decided by is_available() = false lists that read in How to verify, with the timestamp and max_stale reads (M-3)", async () => {
+    mocks.fetchOracleView.mockResolvedValue(oracleView({ available: live(false, "is_available"), freshness: "stale" }))
+    const user = userEvent.setup()
+    render(wrap(<Overview />))
+    const safety = region("Safety")
+    expect(await safety.findByText("Stale · mint, trade, single-sided liquidity and redemption are blocked")).toBeTruthy()
+    await user.click(safety.getByRole("button", { name: "How to verify Oracle freshness" }))
+    const drawer = await screen.findByRole("dialog")
+    // The command is one span per word; its <code> reads as typed.
+    const command = (fn: string) => within(drawer).queryAllByText((_, el) => el?.tagName === "CODE" && (el.textContent ?? "").endsWith(` --send=no -- ${fn}`))
+    for (const fn of ["get_reference_timestamp", "max_stale_seconds", "is_available"]) expect(command(fn).length, fn).toBeGreaterThan(0)
+  })
+
+  it("an unreadable is_available() makes the oracle line Unavailable, with that read's reason (as the oracle page)", async () => {
+    mocks.fetchOracleView.mockResolvedValue(oracleView({ available: down("is_available: rpc down") }))
+    render(wrap(<Overview />))
+    const safety = region("Safety")
+    expect(await safety.findByRole("button", { name: "Why Oracle freshness is unavailable, and how to verify it" })).toBeTruthy()
+    expect(safety.queryByText(/^Fresh · /)).toBeNull()
   })
 
   it("names the paused contracts", async () => {
