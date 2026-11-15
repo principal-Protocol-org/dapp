@@ -11,7 +11,7 @@ import "server-only"
  *   `scripts/dev-stack/oracle-tick.sh` does by hand. It never runs on mainnet.
  * - **feed** (spec 0004 D-21): the oracle reads its own SEP-40 feed (`sync_from_feed`, permissionless,
  *   principal 24d980d), so the keeper signs with `ORACLE_KEEPER_SECRET`, a funded key with no protocol
- *   role, and holds no admin right: it may run on any network. It simulates the call and submits only
+ *   role (it refuses the oracle admin's key), and holds no admin right: it may run on any network. It simulates the call and submits only
  *   what is worth a transaction (`tickFeed`).
  */
 import { Keypair, StrKey, rpc, scValToNative, type Transaction, type xdr } from "@stellar/stellar-sdk"
@@ -34,7 +34,7 @@ export const ORACLE_APY_PERCENT = 5
 const SECONDS_PER_YEAR = 31_536_000
 const TX_TIMEOUT_SECONDS = 60
 
-/** The keeper cannot run: no key, a key that is not the oracle admin, or a network it must not feed. */
+/** The keeper cannot run: no key, a push key that is not the oracle admin, a feed key that is, or a network it must not feed. */
 export class OracleKeeperConfigError extends Error {}
 
 /** What a sent transaction that never confirmed reports as its code. */
@@ -272,9 +272,9 @@ const isIn = (list: readonly string[], reason: string) => list.includes(reason)
 /** A simulation of `sync_from_feed`: its return value (native) and its events, as RPC reports them. */
 export type FeedSimulation = { retval: unknown; events: readonly xdr.DiagnosticEvent[] }
 
-/** What the feed keeper needs from the network: one view of the oracle, a simulation, and one signed call. */
+/** What the feed keeper needs from the network: two views of the oracle, a simulation, and one signed call. */
 export type FeedChain = {
-  read(fn: "feed_source"): Promise<unknown>
+  read(fn: "feed_source" | "get_admin"): Promise<unknown>
   /** Simulates `invocation` with `source` as the transaction's source. A simulation error throws its text. */
   simulate(source: string, invocation: ContractInvocation): Promise<FeedSimulation>
   /** Sends and waits; `events` are the landed transaction's contract events, when RPC returned them. */
@@ -311,6 +311,8 @@ const ERROR_15 = /Error\(Contract, #15\)/
 const NO_FEED_VIEW = "the oracle has no feed_source function: its code predates sync_from_feed (principal 665bb67 or older)."
 const NO_FEED = "the oracle has no feed source (set_feed_source was never called)."
 const FEED_ERROR_15 = "the feed answered an error (#15) to sync_from_feed: the oracle names a feed, so this is not its FeedNotConfigured."
+/** Spec 0004 D-21: no oracle admin key lives on the server. The feed keeper's key must hold no protocol role. */
+export const KEEPER_IS_ADMIN = "ORACLE_KEEPER_SECRET is the oracle admin's key: feed mode needs a key with no protocol role."
 
 /** The oracle's own contract events, decoded (`ref_set`, `ref_rej`); anything else, or of another contract, is left out. */
 function oracleEvents(events: readonly xdr.ContractEvent[], oracle: string): DecodedEvent[] {
@@ -349,7 +351,9 @@ function rejectionOf(events: DecodedEvent[]): Rejection | null {
 
 /**
  * One feed-mode run (D-21). It checks the oracle has a feed (`feed_source()`; a missing view or
- * `None` is a config error), simulates `sync_from_feed` as the keeper, then:
+ * `None` is a config error) and that the keeper's key is not the oracle's admin (`get_admin()`, read
+ * every run; a match is a config error and nothing is sent), simulates `sync_from_feed` as the
+ * keeper, then:
  * - `true`: submits, and reports `synced` with the `ref_set` value;
  * - `false`: reads the reason from the simulation's `ref_rej` event:
  *   - routine (`stale_ts`, `no_data`): `skipped`, nothing sent;
@@ -362,7 +366,8 @@ function rejectionOf(events: DecodedEvent[]): Rejection | null {
  * from the simulation when the feed moved in between), and its own `ref_set` or `ref_rej` event, when
  * RPC returns the landed events, gives the recorded (reason, value); else the simulated ones stand.
  * An error 15 after `feed_source()` named a feed is the feed's (`FeedNotConfigured` needs no feed), and
- * is worded so. No admin check and no network refusal: the key holds no role.
+ * is worded so. No network refusal: the key holds no role. `sync_from_feed` needs no auth, so the
+ * admin's key would work, but it would put that key in a server variable, which D-21 rules out.
  */
 export async function tickFeed(deps: {
   manifest: Manifest
@@ -386,6 +391,8 @@ export async function tickFeed(deps: {
     throw error
   }
   if (source === null || source === undefined) throw new OracleKeeperConfigError(NO_FEED)
+  // Copying ORACLE_ADMIN_SECRET into ORACLE_KEEPER_SECRET is an easy mistake: refuse it before signing anything.
+  if ((await chain.read("get_admin")) === keeper.publicKey()) throw new OracleKeeperConfigError(KEEPER_IS_ADMIN)
 
   const invocation: ContractInvocation = { contractId: oracle, functionName: "sync_from_feed", args: [] }
   let simulation: FeedSimulation

@@ -314,10 +314,17 @@ const FEED = StrKey.encodeContract(Buffer.alloc(32, 7))
 const HASH = "ab".repeat(32)
 const SYNC: ContractInvocation = { contractId: ORACLE, functionName: "sync_from_feed", args: [] }
 
-/** A feed chain: `feed_source` answers `feedSource`, the simulation answers `sim`, and sends are recorded. */
+/** The oracle admin of the fake feed chains: a key the keeper is not. */
+const ORACLE_ADMIN = Keypair.random().publicKey()
+
+/**
+ * A feed chain: `feed_source` answers `feedSource` (or throws `readError`), `get_admin` answers
+ * `admin` (the oracle admin by default), the simulation answers `sim`, and sends are recorded.
+ */
 function fakeFeedChain(state: {
   feedSource?: unknown
   readError?: Error
+  admin?: string
   sim?: { retval: unknown; events: xdr.DiagnosticEvent[] }
   simError?: Error
   returned?: unknown
@@ -327,7 +334,8 @@ function fakeFeedChain(state: {
   const sent: { signer: string; invocation: ContractInvocation }[] = []
   const simulated: { source: string; invocation: ContractInvocation }[] = []
   const chain: FeedChain = {
-    read: vi.fn(async () => {
+    read: vi.fn(async (fn) => {
+      if (fn === "get_admin") return state.admin ?? ORACLE_ADMIN
       if (state.readError) throw state.readError
       return "feedSource" in state ? state.feedSource : [FEED, ["Other", "USDY"]]
     }),
@@ -367,9 +375,33 @@ describe("tickFeed (D-21): sync_from_feed with a role-less key", () => {
     expect(await tickFeed({ manifest, secret, chain })).toEqual({ ...run, status: "synced", value: "10000000", timestamp: 1_700_000_000, hash: HASH })
     expect(simulated).toEqual([{ source: keeper.publicKey(), invocation: SYNC }])
     expect(sent).toEqual([{ signer: keeper.publicKey(), invocation: SYNC }])
-    // No admin check: the key needs no role (it never reads get_admin).
-    expect(chain.read).toHaveBeenCalledTimes(1)
-    expect(chain.read).toHaveBeenCalledWith("feed_source")
+    // Two views: the feed, then the admin (the key must not be the admin's).
+    expect(vi.mocked(chain.read).mock.calls).toEqual([["feed_source"], ["get_admin"]])
+  })
+
+  it("not_configured when ORACLE_KEEPER_SECRET is the oracle admin's key: it never simulates nor sends (I-2, D-21)", async () => {
+    const { chain, sent, simulated } = fakeFeedChain({ admin: keeper.publicKey(), sim: { retval: true, events: [refSet(10_000_000n, 1n)] } })
+    const error = await tickFeed({ manifest, secret, chain }).catch((e: unknown) => e)
+    expect(error).toBeInstanceOf(OracleKeeperConfigError)
+    expect((error as Error).message).toBe("ORACLE_KEEPER_SECRET is the oracle admin's key: feed mode needs a key with no protocol role.")
+    expect((error as Error).message).not.toContain(secret)
+    expect(simulated).toEqual([])
+    expect(sent).toEqual([])
+    // On mainnet too: feed mode runs there, the admin key never does.
+    const mainnet = fakeFeedChain({ admin: keeper.publicKey() })
+    await expect(tickFeed({ manifest: { ...manifest, network: "mainnet" } as Manifest, secret, chain: mainnet.chain })).rejects.toThrow(OracleKeeperConfigError)
+    expect(mainnet.sent).toEqual([])
+  })
+
+  it("a get_admin read that fails is no config error: it fails as itself, sending nothing", async () => {
+    const { chain, sent, simulated } = fakeFeedChain({})
+    vi.mocked(chain.read).mockImplementation(async (fn) => {
+      if (fn === "get_admin") throw new TypeError("fetch failed")
+      return [FEED, ["Other", "USDY"]]
+    })
+    await expect(tickFeed({ manifest, secret, chain })).rejects.toThrow(TypeError)
+    expect(simulated).toEqual([])
+    expect(sent).toEqual([])
   })
 
   it("a routine rejection (stale_ts, no_data) is skipped: no submit, the reason kept", async () => {

@@ -16,8 +16,9 @@ import "server-only"
  * oracle refused the value, R4-8) answers 500 with the reason in push mode, and 200 in feed mode: a
  * feed's rejection is the feed's state, not a failed run, and a 5xx would make QStash retry and record
  * it again (the alert check raises `oracle_rejection` and `feed_broken` from the recorded runs). 503
- * `not_configured` when the keeper cannot run (an unknown mode, no key, a key that is not the oracle
- * admin, mainnet in push mode, an oracle with no feed, an override oracle off the local network);
+ * `not_configured` when the keeper cannot run (an unknown mode, no key, a push key that is not the
+ * oracle admin, a feed key that is, mainnet in push mode, an oracle with no feed, an override oracle
+ * off the local network);
  * else 500 `failed`.
  *
  * Every run, whatever its outcome, writes one `oracle_ticks` row (spec 0004 D-19) under the oracle it
