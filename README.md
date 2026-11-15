@@ -403,7 +403,7 @@ The route answers:
 | 500 | The same body, a group with `error: "failed"`, or `{ error: "failed" }` | The RPC failed, or the manifest could not be read. The next run resumes at the cursor. |
 
 Schedule (ops, with the developer's go): a QStash schedule with cron `*/5 * * * *` to
-`https://<domain>/api/cron/index`, as for the recorder. Apply migrations 0004 to 0006 to the
+`https://<domain>/api/cron/index`, as for the recorder. Apply migrations 0004 to 0007 to the
 network's database first (`pnpm db:migrate --env-file .env.testnet`).
 
 `GET /api/dashboard/events` serves the index, public and without a wallet. `?group=`, `?pool=`,
@@ -438,7 +438,8 @@ pnpm indexer:capture --network testnet                                          
 - `clear-gap` is for a gap known to be false: the contracts it names had no events in those
   ledgers. One case: a market created inside the RPC's window but indexed before its creation ledger
   was known (the wizard published it, and an index run listed it before discovery saw its build),
-  which starts it at `deployLedger`. It prints the stored gap first. On a database that is not on this
+  which starts it at `deployLedger`. That false gap lands on two groups, `market` and `escrow`, each
+  with its own alert: run it for each group. It prints the stored gap first. On a database that is not on this
   machine (the Testnet one) it clears nothing without `--yes`, so run it once to read the gap, then
   again with `--yes`. It clears exactly the gap it printed (one an indexer run widened meanwhile is
   refused) and keeps the cursor and its members. The next `cron/alerts` run then closes the open
@@ -608,7 +609,9 @@ Each step waits for the developer's go. No step needs a secret in this repositor
    `https://testnet.principalmarket.fi/api/cron/index`. Wait for its first run to complete:
    `GET /api/health` then shows `indexer.status` `ok` and a `lagSeconds` under 3,600. Until every
    group has run once it shows `pending`, with the reason "no index run yet" and the groups still to
-   run (`pendingGroups`).
+   run (`pendingGroups`). Let the first run happen before 2026-11-20 09:00 UTC. After that date, each
+   registry market that is not a seed starts as new at `deployLedger` and records a false gap. Clear
+   it with `clear-gap` on the `market` group and on the `escrow` group (see "Event indexer").
 6. **Schedule the alert check**, only after step 5: cron `*/5 * * * *` to
    `https://testnet.principalmarket.fi/api/cron/alerts`, with retries set to 0. The route answers 500
    while a critical alert is open, so the scheduler's own failure alert fires too. With retries, each
