@@ -54,7 +54,7 @@
 # the oracle is fresh, shows what it will sign, and asks for the market id before the first transaction.
 set -euo pipefail
 # shellcheck source=common.sh
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
+source "$(CDPATH='' cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
 # ---------------------------------------------------------------------------------------------
 # Refusals that need neither the keystore nor the network
@@ -101,14 +101,16 @@ $(compgen -e | grep '^SOROBAN_' | tr '\n' ' ' || true)"
 # one from its working directory or any parent (dotenvy), and its STELLAR_* / SOROBAN_* lines would
 # reach the CLI without this script ever seeing them. Only its existence is checked: it is never read.
 dotenv_above() {
-  local d="$1"
+  local d="$1" p
   while :; do
     if [ -e "$d/.env" ]; then
       echo "${d%/}/.env"
       return 0
     fi
-    [ "$d" != / ] || return 0
-    d="$(dirname "$d")"
+    # Stop when dirname no longer shortens the path: `/`, and `//` where dirname keeps it.
+    p="$(dirname "$d")"
+    [ "$p" != "$d" ] || return 0
+    d="$p"
   done
 }
 DOTENV_ADVICE="it could point the Stellar CLI at another RPC or network. Move or rename it (it is not read here). Nothing was signed."
@@ -149,14 +151,14 @@ need node "Install Node.js (oracle-tick.sh needs it)."
 # Every path the drill uses is absolute (DAPP_DIR, DEV_STACK_DIR, MANIFEST, WORK), DRILL_MANIFEST
 # included once resolved here.
 if [ -n "${DRILL_MANIFEST:-}" ]; then
-  MANIFEST_DIR="$(cd "$(dirname "$DRILL_MANIFEST")" 2>/dev/null && pwd)" ||
+  MANIFEST_DIR="$(CDPATH='' cd -- "$(dirname "$DRILL_MANIFEST")" 2>/dev/null && pwd)" ||
     die "DRILL_MANIFEST=$DRILL_MANIFEST: its directory does not exist"
   DRILL_MANIFEST="$MANIFEST_DIR/$(basename "$DRILL_MANIFEST")"
 fi
 TMP_ROOT="${TMPDIR:-/tmp}"
 WORK="$(mktemp -d "${TMP_ROOT%/}/drill.XXXXXX")" # an explicit template: macOS mktemp ignores TMPDIR without one
 trap 'rm -rf "$WORK"' EXIT                       # replaced by the full exit trap below
-WORK="$(cd "$WORK" && pwd -P)"
+WORK="$(CDPATH='' cd -- "$WORK" && pwd -P)"
 CLI_ERR="$WORK/cli.err"
 if [ "$NETWORK" = testnet ]; then
   DOTENV="$(dotenv_above "$WORK")"

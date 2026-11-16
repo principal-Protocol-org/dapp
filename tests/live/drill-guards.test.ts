@@ -87,7 +87,7 @@ function drill(
   env: Record<string, string | undefined>,
   script: string = DRILL,
   cwd: string = process.cwd(),
-  timeout = 20_000,
+  timeout = 4_000, // under vitest's 5 s test timeout, so the group kill fires first
 ): Promise<{ code: number; stderr: string; stdout: string; killed: boolean }> {
   const base: Record<string, string> = { PATH: `${stubs}:${process.env.PATH ?? ""}`, HOME: process.env.HOME ?? dir, STUB_NETLS: netls.good }
   const full: Record<string, string | undefined> = { ...base, ...env }
@@ -103,8 +103,16 @@ function drill(
     child.stderr.setEncoding("utf8").on("data", (chunk: string) => (stderr += chunk))
     const timer = setTimeout(() => {
       killed = true
-      if (child.pid) process.kill(-child.pid, "SIGKILL")
+      try {
+        if (child.pid) process.kill(-child.pid, "SIGKILL")
+      } catch {
+        // the group already exited
+      }
     }, timeout)
+    child.on("error", (err) => {
+      clearTimeout(timer)
+      resolve({ code: 1, stdout, stderr: `${stderr}${err.message}`, killed })
+    })
     child.on("close", (code) => {
       clearTimeout(timer)
       resolve({ code: code ?? 1, stdout, stderr, killed })
