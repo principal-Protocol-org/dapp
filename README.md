@@ -659,7 +659,8 @@ PRINCIPAL_NETWORK=testnet scripts/dev-stack/drill.sh
   run by the developer, not by an agent."), a `.env` file in the working directory or any parent (the
   Stellar CLI loads one, and its `STELLAR_*` or `SOROBAN_*` lines would reach it unseen: the drill names
   the file and never reads it; it then runs every command from a fresh temporary directory, whose
-  parents it checks the same way), the Stellar CLI variables that would change the network,
+  physical parents it checks the same way and which holds an empty `.env` of its own, so the CLI loads
+  no parent's), the Stellar CLI variables that would change the network,
   the config, the default source, the signer or the sending (`STELLAR_RPC_URL`, `STELLAR_RPC_HEADERS`,
   `STELLAR_NETWORK_PASSPHRASE`, `STELLAR_NETWORK`, `STELLAR_ACCOUNT`, `STELLAR_SIGN_WITH_KEY`,
   `STELLAR_SIGN_WITH_LEDGER`, `STELLAR_SIGN_WITH_LAB`, `STELLAR_SEND`, `STELLAR_INVOKE_VIEW`,

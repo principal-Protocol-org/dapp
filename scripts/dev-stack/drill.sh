@@ -48,10 +48,10 @@
 # (CLAUDECODE), a `.env` in the working directory or any parent (the CLI would load it), Stellar CLI
 # variables that would change the network, config, source, signer or sending (SOROBAN_* included), any
 # key name but the official ones, DRILL_MANIFEST, and a run without a terminal. It runs every command
-# from a fresh temporary directory (whose parents hold no `.env` either), checks that the CLI's own
-# `testnet` is the SDF one (failing closed on a list it cannot read in full), each key's role on chain, that
-# RiskControl is not paused and the oracle is fresh, shows what it will sign, and asks for the market id
-# before the first transaction.
+# from a fresh temporary directory (its physical parents hold no `.env` either; it holds an empty one of
+# its own, so the CLI loads no parent's), checks that the CLI's own `testnet` is the SDF one (failing
+# closed on a list it cannot read in full), each key's role on chain, that RiskControl is not paused and
+# the oracle is fresh, shows what it will sign, and asks for the market id before the first transaction.
 set -euo pipefail
 # shellcheck source=common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
@@ -142,21 +142,27 @@ need node "Install Node.js (oracle-tick.sh needs it)."
 # ---------------------------------------------------------------------------------------------
 # The work directory: every command from here on runs in it
 # ---------------------------------------------------------------------------------------------
-# A fresh temporary directory holds no `.env`, so the CLI loads none from the caller's directory; on
-# testnet its parents are checked too. Every path the drill uses is absolute (DAPP_DIR, DEV_STACK_DIR,
-# MANIFEST, WORK), DRILL_MANIFEST included once resolved here.
+# A fresh temporary directory, by its physical path (dotenvy walks the physical parents: a symlinked
+# TMPDIR, or macOS's /var -> /private/var, cannot hide one; a relative TMPDIR becomes absolute). On
+# testnet its parents are checked too. Then it gets an empty `.env` of its own: dotenvy loads the first
+# one it finds, so the CLI loads no parent's, not even one planted there (e.g. in /tmp) after the check.
+# Every path the drill uses is absolute (DAPP_DIR, DEV_STACK_DIR, MANIFEST, WORK), DRILL_MANIFEST
+# included once resolved here.
 if [ -n "${DRILL_MANIFEST:-}" ]; then
-  DRILL_MANIFEST="$(cd "$(dirname "$DRILL_MANIFEST")" 2>/dev/null && pwd)/$(basename "$DRILL_MANIFEST")" ||
-    die "the directory of DRILL_MANIFEST does not exist"
+  MANIFEST_DIR="$(cd "$(dirname "$DRILL_MANIFEST")" 2>/dev/null && pwd)" ||
+    die "DRILL_MANIFEST=$DRILL_MANIFEST: its directory does not exist"
+  DRILL_MANIFEST="$MANIFEST_DIR/$(basename "$DRILL_MANIFEST")"
 fi
 TMP_ROOT="${TMPDIR:-/tmp}"
 WORK="$(mktemp -d "${TMP_ROOT%/}/drill.XXXXXX")" # an explicit template: macOS mktemp ignores TMPDIR without one
 trap 'rm -rf "$WORK"' EXIT                       # replaced by the full exit trap below
+WORK="$(cd "$WORK" && pwd -P)"
 CLI_ERR="$WORK/cli.err"
 if [ "$NETWORK" = testnet ]; then
   DOTENV="$(dotenv_above "$WORK")"
   [ -z "$DOTENV" ] || die "$DOTENV exists above the drill's work directory: $DOTENV_ADVICE"
 fi
+: >"$WORK/.env"
 cd "$WORK"
 
 # ---------------------------------------------------------------------------------------------

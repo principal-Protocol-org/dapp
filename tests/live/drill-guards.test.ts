@@ -9,8 +9,8 @@
  * own `testnet` is tested here too. Nothing here reaches Testnet; the local run is
  * `tests/integration/drill.test.ts`.
  */
-import { execFile } from "node:child_process"
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { spawn } from "node:child_process"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest"
@@ -19,6 +19,7 @@ const DRILL = join(process.cwd(), "scripts", "dev-stack", "drill.sh")
 
 let dir: string
 let marker: string
+let cwdLog: string
 let stubs: string
 let netls: Record<string, string>
 
@@ -42,6 +43,7 @@ const NETLS: Record<string, string> = {
 beforeAll(() => {
   dir = mkdtempSync(join(tmpdir(), "drill-guards-"))
   marker = join(dir, "calls.log")
+  cwdLog = join(dir, "cwds.log")
   stubs = join(dir, "bin")
   mkdirSync(stubs)
   netls = {}
@@ -50,9 +52,12 @@ beforeAll(() => {
     writeFileSync(netls[name], text)
   }
   // `stellar network ls` answers from $STUB_NETLS (stderr and exit code on demand); any other call fails.
+  // Each call also logs its physical working directory and the size of the `.env` there (or `none`).
   writeFileSync(
     join(stubs, "stellar"),
     `#!/bin/sh\necho "stellar $*" >> "${marker}"\n` +
+      `if [ -f .env ]; then size="$(wc -c < .env | tr -d ' ')"; else size=none; fi\n` +
+      `echo "$(pwd -P) $size" >> "${cwdLog}"\n` +
       `if [ "$1" = network ] && [ "$2" = ls ]; then\n` +
       `  [ -z "$STUB_NETLS_STDERR" ] || echo "$STUB_NETLS_STDERR" >&2\n` +
       `  [ -z "$STUB_NETLS" ] || cat "$STUB_NETLS"\n` +
@@ -65,6 +70,7 @@ beforeAll(() => {
 
 beforeEach(() => {
   rmSync(marker, { force: true })
+  rmSync(cwdLog, { force: true })
 })
 
 afterAll(() => {
@@ -74,25 +80,41 @@ afterAll(() => {
 /**
  * Runs drill.sh with stdin, stdout and stderr on pipes (no terminal) and the stubs first on PATH, from
  * `cwd` (default: this repository). The stub's `network ls` answers the good list unless `STUB_NETLS` says.
+ * A run still going after `timeout` ms is killed with its whole process group (a subshell left spinning
+ * would hold the pipes open), and says so (`killed`).
  */
 function drill(
   env: Record<string, string | undefined>,
   script: string = DRILL,
   cwd: string = process.cwd(),
-): Promise<{ code: number; stderr: string; stdout: string }> {
+  timeout = 20_000,
+): Promise<{ code: number; stderr: string; stdout: string; killed: boolean }> {
   const base: Record<string, string> = { PATH: `${stubs}:${process.env.PATH ?? ""}`, HOME: process.env.HOME ?? dir, STUB_NETLS: netls.good }
   const full: Record<string, string | undefined> = { ...base, ...env }
   for (const k of Object.keys(full)) if (full[k] === undefined) delete full[k]
   return new Promise((resolve) => {
-    // Only these variables: CI, GITHUB_ACTIONS and key names of the test run never leak in.
-    execFile("bash", [script], { cwd, env: full as NodeJS.ProcessEnv, timeout: 20_000, encoding: "utf8" }, (error, stdout, stderr) => {
-      const code = error ? (typeof error.code === "number" ? error.code : 1) : 0
-      resolve({ code, stdout, stderr })
+    // Only these variables: CI, GITHUB_ACTIONS and key names of the test run never leak in. Its own
+    // process group (detached), so the timeout reaches every subshell it started.
+    const child = spawn("bash", [script], { cwd, env: full as NodeJS.ProcessEnv, detached: true })
+    let stdout = ""
+    let stderr = ""
+    let killed = false
+    child.stdout.setEncoding("utf8").on("data", (chunk: string) => (stdout += chunk))
+    child.stderr.setEncoding("utf8").on("data", (chunk: string) => (stderr += chunk))
+    const timer = setTimeout(() => {
+      killed = true
+      if (child.pid) process.kill(-child.pid, "SIGKILL")
+    }, timeout)
+    child.on("close", (code) => {
+      clearTimeout(timer)
+      resolve({ code: code ?? 1, stdout, stderr, killed })
     })
   })
 }
 
 const calls = () => (existsSync(marker) ? readFileSync(marker, "utf8") : "")
+/** Each CLI call's physical working directory and the size of its `.env` (`none` without one). */
+const cliCwds = () => (existsSync(cwdLog) ? readFileSync(cwdLog, "utf8").trim().split("\n").filter(Boolean) : [])
 /** The only call allowed before the terminal check: the CLI's network list. */
 const NETWORK_LIST_ONLY = "stellar network ls --long\n"
 
@@ -202,6 +224,57 @@ describe("drill.sh on testnet refuses before touching the keystore or the networ
     // The early exit trap removed the work directory.
     expect(readdirSync(tmp)).toEqual([])
   })
+
+  it("refuses a .env above a symlinked TMPDIR's physical directory, before any call", async () => {
+    // dotenvy walks the physical parents: TMPDIR=…/link/ with link -> real/x/y and real/.env present.
+    const base = mkdtempSync(join(dir, "symtmp-"))
+    const real = join(base, "real")
+    const target = join(real, "x", "y")
+    mkdirSync(target, { recursive: true })
+    writeFileSync(join(real, ".env"), "STELLAR_RPC_URL=x\n")
+    const link = join(base, "link")
+    symlinkSync(target, link)
+    const r = await drill({ PRINCIPAL_NETWORK: "testnet", TMPDIR: `${link}/` })
+    expect(r.code).not.toBe(0)
+    expect(r.stderr).toMatch(/\.env exists above the drill's work directory/)
+    expect(r.stderr).toContain(join(realpathSync(real), ".env"))
+    expect(r.stderr).not.toContain("STELLAR_RPC_URL=x")
+    expect(calls()).toBe("")
+    expect(readdirSync(target)).toEqual([])
+  })
+
+  it(
+    "takes a relative TMPDIR to an absolute work directory: no hang, the CLI runs from it with an empty .env",
+    async () => {
+      // Before, the walk above a relative work directory never reached `/` (dirname stops at `.`).
+      const cwd = mkdtempSync(join(dir, "reltmp-"))
+      const rt = join(cwd, "rt")
+      mkdirSync(rt)
+      const r = await drill({ PRINCIPAL_NETWORK: "testnet", TMPDIR: "rt/" }, DRILL, cwd, 8_000)
+      expect(r.killed, "the drill hung").toBe(false)
+      expect(r.stderr).toMatch(/needs a terminal/)
+      expect(calls()).toBe(NETWORK_LIST_ONLY)
+      // The CLI ran from the work directory, by its absolute physical path, next to an empty `.env` of its
+      // own (dotenvy loads the first `.env` it finds, so no parent's), and the exit trap removed it.
+      const [only, ...rest] = cliCwds()
+      expect(rest).toEqual([])
+      const [workDir, envSize] = (only ?? "").split(" ")
+      expect(workDir.startsWith(`${realpathSync(rt)}/drill.`), workDir).toBe(true)
+      expect(envSize).toBe("0")
+      expect(readdirSync(rt)).toEqual([])
+
+      // On the local network too: the exit trap removes the work directory, which a relative path missed
+      // once the drill had moved into it.
+      rmSync(marker, { force: true })
+      const local = await drill({ PRINCIPAL_NETWORK: "local", TMPDIR: "rt/", DRILL_MANIFEST: join(cwd, "absent.json") }, DRILL, cwd, 8_000)
+      expect(local.killed, "the drill hung").toBe(false)
+      expect(local.code).not.toBe(0)
+      expect(local.stderr).toContain(`${join(cwd, "absent.json")} not found.`)
+      expect(calls()).not.toMatch(/^stellar /m)
+      expect(readdirSync(rt)).toEqual([])
+    },
+    15_000,
+  )
 })
 
 describe("drill.sh on testnet checks the Stellar CLI's own testnet, and fails closed", () => {
@@ -255,6 +328,14 @@ describe("drill.sh on testnet checks the Stellar CLI's own testnet, and fails cl
     const pause = await drill({ PRINCIPAL_NETWORK: "local", DRILL_PAUSE_SECONDS: "60" })
     expect(pause.code).not.toBe(0)
     expect(pause.stderr).toMatch(/DRILL_PAUSE_SECONDS/)
+    expect(calls()).toBe("")
+  })
+
+  it("names DRILL_MANIFEST when its directory does not exist (local)", async () => {
+    const given = join(dir, "no-such-dir", "m.json")
+    const r = await drill({ PRINCIPAL_NETWORK: "local", DRILL_MANIFEST: given })
+    expect(r.code).not.toBe(0)
+    expect(r.stderr).toContain(`DRILL_MANIFEST=${given}: its directory does not exist`)
     expect(calls()).toBe("")
   })
 })
