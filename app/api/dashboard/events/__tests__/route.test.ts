@@ -132,6 +132,21 @@ describe("GET /api/dashboard/events", () => {
     expect(params).toEqual(expect.arrayContaining(["testnet", "escrow", POOL, before, 7]))
   })
 
+  it("passes ?contract= (one contract's events) to the read model and to the counts", async () => {
+    const oracle = "CDYGBFGO7KD446CDTGJ7M4OWUXC7UPBGPVM5CUWP2NSNX2CKK2TYYIPS"
+    const res = await call(`?group=oracle&contract=${oracle}&topic=ref_set&counts=1&limit=5`)
+    expect(res.status).toBe(200)
+    expect(res.headers.get("cache-control")).toBe(CACHED)
+    const i = state.texts.findIndex((t) => t.includes("from events") && !t.includes("group by topic"))
+    expect(state.texts[i]).toMatch(/contract_id = \?/)
+    expect(state.values[i]).toEqual(expect.arrayContaining(["testnet", "oracle", oracle, ["ref_set"], 5]))
+    const j = state.texts.findIndex((t) => t.includes("group by topic"))
+    expect(state.texts[j]).toMatch(/contract_id = \?/)
+    expect(state.values[j]).toEqual(expect.arrayContaining(["testnet", "oracle", oracle]))
+    // The id goes as a parameter, never into the query text.
+    expect(state.texts.some((t) => t.includes(oracle))).toBe(false)
+  })
+
   it("passes ?topic= (a comma list) to the read model", async () => {
     expect((await call("?group=risk&topic=cb_limit,ast_limit,cb_window")).status).toBe(200)
     const params = state.values[state.texts.findIndex((t) => t.includes("from events"))]
@@ -165,6 +180,10 @@ describe("GET /api/dashboard/events", () => {
     ["?counts=yes", "invalid_counts"],
     ["?group=pools", "invalid_group"],
     ["?pool=nope", "invalid_pool"],
+    ["?contract=nope", "invalid_contract"],
+    ["?contract=", "invalid_contract"],
+    [`?contract=G${"A".repeat(55)}`, "invalid_contract"],
+    [`?contract=c${"A".repeat(55)}`, "invalid_contract"],
     ["?before=123", "invalid_before"],
     ["?id=abc", "invalid_id"],
     ["?limit=0", "invalid_limit"],

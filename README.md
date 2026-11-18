@@ -350,11 +350,11 @@ sub-daily crons at deploy time.
 ## Event indexer
 
 A scheduled job calls `/api/cron/index` (GET or POST) every 5 minutes. It reads the protocol's
-contract events with the RPC's `getEvents` into the `events` table (migrations 0004 to 0006), one
-row per RPC event id, so a retry or two overlapping runs never duplicate a row. Each row keeps the
-contract, topic, ledger, close time, transaction hash, the market's pool, the decoded fields (`data`)
-and the event value as the RPC sent it (`raw_xdr`, base64 XDR of the `ScVal`; decode it with
-`stellar xdr decode --type ScVal`).
+contract events with the RPC's `getEvents` into the `events` table (migrations 0004 to 0006 and
+0008), one row per RPC event id, so a retry or two overlapping runs never duplicate a row. Each row
+keeps the contract, topic, ledger, close time, transaction hash, the market's pool, the decoded
+fields (`data`) and the event value as the RPC sent it (`raw_xdr`, base64 XDR of the `ScVal`;
+decode it with `stellar xdr decode --type ScVal`).
 
 Contracts are indexed in five groups, each with its own cursor in `ingest_cursor`
 (`events:<group>:<network>`):
@@ -363,20 +363,26 @@ Contracts are indexed in five groups, each with its own cursor in `ingest_cursor
 |---|---|
 | `market` | Every listed market's SY wrapper, manager and pool |
 | `escrow` | Every listed market's RecoveryEscrow |
-| `oracle` | The shared OracleAdapter |
+| `oracle` | Every OracleAdapter the manifest names: each market's oracle and `shared.oracle` |
 | `permissioning` | The shared Permissioning contract |
 | `risk` | The shared RiskControl contract |
 
+- The `oracle` group's contracts come from the manifest, not from the market list. It runs even when
+  the registry cannot be read.
 - A first run starts at the manifest's `deployLedger`, or at the RPC's oldest ledger if that is
-  later. The RPC keeps about 7 days on Testnet.
+  later. The RPC keeps about 7 days.
 - Each run reads pages of 200 events (at most 5 contracts per request), saves the cursor after
   every page, and starts no page after its 50 s budget. The next run resumes there.
 - A cursor only moves forward. A run that is behind cannot rewind one that is ahead.
 - A cursor names the contracts it has read through its ledger (`members`). Any other contract of
   its group (a market listed after its creation, a market dropped from the list and listed again, a
-  new deployment in the manifest) is read in its own requests until it catches up. It starts at its
-  market's creation ledger when that is known and later than `deployLedger`, else at `deployLedger`.
-  The cursor moves only once every contract has.
+  new deployment or contract in the manifest) is read in its own requests until it catches up. It
+  starts at its creation ledger when that is known and later than `deployLedger`, else at
+  `deployLedger`. The cursor moves only once every contract has.
+- A contract's creation ledger is the manifest's `createdLedgers` entry for it (contract id to
+  ledger), else its market's `createdLedger` (below). Add an entry when a manifest names a contract
+  that is not a market, such as a new oracle, after `deployLedger` has left the RPC's window. Without
+  one, the contract would start at `deployLedger` and record a gap for ledgers before it existed.
 - A market's creation ledger (`createdLedger` in its registry row) is the earliest ledger at which
   discovery saw the factory build it: its salt's `mkt_tok`, `mkt_eng` or `mkt_new`, in the page of
   events that named the pool, or else the salt index's ledger for it (its `mkt_new`). A market the
@@ -405,14 +411,16 @@ The route answers:
 | 500 | The same body, a group with `error: "failed"`, or `{ error: "failed" }` | The RPC failed, or the manifest could not be read. The next run resumes at the cursor. |
 
 Schedule (ops, with the developer's go): a QStash schedule with cron `*/5 * * * *` to
-`https://<domain>/api/cron/index`, as for the recorder. Apply migrations 0004 to 0007 to the
+`https://<domain>/api/cron/index`, as for the recorder. Apply migrations 0004 to 0008 to the
 network's database first (`pnpm db:migrate --env-file .env.testnet`).
 
 `GET /api/dashboard/events` serves the index, public and without a wallet. `?group=`, `?pool=`,
-`?topic=<a,b,…>` (at most 10 topics, filtered in the query so a page holds only them),
-`?before=<event id>` (older rows, for paging) and `?limit=` (1 to 200, default 50) filter the list.
-`?counts=1` adds `counts`: the number of indexed events per topic for the group and pool asked, over
-every row, not one page (the compliance page's Permissioning counts).
+`?contract=<C…>` (one contract's events, such as one oracle's history), `?topic=<a,b,…>` (at most
+10 topics, filtered in the query so a page holds only them), `?before=<event id>` (older rows, for
+paging) and `?limit=` (1 to 200, default 50) filter the list. A `contract` that is not a contract id
+answers 400 `invalid_contract`. `?counts=1` adds `counts`: the number of indexed events per topic
+for the group, pool and contract asked, over every row, not one page (the compliance page's
+Permissioning counts).
 It answers `{ rows, indexedThrough, indexedThroughCloseTime, lagSeconds, gaps, pendingGroups, reconcile }`,
 newest first and cached 60 s at the edge: `indexedThrough` is the slowest group's cursor (0 while a
 group has none), and `indexedThroughCloseTime` its close time, from which a page computes a fresh lag
@@ -594,9 +602,9 @@ confirmed. An uptime monitor can watch the status code, `ledger.status`, `indexe
 The developer's checklist for putting the dashboard and its monitoring live on Testnet, in order.
 Each step waits for the developer's go. No step needs a secret in this repository.
 
-1. **Migrate the Testnet database.** `pnpm db:migrate --env-file .env.testnet` applies 0004 to 0007
-   (events, ticks and alerts; the cursor's close time; gaps and members; the alerts' post flags). 0001
-   to 0003 are already applied there.
+1. **Migrate the Testnet database.** `pnpm db:migrate --env-file .env.testnet` applies 0004 to 0008
+   (events, ticks and alerts; the cursor's close time; gaps and members; the alerts' post flags; the
+   events' contract and topic index). 0001 to 0003 are already applied there.
 2. **Load the history.** Run the capture once more just before the import (the next one is due by
    2026-11-20 in any case, see "Event indexer"), then import it:
    `pnpm indexer:capture --network testnet`, then

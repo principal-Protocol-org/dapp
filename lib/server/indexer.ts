@@ -8,7 +8,8 @@ import "server-only"
  * place is older than the RPC's window.
  *
  * Contracts are indexed in five groups, each with its own cursor: `market` (every market's SY,
- * manager and pool), `escrow` (every market's RecoveryEscrow), and the shared `oracle`,
+ * manager and pool), `escrow` (every market's RecoveryEscrow), `oracle` (every oracle the manifest
+ * names: its markets' and `shared.oracle`, whatever markets a run lists), and the shared
  * `permissioning` and `risk` (RiskControl). The RPC takes at most 5 contract ids per request, so a
  * larger group is read in chunks, page by page in turn; the group's cursor is the ledger every chunk
  * has read through.
@@ -20,12 +21,14 @@ import "server-only"
  *
  * A cursor also names the contracts it has read through its ledger (`members`). A contract of the
  * group that is not among them (a market listed after its creation, a market dropped from the list
- * and listed again, a new deployment in the manifest) is read in its own chunks from where it can
- * first have emitted until it catches up: its market's `createdLedger` (the ledger discovery saw the
- * factory build it at) when known and later than the deploy ledger, else the deploy ledger (or the
- * RPC's oldest ledger). The cursor and its members move only when every chunk has. A run whose market
- * list is the seeds alone (the registry could not be read) leaves the market and escrow groups for
- * the next run (`runGroups`), so their members never drop a market for a run.
+ * and listed again, a new deployment or contract in the manifest) is read in its own chunks from
+ * where it can first have emitted until it catches up: its creation ledger when known and later than
+ * the deploy ledger, else the deploy ledger (or the RPC's oldest ledger). The creation ledger is the
+ * manifest's `createdLedgers` entry for the contract, else (a market's contract) its market's
+ * `createdLedger`, the ledger discovery saw the factory build it at. The cursor and its members move
+ * only when every chunk has. A run whose market list is the seeds alone (the registry could not be
+ * read) leaves the market and escrow groups for the next run (`runGroups`), so their members never
+ * drop a market for a run.
  *
  * A gap (ledgers the RPC no longer holds) is stored on the cursor by the same guarded write that moves
  * the cursor past it (`gap_from`, `gap_to`, widened when one is open), so a cursor never passes a gap
@@ -40,6 +43,7 @@ import "server-only"
 import { scValToNative, type xdr } from "@stellar/stellar-sdk"
 import { bytesToHex } from "@/lib/protocol/bytes"
 import { cursorLedger, decodeEvent, idOf, type RawEvent, type Role } from "@/lib/protocol/events"
+import { manifestOracles } from "@/lib/protocol/manifest"
 import { createRpcReader, type ContractReader } from "@/lib/protocol/reader"
 import type { Manifest, Market, Network } from "@/lib/protocol/types"
 import { DatabaseConfigError, type Sql } from "./db"
@@ -71,7 +75,8 @@ export function runGroups(fromRegistry: boolean): { groups: IndexGroup[]; skippe
 
 /**
  * One indexed contract: the role its events are decoded for, its market's pool when it has one, and
- * that market's `createdLedger` when discovery saw it built (no event of it is older).
+ * the ledger it was created at when known (no event of it is older): the manifest's `createdLedgers`
+ * entry, else its market's `createdLedger` (discovery saw the factory build it).
  */
 export type IndexMember = { id: string; role: Role; pool?: string; createdLedger?: number }
 
@@ -83,21 +88,26 @@ export const MAX_CONTRACTS_PER_REQUEST = 5
 /** The cursor row of one group on one network. */
 export const indexCursorName = (group: IndexGroup, network: Network) => `events:${group}:${network}`
 
-/** The contracts of each group, each listed once. */
+/**
+ * The contracts of each group, each listed once. The market and escrow groups are the listed
+ * `markets`' contracts; the oracle group is every oracle of the static manifest (`shared.oracle`
+ * first, then its markets' in order), so it is the same whatever markets the registry listed.
+ */
 export function contractsOf(manifest: Manifest, markets: Market[]): Record<IndexGroup, IndexMember[]> {
   const groups: Record<IndexGroup, IndexMember[]> = { escrow: [], oracle: [], permissioning: [], risk: [], market: [] }
-  const add = (group: IndexGroup, member: IndexMember) => {
-    if (!groups[group].some((m) => m.id === member.id)) groups[group].push(member)
+  const add = (group: IndexGroup, member: Omit<IndexMember, "createdLedger">, marketCreated?: number) => {
+    if (groups[group].some((m) => m.id === member.id)) return
+    const createdLedger = manifest.createdLedgers?.[member.id] ?? marketCreated
+    groups[group].push(createdLedger === undefined ? member : { ...member, createdLedger })
   }
   for (const market of markets) {
     const k = market.contracts
-    const created = market.createdLedger === undefined ? {} : { createdLedger: market.createdLedger }
-    add("market", { id: k.sy, role: "sy", pool: k.pool, ...created })
-    add("market", { id: k.manager, role: "manager", pool: k.pool, ...created })
-    add("market", { id: k.pool, role: "pool", pool: k.pool, ...created })
-    add("escrow", { id: k.recoveryEscrow, role: "escrow", pool: k.pool, ...created })
+    add("market", { id: k.sy, role: "sy", pool: k.pool }, market.createdLedger)
+    add("market", { id: k.manager, role: "manager", pool: k.pool }, market.createdLedger)
+    add("market", { id: k.pool, role: "pool", pool: k.pool }, market.createdLedger)
+    add("escrow", { id: k.recoveryEscrow, role: "escrow", pool: k.pool }, market.createdLedger)
   }
-  add("oracle", { id: manifest.shared.oracle, role: "oracle" })
+  for (const id of [manifest.shared.oracle, ...manifestOracles(manifest).map((o) => o.oracle)]) add("oracle", { id, role: "oracle" })
   add("permissioning", { id: manifest.shared.permissioning, role: "permissioning" })
   add("risk", { id: manifest.shared.riskControl, role: "riskControl" })
   return groups
@@ -287,8 +297,8 @@ async function indexGroup(
   let oldest = health.oldestLedger
 
   // The contracts this cursor has read through its ledger resume after it. Any other starts where it
-  // can first have emitted: its market's creation ledger when discovery saw it built after the deploy,
-  // else the deploy (a manifest without `deployLedger`, the local stack, at the RPC's oldest ledger,
+  // can first have emitted: its creation ledger (`contractsOf`) when that is after the deploy, else
+  // the deploy (a manifest without `deployLedger`, the local stack, at the RPC's oldest ledger,
   // claiming no gap). It reads in chunks of its own, one start per chunk, so the cursor moves only
   // once it has caught up, and a gap is claimed only below that start.
   const known = new Set(saved?.members ?? [])
@@ -602,6 +612,8 @@ export async function getIndexedEvents(
     network: Network
     group?: IndexGroup
     pool?: string
+    /** Only this contract's events (one oracle's history). */
+    contract?: string
     /** Only these topics (`cb_limit`, `ast_limit`…): filtered in the query, so a page holds only them. */
     topics?: readonly string[]
     before?: string
@@ -612,6 +624,7 @@ export async function getIndexedEvents(
 ): Promise<IndexedEvents> {
   const group = q.group ?? null
   const pool = q.pool ?? null
+  const contract = q.contract ?? null
   const topics = q.topics && q.topics.length > 0 ? [...q.topics] : null
   const before = q.before ?? null
   const rows = await sql<EventRowIn>`
@@ -620,6 +633,7 @@ export async function getIndexedEvents(
     where network = ${q.network}
       and (${group}::text is null or group_name = ${group})
       and (${pool}::text is null or pool = ${pool})
+      and (${contract}::text is null or contract_id = ${contract})
       and (${topics}::text[] is null or topic = any(${topics}::text[]))
       and (${before}::text is null or id < ${before})
     order by ledger desc, id desc
@@ -668,18 +682,23 @@ export async function getIndexedEvents(
 }
 
 /**
- * How many events the index holds per topic, for the group and pool asked: every row, not one page
- * (the Permissioning counts on the compliance page). A topic with no event is absent.
+ * How many events the index holds per topic, for the group, pool and contract asked: every row, not
+ * one page (the Permissioning counts on the compliance page). A topic with no event is absent.
  */
-export async function getEventCounts(sql: Sql, q: { network: Network; group?: IndexGroup; pool?: string }): Promise<Record<string, number>> {
+export async function getEventCounts(
+  sql: Sql,
+  q: { network: Network; group?: IndexGroup; pool?: string; contract?: string },
+): Promise<Record<string, number>> {
   const group = q.group ?? null
   const pool = q.pool ?? null
+  const contract = q.contract ?? null
   const rows = await sql<{ topic: string; n: string | number }>`
     select topic, count(*) as n
     from events
     where network = ${q.network}
       and (${group}::text is null or group_name = ${group})
       and (${pool}::text is null or pool = ${pool})
+      and (${contract}::text is null or contract_id = ${contract})
     group by topic`
   return Object.fromEntries(rows.map((r) => [r.topic, Number(r.n)]))
 }

@@ -334,20 +334,24 @@ export function useOracleTicks(limit = 20) {
   )
 }
 
-/** Which indexed events a list shows: one group (every group when omitted), one pool, some topics. */
-export type EventQuery = { group?: IndexGroup; pool?: string; topics?: readonly string[] }
+/**
+ * Which indexed events a list shows: one group (every group when omitted), one pool, one contract
+ * (one oracle's history), some topics.
+ */
+export type EventQuery = { group?: IndexGroup; pool?: string; contract?: string; topics?: readonly string[] }
 
 /** `GET /api/dashboard/events` for `q`, plus the extra parameters (`limit`, `before`, `counts`). */
 function eventsUrl(q: EventQuery, extra: Record<string, string>): string {
   const params = new URLSearchParams()
   if (q.group) params.set("group", q.group)
   if (q.pool) params.set("pool", q.pool)
+  if (q.contract) params.set("contract", q.contract)
   if (q.topics && q.topics.length > 0) params.set("topic", q.topics.join(","))
   for (const [k, v] of Object.entries(extra)) params.set(k, v)
   return `/api/dashboard/events?${params}`
 }
 
-const queryKeyOf = (q: EventQuery) => [q.group ?? "all", q.pool ?? "all", (q.topics ?? []).join(",")] as const
+const queryKeyOf = (q: EventQuery) => [q.group ?? "all", q.pool ?? "all", (q.topics ?? []).join(","), q.contract ?? "all"] as const
 
 /**
  * One indexed-event list, newest first, `pageSize` rows a page (`EventList`). `fetchNextPage` reads

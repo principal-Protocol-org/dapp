@@ -381,7 +381,16 @@ describe("useEventPages (EventList)", () => {
     expect(fetchMock).toHaveBeenLastCalledWith("/api/dashboard/events?group=risk&pool=CPOOL&topic=cb_limit%2Ccb_window&limit=2&before=0000000000000000002-0000000000")
     // A short page is the last.
     expect(result.current.hasNextPage).toBe(false)
-    expect(interval(["dashboard", "events", "testnet", "risk", "CPOOL", "cb_limit,cb_window", 2])).toBe(DASHBOARD_AGGREGATE_MS)
+    expect(interval(["dashboard", "events", "testnet", "risk", "CPOOL", "cb_limit,cb_window", "all", 2])).toBe(DASHBOARD_AGGREGATE_MS)
+  })
+
+  it("asks one contract's events (an oracle's history), keyed apart from the group's", async () => {
+    const fetchMock = vi.fn(async () => Response.json(indexAnswer()))
+    vi.stubGlobal("fetch", fetchMock)
+    const { result } = renderHook(() => useEventPages({ group: "oracle", contract: "CORACLE", topics: ["ref_set"] }, 20), { wrapper })
+    await waitFor(() => expect(result.current.data).toBeDefined())
+    expect(fetchMock).toHaveBeenCalledWith("/api/dashboard/events?group=oracle&contract=CORACLE&topic=ref_set&limit=20")
+    expect(interval(["dashboard", "events", "testnet", "oracle", "all", "ref_set", "CORACLE", 20])).toBe(DASHBOARD_AGGREGATE_MS)
   })
 
   it("every group when none is named", async () => {
