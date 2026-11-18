@@ -753,7 +753,7 @@ Docker. Full details are in [`scripts/dev-stack/README.md`](scripts/dev-stack/RE
 
 ```bash
 scripts/dev-stack/up.sh                              # start the network, create keys
-MATURITY_SECONDS=3600 scripts/dev-stack/deploy.sh    # deploy and seed one market
+scripts/dev-stack/deploy.sh                          # deploy and seed two markets, maturing in a day
 NEXT_PUBLIC_PRINCIPAL_NETWORK=local pnpm dev
 scripts/dev-stack/oracle-tick.sh                     # run every 30 minutes; the oracle goes stale after one hour
 ```

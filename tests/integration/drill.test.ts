@@ -14,9 +14,9 @@
  *
  * - When the market has not matured (and the oracle is fresh), the throwaway account also mints PT and YT,
  *   so the seizure record holds PT and YT (what finalize_record settles after maturity); otherwise the
- *   drill says why it skipped the mint and the record holds SY only. The dev stack's market usually has
- *   matured (MATURITY_SECONDS=3600): `DRILL_MANIFEST=<manifest>` runs this suite, and the drill, on another
- *   local deployment, e.g. one made with `MANIFEST_OUT=<path> MATURITY_SECONDS=1200 deploy.sh`.
+ *   drill says why it skipped the mint and the record holds SY only. The dev stack's market matures a day
+ *   after its deploy (MATURITY_SECONDS=86400 by default); once it has, `DRILL_MANIFEST=<manifest>` runs this
+ *   suite, and the drill, on another local deployment, e.g. one made with `MANIFEST_OUT=<path> MATURITY_SECONDS=1200 deploy.sh`.
  *
  * The local database already holds earlier seizures (the indexer suite's), so every count is over the
  * drill's own transaction hashes. Needs `scripts/dev-stack/up.sh`, a deployed market, and `principal-pg`

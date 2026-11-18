@@ -7,7 +7,7 @@
 # same Permissioning, RiskControl and Router, so the app's multi-oracle paths can be tried without Mainnet.
 #
 # Usage: [PRINCIPAL_NETWORK=local|testnet] [PRINCIPAL_REPO=../principal] \
-#        [PRINCIPAL_REF=3af938853e5818aa8d56bd35670b9a19cfa55a78] [MATURITY_SECONDS=3600 locally, 7776000 on testnet] \
+#        [PRINCIPAL_REF=3af938853e5818aa8d56bd35670b9a19cfa55a78] [MATURITY_SECONDS=86400 locally, 7776000 on testnet] \
 #        [ASSET_CODE=USDY] [ASSET_CODE_2=GILT] [SECOND_MARKET=1] scripts/dev-stack/deploy.sh
 # SECOND_MARKET=0 deploys one market locally too. On testnet there is always one market (both are ignored).
 # PRINCIPAL_REF defaults to the Mainnet deployment's commit (config/manifests/mainnet.json sourceCommit).
@@ -120,7 +120,7 @@ fi
 
 PRINCIPAL_REPO="${PRINCIPAL_REPO:-../principal}"
 PRINCIPAL_REF="${PRINCIPAL_REF:-3af938853e5818aa8d56bd35670b9a19cfa55a78}"
-if [ "$NETWORK" = local ]; then MATURITY_SECONDS="${MATURITY_SECONDS:-3600}"; else MATURITY_SECONDS="${MATURITY_SECONDS:-7776000}"; fi
+if [ "$NETWORK" = local ]; then MATURITY_SECONDS="${MATURITY_SECONDS:-86400}"; else MATURITY_SECONDS="${MATURITY_SECONDS:-7776000}"; fi
 ASSET_CODE="${ASSET_CODE:-USDY}"
 [[ "$ASSET_CODE" =~ ^[A-Za-z0-9]{1,12}$ ]] || die "ASSET_CODE must be 1-12 letters or digits"
 ASSET_DISPLAY="$ASSET_CODE (test)"

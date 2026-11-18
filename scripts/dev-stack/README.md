@@ -10,7 +10,7 @@ and Podman (an existing machine) or Docker.
 
 ```bash
 scripts/dev-stack/up.sh                                   # network, Postgres + dev-only keys (see below)
-MATURITY_SECONDS=3600 scripts/dev-stack/deploy.sh         # build, deploy two markets, seed, write outputs
+scripts/dev-stack/deploy.sh                               # build, deploy two markets, seed, write outputs
 NEXT_PUBLIC_PRINCIPAL_NETWORK=local pnpm dev              # or pnpm build
 scripts/dev-stack/oracle-tick.sh                          # run this every 30 minutes (grows ~5 %/year)
 ```
@@ -24,14 +24,16 @@ scripts/dev-stack/oracle-tick.sh                          # run this every 30 mi
   written to `.env.local`, so a real identity must never share them.
 - `deploy.sh` reads `PRINCIPAL_REPO` (default `../principal`), `PRINCIPAL_REF` (default
   `3af938853e5818aa8d56bd35670b9a19cfa55a78`, the Mainnet deployment's commit, `sourceCommit` in
-  `config/manifests/mainnet.json`) and `MATURITY_SECONDS` (default `3600`). It extracts the sources with
+  `config/manifests/mainnet.json`) and `MATURITY_SECONDS` (default `86400`, one day). It extracts the sources with
   `git archive` into `$TMPDIR/principal-dev-stack/<commit>` (read-only for the repository, cached per
   commit), builds the WASM, issues `USDY` (`ASSET_CODE`, default `USDY`, shown as "USDY (test)"; AUTH_REQUIRED, AUTH_REVOCABLE, AUTH_CLAWBACK_ENABLED) from
   `principal-localdev-admin`, deploys its SAC, and runs steps 1-11 of the repository's
   `docs/DEPLOYMENT.md`. It then deposits 200,000 USDY, mints PT/YT from 100,000 SY, and seeds the
   pool with all the PT and 95 % of its value in SY. It also deploys the stateless `MarketFactory` (its address is `shared.factory`, the wasm hashes of the seven market contracts are recorded) and runs `scripts/db-migrate.mjs` when that file exists (migrations 0001 to 0003; 0003 adds `market_salts`). Every run deploys new markets and overwrites `config/manifests/local.json`.
   Allow for the run: a one-market deploy takes a few minutes, so do not set `MATURITY_SECONDS` below about
-  600. A two-market local deploy (the default) needs about 90 s more, or set `SECOND_MARKET=0`.
+  600. A two-market local deploy (the default) needs about 90 s more, or set `SECOND_MARKET=0`. The
+  one-day default leaves the integration suites room: the routes suite fails on a market an hour from
+  maturity, though its own floor is 30 minutes.
 - A second market, on the local network only. Mainnet has several markets, each on its own asset with
   its own oracle, so the local stack has two. After the first market, `deploy.sh` issues a second asset,
   `GILT` (`ASSET_CODE_2`, shown as "GILT (test)"), from the same key, with its own SAC and trustlines
@@ -106,8 +108,8 @@ scripts/dev-stack/oracle-tick.sh                          # run this every 30 mi
   with `principal-localdev-admin` and onboards with the issuer's own steps; the throwaway key
   (`drill-<network>-<time>-<pid>`) is removed from the keystore at the end, and an exit trap unpauses
   RiskControl on any failure or interruption (INT, TERM, QUIT; the cleanup ignores further ones). The
-  mint is skipped, and said, when the market has matured (the dev stack's market usually has) or the
-  oracle is stale: the record then holds SY only. `DRILL_MANIFEST=<path>` (local only) runs it on
+  mint is skipped, and said, when the market has matured (the dev stack's markets do a day after their
+  deploy) or the oracle is stale: the record then holds SY only. `DRILL_MANIFEST=<path>` (local only) runs it on
   another local deployment, e.g. a fresh one written with `MANIFEST_OUT`, and passes it on to
   `oracle-tick.sh` as `ORACLE_TICK_MANIFEST`. Every hash goes to stderr, and a JSON summary to stdout.
   `DRILL_STEPS=recovery,oracle,pause` picks steps. On Testnet it is the developer's run only (the main
