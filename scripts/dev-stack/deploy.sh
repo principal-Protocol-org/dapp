@@ -5,8 +5,11 @@
 # database; on testnet it writes no env file and prints which keys to give the server.
 #
 # Usage: [PRINCIPAL_NETWORK=local|testnet] [PRINCIPAL_REPO=../principal] \
-#        [PRINCIPAL_REF=origin/feat/tranche-1-mvp] [MATURITY_SECONDS=3600 locally, 7776000 on testnet] \
+#        [PRINCIPAL_REF=3af938853e5818aa8d56bd35670b9a19cfa55a78] [MATURITY_SECONDS=3600 locally, 7776000 on testnet] \
 #        [ASSET_CODE=USDY] scripts/dev-stack/deploy.sh
+# PRINCIPAL_REF defaults to the Mainnet deployment's commit (config/manifests/mainnet.json sourceCommit).
+# PRINCIPAL_REF=665bb6760372d30307a1a035da24e51776f727e8 deploys the official Testnet market's contracts,
+# the older interface. The manifest's protocolAbi (1 or 2) is read from the Router that was built.
 # Options: MANIFEST_OUT=<path> writes the manifest there instead of config/manifests/<network>.json and
 #          writes no .env file. ORACLE_MAX_STALE_SECONDS=<n> sets the oracle freshness window (default 3600).
 #          The window must outlast the deploy itself (genesis value at step 1, seeding mints 5 to 10 minutes
@@ -113,7 +116,7 @@ elif [ "$NETWORK" = testnet ] && [ -n "$OFFICIAL_MANIFEST" ] && [ "${ALLOW_TESTN
 fi
 
 PRINCIPAL_REPO="${PRINCIPAL_REPO:-../principal}"
-PRINCIPAL_REF="${PRINCIPAL_REF:-origin/feat/tranche-1-mvp}"
+PRINCIPAL_REF="${PRINCIPAL_REF:-3af938853e5818aa8d56bd35670b9a19cfa55a78}"
 if [ "$NETWORK" = local ]; then MATURITY_SECONDS="${MATURITY_SECONDS:-3600}"; else MATURITY_SECONDS="${MATURITY_SECONDS:-7776000}"; fi
 ASSET_CODE="${ASSET_CODE:-USDY}"
 [[ "$ASSET_CODE" =~ ^[A-Za-z0-9]{1,12}$ ]] || die "ASSET_CODE must be 1-12 letters or digits"
@@ -157,6 +160,23 @@ if [ ! -f "$WASM_DIR/principal_router.wasm" ] || [ ! -f "$WASM_DIR/principal_mar
 else
   log "Reusing built contracts for $COMMIT"
 fi
+
+# The Router's interface, read from the wasm just built with one CLI call and one jq program: the user
+# flows it exposes (the `quote_*` views are reads, not flows, so they are left out) and its interface
+# version, the manifest's protocolAbi: 2 when wrap_and_mint takes `sy_in` (principal 3af9388, Mainnet),
+# else 1 (665bb67, the official Testnet market). Read before any transaction, so a Router that cannot be
+# read signs nothing; step 9 (RecoveryEscrow) depends on the version.
+ROUTER_INTERFACE="$(stellar contract info interface --wasm "$WASM_DIR/principal_router.wasm" --output json 2>/dev/null |
+  jq -r '[.[] | select(has("function_v0")) | .function_v0] |
+    ([.[].name | select(startswith("quote_") | not)] - ["bump","initialize","register_market","unregister_market","is_registered","market","get_admin","transfer_admin"]) as $fns |
+    (if any(.[]; .name == "wrap_and_mint" and any(.inputs[]?; .name == "sy_in")) then 2 else 1 end) as $abi |
+    "\($abi) \($fns | tojson)"')" ||
+  die "could not read the router interface"
+PROTOCOL_ABI="${ROUTER_INTERFACE%% *}"
+ROUTER_FUNCTIONS="${ROUTER_INTERFACE#* }"
+[[ "$PROTOCOL_ABI" =~ ^[12]$ ]] || die "could not tell the router's interface version from its interface"
+[ "$(jq 'length' <<<"$ROUTER_FUNCTIONS")" -gt 0 ] || die "router interface listed no user functions"
+log "Router interface version $PROTOCOL_ABI (the manifest's protocolAbi)"
 
 # The manifest's deployLedger, where the event indexer starts: the latest ledger before this deploy's
 # first transaction (set-options, the SAC, every upload and contract), so no event of it comes before.
@@ -239,7 +259,9 @@ deploy_contract oracle principal_oracle_adapter.wasm
 ORACLE="$LAST_ID"
 # The oracle admin is its own key on testnet: it can only push a value (the keeper's job).
 # v2 (R4-9): freshness window ORACLE_MAX_STALE_SECONDS (default 1 h), 10 % deviation bound, one primary source, no fallback.
-adm "$ORACLE" initialize --admin "$ORACLE_ADMIN" --max_stale_seconds "$ORACLE_MAX_STALE_SECONDS" --max_deviation_bps 1000
+# Signed by the oracle admin: at 3af9388 initialize requires the admin's authorization (665bb67 requires none).
+invoke "$ORACLE_KEY" "$ORACLE" initialize --admin "$ORACLE_ADMIN" --max_stale_seconds "$ORACLE_MAX_STALE_SECONDS" --max_deviation_bps 1000 >/dev/null ||
+  die "oracle initialize failed"
 ORACLE_SOURCE="$(printf '%s' "principal-oracle-source:${NETWORK}:${ASSET_CODE}:app-team:keeper" | shasum -a 256 | cut -d' ' -f1)"
 [[ "$ORACLE_SOURCE" =~ ^[0-9a-f]{64}$ ]] || die "could not derive the oracle source id"
 invoke "$ORACLE_KEY" "$ORACLE" set_sources --caller "$ORACLE_ADMIN" --primary_source "$ORACLE_SOURCE" >/dev/null ||
@@ -251,7 +273,8 @@ GENESIS="$(invoke "$ORACLE_KEY" "$ORACLE" set_reference_value --caller "$ORACLE_
 log "2. Permissioning"
 deploy_contract permissioning principal_permissioning.wasm
 PERMISSIONING="$LAST_ID"
-adm "$PERMISSIONING" initialize --admin "$ISSUER"
+# Signed by its admin, the issuer: at 3af9388 initialize requires the admin's authorization (665bb67 requires none).
+iss "$PERMISSIONING" initialize --admin "$ISSUER"
 
 log "3. RiskControl (circuit breaker disabled)"
 deploy_contract riskControl principal_risk_control.wasm
@@ -302,8 +325,15 @@ adm "$POOL" initialize --admin "$ADMIN" --principal_manager "$MANAGER" --time_st
 log "9. RecoveryEscrow (+ set_recovery_escrow on SY, PT, YT, pool)"
 deploy_contract recoveryEscrow principal_recovery_escrow.wasm
 ESCROW="$LAST_ID"
-adm "$ESCROW" initialize --underlying "$SAC" --sy_wrapper "$SY" --pt_token "$PT" --yt_token "$YT" \
-  --principal_manager "$MANAGER" --market_pool "$POOL"
+# At 3af9388 (protocolAbi 2) initialize takes a first argument, caller, who signs and must be the underlying's
+# authority: the SAC admin, which is $ADMIN since the set_admin above. 665bb67 has no such parameter.
+if [ "$PROTOCOL_ABI" = 2 ]; then
+  adm "$ESCROW" initialize --caller "$ADMIN" --underlying "$SAC" --sy_wrapper "$SY" --pt_token "$PT" --yt_token "$YT" \
+    --principal_manager "$MANAGER" --market_pool "$POOL"
+else
+  adm "$ESCROW" initialize --underlying "$SAC" --sy_wrapper "$SY" --pt_token "$PT" --yt_token "$YT" \
+    --principal_manager "$MANAGER" --market_pool "$POOL"
+fi
 for c in "$SY" "$PT" "$YT" "$POOL"; do
   adm "$c" set_recovery_escrow --admin "$ADMIN" --escrow "$ESCROW"
 done
@@ -321,12 +351,6 @@ FACTORY="$LAST_ID"
 for k in sy pt yt config manager pool recoveryEscrow; do
   jq -e --arg k "$k" 'has($k)' <<<"$HASHES_JSON" >/dev/null || die "wasm hash for $k was not recorded"
 done
-# Router functions the deployed wasm exposes (user flows only), read from its interface. The `quote_*`
-# views are reads, not flows, so they are left out.
-ROUTER_FUNCTIONS="$(stellar contract info interface --wasm "$WASM_DIR/principal_router.wasm" --output json 2>/dev/null |
-  jq -c '[.[] | select(has("function_v0")) | .function_v0.name | select(startswith("quote_") | not)] - ["bump","initialize","register_market","unregister_market","is_registered","market","get_admin","transfer_admin"]')" ||
-  die "could not read the router interface"
-[ "$(jq 'length' <<<"$ROUTER_FUNCTIONS")" -gt 0 ] || die "router interface listed no user functions"
 
 # ---------------------------------------------------------------------------------------------
 # Step 11: compliance standing. Both layers: SAC authorization and Permissioning grants.
@@ -385,7 +409,7 @@ jq -n \
   --arg friendbot "$FRIENDBOT_URL" --arg generatedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --arg commit "$COMMIT" --argjson deployLedger "$DEPLOY_LEDGER" --arg risk "$RISK_CONTROL" --arg perm "$PERMISSIONING" --arg factory "$FACTORY" \
   --arg id "$MARKET_ID" --arg issuer "$ISSUER" --arg sac "$SAC" --argjson maturity "$MATURITY" --arg network "$NETWORK" \
-  --arg code "$ASSET_CODE" --arg display "$ASSET_DISPLAY" --argjson fns "$ROUTER_FUNCTIONS" \
+  --arg code "$ASSET_CODE" --arg display "$ASSET_DISPLAY" --argjson fns "$ROUTER_FUNCTIONS" --argjson protocolAbi "$PROTOCOL_ABI" \
   --arg router "$ROUTER" --arg oracle "$ORACLE" --arg sy "$SY" --arg pt "$PT" --arg yt "$YT" \
   --arg config "$CONFIG" --arg manager "$MANAGER" --arg pool "$POOL" --arg escrow "$ESCROW" \
   --argjson hashes "$HASHES_JSON" '{
@@ -395,6 +419,7 @@ jq -n \
     shared: { router: $router, oracle: $oracle, permissioning: $perm, riskControl: $risk, factory: $factory },
     wasmHashes: $hashes,
     routerFunctions: $fns,
+    protocolAbi: $protocolAbi,
     testAsset: { code: $code, issuer: $issuer, sac: $sac, decimals: 7, displayName: $display },
     markets: [{
       marketId: $id, displayName: ($display),

@@ -5,7 +5,7 @@ name: E2E Testnet
 #   (config/manifests/testnet.json), with fresh keypairs onboarded through the public faucet.
 # - Suite B (tests/e2e-testnet/lifecycle.test.ts): a throwaway market deployed by scripts/dev-stack/deploy.sh
 #   (EPHEMERAL=1) with four keys generated in the run and removed afterwards, from principal at the
-#   manifest's sourceCommit.
+#   Mainnet manifest's sourceCommit (config/manifests/mainnet.json).
 # No repository secret is used and no key is set in any environment: both suites make their keys in the run.
 on:
   # Pull requests to `testnet` only. `main` is the production landing site and holds no app code until
@@ -81,9 +81,10 @@ jobs:
       STELLAR_CLI_VERSION: 28.1.0
       STELLAR_CLI_SHA256: c1680deee94301d33ada7a17f98411e642a4248c727afbd2e43050d345746462
       STELLAR_NO_UPDATE_CHECK: "1"
-      # The rustc that built the official deployment: at 665bb67 it reproduces the manifest's wasmHashes
-      # byte for byte (checked on macOS; the job summary checks it on Linux), so the throwaway market runs
-      # the same wasm. Stable would drift with each release. Part of the wasm cache key.
+      # A pinned rustc, so every run builds the same wasm: stable would drift with each release. Part of the
+      # wasm cache key. It built the official Testnet deployment (665bb67) byte for byte on macOS; the
+      # Mainnet wasm that this job now builds (mainnet.json's sourceCommit) was built with rustc 1.94.1, so
+      # the job summary's comparison below is informational.
       RUST_VERSION: 1.95.0
     steps:
       - uses: actions/checkout@v4
@@ -92,13 +93,14 @@ jobs:
           ref: ${{ (github.event_name == 'schedule' || github.ref_name == 'main') && 'testnet' || '' }}
           path: dapp
           persist-credentials: false
-      - name: Read the official deployment's source commit
+      # Suite B deploys Mainnet's contracts on Testnet: nothing is ever signed on Mainnet by a test.
+      - name: Read the Mainnet deployment's source commit
         id: manifest
         run: |
           set -euo pipefail
-          commit="$(jq -er '.sourceCommit' config/manifests/testnet.json)"
+          commit="$(jq -er '.sourceCommit' config/manifests/mainnet.json)"
           if ! [[ "$commit" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "::error::config/manifests/testnet.json sourceCommit is not a full commit hash"
+            echo "::error::config/manifests/mainnet.json sourceCommit is not a full commit hash"
             exit 1
           fi
           echo "principal at $commit"
@@ -192,18 +194,20 @@ jobs:
         with:
           path: ${{ steps.manifest.outputs.build-dir }}/target/wasm32v1-none/release/*.wasm
           key: principal-wasm-rust${{ env.RUST_VERSION }}-${{ runner.os }}-${{ steps.manifest.outputs.commit }}
-      - name: Compare the wasm with the official deployment's (informational)
+      - name: Compare the wasm with the Mainnet deployment's (informational)
         env:
           COMMIT: ${{ steps.manifest.outputs.commit }}
           WASM_DIR: ${{ steps.manifest.outputs.build-dir }}/target/wasm32v1-none/release
         run: |
           set -euo pipefail
-          official="$(jq -r '.wasmHashes[]' config/manifests/testnet.json)"
+          official="$(jq -r '.wasmHashes[]' config/manifests/mainnet.json)"
           same=0
           total=0
           {
             echo "### Contracts built from principal at $COMMIT"
-            echo "| wasm | sha256 | in testnet.json wasmHashes |"
+            echo "Built with rustc $RUST_VERSION. Mainnet's wasm was built with rustc 1.94.1: a difference is expected when the toolchain differs from the one that built Mainnet. Informational only."
+            echo ""
+            echo "| wasm | sha256 | in mainnet.json wasmHashes |"
             echo "|---|---|---|"
             for f in "$WASM_DIR"/*.wasm; do
               hash="$(sha256sum "$f" | cut -d' ' -f1)"
@@ -212,7 +216,7 @@ jobs:
               echo "| $(basename "$f") | \`$hash\` | $match |"
             done
           } >>"$GITHUB_STEP_SUMMARY"
-          echo "$same of $total wasm files are byte-identical to the official deployment's"
+          echo "$same of $total wasm files are byte-identical to the Mainnet deployment's (expected to differ with another toolchain)"
       - name: Suite B (lifecycle.test.ts)
         # About 22 minutes, set by the market's 20-minute maturity. The worst case is a failed deploy:
         # beforeAll's 35 minutes, then afterAll's 3, which writes the record.

@@ -6,7 +6,8 @@
  *
  * 1. `beforeAll` deploys it with `scripts/dev-stack/deploy.sh` (EPHEMERAL=1): four run-unique keys
  *    (`e2e-<runId>-<role>`) that the script generates and funds; the contracts built from
- *    `org/principal` at the official manifest's `sourceCommit`; the manifest written to a new file
+ *    `org/principal` at the Mainnet manifest's `sourceCommit` (`config/manifests/mainnet.json`), so the
+ *    run proves Mainnet's contracts on a deployment it controls; the manifest written to a new file
  *    in a temporary directory. The market matures `MATURITY_SECONDS` after the deploy reads the
  *    ledger time.
  * 2. Two fresh keypairs are onboarded with the run's own issuer (`keys` mode: the faucet's code run
@@ -478,12 +479,13 @@ describe("Suite B: the ephemeral lifecycle on a throwaway Testnet market (plan 0
 
   beforeAll(async () => {
     // Review Focus 3: a Testnet that cannot be reached fails the run with the reason; it never skips.
-    // The official manifest (`config/manifests/testnet.json`) is only read: its RPC and its `sourceCommit`.
+    // The official Testnet manifest (`config/manifests/testnet.json`) is only read, for its RPC.
     const official = liveContext({ network: "testnet" })
     const down = await official.unreachableReason()
     if (down) throw new Error(`Testnet cannot be reached: ${down}`)
-    // The contracts of the official deployment, never a moving branch head.
-    const sourceCommit = official.manifest.sourceCommit
+    // The contracts of the Mainnet deployment, never a moving branch head. Read from the file itself:
+    // `liveContext` opens the local and Testnet manifests only.
+    const sourceCommit = parseManifest(JSON.parse(readFileSync(join(DAPP, "config", "manifests", "mainnet.json"), "utf8"))).sourceCommit
     record.sourceCommit = sourceCommit
     const principalRepo = process.env.PRINCIPAL_REPO ?? "../principal"
     const repoDir = isAbsolute(principalRepo) ? principalRepo : resolve(DAPP, principalRepo)
@@ -511,7 +513,7 @@ describe("Suite B: the ephemeral lifecycle on a throwaway Testnet market (plan 0
     manifest = parseManifest(JSON.parse(readFileSync(manifestOut, "utf8")))
     market = manifest.markets[0]
     expect(manifest.network).toBe("testnet")
-    expect(manifest.sourceCommit, "the ephemeral market runs the official deployment's contracts").toBe(sourceCommit)
+    expect(manifest.sourceCommit, "the ephemeral market runs the Mainnet deployment's contracts").toBe(sourceCommit)
     expect(manifest.markets).toHaveLength(1)
     record.deploy = {
       seconds: deployed.seconds,

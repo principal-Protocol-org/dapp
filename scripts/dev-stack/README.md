@@ -23,13 +23,21 @@ scripts/dev-stack/oracle-tick.sh                          # run this every 30 mi
   `principal-localdev-treasury`. The names are deliberately unlike any real key: the admin's secret is
   written to `.env.local`, so a real identity must never share them.
 - `deploy.sh` reads `PRINCIPAL_REPO` (default `../principal`), `PRINCIPAL_REF` (default
-  `origin/feat/tranche-1-mvp`, which is `665bb67` today) and `MATURITY_SECONDS` (default `3600`). It extracts the sources with
+  `3af938853e5818aa8d56bd35670b9a19cfa55a78`, the Mainnet deployment's commit, `sourceCommit` in
+  `config/manifests/mainnet.json`) and `MATURITY_SECONDS` (default `3600`). It extracts the sources with
   `git archive` into `$TMPDIR/principal-dev-stack/<commit>` (read-only for the repository, cached per
   commit), builds the WASM, issues `USDY` (`ASSET_CODE`, default `USDY`, shown as "USDY (test)"; AUTH_REQUIRED, AUTH_REVOCABLE, AUTH_CLAWBACK_ENABLED) from
   `principal-localdev-admin`, deploys its SAC, and runs steps 1-11 of the repository's
   `docs/DEPLOYMENT.md`. It then deposits 200,000 USDY, mints PT/YT from 100,000 SY, and seeds the
   pool with all the PT and 95 % of its value in SY. It also deploys the stateless `MarketFactory` (its address is `shared.factory`, the wasm hashes of the seven market contracts are recorded) and runs `scripts/db-migrate.mjs` when that file exists (migrations 0001 to 0003; 0003 adds `market_salts`). Every run deploys a new market and overwrites `config/manifests/local.json`.
   Allow for the run: a deploy takes a few minutes, so do not set `MATURITY_SECONDS` below about 600.
+- Two contract versions. By default the stack runs Mainnet's contracts (`3af9388`, interface version 2).
+  For the older interface of the official Testnet market (`665bb67`, version 1), deploy with
+  `PRINCIPAL_REF=665bb6760372d30307a1a035da24e51776f727e8 scripts/dev-stack/deploy.sh`. The script reads the
+  version from the Router it built (2 when `wrap_and_mint` takes `sy_in`, else 1) and writes it as the
+  manifest's `protocolAbi`. At version 2 the OracleAdapter and Permissioning `initialize` need their admin's
+  signature (the oracle key and the issuer key sign them, at both versions), and `RecoveryEscrow.initialize`
+  takes a `caller`, the SAC admin (`--caller` is passed at version 2 only).
 - The OracleAdapter is v2, which the dApp requires (R4-9). `deploy.sh` initializes it with
   `max_stale_seconds = 3600` and `max_deviation_bps = 1000`, sets one primary source and no
   fallback (`set_sources`, signed by the oracle admin), and pushes the genesis value `10000000`
@@ -92,7 +100,7 @@ scripts/dev-stack/oracle-tick.sh                          # run this every 30 mi
 
 Outputs (both git-ignored; never commit them):
 
-- `config/manifests/local.json`: a v2 manifest (shared contracts, factory, `wasmHashes`, `routerFunctions` (every Router function the wasm exposes except the `quote_*` views), `testAsset`, one market, and `deployLedger`).
+- `config/manifests/local.json`: a v2 manifest (shared contracts, factory, `wasmHashes`, `routerFunctions` (every Router function the wasm exposes except the `quote_*` views), `protocolAbi` (1 or 2, see above), `testAsset`, one market, and `deployLedger`).
 - `.env.local`: `NEXT_PUBLIC_PRINCIPAL_NETWORK=local`, `FAUCET_ISSUER_SECRET` (the
   `principal-localdev-admin` secret, valid on this throwaway network only) and `DATABASE_URL` for `principal-pg`.
 
@@ -111,6 +119,8 @@ and the roles are split so the server never holds the protocol admin:
 | `principal-testnet-issuer` | Classic issuer of the test asset and Permissioning admin: the faucet's key | Server: `FAUCET_ISSUER_SECRET` |
 | `principal-testnet-oracle` | OracleAdapter admin: pushes the value, and can also change the oracle's window, deviation cap, sources and value bounds | Server: `ORACLE_ADMIN_SECRET` |
 
+- The official Testnet market runs `665bb67`. A Testnet deploy builds `PRINCIPAL_REF` like a local one, so
+  it deploys `3af9388` unless `PRINCIPAL_REF=665bb6760372d30307a1a035da24e51776f727e8` is set.
 - `MATURITY_SECONDS` defaults to 90 days on testnet. The market id is `testnet-usdy-<maturity>`.
 - It writes `config/manifests/testnet.json` (committed: public addresses and hashes only), no env
   file and no database migration. Apply migration 0003 to the Testnet database yourself
