@@ -141,13 +141,32 @@ export function rescaleTo7(raw: bigint, decimals: number): bigint {
   return scaled
 }
 
-/** The feed's price for the oracle's asset: two reads on the feed contract, combined. */
+/** The call a read made, without its answer: what an unavailable figure keeps so its command can be repeated. */
+function callOf(source: ReadSource | undefined): Omit<ReadSource, "rawXdr" | "ledger"> | undefined {
+  if (!source) return undefined
+  const { contractId, fn, args, rpcUrl, viaFallback } = source
+  return viaFallback ? { contractId, fn, args, rpcUrl, viaFallback } : { contractId, fn, args, rpcUrl }
+}
+
+/**
+ * The feed's price for the oracle's asset: two reads on the feed contract, combined. A price the
+ * oracle could not rescale (its `rescale` rejection) is unavailable with the `lastprice` call, so
+ * the reader can repeat it.
+ */
 async function readFeedPrice(reader: ContractReader, feed: OracleFeed): Promise<Live<FeedPrice>> {
   const [decimals, last] = await Promise.all([
     readLive<unknown, number>(reader, { contractId: feed.contract, functionName: "decimals" }, toU32),
     readLive<unknown, { price: bigint; timestamp: bigint }>(reader, { contractId: feed.contract, functionName: "lastprice", args: [assetArg(feed.asset)] }, parsePriceData),
   ])
-  return allLive([decimals, last] as const, ([d, p]) => ({ raw: p.price, decimals: d, value: rescaleTo7(p.price, d), timestamp: p.timestamp }))
+  if (decimals.status === "unavailable") return decimals
+  if (last.status === "unavailable") return last
+  let value: bigint
+  try {
+    value = rescaleTo7(last.value.price, decimals.value)
+  } catch {
+    return unavailable(`${NOT_RESCALABLE}.`, callOf(last.source))
+  }
+  return allLive([decimals, last] as const, ([d, p]) => ({ raw: p.price, decimals: d, value, timestamp: p.timestamp }))
 }
 
 /** The feed price follows `feed_source()`: read only when it names a feed. */

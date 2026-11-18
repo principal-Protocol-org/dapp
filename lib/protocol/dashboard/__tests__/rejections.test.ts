@@ -91,6 +91,14 @@ describe("lastRejectionNote", () => {
     for (const w of FEED_WORDS) expect(note).toContain(w)
   })
 
+  it("the aae6cf8 oracle lists only the routine reasons its code gives: no throttle, no feed_err (both from 3af9388)", () => {
+    const hash = "f5c8a129c5aad53aff733b325a9949926a4fd4abf185a4dd0aec53476bf45253"
+    expect([...ORACLE_WASM_LAST_REJECTION[hash].routine]).toEqual(["stale_ts", "no_data", "bad_price", "rescale", "future_ts"])
+    const note = lastRejectionNote(hash)
+    expect(note).not.toContain("too soon after the last accepted feed update")
+    expect(note).not.toContain("the feed could not be read")
+  })
+
   it("a 24d980d build keeps only significant reasons", () => {
     const note = lastRejectionNote("cf58bbd831957b817f8bfa7bf52313a8e9ba6256344ad34ab0c69916c8b1f85d")
     expect(note).toMatch(/only significant/)

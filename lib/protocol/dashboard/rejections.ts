@@ -79,13 +79,17 @@ const PULL_ROUTINE = [...ROUTINE, ...BROKEN] as const
  *
  * 665bb67 is push only (`set_reference_value`: `oob`, `stale_ts`, `fb_value`, `decrease`,
  * `deviate`); aae6cf8 adds the feed path (`sync_from_feed`) and its four reasons; 3af9388 adds
- * `throttle` and `feed_err`. Every pull entry lists `PULL_ROUTINE`, which includes the two newest.
- * Only a "keeps every" entry's note names its list, so this matters for aae6cf8 alone: its note
- * names `throttle` and `feed_err`, which its code cannot give.
+ * `throttle` and `feed_err`. Only a "keeps every" note names its routine list, so aae6cf8 lists the
+ * five its code gives; the entries that keep only significant rejections list `PULL_ROUTINE`.
  */
 export const ORACLE_WASM_LAST_REJECTION: Record<string, OracleWasmRejections> = {
   adb87f76c1bafd93c67489645fe49df771ede639edc0d1919233563ffae86bce: { commit: "665bb67", keeps: "every", routine: PUSH_ROUTINE },
-  f5c8a129c5aad53aff733b325a9949926a4fd4abf185a4dd0aec53476bf45253: { commit: "aae6cf8", keeps: "every", routine: PULL_ROUTINE },
+  f5c8a129c5aad53aff733b325a9949926a4fd4abf185a4dd0aec53476bf45253: {
+    commit: "aae6cf8",
+    keeps: "every",
+    // aae6cf8's own routine reasons: it has neither `throttle` nor `feed_err` (both from 3af9388).
+    routine: ["stale_ts", "no_data", "bad_price", "rescale", "future_ts"],
+  },
   cf58bbd831957b817f8bfa7bf52313a8e9ba6256344ad34ab0c69916c8b1f85d: { commit: "24d980d", keeps: "significant", routine: PULL_ROUTINE },
   "93eb1ae6d6affd455d0878d1ce66849788eb34924f0f084a28e79b7c4eafee88": { commit: "24d980d", keeps: "significant", routine: PULL_ROUTINE },
   "8581bbba82bb57f5c5c9c00adf98b1691ad20821840e55a67ad8d7ecace0c1b0": { commit: "3af9388", keeps: "significant", routine: PULL_ROUTINE },

@@ -13,6 +13,7 @@ vi.mock("server-only", () => ({}))
 
 import {
   BROKEN,
+  NO_PRICE_REASONS,
   ORACLE_APY_PERCENT,
   OracleKeeperConfigError,
   OracleSubmitError,
@@ -450,8 +451,11 @@ describe("tickFeed (D-21): sync_from_feed with a role-less key", () => {
     expect(reason.sent).toHaveLength(1)
   })
 
-  it("a broken-feed rejection (bad_price, rescale, future_ts) is rejected and never submitted", async () => {
-    for (const reason of ["bad_price", "rescale", "future_ts"]) {
+  it("a broken-feed rejection with a price (bad_price, rescale, future_ts) is rejected and never submitted", async () => {
+    // Every broken-feed reason but those whose ref_rej carries (0, 0) placeholders (feed_err, below).
+    const priced = BROKEN.filter((r) => !NO_PRICE_REASONS.has(r))
+    expect(priced.length).toBeGreaterThan(0)
+    for (const reason of priced) {
       const { chain, sent } = fakeFeedChain({ sim: { retval: false, events: [refRej(-1n, 1_700_000_000n, reason)] } })
       const tick = await tickFeed({ manifest, secret, chain })
       expect(tick).toEqual({ ...run, status: "rejected", value: "-1", timestamp: 1_700_000_000, reason })

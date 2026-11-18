@@ -172,7 +172,8 @@ export type OracleTick = { mode: KeeperMode; signer: string } & (
    * The oracle refused the value (R4-8): `set_reference_value` or `sync_from_feed` returned false.
    * Push always sent it (`hash`). Feed mode sends only a new significant rejection; a repeat, a broken
    * feed or an unknown reason has no `hash` (not submitted). `value` and `timestamp` are the oracle's
-   * `ref_rej` event's; null when no event said (`reason` is then `unknown`).
+   * `ref_rej` event's; null when no event said (`reason` is then `unknown`), or when the reason
+   * carries the contract's (0, 0) placeholders, not a price (`feed_err`, `no_data`: `NO_PRICE_REASONS`).
    */
   | { status: "rejected"; value: string | null; timestamp: number | null; hash?: string; reason: string }
   /** Feed: the oracle took its feed's value (`ref_set`), in transaction `hash`. Null value: the landed call disagreed with its simulation. */
@@ -342,7 +343,7 @@ function pointOf(event: DecodedEvent | undefined): Point {
 
 type Rejection = { reason: string; point: Point }
 /** Reasons whose `ref_rej` carries the contract's placeholders (0, 0), not a price: the feed gave none (3af9388 `sync_from_feed`). */
-const NO_PRICE_REASONS: ReadonlySet<string> = new Set(["no_data", "feed_err"])
+export const NO_PRICE_REASONS: ReadonlySet<string> = new Set(["no_data", "feed_err"])
 /** The `ref_rej` among `events` as a reason and its (value, timestamp); `no_data` and `feed_err` have no point. */
 function rejectionOf(events: DecodedEvent[]): Rejection | null {
   const event = events.find((e) => e.topic === "ref_rej")

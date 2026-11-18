@@ -7,7 +7,7 @@ import type { ScArg } from "../../stellar"
 import type { Live, ReadSource } from "../../types"
 import { BLOCKED_WHEN_STALE, fetchOracleView, rescaleTo7, type OracleView } from "../oracle"
 import { verifyCommand } from "../verify"
-import { fakeReader, type Calls, type Handler } from "./fake-reader"
+import { fakeReader, RPC, type Calls, type Handler } from "./fake-reader"
 
 const base = parseManifest(testnetJson)
 const PRIMARY = "8f157e8dfc6b0bef22553de5a980e24fc7c7c9eacc8bccbb8df0f2cab866b3b4"
@@ -236,11 +236,14 @@ describe("fetchOracleView: the feed side (3af9388 feed_source, feed_min_interval
   it("no feed set (feed_source None): feedPrice is null and nothing is read on any feed", async () => {
     for (const none of [null, undefined]) {
       const calls: Calls = []
-      const view = await fetchOracleView(fakeReader(fed(undefined, { [`${O}.feed_source`]: none })), manifest, O, TS)
+      // The fixture still answers the feed's two views: a stray read would succeed, so only `calls` can catch it.
+      const view = await fetchOracleView(fakeReader(fed(undefined, { [`${O}.feed_source`]: none }), calls), manifest, O, TS)
       expect(view.feed).toMatchObject({ status: "live", value: null })
       expect(view.feedPrice).toBeNull()
       expect(view.feedMinInterval).toMatchObject({ status: "live", value: 300n })
-      expect(calls.every((c) => c.key.startsWith(`${O}.`))).toBe(true)
+      expect(calls.map((c) => c.key)).toContain(`${O}.feed_source`)
+      expect(calls).toHaveLength(13)
+      expect(calls.filter((c) => c.key.startsWith(`${FEED}.`))).toEqual([])
     }
   })
 
@@ -316,6 +319,19 @@ describe("fetchOracleView: the feed side (3af9388 feed_source, feed_min_interval
     expect(verifyCommand("testnet", feedPrice.source!)).toMatch(/-- lastprice --asset '\{"Other":"USDY"\}'$/)
     // The feed itself is still known.
     expect(view.feed).toMatchObject({ status: "live", value: { contract: FEED } })
+  })
+
+  it("a price the oracle could not rescale (past i128) is unavailable, saying so, with the lastprice call to repeat", async () => {
+    // 2^127 − 1 at 6 decimals: × 10 overflows an i128, so the contract would reject it with `rescale`.
+    const huge = 2n ** 127n - 1n
+    const view = await fetchOracleView(fakeReader(fed(undefined, { [`${FEED}.decimals`]: 6, [`${FEED}.lastprice`]: { price: huge, timestamp: FEED_TS } })), manifest, O, TS)
+    expect(view.feedPrice).toEqual({
+      status: "unavailable",
+      error: "The feed's price could not be converted to 7 decimals.",
+      source: { contractId: FEED, fn: "lastprice", args: [{ type: "enum", variant: "Other", value: { type: "symbol", value: "USDY" } }], rpcUrl: RPC },
+    })
+    const feedPrice = view.feedPrice as Extract<OracleView["feedPrice"], { status: "unavailable" }>
+    expect(verifyCommand("testnet", feedPrice.source!)).toMatch(new RegExp(`--id ${FEED} .* -- lastprice --asset '\\{"Other":"USDY"\\}'$`))
   })
 
   it("either feed read failing makes feedPrice unavailable with that read's reason", async () => {
