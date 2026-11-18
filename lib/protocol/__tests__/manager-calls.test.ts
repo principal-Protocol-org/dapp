@@ -16,6 +16,7 @@ import {
   grantAccountCall,
   grantAssetCall,
   managerCallAmounts,
+  managerCallAuthTree,
   managerCallTree,
   rebuildManagerCall,
   seedCall,
@@ -419,6 +420,106 @@ describe("the seed's calls (spec 0002 §5 step 6, R5-10): the new market's pool 
     expect(() => rebuildManagerCall(manifest, { ...deposit(), newMarket: undefined })).toThrow(/names no new market/)
     const otherFrom = { ...deposit(), invocation: { ...deposit().invocation, args: [address(ACCOUNT), i128(6_000_000_000n), i128(5_812_345_678n)] } }
     expect(() => rebuildManagerCall(manifest, otherFrom)).toThrow(/differ/)
+  })
+
+  it("version 1 ignores syIn: the same five arguments, label and amounts as without it", () => {
+    const withSy = seedCall(manifest, { source: SIGNER, market: NEW, kind: "seed_mint", amount: 4_000_000_001n, syIn: 3_921_568_628n, floor: 3_900_000_000n, deadline: DEADLINE })
+    expect(withSy).toEqual(mint())
+    expect(managerCallAmounts(manifest, withSy)).toEqual(managerCallAmounts(manifest, mint()))
+  })
+})
+
+describe("the seed's mint on version 2 (principal 3af9388, plan 0009): wrap_and_mint signs sy_in", () => {
+  const m2: Manifest = { ...manifest, protocolAbi: 2 }
+  const predicted = deriveMarketContracts(m2, SALT)
+  const NEW = { salt: SALT, underlying: TEST_SAC }
+  const DEADLINE = 1_800_000_300n
+  const SY_IN = 3_921_568_628n
+  const i128 = (value: bigint): ScArg => ({ type: "i128", value })
+  const mintWith = (syIn: bigint | undefined) =>
+    seedCall(m2, { source: SIGNER, market: NEW, kind: "seed_mint", amount: 4_000_000_001n, syIn, floor: 3_900_000_000n, deadline: DEADLINE })
+  const mint = () => mintWith(SY_IN)
+  const v1Mint = () => seedCall(manifest, { source: SIGNER, market: NEW, kind: "seed_mint", amount: 4_000_000_001n, floor: 3_900_000_000n, deadline: DEADLINE })
+
+  it("Router wrap_and_mint(from, pool, amount, sy_in, min_pt_out, deadline), sy_in between the amount and the floor", () => {
+    const call = mint()
+    expect(call.invocation).toEqual({
+      contractId: router,
+      functionName: "wrap_and_mint",
+      args: [address(SIGNER), address(predicted.pool), i128(4_000_000_001n), i128(SY_IN), i128(3_900_000_000n), { type: "u64", value: DEADLINE }],
+    })
+    expect(encodedTypes(call)).toEqual(["scvAddress", "scvAddress", "scvI128", "scvI128", "scvI128", "scvU64"])
+    expect(managerCallTree(m2, call)).toEqual(["Router.wrap_and_mint", "SYWrapper.deposit", "PrincipalManager.mint"])
+  })
+
+  it("sy_in is never shown as something given or got: the label and the review's amounts are version 1's", () => {
+    expect(mint().label).toBe(v1Mint().label)
+    expect(mint().label).toBe("Mint PT and YT of the new USDY market from 400.0000001 USDY: at least 390 PT, and as much YT")
+    // The floor at argument 5 and the deadline at argument 6.
+    expect(managerCallAmounts(m2, mint())).toEqual({ give: ["400.0000001 USDY"], getAtLeast: ["390 PT, and the same amount of YT"], deadline: Number(DEADLINE) })
+  })
+
+  it("a mint without sy_in, or with none above 0, is refused before it is built", () => {
+    expect(() => mintWith(undefined)).toThrow("The SY to mint (sy_in) is missing")
+    expect(() => seedInvocation(m2, SIGNER, NEW, { kind: "seed_mint", amount: 1n, floor: 0n, deadline: DEADLINE })).toThrow("The SY to mint (sy_in) is missing")
+    expect(() => mintWith(0n)).toThrow("The SY to mint must be above 0.")
+    // Simulated only, with a zero floor: still sy_in at argument 4.
+    expect(seedInvocation(m2, SIGNER, NEW, { kind: "seed_mint", amount: 1n, syIn: 1n, floor: 0n, deadline: DEADLINE }).args.map((a) => a.value)).toEqual([
+      SIGNER,
+      predicted.pool,
+      1n,
+      1n,
+      0n,
+      DEADLINE,
+    ])
+  })
+
+  it("R31: rebuilt from its six arguments; another sy_in, the version-1 argument list, or a dropped argument is refused", () => {
+    const call = mint()
+    const copy = rebuildManagerCall(m2, call)
+    expect(copy).toEqual(call)
+    expect(copy).not.toBe(call)
+    const withArgs = (args: ScArg[]) => ({ ...call, invocation: { ...call.invocation, args } })
+    // sy_in is read back like the amount: the rebuilt call carries exactly the one signed.
+    const otherSy = withArgs(call.invocation.args.map((a, i) => (i === 3 ? i128(SY_IN + 1n) : a)))
+    expect(rebuildManagerCall(m2, otherSy).invocation.args[3]).toEqual(i128(SY_IN + 1n))
+    // Version 1's five arguments on a version-2 manifest, and the other way round.
+    expect(() => rebuildManagerCall(m2, v1Mint())).toThrow("seed_mint takes 6 arguments, not 5.")
+    expect(() => rebuildManagerCall(manifest, call)).toThrow("seed_mint takes 5 arguments, not 6.")
+    expect(() => rebuildManagerCall(m2, withArgs(call.invocation.args.slice(0, 5)))).toThrow("seed_mint takes 6 arguments, not 5.")
+    // A zero floor, now at argument 5.
+    expect(() => rebuildManagerCall(m2, withArgs(call.invocation.args.map((a, i) => (i === 4 ? i128(0n) : a))))).toThrow(/zero floor/)
+    // sy_in must be an i128.
+    expect(() => rebuildManagerCall(m2, withArgs(call.invocation.args.map((a, i) => (i === 3 ? { type: "u64" as const, value: SY_IN } : a))))).toThrow(
+      "argument 4 of seed_mint must be an i128.",
+    )
+  })
+
+  it("create_pool_and_escrow: the issuer also authorizes RecoveryEscrow.initialize, between the pool's initialize and the wiring", () => {
+    const call = createPoolAndEscrowCall(m2, { source: SIGNER, salt: SALT, params: PARAMS })
+    expect(call).toEqual(createPoolAndEscrowCall(manifest, { source: SIGNER, salt: SALT, params: PARAMS }))
+    expect(managerCallTree(m2, call)).toEqual([
+      "MarketFactory.create_pool_and_escrow",
+      "MarketPool.initialize",
+      "RecoveryEscrow.initialize",
+      "SYWrapper.set_recovery_escrow",
+      "PTToken.set_recovery_escrow",
+      "YTToken.set_recovery_escrow",
+      "MarketPool.set_recovery_escrow",
+    ])
+    expect(managerCallAuthTree(m2, call)[1]).toEqual({
+      contractId: predicted.recoveryEscrow,
+      functionName: "initialize",
+      args: [address(SIGNER), address(TEST_SAC), address(predicted.sy), address(predicted.pt), address(predicted.yt), address(predicted.manager), address(predicted.pool)],
+    })
+    expect(rebuildManagerCall(m2, call)).toEqual(call)
+  })
+
+  it("the seed's other calls are version 1's", () => {
+    const deposit = { kind: "seed_deposit" as const, amount: 6_000_000_000n, floor: 5_812_345_678n }
+    expect(seedCall(m2, { source: SIGNER, market: NEW, ...deposit })).toEqual(seedCall(manifest, { source: SIGNER, market: NEW, ...deposit }))
+    const add = { kind: "seed_add_liquidity" as const, pt: 4_100_000_005n, sy: 3_500_000_000n, floor: 3_700_000_000n, deadline: DEADLINE }
+    expect(seedCall(m2, { source: SIGNER, market: NEW, ...add })).toEqual(seedCall(manifest, { source: SIGNER, market: NEW, ...add }))
   })
 })
 

@@ -7,7 +7,7 @@ import { parseManifest } from "@/lib/protocol/manifest"
 import type { AccruedFees, AccountRoles, MarketRoles, SharedRoles } from "@/lib/protocol/roles"
 import type { ManagerReview } from "@/lib/protocol/review"
 import type { ManagerCall } from "@/lib/protocol/manager-calls"
-import type { Live, Market, WalletState } from "@/lib/protocol/types"
+import type { Live, Market, Network, WalletState } from "@/lib/protocol/types"
 import { TooltipProvider } from "@/components/ui/tooltip"
 import { down, live, LEDGER_TIME, marketState } from "./fixtures"
 
@@ -34,9 +34,11 @@ const mocks = vi.hoisted(() => ({
   toast: vi.fn(),
   inProgress: [] as { salt: string; progress: { data?: unknown; isPending: boolean; isError: boolean; error?: Error | null } }[],
   inProgressArgs: [] as unknown[],
+  /** Set: the network the manifest names instead of the fixture's. */
+  network: null as Network | null,
 }))
 
-vi.mock("@/components/app/manifest-provider", () => ({ useManifest: () => manifest }))
+vi.mock("@/components/app/manifest-provider", () => ({ useManifest: () => (mocks.network ? { ...manifest, network: mocks.network } : manifest) }))
 vi.mock("@/hooks/use-wallet", () => ({ useWallet: () => ({ state: mocks.wallet }) }))
 vi.mock("@/hooks/use-manage", () => ({
   useMyRoles: () => ({ account: mocks.wallet.status === "connected" ? mocks.wallet.publicKey : null, roles: mocks.roles, pending: mocks.rolesPending }),
@@ -117,6 +119,7 @@ beforeEach(() => {
   mocks.execute.mockReset().mockResolvedValue({ status: "SUCCESS", hash: "abc" })
   mocks.toast.mockReset()
   mocks.inProgress = []
+  mocks.network = null
 })
 
 describe("My markets / All", () => {
@@ -392,5 +395,27 @@ describe("creating a market (spec 0002 §5, R5-10)", () => {
     unmount()
     show(noInvalid, { status: "unavailable" })
     expect(screen.getByText(/Markets started from other browsers could not be read from the registry/)).toBeTruthy()
+  })
+
+  it("on Mainnet neither the New market entry nor a Resume link is rendered, even for an issuer with markets in progress (plan 0009)", () => {
+    mocks.network = "mainnet"
+    mocks.roles = { ...mocks.roles, testAssetIssuer: live(true) }
+    setRoles(marketRoles(A, { issuer: yes, pool: yes }), marketRoles(B))
+    mocks.inProgress = [{ salt: "a1".repeat(32), progress: { isPending: false, isError: false, data: { step: 4, predicted: { ...A.contracts, pool: contractAt(61) } } } }]
+    const salts = { status: "ok" as const, salts: [{ salt: "c1".repeat(32), underlying: A.underlying.sac }] }
+    const { container, unmount } = show(noInvalid, salts)
+    expect(screen.queryByRole("link", { name: "New market" })).toBeNull()
+    expect(screen.queryByText(/You are an asset.s issuer/)).toBeNull()
+    expect(screen.queryByRole("region", { name: "Markets being created" })).toBeNull()
+    expect(container.querySelector('a[href^="/app/manage/new"]')).toBeNull()
+    // The registry's salts are not read for a list that is not shown.
+    expect(mocks.inProgressArgs).toEqual([[], ME])
+    // The rest of the manager view is unchanged.
+    expect(screen.getByText("USDY Dec 2026")).toBeTruthy()
+    expect(screen.getByRole("button", { name: "Pause pool" })).toBeTruthy()
+    unmount()
+    // A registry that cannot be read is not said either: there is nothing to resume on Mainnet.
+    show(noInvalid, { status: "unavailable" })
+    expect(screen.queryByText(/Markets started from other browsers/)).toBeNull()
   })
 })

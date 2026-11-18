@@ -14,7 +14,9 @@
  * `set_authorized(id, authorize)` is the host's Stellar Asset Contract interface. The MarketFactory
  * `create_*` calls (the creation wizard's step 3, R5-10) are those of 665bb67: their structs are
  * encoded in `factory.ts`, which takes the factory, the shared contracts and the Wasm hashes from the
- * manifest and derives the market's addresses from the salt.
+ * manifest and derives the market's addresses from the salt. Two calls differ by the manifest's
+ * contract version (`protocolAbi`, 2 at 3af9388): the seed's `wrap_and_mint` signs `sy_in`, and
+ * `create_pool_and_escrow` carries one more authorization (`factory.ts` `poolAuthTree`).
  */
 import { StrKey } from "@stellar/stellar-sdk"
 import {
@@ -36,7 +38,7 @@ import {
   type TokenParamsInput,
 } from "./factory"
 import { formatAmount, shorten } from "./format"
-import { getMarket } from "./manifest"
+import { getMarket, protocolAbi } from "./manifest"
 import { scArgEquals, type ContractInvocation, type ScArg } from "./stellar"
 import type { Manifest, Market, MarketContractName } from "./types"
 
@@ -351,9 +353,13 @@ export function createPoolAndEscrowCall(manifest: Manifest, p: FactoryCallParams
 /** PT, SY and LP have 7 decimals, like every Principal token. */
 const TOKEN_DECIMALS = 7
 
-/** What a seed call signs besides the signer and the new market; `floor` is its slippage floor. */
+/**
+ * What a seed call signs besides the signer and the new market; `floor` is its slippage floor. The
+ * mint's `syIn` is the SY its deposit of `amount` gives (`previewDeposit`), which a version-2 Router
+ * mints from (`sy_in`); version 1 takes no such argument and ignores it.
+ */
 export type SeedCallParams =
-  | { kind: "seed_mint"; amount: bigint; floor: bigint; deadline: bigint }
+  | { kind: "seed_mint"; amount: bigint; floor: bigint; deadline: bigint; syIn?: bigint }
   | { kind: "seed_deposit"; amount: bigint; floor: bigint }
   | { kind: "seed_add_liquidity"; pt: bigint; sy: bigint; floor: bigint; deadline: bigint }
 
@@ -369,6 +375,18 @@ function u64Arg(value: bigint, what: string): ScArg {
   return { type: "u64", value }
 }
 
+/** Version 2's `sy_in`, between the mint's amount and its floor; nothing on version 1. */
+function mintSyIn(manifest: Manifest, syIn: bigint | undefined): ScArg[] {
+  if (protocolAbi(manifest) !== 2) return []
+  if (syIn === undefined) throw new Error("The SY to mint (sy_in) is missing: this version of the Router signs it. Nothing was signed; start the seed again.")
+  return [positive(syIn, "The SY to mint")]
+}
+
+/** Where the seed mint's floor sits in its arguments: after `sy_in` on version 2. */
+function mintFloorIndex(manifest: Manifest): number {
+  return protocolAbi(manifest) === 2 ? 4 : 3
+}
+
 /** The new market's code and decimals: its underlying must be an asset this network knows. */
 function newMarketAsset(manifest: Manifest, market: NewMarket): { code: string; decimals: number } {
   const found = knownUnderlyings(manifest).get(market.underlying)
@@ -380,8 +398,9 @@ function newMarketAsset(manifest: Manifest, market: NewMarket): { code: string; 
  * The seed call's invocation: Router `wrap_and_mint(from, pool, amount, min_pt_out, deadline)`, SY
  * `deposit(from, amount, min_shares_out)` or Router `add_liquidity(from, pool, pt_in, sy_in,
  * min_lp_out, deadline)` (router:483, sy_wrapper deposit, router:803), the pool and SY derived from
- * the salt. The floor is not checked here: an invocation with a zero floor is only ever simulated
- * (`seedCall` refuses it).
+ * the salt. On version 2 (3af9388, router:500) the mint is `wrap_and_mint(from, pool, amount, sy_in,
+ * min_pt_out, deadline)`, and a mint without `syIn` is refused. The floor is not checked here: an
+ * invocation with a zero floor is only ever simulated (`seedCall` refuses it).
  */
 export function seedInvocation(manifest: Manifest, source: string, market: NewMarket, p: SeedCallParams): ContractInvocation {
   const from = address(signerOf(source))
@@ -392,7 +411,7 @@ export function seedInvocation(manifest: Manifest, source: string, market: NewMa
       return {
         contractId: manifest.shared.router,
         functionName: "wrap_and_mint",
-        args: [from, address(pool), positive(p.amount, "The amount to mint from"), floor, u64Arg(p.deadline, "The deadline")],
+        args: [from, address(pool), positive(p.amount, "The amount to mint from"), ...mintSyIn(manifest, p.syIn), floor, u64Arg(p.deadline, "The deadline")],
       }
     case "seed_deposit":
       return { contractId: sy, functionName: "deposit", args: [from, positive(p.amount, "The amount to deposit"), floor] }
@@ -408,7 +427,9 @@ export function seedInvocation(manifest: Manifest, source: string, market: NewMa
 /**
  * A seed call (spec 0002 §5 step 6), signed by the asset's issuer, whom step 5 granted the new PT
  * and YT. Never with a zero floor: each floor comes from the call's own simulation (`seed.ts`). The
- * label states every signed amount in full, with its token: it is what the review shows as signed.
+ * label states every amount given or got in full, with its token: it is what the review shows as
+ * signed. A version-2 mint's `sy_in` is not in it, like the client's mint: it is neither given nor
+ * got (the SY the deposit makes, minted at once), so the label is version 1's.
  */
 export function seedCall(manifest: Manifest, p: { source: string; market: NewMarket } & SeedCallParams): ManagerCall {
   const { source, market } = p
@@ -417,7 +438,7 @@ export function seedCall(manifest: Manifest, p: { source: string; market: NewMar
   }
   const params: SeedCallParams =
     p.kind === "seed_mint"
-      ? { kind: p.kind, amount: p.amount, floor: p.floor, deadline: p.deadline }
+      ? { kind: p.kind, amount: p.amount, floor: p.floor, deadline: p.deadline, syIn: p.syIn }
       : p.kind === "seed_deposit"
         ? { kind: p.kind, amount: p.amount, floor: p.floor }
         : { kind: p.kind, pt: p.pt, sy: p.sy, floor: p.floor, deadline: p.deadline }
@@ -451,8 +472,11 @@ export function managerCallAmounts(manifest: Manifest, call: ManagerCall): { giv
   const exact = (value: bigint, d: number) => formatAmount(value, d, d)
   const tok = (value: bigint, token: string) => `${exact(value, TOKEN_DECIMALS)} ${token}`
   switch (call.kind) {
-    case "seed_mint":
-      return { give: [`${exact(v(2), decimals)} ${code}`], getAtLeast: [`${tok(v(3), "PT")}, and the same amount of YT`], deadline: Number(v(4)) }
+    case "seed_mint": {
+      // Version 2's sy_in (argument 4) is neither given nor got: the deposit's SY, minted at once.
+      const at = mintFloorIndex(manifest)
+      return { give: [`${exact(v(2), decimals)} ${code}`], getAtLeast: [`${tok(v(at), "PT")}, and the same amount of YT`], deadline: Number(v(at + 1)) }
+    }
     case "seed_deposit":
       return { give: [`${exact(v(1), decimals)} ${code}`], getAtLeast: [tok(v(2), "SY")] }
     case "seed_add_liquidity":
@@ -614,9 +638,14 @@ function rebuild(manifest: Manifest, call: ManagerCall): ManagerCall {
       const [salt, params] = factoryArgs(kind, args, 6)
       return createPoolAndEscrowCall(manifest, { source, salt, params: decodePoolEscrowParams(params) })
     }
-    // The amounts, floor and deadline are read back; the Router, the pool and the SY wrapper are not:
+    // The amounts (on version 2 the mint's sy_in too), floor and deadline are read back, at the
+    // positions the manifest's contract version gives; the Router, the pool and the SY wrapper are not:
     // the builder derives them from the call's salt, and the comparison below refuses any other.
     case "seed_mint": {
+      if (protocolAbi(manifest) === 2) {
+        const [, , amount, syIn, floor, deadline] = seedArgs(kind, args, ["address", "address", "i128", "i128", "i128", "u64"])
+        return seedCall(manifest, { source, market: newMarketOf(call), kind, amount, syIn, floor, deadline })
+      }
       const [, , amount, floor, deadline] = seedArgs(kind, args, ["address", "address", "i128", "i128", "u64"])
       return seedCall(manifest, { source, market: newMarketOf(call), kind, amount, floor, deadline })
     }

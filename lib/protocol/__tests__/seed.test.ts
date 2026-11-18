@@ -1,9 +1,13 @@
+import { StrKey } from "@stellar/stellar-sdk"
 import { describe, expect, it } from "vitest"
+import testnetJson from "@/lib/protocol/__tests__/fixtures/testnet-interim.json"
 import { WAD, impliedRate, isqrt, spotPrice, type CurveState } from "@/lib/protocol/curve"
 import { aprToApy, BPS, ceilDiv, SCALE, YEAR_SECONDS } from "@/lib/protocol/math"
 import { previewDeposit, previewMint } from "@/lib/protocol/previews"
-import { firstDepositCheck, firstDepositGate, MINIMUM_LIQUIDITY, seedAmounts, seedPair, seedResume } from "@/lib/protocol/seed"
-import { liveValue, unavailable } from "@/lib/protocol/reader"
+import { parseManifest } from "@/lib/protocol/manifest"
+import { firstDepositCheck, firstDepositGate, MINIMUM_LIQUIDITY, readSeedState, seedAmounts, seedPair, seedResume } from "@/lib/protocol/seed"
+import { liveValue, unavailable, type ContractReader } from "@/lib/protocol/reader"
+import type { MarketContracts } from "@/lib/protocol/types"
 
 /**
  * The seed of a new market's pool (spec 0002 §5 step 6, R5-10): from a starting fixed APY and an
@@ -192,5 +196,44 @@ describe("firstDepositGate: in place of poolGate for the seed", () => {
     expect(firstDepositGate({ totalLp: live(0n), oracleFresh: live(true), amounts: { error: "Enter a starting APY above 0 %." } })).toEqual([
       { code: "amount", message: "Enter a starting APY above 0 %." },
     ])
+  })
+})
+
+describe("readSeedState: what the seed reads, on the new market's own contracts", () => {
+  const contractAt = (fill: number) => StrKey.encodeContract(new Uint8Array(32).fill(fill))
+  const manifest = parseManifest(structuredClone(testnetJson))
+  /** The new market's predicted contracts, wired to an oracle that is not the manifest's shared one. */
+  const predicted: MarketContracts = {
+    router: manifest.shared.router,
+    oracle: contractAt(2),
+    sy: contractAt(11),
+    pt: contractAt(12),
+    yt: contractAt(13),
+    config: contractAt(14),
+    manager: contractAt(15),
+    pool: contractAt(16),
+    recoveryEscrow: contractAt(17),
+  }
+
+  it("asks the new market's oracle whether its price is fresh, not the manifest's shared oracle", async () => {
+    expect(predicted.oracle).not.toBe(manifest.shared.oracle)
+    const calls: string[] = []
+    const answers: Record<string, unknown> = {
+      [`${predicted.oracle}.is_available`]: true,
+      [`${manifest.shared.oracle}.is_available`]: false,
+      [`${predicted.sy}.exchange_rate`]: 10_000_000n,
+      [`${predicted.config}.tokenization_fee_bps`]: 5n,
+    }
+    const reader = (async (call: { contractId: string; functionName: string }) => {
+      const key = `${call.contractId}.${call.functionName}`
+      calls.push(key)
+      if (!(key in answers)) throw new Error(`no answer for ${key}`)
+      return { value: answers[key], latestLedger: 10, minResourceFee: "0", rawXdr: "", rpcUrl: "" }
+    }) as ContractReader
+    const r = await readSeedState(reader, manifest, predicted, null)
+    expect(r.oracleFresh).toMatchObject({ status: "live", value: true })
+    expect(calls).toContain(`${predicted.oracle}.is_available`)
+    expect(calls).not.toContain(`${manifest.shared.oracle}.is_available`)
+    expect(r.exchangeRate).toMatchObject({ status: "live", value: 10_000_000n })
   })
 })

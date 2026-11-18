@@ -32,6 +32,7 @@ import {
   tokenParams,
   tokenWasmHashes,
   tokensAuthTree,
+  wizardAvailable,
   type MarketParams,
 } from "../factory"
 import { parseManifest } from "../manifest"
@@ -416,6 +417,37 @@ describe("the issuer's authorization tree: exactly the calls the factory makes u
       { contractId: predicted.yt, functionName: "set_recovery_escrow", args: [issuer, escrow] },
       { contractId: predicted.pool, functionName: "set_recovery_escrow", args: [issuer, escrow] },
     ])
+  })
+
+  it("create_pool_and_escrow on version 2 (principal 3af9388): RecoveryEscrow.initialize(caller, ...) is signed by the issuer too, after the pool's initialize", () => {
+    const m2: Manifest = { ...manifest, protocolAbi: 2 }
+    const escrow = addr(predicted.recoveryEscrow)
+    expect(deriveMarketContracts(m2, SALT)).toEqual(predicted)
+    expect(poolAuthTree(m2, c)).toEqual([
+      { contractId: predicted.pool, functionName: "initialize", args: [issuer, addr(predicted.manager), { type: "u32", value: 4 }] },
+      {
+        contractId: predicted.recoveryEscrow,
+        functionName: "initialize",
+        // (caller, underlying, sy_wrapper, pt_token, yt_token, principal_manager, market_pool), market_factory:539-547.
+        args: [issuer, addr(SAC), addr(predicted.sy), addr(predicted.pt), addr(predicted.yt), addr(predicted.manager), addr(predicted.pool)],
+      },
+      { contractId: predicted.sy, functionName: "set_recovery_escrow", args: [issuer, escrow] },
+      { contractId: predicted.pt, functionName: "set_recovery_escrow", args: [issuer, escrow] },
+      { contractId: predicted.yt, functionName: "set_recovery_escrow", args: [issuer, escrow] },
+      { contractId: predicted.pool, functionName: "set_recovery_escrow", args: [issuer, escrow] },
+    ])
+    // The other two trees, and the invocation itself, are the same at both versions.
+    expect(tokensAuthTree(m2, c)).toEqual(tokensAuthTree(manifest, c))
+    expect(engineAuthTree(m2, c)).toEqual(engineAuthTree(manifest, c))
+    expect(createPoolAndEscrowInvocation(m2, c)).toEqual(createPoolAndEscrowInvocation(manifest, c))
+  })
+})
+
+describe("wizardAvailable: the wizard is offered where the app's users can hold an asset's issuer keys", () => {
+  it("on Testnet and the local network, not on Mainnet (the Mainnet issuers are the protocol team's)", () => {
+    expect(wizardAvailable({ network: "testnet" })).toBe(true)
+    expect(wizardAvailable({ network: "local" })).toBe(true)
+    expect(wizardAvailable({ network: "mainnet" })).toBe(false)
   })
 })
 

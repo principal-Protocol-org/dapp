@@ -17,6 +17,7 @@ import type { Blocker } from "@/lib/protocol/gates"
 import type { ManagerCall, NewMarket } from "@/lib/protocol/manager-calls"
 import { evaluateManagerGates } from "@/lib/protocol/manager-gates"
 import { aprToApy } from "@/lib/protocol/math"
+import { previewDeposit } from "@/lib/protocol/previews"
 import { failureSentence } from "@/lib/protocol/errors"
 import { createRpcReader, liveValue, unavailable } from "@/lib/protocol/reader"
 import type { Role } from "@/lib/protocol/roles"
@@ -42,10 +43,11 @@ const TOKEN_DECIMALS = 7
 /**
  * A fresh seed mints and deposits the amount typed; a resumed one (the wallet already holds this
  * market's PT: a seed was started and not finished) finishes with that PT and deposits only the SY
- * missing, so a retried seed never mints twice.
+ * missing, so a retried seed never mints twice. `mintSy` is the SY the mint's deposit gives at the
+ * exchange rate read, which a version-2 Router signs as `sy_in` (version 1 ignores it).
  */
 type Plan =
-  | { mode: "fresh"; amounts: SeedAmounts }
+  | { mode: "fresh"; amounts: SeedAmounts; mintSy: bigint }
   | { mode: "resume"; amounts: SeedPairResult & { depositUnderlying: bigint }; heldPt: bigint; heldSy: bigint }
 
 const liveOf = <T,>(value: Live<T> | undefined): T | undefined => (value?.status === "live" ? value.value : undefined)
@@ -100,7 +102,7 @@ export function StepSeed({ salt, progress, account, ledgerTime }: ChainStepProps
       plan = "error" in r ? r : { mode: "resume", amounts: r, heldPt, heldSy }
     } else if (typeof amount === "bigint" && feeBps !== undefined) {
       const r = seedAmounts({ apy, amountUnderlying: amount, s, oracleRate: pool.rate, exchangeRate, feeBps })
-      plan = "error" in r ? r : { mode: "fresh", amounts: r }
+      plan = "error" in r ? r : { mode: "fresh", amounts: r, mintSy: previewDeposit(r.mintUnderlying, exchangeRate) }
     }
   }
   const planError = plan && "error" in plan ? plan.error : null
@@ -174,8 +176,9 @@ export function StepSeed({ salt, progress, account, ledgerTime }: ChainStepProps
     })
     if (ready.mode === "fresh") {
       const a = ready.amounts
+      const syIn = ready.mintSy
       steps = [
-        { build: async () => built(source, { kind: "seed_mint", amount: a.mintUnderlying, deadline: await deadline() }) },
+        { build: async () => built(source, { kind: "seed_mint", amount: a.mintUnderlying, syIn, deadline: await deadline() }) },
         { build: () => built(source, { kind: "seed_deposit", amount: a.depositUnderlying }) },
         // At most the plan's PT and SY: SY the wallet held before stays where it is.
         addLiquidity({ pt: a.pt, sy: a.sy }),

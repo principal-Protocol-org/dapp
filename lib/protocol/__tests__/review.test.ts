@@ -1610,6 +1610,33 @@ describe("manager reviews (0002 §5): the same review → sign pipeline as an ac
       await expect(preparedBy((tx) => assemble(tx, { auth: [authWith(callOf(tx), childInits())] }), engine)).rejects.toThrow(foreignAuth)
     })
 
+    it("version 2 (principal 3af9388): create_pool_and_escrow's tree has RecoveryEscrow.initialize; each version's tree is refused on the other", async () => {
+      const m2: Manifest = { ...factoryManifest, protocolAbi: 2 }
+      const c = { issuer: SOURCE, salt: SALT, params }
+      const v2Calls = poolAuthTree(m2, c)
+      expect(v2Calls).toHaveLength(6)
+      expect(v2Calls[1]).toMatchObject({ contractId: deriveMarketContracts(m2, SALT).recoveryEscrow, functionName: "initialize" })
+      const v1Tree = poolAuthTree(factoryManifest, c).map(argsOfInvocation)
+      const v2Tree = v2Calls.map(argsOfInvocation)
+      const pool = (m: Manifest) => createPoolAndEscrowCall(m, { source: SOURCE, salt: SALT, params })
+      const prepared = (m: Manifest, tree: xdr.InvokeContractArgs[]) =>
+        prepareManagerReview({ manifest: m, call: pool(m), rpc: fakeRpc({ prepareTransaction: async (tx) => assemble(tx, { auth: [authWith(callOf(tx), tree)] }) }) })
+      const r = await prepared(m2, v2Tree)
+      expect(r.callTree).toEqual([
+        "MarketFactory.create_pool_and_escrow",
+        "MarketPool.initialize",
+        "RecoveryEscrow.initialize",
+        "SYWrapper.set_recovery_escrow",
+        "PTToken.set_recovery_escrow",
+        "YTToken.set_recovery_escrow",
+        "MarketPool.set_recovery_escrow",
+      ])
+      await expect(prepared(m2, v1Tree)).rejects.toThrow(foreignAuth)
+      await expect(prepared(factoryManifest, v2Tree)).rejects.toThrow(foreignAuth)
+      // The escrow's entry out of the contract's order is refused too.
+      await expect(prepared(m2, [v2Tree[0], ...v2Tree.slice(2), v2Tree[1]])).rejects.toThrow(foreignAuth)
+    })
+
     it("refuses any call beneath the root that the factory does not make: RPC may not slip one into what the issuer signs", async () => {
       const sacTransfer = argsOfInvocation({
         contractId: market.underlying.sac,

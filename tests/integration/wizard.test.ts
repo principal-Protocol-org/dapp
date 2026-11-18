@@ -13,12 +13,13 @@
  *      salt from the factory's event, and the manager view's Resume logic finds it for the asset's
  *      issuer only. Resumed from what the chain fixed: `create_engine` and `create_pool_and_escrow`.
  *      Their first live signatures: each review checks the exact authorization tree against the real
- *      simulation (R29, `caller_tree`).
+ *      simulation (R29, `caller_tree`). The tree the RPC prepared is logged as it came, indented by
+ *      depth: on contract version 2 (3af9388) `create_pool_and_escrow` carries `RecoveryEscrow.initialize`.
  * 4.   RiskControl `add_consumer` (SY, manager) and Router `register_market`.
  * 5.   Every missing compliance grant (`requiredGrants`).
  * 6.   The seed from a starting APY: the refusals first (APY 0 or less, too small), then `wrap_and_mint`,
  *      `deposit` and `add_liquidity`, each floor from its own simulation; the seeded pool's
- *      `implied_rate()` compounds to the APY typed.
+ *      `implied_rate()` compounds to the APY typed. On version 2 the mint also signs `sy_in`.
  * 7.   Publish: the wizard's own request to `POST /api/markets`; the registry lists the market and it
  *      passes validation.
  *
@@ -38,7 +39,7 @@
  * the trading account), so they run sequentially and fail fast: once one fails, every later test is
  * skipped with the name of the step that did not complete, and that first failure is the one reported.
  */
-import { Keypair } from "@stellar/stellar-sdk"
+import { Address, Keypair, scValToNative, Transaction, xdr } from "@stellar/stellar-sdk"
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
 
 // The faucet, the registry and the markets route are `server-only`; that guard throws outside a react-server bundle.
@@ -85,7 +86,7 @@ import {
   type NewMarket,
 } from "@/lib/protocol/manager-calls"
 import { evaluateManagerGates, REQUIRED_ROLE } from "@/lib/protocol/manager-gates"
-import { validateManifest } from "@/lib/protocol/manifest"
+import { protocolAbi, validateManifest } from "@/lib/protocol/manifest"
 import { marketProgress, type MarketProgress } from "@/lib/protocol/market-progress"
 import { fetchMarketState, parsePoolState } from "@/lib/protocol/market-state"
 import { aprToApy, SCALE } from "@/lib/protocol/math"
@@ -102,7 +103,7 @@ import {
   type SeedPairResult,
   type SeedSimulate,
 } from "@/lib/protocol/seed"
-import { createRpcServer, getLedgerClock, simulateInvocation } from "@/lib/protocol/stellar"
+import { buildInvocationEnvelope, createRpcServer, getLedgerClock, simulateInvocation } from "@/lib/protocol/stellar"
 import type { TradeRequest } from "@/lib/protocol/trade-adapter"
 import type { Finding, Live, Manifest, Market, MarketContracts, WalletState } from "@/lib/protocol/types"
 import { keypairSigner, type KeypairSigner } from "./keypair-signer"
@@ -214,6 +215,40 @@ describe.skipIf(skip !== null)("the market wizard on the local stack (spec 0002 
     return { sql, reg, tables, store, deps: { store, reader: reader(), rpc: rpc(), manifest } }
   }
 
+  /** How the prepared trees name a contract: the new market's by its kind, the shared ones by theirs. */
+  const nameOf = (id: string): string => {
+    const shared = Object.entries(manifest.shared).find(([, v]) => v === id)?.[0]
+    const own = predicted ? Object.entries(predicted).find(([k, v]) => v === id && k !== "router" && k !== "oracle")?.[0] : undefined
+    return own ? `new ${own}` : shared ?? (id === manifest.testAsset?.sac ? "test asset SAC" : id)
+  }
+  const argText = (v: unknown): string =>
+    typeof v === "string" ? (/^[CG][A-Z2-7]{55}$/.test(v) ? nameOf(v) : JSON.stringify(v)) : typeof v === "bigint" || typeof v === "number" ? String(v) : v instanceof Uint8Array ? `0x${Buffer.from(v).toString("hex").slice(0, 8)}…` : "{…}"
+  /** The authorization tree a prepared transaction carries, as the RPC recorded it: one line per invocation, indented by depth (spec to-verify 2). */
+  function preparedTree(tx: Transaction): string[] {
+    const op = tx.operations[0]
+    if (op.type !== "invokeHostFunction") return []
+    const lines: string[] = []
+    const walk = (inv: xdr.SorobanAuthorizedInvocation, depth: number) => {
+      const fn = inv.function
+      if (fn.type === "sorobanAuthorizedFunctionTypeContractFn") {
+        const c = fn.contractFn
+        const args = c.args.map((a) => argText(scValToNative(a)))
+        lines.push(`${"  ".repeat(depth)}${nameOf(Address.fromScAddress(c.contractAddress).toString())}.${c.functionName.toString()}(${args.join(", ")})`)
+      } else {
+        lines.push(`${"  ".repeat(depth)}${fn.type}`)
+      }
+      for (const sub of inv.subInvocations) walk(sub, depth + 1)
+    }
+    for (const entry of op.auth ?? []) walk(entry.rootInvocation, 0)
+    return lines
+  }
+  /** What the RPC prepares for `call` (the same request the review makes), for the log when a review refuses its tree. */
+  async function rpcTree(call: ManagerCall): Promise<string[]> {
+    const account = await rpc().getAccount(call.source)
+    const tx = buildInvocationEnvelope({ source: call.source, sequence: account.sequenceNumber(), networkPassphrase: manifest.networkPassphrase, invocation: call.invocation })
+    return preparedTree(await rpc().prepareTransaction(tx))
+  }
+
   const readProgress = async (): Promise<MarketProgress> => {
     progress = await marketProgress(reader(), rpc(), manifest, salt)
     return progress
@@ -228,12 +263,24 @@ describe.skipIf(skip !== null)("the market wizard on the local stack (spec 0002 
   async function sign(step: ManagerStep, blockersFor: (call: ManagerCall) => Blocker[], name: string): Promise<ManagerCall> {
     const call = "build" in step ? await step.build() : step
     expect(blockersFor(call), `${name}: blockers`).toEqual([])
-    const review = await prepareManagerReview({ manifest, call })
+    const exactTree = MANAGER_CALL_AUTH[call.kind] === "caller_tree"
+    let review: Awaited<ReturnType<typeof prepareManagerReview>>
+    try {
+      review = await prepareManagerReview({ manifest, call })
+    } catch (error) {
+      // The evidence for a refused tree: what the RPC prepared, beside what the app expects.
+      if (exactTree) {
+        log(`${name}: ${call.kind} refused; expected beneath it: ${managerCallAuthTree(manifest, call).map((i) => `${nameOf(i.contractId)}.${i.functionName}`).join(", ")}`)
+        log(`${name}: ${call.kind} as the RPC prepares it:\n${(await rpcTree(call).catch((e) => [`(could not be prepared: ${redact(e instanceof Error ? e.message : e)})`])).join("\n")}`)
+      }
+      throw error
+    }
     expect(review.origin.call.label).toBe(call.label)
     // A factory call's review passed only if the real simulation's authorization is exactly the
     // factory's tree beneath the call (R29, `caller_tree`): the calls it lists, in order, nothing else.
-    const tree = MANAGER_CALL_AUTH[call.kind] === "caller_tree" ? managerCallAuthTree(manifest, call) : []
+    const tree = exactTree ? managerCallAuthTree(manifest, call) : []
     if ((FACTORY_CALLS as readonly string[]).includes(call.kind)) expect(tree.length > 0, `${call.kind}: an exact tree`).toBe(true)
+    if (exactTree) log(`${name}: ${call.kind}, the authorization tree the RPC prepared (protocolAbi ${protocolAbi(manifest)}):\n${preparedTree(new Transaction(review.unsignedXdr, manifest.networkPassphrase)).join("\n")}`)
     const result = await executeReview({ review, manifest, sign: admin.sign })
     expect(result.status, `${name}: ${json(result)}`).toBe("SUCCESS")
     signed.push({ step: name, kind: call.kind, hash: result.hash, label: call.label })
@@ -528,8 +575,10 @@ describe.skipIf(skip !== null)("the market wizard on the local stack (spec 0002 
       simulatedSeedCall({ manifest, source, market: newMarket, params: p, simulate, slippageBps: SLIPPAGE_BPS, pool: predicted.pool })
     // The fresh seed's three deferred steps, as StepSeed builds them: the first deposit is worked out
     // again once the mint and deposit have landed, from what the wallet holds, at most the plan's.
+    // The mint's sy_in (signed on version 2, ignored on version 1): the SY its deposit gives at the rate read.
+    const syIn = previewDeposit(plan.mintUnderlying, live(data.exchangeRate, "exchange rate"))
     const steps: ManagerStep[] = [
-      { build: async () => built({ kind: "seed_mint", amount: plan.mintUnderlying, deadline: await deadline() }) },
+      { build: async () => built({ kind: "seed_mint", amount: plan.mintUnderlying, syIn, deadline: await deadline() }) },
       { build: () => built({ kind: "seed_deposit", amount: plan.depositUnderlying }) },
       {
         build: async () => {
@@ -557,9 +606,14 @@ describe.skipIf(skip !== null)("the market wizard on the local stack (spec 0002 
     const calls: ManagerCall[] = []
     for (const [i, step] of steps.entries()) calls.push(await sign(step, blockersFor, `step 6 (${i + 1} of 3)`))
     expect(calls.map((c) => c.invocation.functionName)).toEqual(["wrap_and_mint", "deposit", "add_liquidity"])
+    // wrap_and_mint(from, pool, amount, [sy_in,] min_pt_out, deadline): sy_in on version 2 only.
+    const v2 = protocolAbi(manifest) === 2
+    expect(calls[0].invocation.args.length, `wrap_and_mint arguments at protocolAbi ${protocolAbi(manifest)}`).toBe(v2 ? 6 : 5)
+    if (v2) expect(calls[0].invocation.args[3]).toEqual({ type: "i128", value: syIn })
+    log(`step 6: wrap_and_mint signed ${calls[0].invocation.args.length} arguments (protocolAbi ${protocolAbi(manifest)}${v2 ? `, sy_in ${syIn}` : ""})`)
     // Every floor came from the call's simulation and sits above zero.
     for (const c of calls) {
-      const floor = c.invocation.args[c.kind === "seed_deposit" ? 2 : c.kind === "seed_mint" ? 3 : 4].value as bigint
+      const floor = c.invocation.args[c.kind === "seed_deposit" ? 2 : c.kind === "seed_mint" ? (v2 ? 4 : 3) : 4].value as bigint
       expect(floor > 0n, `${c.kind} floor ${floor}`).toBe(true)
     }
 

@@ -281,7 +281,8 @@ const address = (value: string): ScArg => ({ type: "address", value })
 /**
  * What the seed needs from the chain, for the new market's predicted contracts (not in the
  * manifest). `pool_state()` answers on an unseeded pool (it reads the reserves and the oracle, and
- * never asserts the pool is seeded).
+ * never asserts the pool is seeded). The oracle asked is the new market's own (`predicted.oracle`),
+ * the one its pool checks, whichever oracle the manifest shares.
  */
 export async function readSeedState(
   reader: ContractReader,
@@ -293,7 +294,7 @@ export async function readSeedState(
   const who = account ? [address(account)] : []
   const [poolState, oracleFresh, exchangeRate, feeBps, balances] = await Promise.all([
     readLive<unknown, PoolStateView>(reader, { contractId: predicted.pool, functionName: "pool_state" }, parsePoolState),
-    readLive<unknown, boolean>(reader, { contractId: manifest.shared.oracle, functionName: "is_available" }, toBool),
+    readLive<unknown, boolean>(reader, { contractId: predicted.oracle, functionName: "is_available" }, toBool),
     big(predicted.sy, "exchange_rate"),
     big(predicted.config, "tokenization_fee_bps"),
     account

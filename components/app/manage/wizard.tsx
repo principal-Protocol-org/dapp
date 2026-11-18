@@ -28,6 +28,7 @@ import {
   paramsFromDraft,
   parseSalt,
   randomSalt,
+  wizardAvailable,
   type MarketParams,
   type ParamDraft,
 } from "@/lib/protocol/factory"
@@ -110,13 +111,41 @@ function Fallback() {
 }
 
 /**
+ * In the wizard's place where it is not offered (`wizardAvailable`, Mainnet): the asset issuer's keys
+ * sign every market's deployment, and on Mainnet they are the protocol team's.
+ */
+export function WizardUnavailable() {
+  const id = useId()
+  return (
+    <section aria-labelledby={`${id}-heading`} className="grid gap-3 rounded-lg border border-line bg-surface p-5">
+      <h2 id={`${id}-heading`} className="font-serif text-2xl text-ink">
+        New markets are created by the protocol team
+      </h2>
+      <p className="text-ink">On Mainnet a market needs the asset issuer&apos;s keys. Ask the protocol team to list a market.</p>
+      <p>
+        <Link href="/app/manage" className="text-sm text-ink underline underline-offset-4">
+          Back to Manage
+        </Link>
+      </p>
+    </section>
+  )
+}
+
+/**
  * The market-creation wizard (spec 0002 §5, R5-10). The salt in the URL (`?salt=`, 32 random bytes)
  * fixes the market's seven addresses, so the link alone resumes it: where the market stands is read
  * from the chain (`marketProgress`), never from a saved draft. A link without a salt gets a fresh one.
  * It reads the URL, so it renders inside the page's `<Suspense>`, and from the first client render
- * after hydration.
+ * after hydration. Where the wizard is not offered (Mainnet) it is the card above, with or without a
+ * salt: nothing is read and the URL is left as it is.
  */
 export function Wizard() {
+  const manifest = useManifest()
+  if (!wizardAvailable(manifest)) return <WizardUnavailable />
+  return <WizardAtSalt />
+}
+
+function WizardAtSalt() {
   const hydrated = useHydrated()
   const search = useSearchParams()
   const raw = search?.get("salt") ?? null

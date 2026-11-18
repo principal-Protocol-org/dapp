@@ -16,6 +16,7 @@ import { useAccruedFees, useMyRoles } from "@/hooks/use-manage"
 import { useMarketsInProgress, type RegistrySalt } from "@/hooks/use-wizard"
 import { useWallet } from "@/hooks/use-wallet"
 import { errorReason } from "@/lib/protocol/errors"
+import { wizardAvailable } from "@/lib/protocol/factory"
 import type { Blocker } from "@/lib/protocol/gates"
 import { formatAmount, shorten } from "@/lib/protocol/format"
 import {
@@ -295,7 +296,9 @@ export function MyMarkets({ invalid, salts }: { invalid: InvalidMarkets; salts: 
   const { ledgerTime } = useLedgerClock()
   const [view, setView] = useState<View>("mine")
   const states = useMarketStates(manifest.markets.map((m) => m.marketId))
-  const inProgress = useMarketsInProgress(salts.status === "ok" ? salts.salts : NO_SALTS, account)
+  // Where the wizard is not offered (Mainnet), no link leads to it: no New market, no Resume.
+  const wizard = wizardAvailable(manifest)
+  const inProgress = useMarketsInProgress(wizard && salts.status === "ok" ? salts.salts : NO_SALTS, account)
   const listedPools = new Set(manifest.markets.map((m) => m.contracts.pool))
   const issuer = account !== null && issuesAnAsset(roles)
 
@@ -326,7 +329,7 @@ export function MyMarkets({ invalid, salts }: { invalid: InvalidMarkets; salts: 
         </div>
       </div>
 
-      {issuer ? (
+      {wizard && issuer ? (
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-line bg-surface p-4">
           <p className="min-w-0 text-sm text-ink">You are an asset&apos;s issuer, so you can create a market on it.</p>
           <Button asChild>
@@ -334,7 +337,7 @@ export function MyMarkets({ invalid, salts }: { invalid: InvalidMarkets; salts: 
           </Button>
         </div>
       ) : null}
-      <MarketsInProgress markets={inProgress} listedPools={listedPools} registryDown={issuer && salts.status === "unavailable"} />
+      {wizard ? <MarketsInProgress markets={inProgress} listedPools={listedPools} registryDown={issuer && salts.status === "unavailable"} /> : null}
 
       {view === "mine" && state.status !== "connected" ? (
         <p className="rounded-lg border border-line bg-surface p-5 text-ink">
