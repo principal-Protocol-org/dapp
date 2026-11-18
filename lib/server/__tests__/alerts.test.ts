@@ -116,7 +116,7 @@ function pauses(state: Partial<Record<"riskControl" | "sy" | "pool" | "manager",
   }
 }
 
-const HEALTHY = { healthy: true, lastSuccessAt: ago(600), lastTickAt: ago(600), rejected24h: 0, failures24h: 0 }
+const HEALTHY = { healthy: true, lastSuccessAt: ago(600), lastOkAt: ago(600), lastTickAt: ago(600), rejected24h: 0, failures24h: 0 }
 const GROUPS = ["escrow", "oracle", "permissioning", "risk", "market"] as const
 const cursors = (lagSeconds = 120, over: Partial<Record<(typeof GROUPS)[number], { gapFrom?: number; gapTo?: number; lag?: number | null }>> = {}) =>
   GROUPS.map((group) => {
@@ -285,23 +285,23 @@ describe("evaluateAlerts: each kind's trigger and resolution (D-20)", () => {
 
   describe("keeper_unhealthy", () => {
     it("no run recorded is neutral: no alert, and an open one would close", () => {
-      const i = input({ keeper: { healthy: false, lastSuccessAt: null, lastTickAt: null, rejected24h: 0, failures24h: 0 } })
+      const i = input({ keeper: { healthy: false, lastSuccessAt: null, lastOkAt: null, lastTickAt: null, rejected24h: 0, failures24h: 0 } })
       expect(evaluateAlerts(i)).toEqual([])
       expect(heldKinds(i)).not.toContain("keeper_unhealthy")
     })
-    it("recorded runs whose last success is older than 2 × interval: critical", () => {
-      const keeper = { healthy: false, lastSuccessAt: ago(3_600), lastTickAt: ago(60), rejected24h: 1, failures24h: 2 }
+    it("recorded runs whose last run without an error is older than 2 × interval (M-15): critical", () => {
+      const keeper = { healthy: false, lastSuccessAt: ago(3_600), lastOkAt: ago(3_600), lastTickAt: ago(60), rejected24h: 1, failures24h: 2 }
       expect(evaluateAlerts(input({ keeper }))).toEqual([
         {
           kind: "keeper_unhealthy",
           subject: ORACLE,
           severity: "critical",
-          payload: { lastSuccessAt: ago(3_600), lastTickAt: ago(60), intervalSeconds: 1_800, rejected24h: 1, failures24h: 2 },
+          payload: { lastOkAt: ago(3_600), lastSuccessAt: ago(3_600), lastTickAt: ago(60), intervalSeconds: 1_800, rejected24h: 1, failures24h: 2 },
         },
       ])
     })
-    it("runs that never succeeded are unhealthy", () => {
-      const keeper = { healthy: false, lastSuccessAt: null, lastTickAt: ago(60), rejected24h: 0, failures24h: 3 }
+    it("runs that only ever failed are unhealthy", () => {
+      const keeper = { healthy: false, lastSuccessAt: null, lastOkAt: null, lastTickAt: ago(60), rejected24h: 0, failures24h: 3 }
       expect(kinds(evaluateAlerts(input({ keeper })))).toEqual([`keeper_unhealthy ${ORACLE}`])
     })
     it("held when the ticks cannot be read", () => {

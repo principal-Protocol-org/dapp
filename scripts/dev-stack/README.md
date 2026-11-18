@@ -80,14 +80,19 @@ scripts/dev-stack/oracle-tick.sh                          # run this every 30 mi
   (spec 0004 D-21, D-22) without touching the market. It builds the SEP-40 mock feed in
   `tests/fixtures/sep40-mock` (`MockSep40Feed` of principal 24d980d `oracle_adapter/src/test.rs`,
   copied verbatim, with its two SEP-40 types; `set_price` and `clear_price` take no authorization) and
-  the OracleAdapter of `PRINCIPAL_REF` (default `24d980d`, extracted with `git archive` like
-  `deploy.sh`; its wasm hash is `cf58bbd8…`). It deploys both as `principal-localdev-admin`,
-  initializes the feed with `FEED_DECIMALS` (default 8) and the oracle with `max_stale_seconds = 3600`
-  and `max_deviation_bps = 1000`, calls `set_feed_source(admin, feed, {"Other":"USDY"})`, and prints
-  `{"oracle": "C…", "feed": "C…"}` on stdout. Then:
+  the OracleAdapter of `PRINCIPAL_REF` (default `3af938853e5818aa8d56bd35670b9a19cfa55a78`, the
+  Mainnet contracts, extracted with `git archive` like `deploy.sh`; its wasm hash is `56786ca6…`, and
+  `cf58bbd8…` at `24d980d`). It deploys both as `principal-localdev-admin`, initializes the feed with
+  `FEED_DECIMALS` (default 8) and the oracle with `max_stale_seconds = 3600` and
+  `max_deviation_bps = 1000`, calls `set_feed_source(admin, feed, {"Other":"USDY"})` and
+  `set_feed_min_interval(admin, FEED_MIN_INTERVAL)`, and prints `{"oracle": "C…", "feed": "C…"}` on
+  stdout. `FEED_MIN_INTERVAL` defaults to 0, which turns the feed throttle off (the contract throttles
+  to 300 s when it is never set); with 300, a second new price inside 300 s of the first accepted one is
+  answered `throttle`. `FEED_INITIALIZED=0` leaves the mock feed uninitialized: its `decimals()` fails,
+  and the oracle answers `feed_err`. Then:
 
   ```bash
-  ORACLE_KEEPER_MODE=feed ORACLE_KEEPER_SECRET=<a funded key with no role> ORACLE_KEEPER_ORACLE_ID=<oracle> \
+  ORACLE_KEEPER_MODE=feed ORACLE_KEEPER_SECRET=<a funded key with no role> ORACLE_KEEPER_ORACLE_ID=<oracle>[,<oracle>…] \
     NEXT_PUBLIC_PRINCIPAL_NETWORK=local pnpm dev
   stellar contract invoke --id <feed> --source principal-localdev-admin --network local -- \
     set_price --asset '{"Other":"USDY"}' --price 100000000 --timestamp <a ledger close time>
@@ -206,7 +211,7 @@ runs it for you). Call `GET /api/cron/record` with `Authorization: Bearer $CRON_
 | `registry.test.ts` | Market discovery and validation against the real contracts and `principal-pg`. |
 | `history.test.ts` | The history queries, and the recorder writing one snapshot of the live market to `principal-pg` (the row is deleted afterwards). |
 | `oracle.test.ts` | The OracleAdapter v2 policy read through the app's reader (the primary source id above, no fallback, no rejection, 3,600 s, 1,000 bps), and one keeper tick (`tickOracle`, behind `/api/cron/oracle`) that reports `updated`. |
-| `oracle-feed.test.ts` | The keeper's feed mode (D-21) through `/api/cron/oracle`, with a fresh key that holds no role, against `feed-oracle.sh`'s mock feed and standalone oracle: `synced` (the price rescaled from 8 to 7 decimals), `skipped` `stale_ts`, a +15 % `deviate` submitted once then not again (both answered 200), `bad_price` never submitted, `skipped` `no_data`, `not_configured` on the market's own oracle (no `feed_source`), the indexed `ref_set` and `ref_rej`, and the alert check's `oracle_rejection` and `feed_broken`. It needs `principal-pg` migrated, deletes its rows afterwards and puts the oracle index cursor back. |
+| `oracle-feed.test.ts` | The keeper's feed mode (D-21) through `/api/cron/oracle`, with a fresh key that holds no role, against `feed-oracle.sh`'s mock feed and standalone oracle: `synced` (the price rescaled from 8 to 7 decimals), `skipped` `stale_ts`, a +15 % `deviate` kept off-chain by default, then with `ORACLE_KEEPER_RECORD_REJECTIONS=1` submitted once and not again (all answered 200), `bad_price` never submitted, `skipped` `no_data`, `skipped` `no_feed` on both of the local markets' oracles in one run, the indexed `ref_set` and `ref_rej`, the alert check's `oracle_rejection` and `feed_broken`, then two more oracles synced in one run with consecutive sequence numbers, `skipped` `throttle` (`FEED_MIN_INTERVAL=300`), and `rejected` `feed_err` on an uninitialized feed (`FEED_INITIALIZED=0`). It needs `principal-pg` migrated, deletes its rows afterwards and puts the oracle index cursor back. |
 | `drill.test.ts` | `drill.sh` on the local market: it exits 0, its key is gone, RiskControl is not paused and the oracle is fresh; the index then holds, for the drill's own transactions, one `recovery`, one `ref_rej` `deviate`, the tick's `ref_set` and two RiskControl `paused` rows. A second run stopped (SIGTERM) while paused is unpaused by its trap. Its rows stay in `principal-pg`. |
 | `lifecycle.test.ts` | The full lifecycle proof of plan 0001. Skipped unless `LIFECYCLE_REDEPLOY=1`. |
 | `wizard.test.ts` | The market-creation wizard's seven steps signed on the local network, then a fresh account trading the new market. Skipped unless `WIZARD_LIVE=1`. |

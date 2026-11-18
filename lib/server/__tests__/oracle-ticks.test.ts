@@ -5,8 +5,8 @@ vi.mock("server-only", () => ({}))
 
 import type { Sql } from "@/lib/server/db"
 import type { KeeperFailure } from "@/lib/server/oracle-ticks"
-import { keeperHealth, lastSubmittedRejection, listTicks, ORACLE_TICK_INTERVAL_SECONDS, recordTick, tickRow } from "@/lib/server/oracle-ticks"
-import type { OracleTick } from "@/lib/server/oracle-keeper"
+import { keeperHealth, keeperIntervalSeconds, lastSubmittedRejection, listTicks, recordsRejections, recordTick, tickRow } from "@/lib/server/oracle-ticks"
+import { OracleKeeperConfigError, type OracleTick } from "@/lib/server/oracle-keeper"
 
 const ORACLE = "CDYGBFGO7KD446CDTGJ7M4OWUXC7UPBGPVM5CUWP2NSNX2CKK2TYYIPS"
 const SIGNER = "GBLPAJ2GVSFUWCUIFMEV4EOV2XIOEWMJRIQ3LOM2Z42TNIY3J6ACB7UA"
@@ -67,6 +67,15 @@ describe("tickRow: one cron/oracle run as an oracle_ticks row (D-19)", () => {
       signer: SIGNER,
     })
     expect(tickRow({ status: "skipped", mode: "feed", signer: SIGNER, value: null, timestamp: null, reason: "no_data" })).toMatchObject({ value: null, reason: "no_data" })
+    // An oracle with no feed source (M-13): a skipped run with the keeper's own reason, no value.
+    expect(tickRow({ status: "skipped", mode: "feed", signer: SIGNER, value: null, timestamp: null, reason: "no_feed" })).toEqual({
+      mode: "feed",
+      decision: "skipped",
+      value: null,
+      reason: "no_feed",
+      txHash: null,
+      signer: SIGNER,
+    })
   })
   it("feed mode: a rejection that was not submitted (a repeat, a broken feed) has no hash", () => {
     expect(tickRow({ status: "rejected", mode: "feed", signer: SIGNER, value: "-1", timestamp: 1, reason: "bad_price" })).toEqual({
@@ -107,61 +116,116 @@ describe("recordTick", () => {
   })
 })
 
-/** The health query's one row: when the last success and the last tick were, and the 24 h counts (pg returns counts as strings). */
-const healthRow = (over: Partial<{ last_success: Date | null; last_tick: Date | null; rejected: string; failures: string }> = {}) => ({
+/**
+ * The health query's one row: when the last success, the last run that did not fail and the last
+ * tick were, and the 24 h counts (pg returns counts as strings).
+ */
+const healthRow = (over: Partial<{ last_success: Date | null; last_ok: Date | null; last_tick: Date | null; rejected: string; failures: string }> = {}) => ({
   last_success: new Date(NOW - 600_000),
+  last_ok: new Date(NOW - 300_000),
   last_tick: new Date(NOW - 60_000),
   rejected: "2",
   failures: "1",
   ...over,
 })
 
-describe("keeperHealth (D-19): healthy while the last success is younger than 2 × the interval", () => {
-  it("the interval is the 30 min schedule", () => {
-    expect(ORACLE_TICK_INTERVAL_SECONDS).toBe(1_800)
+describe("keeperIntervalSeconds and recordsRejections: the keeper's schedule and its on-chain rejections, from the environment", () => {
+  it("the interval is ORACLE_KEEPER_INTERVAL_SECONDS, 1,800 s (30 min) when unset or blank", () => {
+    expect(keeperIntervalSeconds({})).toBe(1_800)
+    expect(keeperIntervalSeconds({ ORACLE_KEEPER_INTERVAL_SECONDS: "" })).toBe(1_800)
+    expect(keeperIntervalSeconds({ ORACLE_KEEPER_INTERVAL_SECONDS: "  " })).toBe(1_800)
+    expect(keeperIntervalSeconds({ ORACLE_KEEPER_INTERVAL_SECONDS: "300" })).toBe(300)
+    expect(keeperIntervalSeconds({ ORACLE_KEEPER_INTERVAL_SECONDS: " 300 " })).toBe(300)
   })
 
+  it("accepts 60 to 86,400 whole seconds, bounds included", () => {
+    expect(keeperIntervalSeconds({ ORACLE_KEEPER_INTERVAL_SECONDS: "60" })).toBe(60)
+    expect(keeperIntervalSeconds({ ORACLE_KEEPER_INTERVAL_SECONDS: "86400" })).toBe(86_400)
+  })
+
+  it("refuses anything else with a config error in plain words, never a silent default", () => {
+    for (const raw of ["59", "0", "86401", "-300", "300.5", "3e2", "5m", "abc", "1_800"]) {
+      const error = (() => {
+        try {
+          keeperIntervalSeconds({ ORACLE_KEEPER_INTERVAL_SECONDS: raw })
+        } catch (e) {
+          return e
+        }
+      })()
+      expect(error, raw).toBeInstanceOf(OracleKeeperConfigError)
+      expect((error as Error).message).toBe("ORACLE_KEEPER_INTERVAL_SECONDS must be a whole number of seconds from 60 to 86400.")
+    }
+  })
+
+  it("rejections go on-chain only with ORACLE_KEEPER_RECORD_REJECTIONS=1; anything else is off", () => {
+    expect(recordsRejections({ ORACLE_KEEPER_RECORD_REJECTIONS: "1" })).toBe(true)
+    expect(recordsRejections({ ORACLE_KEEPER_RECORD_REJECTIONS: " 1\n" })).toBe(true)
+    for (const raw of [undefined, "", "0", "true", "yes", "on", "11"]) expect(recordsRejections({ ORACLE_KEEPER_RECORD_REJECTIONS: raw }), String(raw)).toBe(false)
+  })
+})
+
+describe("keeperHealth (M-15): healthy while the last run that did not fail is younger than 2 × the interval", () => {
   it("healthy 1 s before 2 × the interval; not healthy at exactly 2 × the interval or after", async () => {
     const at = async (ageSeconds: number) =>
-      (await keeperHealth(fakeSql([healthRow({ last_success: new Date(NOW - ageSeconds * 1000) })]).sql, "testnet", 1_800, { now: NOW })).healthy
+      (await keeperHealth(fakeSql([healthRow({ last_ok: new Date(NOW - ageSeconds * 1000) })]).sql, "testnet", 1_800, { now: NOW })).healthy
     expect(await at(3_599)).toBe(true)
     expect(await at(3_600)).toBe(false)
     expect(await at(3_601)).toBe(false)
     expect(await at(0)).toBe(true)
+    // The interval decides the window: 5 min runs are late after 10 min.
+    expect((await keeperHealth(fakeSql([healthRow({ last_ok: new Date(NOW - 599_000) })]).sql, "mainnet", 300, { now: NOW })).healthy).toBe(true)
+    expect((await keeperHealth(fakeSql([healthRow({ last_ok: new Date(NOW - 600_000) })]).sql, "mainnet", 300, { now: NOW })).healthy).toBe(false)
   })
 
-  it("returns the last success, the last tick, and the rejected and failed runs of the last 24 h as numbers", async () => {
+  it("returns the last success, the last run that did not fail, the last tick, and the rejected and failed runs of the last 24 h as numbers", async () => {
     const { sql, calls } = fakeSql([healthRow()])
     expect(await keeperHealth(sql, "testnet", 1_800, { now: NOW, oracle: ORACLE })).toEqual({
       healthy: true,
       lastSuccessAt: new Date(NOW - 600_000).toISOString(),
+      lastOkAt: new Date(NOW - 300_000).toISOString(),
       lastTickAt: new Date(NOW - 60_000).toISOString(),
       rejected24h: 2,
       failures24h: 1,
     })
     // A success is an update that landed (pushed, or synced from a feed); skipped runs and errors are not.
     expect(calls[0].text).toContain("filter (where decision in ('pushed', 'synced'))")
+    // A run that did not fail is any decision but error: a skipped or rejected run is the keeper working.
+    expect(calls[0].text).toContain("filter (where decision <> 'error') as last_ok")
     expect(calls[0].text).toContain("decision = 'rejected'")
     expect(calls[0].text).toContain("decision = 'error'")
     // The window starts 24 h before `now`; one network and, when given, one oracle.
     expect(calls[0].values).toEqual(expect.arrayContaining(["testnet", ORACLE, new Date(NOW - 86_400_000).toISOString()]))
   })
 
-  it("errors and rejections with no success: not healthy, no last success", async () => {
-    const { sql } = fakeSql([healthRow({ last_success: null })])
-    expect(await keeperHealth(sql, "testnet", 1_800, { now: NOW })).toMatchObject({ healthy: false, lastSuccessAt: null, lastTickAt: new Date(NOW - 60_000).toISOString() })
+  it("healthy after a skipped run that changed nothing: health is about the keeper, not the oracle (M-15)", async () => {
+    // No update ever landed, and the last run (a skipped one, say stale_ts or no_feed) finished.
+    const { sql } = fakeSql([healthRow({ last_success: null, last_ok: new Date(NOW - 60_000), last_tick: new Date(NOW - 60_000) })])
+    expect(await keeperHealth(sql, "mainnet", 300, { now: NOW })).toMatchObject({ healthy: true, lastSuccessAt: null, lastOkAt: new Date(NOW - 60_000).toISOString() })
+  })
+
+  it("only error runs: not healthy, no last ok run, however recent the last tick", async () => {
+    const { sql } = fakeSql([healthRow({ last_success: null, last_ok: null, last_tick: new Date(NOW - 1_000) })])
+    expect(await keeperHealth(sql, "testnet", 1_800, { now: NOW })).toMatchObject({ healthy: false, lastSuccessAt: null, lastOkAt: null, lastTickAt: new Date(NOW - 1_000).toISOString() })
+    // An old success does not make it healthy either: the runs since have all failed.
+    const old = fakeSql([healthRow({ last_success: new Date(NOW - 7_200_000), last_ok: new Date(NOW - 7_200_000), last_tick: new Date(NOW - 1_000) })])
+    expect((await keeperHealth(old.sql, "testnet", 1_800, { now: NOW })).healthy).toBe(false)
   })
 
   it("no tick recorded: lastTickAt null (a neutral, unknown state for the page and the alerts), zero counts", async () => {
-    const { sql, calls } = fakeSql([{ last_success: null, last_tick: null, rejected: "0", failures: "0" }])
-    expect(await keeperHealth(sql, "testnet", 1_800, { now: NOW })).toEqual({ healthy: false, lastSuccessAt: null, lastTickAt: null, rejected24h: 0, failures24h: 0 })
+    const { sql, calls } = fakeSql([{ last_success: null, last_ok: null, last_tick: null, rejected: "0", failures: "0" }])
+    expect(await keeperHealth(sql, "testnet", 1_800, { now: NOW })).toEqual({ healthy: false, lastSuccessAt: null, lastOkAt: null, lastTickAt: null, rejected24h: 0, failures24h: 0 })
     // Every oracle of the network when none is given.
     expect(calls[0].values).toContain(null)
   })
 
   it("accepts timestamps as ISO strings too", async () => {
-    const { sql } = fakeSql([healthRow({ last_success: new Date(NOW - 5_000).toISOString() as unknown as Date })])
-    expect((await keeperHealth(sql, "testnet", 1_800, { now: NOW })).lastSuccessAt).toBe(new Date(NOW - 5_000).toISOString())
+    const { sql } = fakeSql([
+      healthRow({ last_success: new Date(NOW - 5_000).toISOString() as unknown as Date, last_ok: new Date(NOW - 4_000).toISOString() as unknown as Date }),
+    ])
+    expect(await keeperHealth(sql, "testnet", 1_800, { now: NOW })).toMatchObject({
+      lastSuccessAt: new Date(NOW - 5_000).toISOString(),
+      lastOkAt: new Date(NOW - 4_000).toISOString(),
+    })
   })
 })
 

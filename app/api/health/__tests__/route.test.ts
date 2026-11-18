@@ -8,13 +8,14 @@ const mocks = vi.hoisted(() => ({
   getLedgerClock: vi.fn(),
   getIndexedEvents: vi.fn(),
   keeperHealth: vi.fn(),
+  keeperIntervalSeconds: vi.fn(),
   openAlertCounts: vi.fn(),
   manifest: vi.fn(),
   DatabaseConfigError: class DatabaseConfigError extends Error {},
 }))
 vi.mock("@/lib/protocol/stellar", () => ({ createRpcServer: () => ({ rpc: "fake" }), getLedgerClock: mocks.getLedgerClock }))
 vi.mock("@/lib/server/indexer", () => ({ getIndexedEvents: mocks.getIndexedEvents }))
-vi.mock("@/lib/server/oracle-ticks", () => ({ keeperHealth: mocks.keeperHealth, ORACLE_TICK_INTERVAL_SECONDS: 1_800 }))
+vi.mock("@/lib/server/oracle-ticks", () => ({ keeperHealth: mocks.keeperHealth, keeperIntervalSeconds: mocks.keeperIntervalSeconds }))
 vi.mock("@/lib/server/alerts", () => ({ openAlertCounts: mocks.openAlertCounts }))
 vi.mock("@/lib/server/db", () => ({ sql: vi.fn(async () => []), DatabaseConfigError: mocks.DatabaseConfigError }))
 vi.mock("@/lib/protocol/manifest-source", () => ({ activeManifest: () => mocks.manifest() }))
@@ -26,7 +27,14 @@ import { GET, HEALTH_PART_TIMEOUT_MS } from "../route"
 const MANIFEST = parseManifest(testnetJson)
 const CLOSE = 1_794_657_600 // 2026-11-14T12:00:00Z
 const INDEX = { rows: [], indexedThrough: 5_719_749, indexedThroughCloseTime: "2026-11-14T11:55:00.000Z", lagSeconds: 300, gaps: [], pendingGroups: [], reconcile: null }
-const KEEPER = { healthy: true, lastSuccessAt: "2026-11-14T11:30:00.000Z", lastTickAt: "2026-11-14T11:30:00.000Z", rejected24h: 0, failures24h: 0 }
+const KEEPER = {
+  healthy: true,
+  lastSuccessAt: "2026-11-14T11:30:00.000Z",
+  lastOkAt: "2026-11-14T11:45:00.000Z",
+  lastTickAt: "2026-11-14T11:45:00.000Z",
+  rejected24h: 0,
+  failures24h: 0,
+}
 
 describe("GET /api/health", () => {
   beforeEach(() => {
@@ -38,6 +46,7 @@ describe("GET /api/health", () => {
     mocks.getIndexedEvents.mockResolvedValue(INDEX)
     mocks.keeperHealth.mockReset()
     mocks.keeperHealth.mockResolvedValue(KEEPER)
+    mocks.keeperIntervalSeconds.mockReset().mockReturnValue(1_800)
     mocks.openAlertCounts.mockReset()
     mocks.openAlertCounts.mockResolvedValue({ count: 2, critical: 1 })
     process.env.DATABASE_URL = "postgres://u:p@db.example/x"
@@ -56,11 +65,13 @@ describe("GET /api/health", () => {
       network: "testnet",
       ledger: { status: "ok", sequence: 5_720_000, closeTime: "2026-11-14T12:00:00.000Z" },
       indexer: { status: "ok", indexedThrough: 5_719_749, indexedThroughCloseTime: "2026-11-14T11:55:00.000Z", lagSeconds: 300, gaps: [], pendingGroups: [] },
-      keeper: { status: "ok", healthy: true, lastSuccessAt: "2026-11-14T11:30:00.000Z", lastTickAt: "2026-11-14T11:30:00.000Z" },
+      keeper: { status: "ok", healthy: true, lastSuccessAt: "2026-11-14T11:30:00.000Z", lastOkAt: "2026-11-14T11:45:00.000Z", lastTickAt: "2026-11-14T11:45:00.000Z" },
       openAlerts: { status: "ok", count: 2, critical: 1 },
     })
     expect(mocks.getIndexedEvents.mock.calls[0][1]).toMatchObject({ network: "testnet", limit: 1 })
     expect(mocks.keeperHealth.mock.calls[0]).toEqual([expect.anything(), "testnet", 1_800, { oracle: MANIFEST.shared.oracle }])
+    // The schedule is read from the environment at request time.
+    expect(mocks.keeperIntervalSeconds).toHaveBeenCalledWith(process.env)
     expect(mocks.openAlertCounts.mock.calls[0][1]).toBe("testnet")
   })
 
@@ -92,8 +103,24 @@ describe("GET /api/health", () => {
   })
 
   it("no keeper run recorded reads healthy null: unknown, not unhealthy", async () => {
-    mocks.keeperHealth.mockResolvedValue({ healthy: false, lastSuccessAt: null, lastTickAt: null, rejected24h: 0, failures24h: 0 })
-    expect((await (await GET()).json()).keeper).toEqual({ status: "ok", healthy: null, lastSuccessAt: null, lastTickAt: null })
+    mocks.keeperHealth.mockResolvedValue({ healthy: false, lastSuccessAt: null, lastOkAt: null, lastTickAt: null, rejected24h: 0, failures24h: 0 })
+    expect((await (await GET()).json()).keeper).toEqual({ status: "ok", healthy: null, lastSuccessAt: null, lastOkAt: null, lastTickAt: null })
+  })
+
+  it("the keeper is measured against ORACLE_KEEPER_INTERVAL_SECONDS; a bad value makes its part unavailable, the others still read", async () => {
+    mocks.keeperIntervalSeconds.mockReturnValue(300)
+    await GET()
+    expect(mocks.keeperHealth.mock.calls[0][2]).toBe(300)
+    mocks.keeperHealth.mockClear()
+    mocks.keeperIntervalSeconds.mockImplementation(() => {
+      throw new Error("ORACLE_KEEPER_INTERVAL_SECONDS must be a whole number of seconds from 60 to 86400.")
+    })
+    const res = await GET()
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.keeper).toEqual({ status: "unavailable", reason: "the keeper's interval is not valid" })
+    expect(body.ledger.status).toBe("ok")
+    expect(mocks.keeperHealth).not.toHaveBeenCalled()
   })
 
   it("each part fails alone: an RPC failure leaves the database parts, with 200", async () => {

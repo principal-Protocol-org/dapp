@@ -7,9 +7,9 @@ import "server-only"
  * - `ticks`: the newest recorded `cron/oracle` runs of this network's oracle (`RecordedTick`), each
  *   with its time, mode, decision, value, reason, tx hash and signer (a public key; no secret is
  *   ever recorded);
- * - `health`: `keeperHealth` over the same rows (healthy while the last success is younger than
- *   2 × `intervalSeconds`; `lastTickAt` null when no run is recorded);
- * - `intervalSeconds`: the keeper's schedule, `ORACLE_TICK_INTERVAL_SECONDS`.
+ * - `health`: `keeperHealth` over the same rows (healthy while the last run that did not fail,
+ *   `lastOkAt`, is younger than 2 × `intervalSeconds`; `lastTickAt` null when no run is recorded);
+ * - `intervalSeconds`: the keeper's schedule, `keeperIntervalSeconds` (`ORACLE_KEEPER_INTERVAL_SECONDS`, read per request).
  *
  * Bad input is 400. A database answer is cached 60 s at the edge; errors are never cached (503
  * `not_configured` without `DATABASE_URL`, 503 `unavailable` when the database fails). It reads the
@@ -17,7 +17,7 @@ import "server-only"
  */
 import { activeManifest } from "@/lib/protocol/manifest-source"
 import { DatabaseConfigError, sql } from "@/lib/server/db"
-import { keeperHealth, listTicks, ORACLE_TICK_INTERVAL_SECONDS } from "@/lib/server/oracle-ticks"
+import { keeperHealth, keeperIntervalSeconds, listTicks } from "@/lib/server/oracle-ticks"
 
 const CACHED = "public, s-maxage=60, stale-while-revalidate=300"
 const DEFAULT_LIMIT = 20
@@ -36,11 +36,10 @@ export async function GET(request: Request) {
     const manifest = activeManifest()
     const { network } = manifest
     const oracle = manifest.shared.oracle
-    const [ticks, health] = await Promise.all([
-      listTicks(sql, { network, oracle, limit }),
-      keeperHealth(sql, network, ORACLE_TICK_INTERVAL_SECONDS, { oracle }),
-    ])
-    return json({ ticks, health, intervalSeconds: ORACLE_TICK_INTERVAL_SECONDS }, 200, CACHED)
+    // A bad schedule is a config error (logged by name below), never a silent default.
+    const intervalSeconds = keeperIntervalSeconds(process.env)
+    const [ticks, health] = await Promise.all([listTicks(sql, { network, oracle, limit }), keeperHealth(sql, network, intervalSeconds, { oracle })])
+    return json({ ticks, health, intervalSeconds }, 200, CACHED)
   } catch (error) {
     if (error instanceof DatabaseConfigError) return json({ error: "not_configured" }, 503)
     console.error("dashboard oracle-ticks route:", error instanceof Error ? error.name : "unknown")

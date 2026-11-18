@@ -34,7 +34,7 @@ import { createRpcServer, getLedgerClock } from "@/lib/protocol/stellar"
 import type { Live, Manifest, Network } from "@/lib/protocol/types"
 import type { Sql } from "./db"
 import { INDEX_GROUPS, indexCursorName, type IndexGroup } from "./indexer"
-import { keeperHealth, ORACLE_TICK_INTERVAL_SECONDS, type KeeperHealth, type TickDecision } from "./oracle-ticks"
+import { keeperHealth, keeperIntervalSeconds, type KeeperHealth, type TickDecision } from "./oracle-ticks"
 import { redact } from "./request"
 
 // ---------------------------------------------------------------- kinds and thresholds
@@ -132,7 +132,7 @@ export type AlertInput = {
   network: Network
   /** Wall-clock time of the check (ms): the windows over recorded rows are measured from it. */
   now: number
-  /** The keeper's schedule (`ORACLE_TICK_INTERVAL_SECONDS`): `feed_broken` looks back 2 × this. */
+  /** The keeper's schedule (`keeperIntervalSeconds`): `feed_broken` looks back 2 × this, and the keeper's health is measured against it. */
   intervalSeconds: number
   oracleId: string
   /** `fetchOracleView` at the latest ledger time (its freshness is measured in ledger time). */
@@ -234,6 +234,7 @@ function keeperAlerts(i: AlertInput): DesiredAlert[] {
   if (unread(k) || k.lastTickAt === null || k.healthy) return []
   return [
     alert("keeper_unhealthy", i.oracleId, {
+      lastOkAt: k.lastOkAt,
       lastSuccessAt: k.lastSuccessAt,
       lastTickAt: k.lastTickAt,
       intervalSeconds: i.intervalSeconds,
@@ -315,7 +316,7 @@ function indexerAlerts(i: AlertInput): DesiredAlert[] {
  *   the oracle cannot be read (the view's own freshness, in ledger time);
  * - `oracle_rejection` per significant (reason, value) seen in the last 24 h;
  * - `feed_broken` on a broken-feed tick in the last 2 × interval;
- * - `keeper_unhealthy` when runs are recorded and the last success is 2 × interval old or more;
+ * - `keeper_unhealthy` when runs are recorded and the last run that did not fail is 2 × interval old or more (M-15);
  * - `paused` per paused contract;
  * - `risk_warning` at ≥ 90% of a limit, `risk_exhausted` at ≥ 100% (protocol-wide and per asset);
  * - `signer_low` under `ALERT_SIGNER_MIN_XLM`;
@@ -421,7 +422,7 @@ function detail(kind: string, p: Record<string, unknown>): string {
     case "feed_broken":
       return `The feed's price could not be used (${Array.isArray(p.reasons) ? p.reasons.join(", ") : s(p.reasons)}), last at ${s(p.lastAt)}.`
     case "keeper_unhealthy":
-      return `Last successful update: ${p.lastSuccessAt ? s(p.lastSuccessAt) : "none recorded"}. The keeper runs every ${n(p.intervalSeconds)} s.`
+      return `Last run without an error: ${p.lastOkAt ? s(p.lastOkAt) : "none recorded"}. Last successful update: ${p.lastSuccessAt ? s(p.lastSuccessAt) : "none recorded"}. The keeper runs every ${n(p.intervalSeconds)} s.`
     case "paused":
       return `${s(p.label)} (${shortId(s(p.contractId))}) is paused.`
     case "risk_warning":
@@ -877,6 +878,8 @@ export async function collectAlertInput(deps: AlertDeps): Promise<AlertInput> {
   const readsBy = (deps.startedAt ?? Date.now()) + (deps.readBudgetMs ?? READ_BUDGET_MS)
   const network = manifest.network
   const oracleId = manifest.shared.oracle
+  // Read per run from the same environment as the keeper's keys; a bad value throws (the check fails loudly, never on a silent default).
+  const intervalSeconds = keeperIntervalSeconds(deps.env)
   const reader = deps.reader ?? createRpcReader(manifest)
   const since = iso(now - REJECTION_WINDOW_SECONDS * 1000)
   const noLedger: Unread = { error: "the ledger could not be read" }
@@ -890,14 +893,14 @@ export async function collectAlertInput(deps: AlertDeps): Promise<AlertInput> {
     by(guard(fetchPauses(reader, manifest)), readsBy),
     by(guard(readTicks(sql, network, oracleId, since)), readsBy),
     by(guard(readRejectionEvents(sql, network, oracleId, since)), readsBy),
-    by(guard(keeperHealth(sql, network, ORACLE_TICK_INTERVAL_SECONDS, { oracle: oracleId, now })), readsBy),
+    by(guard(keeperHealth(sql, network, intervalSeconds, { oracle: oracleId, now })), readsBy),
     by(guard(readCursors(sql, network)), readsBy),
     by(
       readSigner(manifest, deps.env, deps.fetchImpl ?? fetch).catch((error: unknown): SignerSeen => ({ account: null, error: nameOf(error) })),
       readsBy,
     ).then((r): SignerSeen | null => (r !== null && "error" in r && !("account" in r) ? { account: null, error: r.error } : r)),
   ])
-  return { network, now, intervalSeconds: ORACLE_TICK_INTERVAL_SECONDS, oracleId, oracle, ticks, rejectionEvents, keeper, pauses, risk, signer, indexer }
+  return { network, now, intervalSeconds, oracleId, oracle, ticks, rejectionEvents, keeper, pauses, risk, signer, indexer }
 }
 
 export type AlertCheckResult = SyncResult & {

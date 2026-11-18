@@ -6,11 +6,12 @@ vi.mock("server-only", () => ({}))
 const mocks = vi.hoisted(() => ({
   listTicks: vi.fn(),
   keeperHealth: vi.fn(),
+  keeperIntervalSeconds: vi.fn(),
   DatabaseConfigError: class DatabaseConfigError extends Error {},
   manifestError: null as Error | null,
 }))
 vi.mock("@/lib/server/db", () => ({ sql: "the-sql", DatabaseConfigError: mocks.DatabaseConfigError }))
-vi.mock("@/lib/server/oracle-ticks", () => ({ listTicks: mocks.listTicks, keeperHealth: mocks.keeperHealth, ORACLE_TICK_INTERVAL_SECONDS: 1_800 }))
+vi.mock("@/lib/server/oracle-ticks", () => ({ listTicks: mocks.listTicks, keeperHealth: mocks.keeperHealth, keeperIntervalSeconds: mocks.keeperIntervalSeconds }))
 vi.mock("@/lib/protocol/manifest-source", async () => {
   const { parseManifest } = await import("@/lib/protocol/manifest")
   const m = parseManifest((await import("@/config/manifests/local.example.json")).default)
@@ -38,13 +39,14 @@ const TICK = {
   txHash: "ab".repeat(32),
   signer: SIGNER,
 }
-const HEALTH = { healthy: true, lastSuccessAt: TICK.at, lastTickAt: TICK.at, rejected24h: 0, failures24h: 0 }
+const HEALTH = { healthy: true, lastSuccessAt: TICK.at, lastOkAt: TICK.at, lastTickAt: TICK.at, rejected24h: 0, failures24h: 0 }
 const get = (query = "") => GET(new Request(`https://app.example/api/dashboard/oracle-ticks${query}`))
 
 describe("GET /api/dashboard/oracle-ticks (D-19)", () => {
   beforeEach(() => {
     mocks.listTicks.mockReset().mockResolvedValue([TICK])
     mocks.keeperHealth.mockReset().mockResolvedValue(HEALTH)
+    mocks.keeperIntervalSeconds.mockReset().mockReturnValue(1_800)
     mocks.manifestError = null
   })
 
@@ -69,6 +71,27 @@ describe("GET /api/dashboard/oracle-ticks (D-19)", () => {
     expect(res.headers.get("cache-control")).toBe("public, s-maxage=60, stale-while-revalidate=300")
     expect(mocks.listTicks).toHaveBeenCalledWith("the-sql", { network: "local", oracle: ORACLE, limit: 20 })
     expect(mocks.keeperHealth).toHaveBeenCalledWith("the-sql", "local", 1_800, { oracle: ORACLE })
+    expect(mocks.keeperIntervalSeconds).toHaveBeenCalledWith(process.env)
+  })
+
+  it("the schedule is ORACLE_KEEPER_INTERVAL_SECONDS, read per request; a bad one answers 503 unavailable, nothing read", async () => {
+    mocks.keeperIntervalSeconds.mockReturnValue(300)
+    expect((await (await get()).json()).intervalSeconds).toBe(300)
+    expect(mocks.keeperHealth).toHaveBeenLastCalledWith("the-sql", "local", 300, { oracle: ORACLE })
+    const error = vi.spyOn(console, "error").mockImplementation(() => {})
+    try {
+      mocks.listTicks.mockClear()
+      mocks.keeperIntervalSeconds.mockImplementation(() => {
+        throw new Error("ORACLE_KEEPER_INTERVAL_SECONDS must be a whole number of seconds from 60 to 86400.")
+      })
+      const res = await get()
+      expect(res.status).toBe(503)
+      expect(await res.json()).toEqual({ error: "unavailable" })
+      expect(res.headers.get("cache-control")).toBe("no-store")
+      expect(mocks.listTicks).not.toHaveBeenCalled()
+    } finally {
+      error.mockRestore()
+    }
   })
 
   it("takes ?limit= from 1 to 100", async () => {
