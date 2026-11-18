@@ -37,6 +37,13 @@ export type Market = {
   contracts: MarketContracts
   /** Wasm hash (hex) each contract runs, by contract name; optional in the manifest. */
   wasmHashes?: Record<string, string>
+  /**
+   * Registry markets only: the earliest ledger at which discovery saw the factory build this market
+   * (its salt's `mkt_tok`, `mkt_eng` or `mkt_new`, in the page of events that named its pool). The
+   * indexer reads a newly listed market from there instead of `deployLedger` (spec 0004 D-14).
+   * Absent for the manifest seeds and for a market discovery has not seen built.
+   */
+  createdLedger?: number
 }
 
 export type Manifest = {
@@ -48,6 +55,12 @@ export type Manifest = {
   friendbotUrl?: string
   generatedAt: string
   sourceCommit: string
+  /** Ledger of the deployment's first contract creation: where the indexer starts. */
+  deployLedger?: number
+  /** Oracle source hashes the monitor recognises: sha256(preimage) = hash. */
+  oracleSources?: { hash: string; preimage: string }[]
+  /** RPC endpoints tried, in order, after `rpcUrl`. */
+  rpcFallbackUrls?: string[]
   shared: SharedContracts
   /** Pinned Wasm hash (hex) per market contract kind; the trust anchor for restoring code (R29b). */
   wasmHashes: Partial<Record<WasmHashKey, string>>
@@ -69,5 +82,11 @@ export type WalletState =
   | { status: "wrong_network"; publicKey: string; actualPassphrase: string; expectedPassphrase: string }
   | { status: "rejected"; reason: string }
 
+/** Where a figure was read: enough for a reviewer to repeat the call and compare the raw return value. */
+/** Where a figure was read; `viaFallback` when `rpcUrl` is one of the manifest's fallbacks (D-6). */
+export type ReadSource = { contractId: string; fn: string; args: unknown[]; rawXdr: string; ledger: number; rpcUrl: string; viaFallback?: boolean }
+
 /** A chain value, or the reason it could not be read. Gates treat `unavailable` as a refusal. */
-export type Live<T> = { status: "live"; value: T; ledger: number } | { status: "unavailable"; error: string }
+export type Live<T> =
+  | { status: "live"; value: T; ledger: number; source?: ReadSource; sources?: ReadSource[]; ledgerSpread?: { min: number; max: number } }
+  | { status: "unavailable"; error: string; source?: Omit<ReadSource, "rawXdr" | "ledger"> }

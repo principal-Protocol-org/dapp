@@ -28,6 +28,7 @@ import { useManifest } from "@/components/app/manifest-provider"
 import { isExpired, SIGN_MARGIN_MS, type Review, type TxResult, type TxStatus } from "@/lib/protocol/review"
 import {
   describeHoldings,
+  quoteWorseThanPreview,
   resolveStep,
   routeHoldings,
   unwindFrom,
@@ -35,6 +36,7 @@ import {
   type RouteKind,
   type RouteRequest,
   type StepPlan,
+  type StepPreview,
   type Unwind,
 } from "@/lib/protocol/routes"
 import { errorReason, userErrorMessage } from "@/lib/protocol/errors"
@@ -78,6 +80,11 @@ export type RouteState = {
   review?: Review
   /** Seconds before `review` expires: the route then stops, and Continue prepares the step again. */
   secondsLeft?: number
+  /**
+   * Reviewing and signing a later step: its fresh quote is worse than the route preview by more than
+   * the slippage setting (D-26 item 4). A warning only: the step can still be signed.
+   */
+  quoteWarning?: true
   /** Interrupted: the single call back to USDY, or why there is none. */
   unwind?: { available: true; amount: bigint } | { available: false; reason: string }
   /** Interrupted by an archived entry: the call to restore first (0001's restore flow). */
@@ -122,9 +129,10 @@ export type RouteControls = {
   state: RouteState
   /**
    * Logs a new run and prepares its first step. A no-op while a route holds funds between steps, and
-   * for a kind this host does not offer.
+   * for a kind this host does not offer. `preview` is the trade's figure for a later step's output,
+   * logged with the run, that step's fresh quote is checked against (D-26 item 4).
    */
-  start(req: RouteRequest, plans: StepPlan[]): void
+  start(req: RouteRequest, plans: StepPlan[], preview?: StepPreview): void
   /** Signs the prepared step, exactly the review shown (R31). Prepares it again if it is about to expire. */
   sign(): void
   /** Interrupted: prepares the first step not confirmed. Waiting: re-checks the unknown step by its hash. */
@@ -144,6 +152,8 @@ type View = {
   error?: string
   blockers?: Blocker[]
   review?: Review
+  /** The prepared step's fresh quote is worse than the route preview by more than the slippage setting. */
+  quoteWarning?: true
   restore?: { source: string; invocation: ContractInvocation }
   checking?: boolean
   /** Waiting: the step's time limit passed but the network cannot say whether it landed. */
@@ -151,7 +161,16 @@ type View = {
 }
 
 /** What `prepareStep` produced for the step on screen: signed only if it still passes the gates. */
-type Prepared = { review: Review; draft: ActionInput; outcome: SimulationOutcome; ledgerAt: number }
+type Prepared = { review: Review; draft: ActionInput; outcome: SimulationOutcome; ledgerAt: number; quoteWarning?: true }
+
+const HOLDINGS: readonly string[] = ["underlying", "sy", "pt", "yt", "lp"]
+
+/** The run's logged preview when it has the right shape; a run turned back into USDY is never compared. */
+function previewOf(run: RouteRun): StepPreview | undefined {
+  const p = run.preview as Partial<StepPreview> | undefined
+  if (run.unwound || !p || typeof p !== "object") return undefined
+  return typeof p.step === "number" && typeof p.amount === "bigint" && typeof p.token === "string" && HOLDINGS.includes(p.token) ? (p as StepPreview) : undefined
+}
 
 type Lookup =
   | { status: "SUCCESS"; output: ActionOutput | null; decodeError?: string }
@@ -447,12 +466,15 @@ export function useRoute(opts: UseRouteOptions): RouteControls {
           !outcome.ok && outcome.kind === "restore_required" ? { source: r.account, invocation: invocationFor(latest.current.manifest, draft) } : undefined
         const blockers = latest.current.opts.gate(draft, outcome)
         if (blockers.length > 0) return interrupt(g, i, blockers[0].message, { blockers, ...(restore ? { restore } : {}) })
-        const { guards } = derive(draft, outcome, latest.current.slippageBps, rates)
+        const { output, guards } = derive(draft, outcome, latest.current.slippageBps, rates)
         if (!guards?.ok) return interrupt(g, i, guards?.reason ?? `Step ${i + 1} has no exact quote, so it was not prepared. Continue to try again.`)
+        // D-26 item 4: the floor comes from this fresh quote; warn when it is worse than the preview.
+        const worse = quoteWorseThanPreview({ preview: previewOf(r), step: i + 1, action: plan.action, output, slippageBps: latest.current.slippageBps })
+        const quoteWarning = worse ? ({ quoteWarning: true } as const) : {}
         const review = await exe().prepare({ ...draft, guards: guards.guards })
         if (!live(g)) return
-        prepared.current = { review, draft, outcome, ledgerAt }
-        show(g, { phase: "reviewing", index: i, review })
+        prepared.current = { review, draft, outcome, ledgerAt, ...quoteWarning }
+        show(g, { phase: "reviewing", index: i, review, ...quoteWarning })
       } catch (error) {
         interrupt(g, i, text(error))
       } finally {
@@ -496,7 +518,7 @@ export function useRoute(opts: UseRouteOptions): RouteControls {
         const sent: RouteStep = { action: before.action, status: "unknown", hash, validUntil: p.review.summary.validUntil, sentAt: p.ledgerAt }
         const cur = withStep(r, i, sent)
         save(g, cur)
-        show(g, { phase: "signing", index: i, review: p.review })
+        show(g, { phase: "signing", index: i, review: p.review, ...(p.quoteWarning ? { quoteWarning: true } : {}) })
         let result: TxResult | undefined
         try {
           result = await exe().execute(p.review)
@@ -573,7 +595,7 @@ export function useRoute(opts: UseRouteOptions): RouteControls {
       show(g, { phase: "waiting", index: i, error: found.lost ? lostStep(i + 1) : stillUnknown(i + 1), lost: found.lost })
     }
 
-    function start(req: RouteRequest, plans: StepPlan[]) {
+    function start(req: RouteRequest, plans: StepPlan[], preview?: StepPreview) {
       const { account: who, marketId: market, kinds } = latest.current.opts
       if (busy.current || !who || req.source !== who || req.marketId !== market || plans.length === 0 || !kinds.includes(req.kind)) return
       // The run on screen is always of this host's kinds (load and this guard), so this is the
@@ -595,6 +617,7 @@ export function useRoute(opts: UseRouteOptions): RouteControls {
         kind: req.kind,
         request: req,
         plans,
+        ...(preview ? { preview } : {}),
         outputs: [],
         steps: plans.map((p) => ({ action: p.action, status: "pending" })),
         startedAt: Date.now(),
@@ -750,6 +773,7 @@ export function useRoute(opts: UseRouteOptions): RouteControls {
     ...(view.blockers && !idle ? { blockers: view.blockers } : {}),
     ...(run && !idle ? { run } : {}),
     ...(shown ? { review: shown } : {}),
+    ...(shown && view.quoteWarning ? { quoteWarning: true as const } : {}),
     ...(shown && nowMs !== null && nowMs >= shown.preparedAtMs
       ? { secondsLeft: Math.max(0, Math.ceil((shown.expiresAtMs - nowMs) / 1000)) }
       : {}),

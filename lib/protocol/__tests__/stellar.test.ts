@@ -155,10 +155,12 @@ describe("simulateContractRead", () => {
       },
     });
 
-    expect(read).toEqual({
+    expect(read).toMatchObject({
       value: 123n,
       latestLedger: 77,
       minResourceFee: "321",
+      rawXdr: nativeToScVal(123n, { type: "i128" }).toXDR("base64"),
+      rpcUrl: testnetMarket.rpcUrl,
     });
   });
 
@@ -503,6 +505,28 @@ describe("pollTransactionStatus", () => {
       },
     });
     expect(result).toEqual({ hash: "abc123", status: "FAILED", attempts: 1, failure: { result: resultXdr, diagnosticEvents: diagnosticEventsXdr } });
+  });
+
+  it("keeps the contract events of a SUCCESS transaction, every operation's, when RPC returns them", async () => {
+    const event = (topic: string) =>
+      new xdr.ContractEvent({
+        ext: xdr.ExtensionPoint.v0(),
+        contractId: null,
+        type: xdr.ContractEventType.contract,
+        body: xdr.ContractEventBody.v0(new xdr.ContractEventV0({ topics: [xdr.ScVal.scvSymbol(topic)], data: xdr.ScVal.scvVoid() })),
+      });
+    const [a, b] = [event("ref_rej"), event("other")];
+    const result = await pollTransactionStatus({
+      rpcUrl: testnetMarket.rpcUrl,
+      hash: "abc123",
+      wait: async () => undefined,
+      server: {
+        async getTransaction() {
+          return { status: "SUCCESS", events: { contractEventsXdr: [[a], [b]] } };
+        },
+      },
+    });
+    expect(result).toEqual({ hash: "abc123", status: "SUCCESS", attempts: 1, contractEvents: [a, b] });
   });
 });
 

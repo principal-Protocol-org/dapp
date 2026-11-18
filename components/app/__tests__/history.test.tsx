@@ -110,7 +110,7 @@ describe("history table", () => {
   it("names the link with the full hash and where it goes (M11)", () => {
     render(<HistoryTable />)
     const link = screen.getByRole("link", { name: `View transaction ${HASH} on stellar.expert` })
-    // The URL comes from explorerTxUrl, which encodes the hash.
+    // The URL comes from explorerUrl, which encodes the hash.
     expect(link.getAttribute("href")).toBe(`https://stellar.expert/explorer/testnet/tx/${encodeURIComponent(HASH)}`)
     expect(link.textContent).toBe("aaaaaaaa...aaaaaaaa")
   })

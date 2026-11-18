@@ -104,13 +104,13 @@ export function underlyingApy7d(
 }
 
 /**
- * TVL in underlying: (SY held by the PrincipalManager + the pool's SY reserve) x exchange rate.
- * The PT reserve is backed by the manager's SY, so it is not counted. Unavailable if any input is.
+ * TVL in underlying (D-8), the one definition `/app` and the dashboard share: `SYWrapper.total_underlying()`
+ * plus the underlying RecoveryEscrow holds (the SAC's `balance(escrow)`, seized positions once unwrapped).
+ * It replaces "manager SY + pool SY reserve, at the exchange rate", which missed SY held anywhere else.
+ * Both reads are its provenance, `total_underlying` first; unavailable if either is, never a partial sum.
  */
-export function marketTvl(ms: MarketState): Live<bigint> {
-  return allLive([ms.managerSy, ms.poolState, ms.exchangeRate] as const, ([managerSy, pool, rate]) =>
-    ((managerSy + pool.syReserve) * rate) / SCALE,
-  )
+export function tvlOf(state: Pick<MarketState, "syUnderlying" | "escrowUnderlying">): Live<bigint> {
+  return allLive([state.syUnderlying, state.escrowUnderlying] as const, ([sy, escrow]) => sy + escrow)
 }
 
 /** The fixed APY (pool `implied_rate`, compounded) once the quote `q` has landed. */

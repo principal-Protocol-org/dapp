@@ -1,9 +1,9 @@
-import { activeManifest } from "@/lib/protocol/manifest-source"
+import { activeNetwork } from "@/lib/protocol/manifest-source"
 import { networkLabel } from "./network"
 
-/** Always visible on `/app/**` while the manifest points at a test network. */
+/** Always visible on `/app/**` while the manifest points at a test network. It reads only the network, as the static shell. */
 export function TestnetBanner() {
-  const { network } = activeManifest()
+  const network = activeNetwork()
   if (network !== "testnet" && network !== "local") return null
   return (
     <div

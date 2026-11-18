@@ -16,6 +16,12 @@ need jq "brew install jq"
 need node "Install Node.js."
 
 MANIFEST="$DAPP_DIR/config/manifests/$NETWORK.json"
+# ORACLE_TICK_MANIFEST: another local deployment's manifest (one written with deploy.sh's MANIFEST_OUT);
+# drill.sh passes it on with DRILL_MANIFEST. Local only: on testnet the tick follows testnet.json.
+if [ -n "${ORACLE_TICK_MANIFEST:-}" ]; then
+  [ "$NETWORK" = local ] || die "ORACLE_TICK_MANIFEST is for the local network only"
+  MANIFEST="$ORACLE_TICK_MANIFEST"
+fi
 [ -f "$MANIFEST" ] || die "$MANIFEST not found. Run scripts/dev-stack/deploy.sh first."
 APY="5"
 RATE_ARG=""
@@ -34,14 +40,17 @@ ORACLE="$(jq -er '.shared.oracle // .markets[0].contracts.oracle' "$MANIFEST")" 
 rpc_healthy || die "the $NETWORK network is not answering on $RPC_URL."
 ORACLE_ADMIN="$(stellar keys address "$ORACLE_KEY")" || die "key $ORACLE_KEY is missing"
 
-CURRENT="$(invoke "$ORACLE_KEY" "$ORACLE" get_reference_value | tr -d '"[:space:]')"
+# Reads are simulations only (--send=no): they never sign or send, whatever the CLI's default would do.
+view() { stellar contract invoke --id "$ORACLE" --source "$ORACLE_KEY" --network "$NETWORK" --send=no -- "$@"; }
+
+CURRENT="$(view get_reference_value | tr -d '"[:space:]')"
 [[ "$CURRENT" =~ ^[0-9]+$ ]] || die "unexpected oracle value '$CURRENT'"
 TS="$(ledger_close_time)"
 if [ -n "$RATE_ARG" ]; then
   NEW="$RATE_ARG"
   [[ "$NEW" =~ ^[0-9]+$ ]] || die "rate must be a positive integer with 7 decimals (e.g. 10001000), got '$NEW'"
 else
-  LAST_TS="$(invoke "$ORACLE_KEY" "$ORACLE" get_reference_timestamp | tr -d '"[:space:]')"
+  LAST_TS="$(view get_reference_timestamp | tr -d '"[:space:]')"
   [[ "$LAST_TS" =~ ^[0-9]+$ ]] || die "unexpected oracle timestamp '$LAST_TS'"
   # current x (1 + apy/100)^(elapsed/year), floored; a double is exact enough for a dev rate, the result stays >= current.
   NEW="$(node -e '
@@ -55,10 +64,10 @@ fi
 [ "$NEW" -ge "$CURRENT" ] || die "the oracle never decreases: new $NEW < current $CURRENT"
 
 # v2 (R4-8): the source id is the oracle's primary source; Option<BytesN<32>> prints as a JSON hex string.
-SOURCE="$(invoke "$ORACLE_KEY" "$ORACLE" get_primary_source | tr -d '"[:space:]')"
+SOURCE="$(view get_primary_source | tr -d '"[:space:]')"
 [[ "$SOURCE" =~ ^[0-9a-f]{64}$ ]] || die "the oracle has no primary source (not initialized with set_sources, or a v1 oracle)"
 RESULT="$(invoke "$ORACLE_KEY" "$ORACLE" set_reference_value --caller "$ORACLE_ADMIN" --source "$SOURCE" --value "$NEW" --timestamp "$TS" | tr -d '"[:space:]')" ||
   die "set_reference_value failed (the transaction reverted)"
 # A rejection is a successful transaction that returns false (a second tick within the same ledger second returns false with reason stale_ts).
-[ "$RESULT" = "true" ] || die "the oracle rejected the value (returned '$RESULT'): $(invoke "$ORACLE_KEY" "$ORACLE" last_rejection)"
+[ "$RESULT" = "true" ] || die "the oracle rejected the value (returned '$RESULT'): $(view last_rejection)"
 echo "oracle rate $CURRENT -> $NEW at ledger time $TS"

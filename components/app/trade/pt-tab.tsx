@@ -166,6 +166,7 @@ export function PtTab({ marketId, side, routeId, onRouteOpened }: { marketId: st
           request={route.request}
           kind={trade.kind}
           plans={route.plans}
+          preview={route.preview}
           canStart={route.canStart}
           blockers={route.blockers}
           onNotice={(notice) => setLast({ owner, notice })}

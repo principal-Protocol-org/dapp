@@ -6,8 +6,8 @@ import { formatAmount, formatBps, formatFeeRate, formatRate } from "@/lib/protoc
 import { getMarket } from "@/lib/protocol/manifest"
 import { useManifest } from "@/components/app/manifest-provider"
 import { Skeleton } from "@/components/ui/skeleton"
-import { InfoTip } from "@/components/app/info-tip"
-import { formatDuration, showLive, UNAVAILABLE } from "@/components/app/live"
+import { InfoTip, LiveFigure, ReasonFigure, type FigureText } from "@/components/app/info-tip"
+import { formatDuration, UNAVAILABLE } from "@/components/app/live"
 import { MATURITY_DATE } from "@/components/app/market/market-header"
 
 /** The market's facts: oracle rate and freshness, supplies, reserves, fees and maturity. */
@@ -27,34 +27,38 @@ export function MarketDetails({ marketId }: { marketId: string }) {
     )
   }
   const amount = (v: bigint) => formatAmount(v, market.underlying.decimals, 4, { group: true })
-  const oracleAge =
-    ledgerTime === null || ms.oracleTimestamp.status === "unavailable"
-      ? UNAVAILABLE
-      : `${formatDuration(ledgerTime - Number(ms.oracleTimestamp.value))} ago`
+  const oracleAge: FigureText =
+    ms.oracleTimestamp.status === "unavailable"
+      ? { text: UNAVAILABLE, reason: ms.oracleTimestamp.error }
+      : ledgerTime === null
+        ? { text: UNAVAILABLE }
+        : { text: `${formatDuration(ledgerTime - Number(ms.oracleTimestamp.value))} ago` }
   return (
     <div className="grid grid-cols-1 gap-x-10 gap-y-6 sm:grid-cols-2">
       <Group title="Oracle & maturity">
         <Row label="Oracle rate" tip="Notional per SY share, read from the market oracle. PT and YT are counted in notional units.">
-          {ms.oracleRate.status === "live" ? formatRate(ms.oracleRate.value) : UNAVAILABLE}
+          <LiveFigure label="Oracle rate" live={ms.oracleRate} format={formatRate} />
         </Row>
-        <Row label="Oracle updated">{oracleAge}</Row>
-        <Row label="Maturity">{showLive(ms.maturity, (v) => MATURITY_DATE.format(new Date(Number(v) * 1000)))}</Row>
-        {ms.settledRate.status === "live" && ms.settledRate.value !== null ? (
-          <Row label="Settlement rate">{formatRate(ms.settledRate.value)}</Row>
+        <Row label="Oracle updated"><ReasonFigure label="Oracle updated" figure={oracleAge} /></Row>
+        <Row label="Maturity"><LiveFigure label="Maturity" live={ms.maturity} format={(v) => MATURITY_DATE.format(new Date(Number(v) * 1000))} /></Row>
+        {ms.settledRate.status === "unavailable" || ms.settledRate.value !== null ? (
+          <Row label="Settlement rate">
+            <LiveFigure label="Settlement rate" live={ms.settledRate} format={(v) => (v === null ? UNAVAILABLE : formatRate(v))} />
+          </Row>
         ) : null}
       </Group>
       <Group title="Pool & fees">
-        <Row label="PT outstanding">{showLive(ms.totalPt, amount)}</Row>
-        <Row label="YT outstanding">{showLive(ms.totalYt, amount)}</Row>
+        <Row label="PT outstanding"><LiveFigure label="PT outstanding" live={ms.totalPt} format={amount} /></Row>
+        <Row label="YT outstanding"><LiveFigure label="YT outstanding" live={ms.totalYt} format={amount} /></Row>
         <Row label="PT price (pool spot)" tip="Notional value per PT, from the pool's spot price.">
-          {showLive(ms.ptPrice, formatRate)}
+          <LiveFigure label="PT price (pool spot)" live={ms.ptPrice} format={formatRate} />
         </Row>
-        <Row label="Pool PT reserve">{showLive(ms.poolState, (p) => amount(p.ptReserve))}</Row>
-        <Row label="Pool SY reserve">{showLive(ms.poolState, (p) => amount(p.syReserve))}</Row>
-        <Row label="Tokenization fee">{showLive(ms.fees.tokenizationBps, formatBps)}</Row>
-        <Row label="YT fee">{showLive(ms.fees.ytBps, formatBps)}</Row>
+        <Row label="Pool PT reserve"><LiveFigure label="Pool PT reserve" live={ms.poolState} format={(p) => amount(p.ptReserve)} /></Row>
+        <Row label="Pool SY reserve"><LiveFigure label="Pool SY reserve" live={ms.poolState} format={(p) => amount(p.syReserve)} /></Row>
+        <Row label="Tokenization fee"><LiveFigure label="Tokenization fee" live={ms.fees.tokenizationBps} format={formatBps} /></Row>
+        <Row label="YT fee"><LiveFigure label="YT fee" live={ms.fees.ytBps} format={formatBps} /></Row>
         <Row label="Swap fee" tip="The current swap fee. It decreases to 0 at maturity.">
-          {showLive(ms.swapFeeRate, formatFeeRate)}
+          <LiveFigure label="Swap fee" live={ms.swapFeeRate} format={formatFeeRate} />
         </Row>
       </Group>
     </div>

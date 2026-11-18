@@ -51,6 +51,14 @@ export function formatAmount(
 }
 
 /**
+ * A display amount at a fixed number of fraction digits, grouped: truncated, never rounded up, and
+ * not trimmed, so a column of figures lines up ("223,011.30", "105,200.00"). Display only.
+ */
+export function formatAmountFixed(raw: bigint, decimals: number, fractionDigits = 2): string {
+  return fixed(raw, decimals, Math.min(fractionDigits, decimals), false, true);
+}
+
+/**
  * A preview amount: at least 4 decimals (all of them for a token with fewer), plus every further
  * digit up to the token's `decimals` while it is not zero. Exact: nothing is cut or rounded, so a
  * previewed amount reads the same as the raw value. 1_000_000_000n (7) -> "100.0000",

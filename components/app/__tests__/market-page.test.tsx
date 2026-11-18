@@ -43,7 +43,7 @@ vi.mock("@/components/app/manifest-provider", () => {
   }
 })
 // Server side: generateStaticParams reads the static seeds, MarketRoute the resolved markets.
-vi.mock("@/lib/protocol/manifest-source", () => ({ activeManifest: () => ({ network: mocks.network, markets: [MARKET] }) }))
+vi.mock("@/lib/protocol/manifest-source", () => ({ activeManifest: () => ({ network: mocks.network, markets: [MARKET] }), manifestPending: () => false }))
 vi.mock("@/lib/server/manifest", () => ({
   resolvedManifest: async () => ({ network: mocks.network, markets: [MARKET, { ...MARKET, marketId: "testnet-sta-registry" }] }),
 }))
@@ -160,11 +160,11 @@ describe("market page route", () => {
   })
   it("renders the market for a known id", async () => {
     const el = await MarketRoute({ params: Promise.resolve({ marketId: "m1" }) })
-    expect(el.props.marketId).toBe("m1")
+    expect(el!.props.marketId).toBe("m1")
   })
   it("renders a registry market too: known ids are the resolved markets, not only the seeds", async () => {
     const el = await MarketRoute({ params: Promise.resolve({ marketId: "testnet-sta-registry" }) })
-    expect(el.props.marketId).toBe("testnet-sta-registry")
+    expect(el!.props.marketId).toBe("testnet-sta-registry")
     expect(mocks.notFound).not.toHaveBeenCalled()
   })
 })
@@ -212,7 +212,8 @@ describe("MarketStats", () => {
   it("shows five stats: liquidity, TVL, underlying APY 7 d, PT fixed APY, YT leverage", () => {
     wrap(<MarketStats marketId="m1" />)
     expect(stat("Liquidity")?.textContent).toBe("≈ 4,520 STA")
-    expect(stat("TVL")?.textContent).toBe("≈ 9,400 STA")
+    // tvlOf (D-8): total_underlying 9,500 + RecoveryEscrow 50.
+    expect(stat("TVL")?.textContent).toBe("≈ 9,550 STA")
     expect(stat("Underlying APY (7 d)")?.textContent).toContain("4.98%")
     expect(stat("PT fixed APY")?.textContent).toMatch(/^\d+\.\d\d%$/)
     expect(stat("YT leverage")?.textContent).toBe("50x")
@@ -228,6 +229,15 @@ describe("MarketStats", () => {
     expect(liquidity.className).not.toContain("text-[15px]")
     expect((liquidity.parentElement as HTMLElement).className).toContain("content-between")
     expect(screen.getByText("Liquidity").className).toBe("label")
+  })
+  it("TVL is Unavailable when the escrow balance or total_underlying cannot be read, never total_underlying alone", () => {
+    for (const over of [{ escrowUnderlying: down() }, { syUnderlying: down() }]) {
+      mocks.ms = marketState(over)
+      const { unmount } = wrap(<MarketStats marketId="m1" />)
+      expect(stat("TVL")?.textContent).toMatch(/^Unavailable/)
+      expect(stat("TVL")?.textContent).not.toContain("9,500")
+      unmount()
+    }
   })
   it("labels a short underlying window 'since <date>' and never extrapolates (R2-44)", () => {
     mocks.history = "short"
@@ -447,6 +457,53 @@ describe("SafetyContent manager pause", () => {
   })
 })
 
+describe("composite rows give the reason of the first unavailable input (D-27)", () => {
+  const reasonOf = async (name: string, label: string) => {
+    const el = screen.getByText(name)
+    const row = (el.closest("dt")?.nextSibling ?? el.nextSibling) as HTMLElement
+    expect(row.textContent).toBe("Unavailable")
+    await userEvent.click(within(row).getByRole("button", { name: `More about ${label} (unavailable)` }))
+    return (await screen.findByRole("tooltip")).textContent
+  }
+  it("oracle", async () => {
+    mocks.ms = marketState({ oracleFresh: down("oracle fresh down") })
+    wrap(<SafetyContent marketId="m1" />)
+    expect(await reasonOf("Oracle", "Oracle")).toBe("oracle fresh down")
+  })
+  it("circuit breaker", async () => {
+    mocks.ms = marketState({ cb: { limit: live(1n), volume: down("volume down"), assetLimit: live(0n), assetVolume: live(0n) } })
+    wrap(<SafetyContent marketId="m1" />)
+    expect(await reasonOf("Circuit breaker, protocol-wide", "Circuit breaker, protocol-wide")).toBe("volume down")
+  })
+  it("deposit cap", async () => {
+    mocks.wallet = { status: "connected", publicKey: "GABC", networkPassphrase: "x" }
+    mocks.account = accountState({ netDeposited: down("net down") })
+    wrap(<SafetyContent marketId="m1" />)
+    expect(await reasonOf("Your deposit cap", "Your deposit cap")).toBe("net down")
+  })
+  it("oracle age", async () => {
+    mocks.ms = marketState({ oracleTimestamp: down("ts down") })
+    wrap(<MarketDetails marketId="m1" />)
+    expect(await reasonOf("Oracle updated", "Oracle updated")).toBe("ts down")
+  })
+  it("settlement rate", async () => {
+    mocks.ms = marketState({ settledRate: down("settle down") })
+    wrap(<MarketDetails marketId="m1" />)
+    expect(await reasonOf("Settlement rate", "Settlement rate")).toBe("settle down")
+  })
+})
+
+describe("SafetyContent unavailable reason", () => {
+  it("shows the reason of an unavailable row in an UnavailableTip", async () => {
+    mocks.ms = marketState({ managerPaused: down("HostError: Error(Contract, #7)") })
+    wrap(<SafetyContent marketId="m1" />)
+    const row = screen.getByText("Principal manager").nextSibling as HTMLElement
+    expect(row.textContent).toBe("Unavailable")
+    await userEvent.click(within(row).getByRole("button", { name: "More about Principal manager (unavailable)" }))
+    expect((await screen.findByRole("tooltip")).textContent).toBe("HostError: Error(Contract, #7)")
+  })
+})
+
 describe("SafetyContent", () => {
   it("lists pauses, oracle freshness and circuit-breaker room", () => {
     mocks.ms = marketState({ riskPaused: live(true) })
@@ -489,7 +546,7 @@ describe("SafetyContent", () => {
     expect(row("Oracle fallback source")).toBe("None")
     expect(row("Oracle last rejected update")).toBe("Moved more than the cap (value 1.2000, 2m 0s ago)")
   })
-  it("says none when no update was ever rejected, and words every reason", () => {
+  it("says none when no update was ever rejected, and words every reason (all nine, spec 0004 D-18)", () => {
     mocks.ms = marketState()
     wrap(<SafetyContent marketId="m1" />)
     expect(screen.getByText("Oracle last rejected update").nextSibling?.textContent).toBe("None")
@@ -499,6 +556,11 @@ describe("SafetyContent", () => {
       stale_ts: "Not newer than the current value",
       oob: "Outside the value bounds",
       fb_value: "Fallback tried to change the value",
+      // The feed path's reasons (principal aae6cf8 and later), worded as the dashboard words them.
+      no_data: "The feed had no price",
+      bad_price: "The feed's price was zero or negative",
+      rescale: "The feed's price could not be converted to 7 decimals",
+      future_ts: "Dated after the current ledger time",
       other: "other",
     }
     for (const [reason, text] of Object.entries(words)) {

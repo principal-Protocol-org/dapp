@@ -8,7 +8,7 @@ import Link from "next/link"
 import { readLog, subscribeLog, type LogEntry } from "@/lib/app/local-log"
 import { firstOpen, holdsFunds, isDone, readRoutes, subscribeRoutes, type RouteRun, type RouteStep } from "@/lib/app/route-log"
 import { describeHoldings, routeHoldings, type RouteKind } from "@/lib/protocol/routes"
-import { explorerTxUrl } from "@/lib/app/tx-notice"
+import { explorerUrl } from "@/lib/protocol/explorer"
 import { shorten } from "@/lib/protocol/format"
 import { useManifest } from "@/components/app/manifest-provider"
 import { TX_TIMEOUT_SECONDS } from "@/lib/protocol/review"
@@ -86,7 +86,7 @@ function windowText(w: { oldestLedger: number; latestLedger: number }): string {
 const when = (iso: string) => iso.slice(0, 16).replace("T", " ") + " UTC"
 
 function TxHash({ hash, network }: { hash: string; network: Network }) {
-  const url = explorerTxUrl(network, hash)
+  const url = explorerUrl(network, "tx", hash)
   if (!url) return <span className="break-all font-mono text-xs">{hash}</span>
   return (
     <a

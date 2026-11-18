@@ -1,4 +1,5 @@
 import { userErrorMessage } from "@/lib/protocol/errors"
+import { explorerUrl } from "@/lib/protocol/explorer"
 import type { TxResult } from "@/lib/protocol/review"
 import { SubmissionRejectedError } from "@/lib/protocol/stellar"
 import type { Network } from "@/lib/protocol/types"
@@ -13,17 +14,12 @@ export type TxNotice = {
   url?: string | null
 }
 
-/** stellar.expert page of a Testnet transaction; no explorer exists for a local network. */
-export function explorerTxUrl(network: Network, hash: string): string | null {
-  return network === "testnet" ? `https://stellar.expert/explorer/testnet/tx/${encodeURIComponent(hash)}` : null
-}
-
 /**
  * `message` is what the action did, decoded from its return value (spec §6 step 7, the panel
  * config's `result`); a success without one reads "<label> confirmed.".
  */
 export function noticeForResult(label: string, result: TxResult, network: Network, message?: string): TxNotice {
-  const link = { hash: result.hash, url: explorerTxUrl(network, result.hash) }
+  const link = { hash: result.hash, url: explorerUrl(network, "tx", result.hash) }
   switch (result.status) {
     case "SUCCESS": {
       const title = message?.trim() ? message.trim() : `${label} confirmed.`
@@ -55,7 +51,7 @@ export function noticeForResult(label: string, result: TxResult, network: Networ
 export function noticeForError(label: string, error: unknown, network: Network): TxNotice {
   const detail = userErrorMessage(error)
   if (error instanceof SubmissionRejectedError && error.hash) {
-    return { tone: "error", title: `${label} was not accepted by the network.`, detail, hash: error.hash, url: explorerTxUrl(network, error.hash) }
+    return { tone: "error", title: `${label} was not accepted by the network.`, detail, hash: error.hash, url: explorerUrl(network, "tx", error.hash) }
   }
   return { tone: "error", title: `${label} was not sent.`, detail }
 }

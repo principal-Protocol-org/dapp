@@ -42,11 +42,57 @@ scripts/dev-stack/oracle-tick.sh                          # run this every 30 mi
   one hour; the ticks keep minting, swaps and quotes working. Rates cannot go down.
   A v2 oracle may refuse a value: `set_reference_value` then returns `false` in a successful
   transaction, and the script fails with the oracle's `last_rejection()`. It also fails on an oracle
-  with no primary source (a v1 oracle, or one never given `set_sources`).
+  with no primary source (a v1 oracle, or one never given `set_sources`). `ORACLE_TICK_MANIFEST=<path>`
+  (local only) ticks the oracle of another local deployment's manifest instead of `local.json`'s.
+
+- `feed-oracle.sh` (local only; it refuses any other network) proves the keeper's feed mode
+  (spec 0004 D-21, D-22) without touching the market. It builds the SEP-40 mock feed in
+  `tests/fixtures/sep40-mock` (`MockSep40Feed` of principal 24d980d `oracle_adapter/src/test.rs`,
+  copied verbatim, with its two SEP-40 types; `set_price` and `clear_price` take no authorization) and
+  the OracleAdapter of `PRINCIPAL_REF` (default `24d980d`, extracted with `git archive` like
+  `deploy.sh`; its wasm hash is `cf58bbd8…`). It deploys both as `principal-localdev-admin`,
+  initializes the feed with `FEED_DECIMALS` (default 8) and the oracle with `max_stale_seconds = 3600`
+  and `max_deviation_bps = 1000`, calls `set_feed_source(admin, feed, {"Other":"USDY"})`, and prints
+  `{"oracle": "C…", "feed": "C…"}` on stdout. Then:
+
+  ```bash
+  ORACLE_KEEPER_MODE=feed ORACLE_KEEPER_SECRET=<a funded key with no role> ORACLE_KEEPER_ORACLE_ID=<oracle> \
+    NEXT_PUBLIC_PRINCIPAL_NETWORK=local pnpm dev
+  stellar contract invoke --id <feed> --source principal-localdev-admin --network local -- \
+    set_price --asset '{"Other":"USDY"}' --price 100000000 --timestamp <a ledger close time>
+  curl -H "Authorization: Bearer $CRON_SECRET" http://localhost:3000/api/cron/oracle   # synced
+  ```
+
+  The mock is built with Rust 1.95.0 for `wasm32v1-none`, `soroban-sdk` 26.0.1 (24d980d's) and its
+  committed `Cargo.lock`; `tests/fixtures/sep40-mock/target/` is git-ignored. The script warns when
+  `rustc` is another version (the documented wasm hashes may then differ). A Stellar CLI call that
+  fails shows its error, with anything shaped like a secret key redacted.
+
+- `drill.sh` gives the public dashboard real history (spec 0004 D-31): one compliance recovery (a
+  throwaway account onboarded, given 10 USDY of SY and PT and YT minted from 5 SY, deauthorized on the
+  SAC by the SAC admin, then `seize_all_positions`), one oracle value over the deviation cap (simulated
+  first, it must answer `false`; it lands as `ref_rej` `deviate`), one `oracle-tick.sh`, and a
+  RiskControl pause of `DRILL_PAUSE_SECONDS` (default 15, at most 30) then unpause. Locally it signs
+  with `principal-localdev-admin` and onboards with the issuer's own steps; the throwaway key
+  (`drill-<network>-<time>-<pid>`) is removed from the keystore at the end, and an exit trap unpauses
+  RiskControl on any failure or interruption (INT, TERM, QUIT; the cleanup ignores further ones). The
+  mint is skipped, and said, when the market has matured (the dev stack's market usually has) or the
+  oracle is stale: the record then holds SY only. `DRILL_MANIFEST=<path>` (local only) runs it on
+  another local deployment, e.g. a fresh one written with `MANIFEST_OUT`, and passes it on to
+  `oracle-tick.sh` as `ORACLE_TICK_MANIFEST`. Every hash goes to stderr, and a JSON summary to stdout.
+  `DRILL_STEPS=recovery,oracle,pause` picks steps. On Testnet it is the developer's run only (the main
+  README, "The Testnet drill"): it refuses CI, an agent session, Stellar CLI overrides, overridden key
+  names and a run without a terminal, and asks for the market id before it signs.
+
+  ```bash
+  scripts/dev-stack/drill.sh                         # local, about 30 s
+  MANIFEST_OUT=/tmp/fresh.json MATURITY_SECONDS=1500 scripts/dev-stack/deploy.sh   # a market that can still mint
+  DRILL_MANIFEST=/tmp/fresh.json scripts/dev-stack/drill.sh
+  ```
 
 Outputs (both git-ignored; never commit them):
 
-- `config/manifests/local.json`: a v2 manifest (shared contracts, factory, `wasmHashes`, `routerFunctions` (every Router function the wasm exposes except the `quote_*` views), `testAsset`, one market).
+- `config/manifests/local.json`: a v2 manifest (shared contracts, factory, `wasmHashes`, `routerFunctions` (every Router function the wasm exposes except the `quote_*` views), `testAsset`, one market, and `deployLedger`).
 - `.env.local`: `NEXT_PUBLIC_PRINCIPAL_NETWORK=local`, `FAUCET_ISSUER_SECRET` (the
   `principal-localdev-admin` secret, valid on this throwaway network only) and `DATABASE_URL` for `principal-pg`.
 
@@ -73,6 +119,9 @@ and the roles are split so the server never holds the protocol admin:
 - The oracle is kept fresh by the app's `/api/cron/oracle` schedule (see the main README);
   `PRINCIPAL_NETWORK=testnet scripts/dev-stack/oracle-tick.sh` does it by hand.
 - Every run deploys a new market and overwrites `testnet.json` (or writes `MANIFEST_OUT` when set).
+- On every network the manifest's `deployLedger` is the latest ledger RPC `getLatestLedger` reports
+  before the deploy's first transaction: the event indexer starts there. The app's schema requires
+  it on Testnet and Mainnet.
 
 ### Ephemeral deploy (end-to-end suites, local experiments)
 
@@ -121,6 +170,8 @@ runs it for you). Call `GET /api/cron/record` with `Authorization: Bearer $CRON_
 | `registry.test.ts` | Market discovery and validation against the real contracts and `principal-pg`. |
 | `history.test.ts` | The history queries, and the recorder writing one snapshot of the live market to `principal-pg` (the row is deleted afterwards). |
 | `oracle.test.ts` | The OracleAdapter v2 policy read through the app's reader (the primary source id above, no fallback, no rejection, 3,600 s, 1,000 bps), and one keeper tick (`tickOracle`, behind `/api/cron/oracle`) that reports `updated`. |
+| `oracle-feed.test.ts` | The keeper's feed mode (D-21) through `/api/cron/oracle`, with a fresh key that holds no role, against `feed-oracle.sh`'s mock feed and standalone oracle: `synced` (the price rescaled from 8 to 7 decimals), `skipped` `stale_ts`, a +15 % `deviate` submitted once then not again (both answered 200), `bad_price` never submitted, `skipped` `no_data`, `not_configured` on the market's own oracle (no `feed_source`), the indexed `ref_set` and `ref_rej`, and the alert check's `oracle_rejection` and `feed_broken`. It needs `principal-pg` migrated, deletes its rows afterwards and puts the oracle index cursor back. |
+| `drill.test.ts` | `drill.sh` on the local market: it exits 0, its key is gone, RiskControl is not paused and the oracle is fresh; the index then holds, for the drill's own transactions, one `recovery`, one `ref_rej` `deviate`, the tick's `ref_set` and two RiskControl `paused` rows. A second run stopped (SIGTERM) while paused is unpaused by its trap. Its rows stay in `principal-pg`. |
 | `lifecycle.test.ts` | The full lifecycle proof of plan 0001. Skipped unless `LIFECYCLE_REDEPLOY=1`. |
 | `wizard.test.ts` | The market-creation wizard's seven steps signed on the local network, then a fresh account trading the new market. Skipped unless `WIZARD_LIVE=1`. |
 

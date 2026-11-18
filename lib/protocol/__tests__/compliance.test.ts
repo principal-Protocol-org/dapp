@@ -177,7 +177,7 @@ describe("fetchMarketCompliance", () => {
         reader({ [`${sac}.admin`]: new Error(msg), [`${sac}.identity_verifier`]: VERIFIER }),
         market,
       )
-      expect(r).toEqual({ status: "unavailable", error: msg })
+      expect(r).toMatchObject({ status: "unavailable", error: msg })
     }
   })
 

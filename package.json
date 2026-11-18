@@ -13,7 +13,13 @@
     "test:integration": "node scripts/ensure-local-manifest.mjs && vitest run --config vitest.integration.config.mts",
     "test:e2e:testnet": "node scripts/ensure-local-manifest.mjs && vitest run --config vitest.e2e-testnet.config.mts",
     "walkthrough:shots": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON tests/e2e-testnet/walkthrough-shots.ts",
-    "db:migrate": "node scripts/db-migrate.mjs"
+    "dashboard:layout": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON tests/e2e-testnet/dashboard-layout.ts",
+    "db:migrate": "node scripts/db-migrate.mjs",
+    "indexer:reindex": "node scripts/indexer.mjs reindex",
+    "indexer:clear-gap": "node scripts/indexer.mjs clear-gap",
+    "indexer:export": "node scripts/indexer.mjs export",
+    "indexer:import": "node scripts/indexer.mjs import",
+    "indexer:capture": "node --experimental-transform-types --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/indexer.mjs capture"
   },
   "dependencies": {
     "@stellar/freighter-api": "^4.1.0",

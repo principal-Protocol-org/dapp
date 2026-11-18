@@ -68,9 +68,12 @@ export function lpShare(p: { lp: bigint; totalLp: bigint; ptReserve: bigint; syR
  * yield of the whole balance (`principal_manager:514-516`). Once the YT index is frozen the oracle
  * is not needed (nor read), as in the claim gate.
  */
-export function pendingOf(ms: MarketState, account: AccountState): Live<PendingYield> {
-  const frozen = ms.ytFrozen.status === "live" && ms.ytFrozen.value
-  const oracle: Live<bigint> = frozen ? liveValue(SCALE, 0) : ms.oracleRate
+export function pendingOf(
+  ms: Pick<MarketState, "ytFrozen" | "ytAccruedIndex" | "fees" | "exchangeRate" | "oracleRate">,
+  account: Pick<AccountState, "yt" | "ytLastClaimedIndex" | "ytPendingClaim">,
+): Live<PendingYield> {
+  // Frozen: the oracle is not read; a placeholder at the is_frozen read's ledger keeps the ledger spread honest.
+  const oracle: Live<bigint> = ms.ytFrozen.status === "live" && ms.ytFrozen.value ? liveValue(SCALE, ms.ytFrozen.ledger) : ms.oracleRate
   return allLive(
     [account.yt, account.ytLastClaimedIndex, account.ytPendingClaim, ms.ytFrozen, ms.ytAccruedIndex, ms.fees.ytBps, ms.exchangeRate, oracle] as const,
     ([balance, lastClaimedIndex, pendingClaim, ytFrozen, accruedYieldIndex, ytFeeBps, exchangeRate, liveOracleRate]) =>

@@ -96,7 +96,13 @@ export type SaltRow = { factory: string; salt: string; underlying: string; phase
 type SaltEvent = Omit<SaltRow, "underlying">
 
 export type RegistryStore = {
-  rows(): Promise<RegistryRow[]>
+  /**
+   * Every row, invalid ones too (discovery, re-validation, publishing, the manager view). With
+   * `listed`, the bounded read pages use (D-26 item 1): the rows with `valid = true`, plus those
+   * pools' own rows (the seeds), so a seed whose verdict is `valid = false` stays hidden. Junk
+   * factory markets add invalid rows that this read never returns.
+   */
+  rows(opts?: { listed: string[] }): Promise<RegistryRow[]>
   /** The salts `factory` started, newest first (by the ledger of the furthest phase seen). */
   salts(factory: string): Promise<SaltRow[]>
   /** Upserts by factory and salt, keeping the furthest phase and the latest ledger. */
@@ -531,15 +537,28 @@ function saltOf(data: unknown): string | null {
   return first instanceof Uint8Array && first.length === 32 ? bytesToHex(first) : null
 }
 
+/** The pool a salt gives on this manifest's factory; null for one it cannot derive. */
+function poolOfSalt(manifest: Manifest, salt: string): string | null {
+  try {
+    return deriveMarketContracts(manifest, salt).pool
+  } catch {
+    return null
+  }
+}
+
 /**
  * One page's events as steps: the last event per pool wins, in the order of those last events. The
- * factory's events also name the salts it started, each at the furthest phase seen (spec 0002 §5).
+ * factory's events also name the salts it started, each at the furthest phase seen (spec 0002 §5),
+ * and `built` holds, by the pool each salt gives (and the pool `mkt_new` names), the earliest ledger of
+ * those events in the page.
  */
-function stepsOf(manifest: Manifest, events: RawEvent[]): { steps: Step[]; salts: SaltEvent[] } {
+function stepsOf(manifest: Manifest, events: RawEvent[]): { steps: Step[]; salts: SaltEvent[]; built: Map<string, number> } {
   const router = manifest.shared.router
   const factory = manifest.shared.factory
   const steps = new Map<string, Step>()
   const salts = new Map<string, SaltEvent>()
+  const built = new Map<string, number>()
+  const pools = new Map<string, string | null>()
   for (const e of [...events].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))) {
     if (e.inSuccessfulContractCall === false) continue
     const from = idOf(e.contractId)
@@ -566,9 +585,50 @@ function stepsOf(manifest: Manifest, events: RawEvent[]): { steps: Step[]; salts
         phase: prev && PHASE_RANK[prev.phase] > PHASE_RANK[phase] ? prev.phase : phase,
         ledger: Math.max(prev?.ledger ?? 0, e.ledger),
       })
+      if (!pools.has(salt)) pools.set(salt, poolOfSalt(manifest, salt))
+      // The pool the salt gives, and the one `mkt_new` names (the same for this factory's own events).
+      const named = topic === "mkt_new" && Array.isArray(data) && isContract(data[1]) ? data[1] : null
+      for (const pool of new Set([pools.get(salt), named])) if (pool) built.set(pool, Math.min(built.get(pool) ?? e.ledger, e.ledger))
     }
   }
-  return { steps: [...steps.values()], salts: [...salts.values()] }
+  return { steps: [...steps.values()], salts: [...salts.values()], built }
+}
+
+/**
+ * Where discovery has seen the factory build each market, by pool: its salt's `market_salts` ledger
+ * (the furthest phase seen, its `mkt_new` once built). Best effort, as the salt index itself: a failed
+ * read is logged by its code and answers none.
+ */
+async function storedBuildLedgers(store: RegistryStore, manifest: Manifest): Promise<Map<string, number>> {
+  const out = new Map<string, number>()
+  const factory = manifest.shared.factory
+  if (!factory) return out
+  try {
+    for (const row of await store.salts(factory)) {
+      const pool = poolOfSalt(manifest, row.salt)
+      if (pool) out.set(pool, Math.min(out.get(pool) ?? row.ledger, row.ledger))
+    }
+  } catch (error) {
+    console.error(`registry: the salts could not be read (${dbCode(error)}); the markets checked now get no creation ledger`)
+  }
+  return out
+}
+
+/**
+ * The market of `outcome` with the earliest ledger the factory was seen building it at
+ * (`createdLedger`, spec 0004 D-14), kept when it is already earlier. A seed never takes one: the
+ * indexer reads the seeds from `deployLedger`.
+ *
+ * The bound holds for every contract of a market made by the wizard: its pool and RecoveryEscrow are
+ * built at `mkt_new`, and its SY and manager emit nothing before someone calls them, which the
+ * wizard does only from the seed step on, after `mkt_new`. With the factory's three events in the
+ * page that names the pool, it is their first one (`mkt_tok`).
+ */
+function withCreatedLedger(outcome: Outcome, ledgers: (number | undefined)[]): Outcome {
+  const seen = ledgers.filter((l): l is number => l !== undefined)
+  if (seen.length === 0 || !outcome.market) return outcome
+  const createdLedger = Math.min(outcome.market.createdLedger ?? Infinity, ...seen)
+  return { ...outcome, market: { ...outcome.market, createdLedger } } as Outcome
 }
 
 /**
@@ -690,6 +750,7 @@ export async function discover(deps: RegistryDeps, opts: { deadline?: number } =
   const checked: string[] = []
   let rows: RegistryRow[] | null = null
   let known: Market[] = []
+  let builtBefore: Map<string, number> | null = null
   const save = (cursor: string, latestLedger: number) => store.saveCursor(name, Math.min(cursorLedger(cursor) || latestLedger, latestLedger), cursor)
 
   for (let page = 0; page < MAX_EVENT_PAGES; page++) {
@@ -724,7 +785,12 @@ export async function discover(deps: RegistryDeps, opts: { deadline?: number } =
         await store.record({ pool: step.pool, source, valid: false, reason: "Unregistered from the Router.", market: null })
       } else {
         const stored = storedMarket(rows.find((r) => r.pool === step.pool)?.market)
-        const outcome = await check(deps, step.pool, known, stored)
+        let outcome = await check(deps, step.pool, known, stored)
+        if (source !== "seed" && outcome.market) {
+          // A market built over several runs (its pool registered after the run that saw mkt_new) has its build in the salt index.
+          builtBefore ??= await storedBuildLedgers(store, manifest)
+          outcome = withCreatedLedger(outcome, [found.built.get(step.pool), builtBefore.get(step.pool)])
+        }
         // A market built in this run holds its id for the next one (R2-37 collisions).
         if (outcome.market && !known.some((m) => m.contracts.pool === step.pool)) known.push(outcome.market)
         await write(store, step.pool, source, outcome)
@@ -822,14 +888,22 @@ function currentPins(manifest: Manifest): Record<string, string> | undefined {
  * manifest's Router and oracle (a row left from another deployment is not listed). Ids are unique,
  * seeds first. A registry market carries the manifest's current pins, never stored ones: the
  * restore path trusts them (R29b, R2-40). With the database down, not configured, or slower than
- * `timeoutMs`, the seeds alone (R2-36, R2-40).
+ * `timeoutMs`, the seeds alone (R2-36, R2-40), and `fromRegistry` is false.
+ *
+ * The registry read is bounded (D-26 item 1): `where valid is true`, plus the seeds' own rows for
+ * their verdicts. Invalid rows are never read here.
  */
-export async function resolvedMarkets(deps: { store: RegistryStore; manifest: Manifest; timeoutMs?: number }): Promise<Market[]> {
+export async function listedMarkets(deps: {
+  store: RegistryStore
+  manifest: Manifest
+  timeoutMs?: number
+}): Promise<{ markets: Market[]; fromRegistry: boolean }> {
   const { store, manifest } = deps
   const seeds = manifest.markets
+  const seedPools = new Set(seeds.map((m) => m.contracts.pool))
   let rows: RegistryRow[]
   try {
-    rows = await within(store.rows(), deps.timeoutMs ?? ROWS_TIMEOUT_MS)
+    rows = await within(store.rows({ listed: [...seedPools] }), deps.timeoutMs ?? ROWS_TIMEOUT_MS)
   } catch (error) {
     if (error instanceof RegistryTimeout) console.error("registry: the markets read timed out; listing the manifest seeds")
     else if (!(error instanceof DatabaseConfigError)) console.error(`registry: markets could not be read (${dbCode(error)}); listing the manifest seeds`)
@@ -837,11 +911,10 @@ export async function resolvedMarkets(deps: { store: RegistryStore; manifest: Ma
       loggedNotConfigured = true
       console.error("registry: DATABASE_URL is not set; listing the manifest seeds")
     }
-    return seeds
+    return { markets: seeds, fromRegistry: false }
   }
   const pins = currentPins(manifest)
   const verdicts = new Map(rows.map((r) => [r.pool, r.valid]))
-  const seedPools = new Set(seeds.map((m) => m.contracts.pool))
   const listed = seeds.filter((m) => verdicts.get(m.contracts.pool) !== false)
   const ids = new Set(seeds.map((m) => m.marketId))
   for (const row of rows) {
@@ -862,7 +935,12 @@ export async function resolvedMarkets(deps: { store: RegistryStore; manifest: Ma
     if (pins) current.wasmHashes = pins
     listed.push(current)
   }
-  return listed
+  return { markets: listed, fromRegistry: true }
+}
+
+/** `listedMarkets`' list alone: what pages, the recorder, the indexer and the faucet read. */
+export async function resolvedMarkets(deps: { store: RegistryStore; manifest: Manifest; timeoutMs?: number }): Promise<Market[]> {
+  return (await listedMarkets(deps)).markets
 }
 
 /** A registry market the app does not list, with why (R2-38): this app's own words, never RPC text. */
@@ -979,9 +1057,12 @@ function dbCode(error: unknown): string {
 export async function publishMarket(deps: RegistryDeps, pool: string): Promise<Outcome> {
   const rows = await deps.store.rows()
   const stored = storedMarket(rows.find((r) => r.pool === pool)?.market)
-  const outcome = await check(deps, pool, knownMarkets(deps.manifest, rows), stored)
+  const checked = await check(deps, pool, knownMarkets(deps.manifest, rows), stored)
+  const seed = sourceFor(deps.manifest, pool) === "seed"
+  // The wizard publishes before the next discovery run: the salt index may already hold its build.
+  const outcome = checked.status === "valid" && !seed ? withCreatedLedger(checked, [(await storedBuildLedgers(deps.store, deps.manifest)).get(pool)]) : checked
   if (outcome.status === "valid") {
-    await deps.store.record({ pool, source: sourceFor(deps.manifest, pool) === "seed" ? "seed" : "published", valid: true, reason: null, market: outcome.market })
+    await deps.store.record({ pool, source: seed ? "seed" : "published", valid: true, reason: null, market: outcome.market })
   }
   return outcome
 }
@@ -1000,8 +1081,8 @@ export const resetPublishLimitsForTests = (): void => publishLimiter.reset()
 /** `market_registry`, `ingest_cursor` and `market_salts` (db/migrations 0001 to 0003) behind `RegistryStore`. */
 export function sqlRegistryStore(sql: Sql): RegistryStore {
   return {
-    async rows() {
-      const rows = await sql<{
+    async rows(opts) {
+      type Row = {
         pool: string
         market_id: string | null
         source: RegistrySource
@@ -1009,8 +1090,14 @@ export function sqlRegistryStore(sql: Sql): RegistryStore {
         reason: string | null
         market: unknown
         updated_at: Date | string | null
-      }>`
-        select pool, market_id, source, valid, reason, market, updated_at from market_registry order by market_id nulls last, pool`
+      }
+      const rows = opts
+        ? await sql<Row>`
+            select pool, market_id, source, valid, reason, market, updated_at from market_registry
+            where valid is true or pool = any(${opts.listed}::text[])
+            order by market_id nulls last, pool`
+        : await sql<Row>`
+            select pool, market_id, source, valid, reason, market, updated_at from market_registry order by market_id nulls last, pool`
       return rows.map((r) => ({
         pool: r.pool,
         marketId: r.market_id,

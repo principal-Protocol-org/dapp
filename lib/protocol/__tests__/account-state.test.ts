@@ -106,7 +106,7 @@ describe("fetchAccountState", () => {
     const table = healthy()
     table[`${c.pt}.balance`] = new Error("rpc down")
     const s = await fetchAccountState(fakeReader(table), horizonWith(trusted(true)), manifest, market.marketId, ACCOUNT, "sac")
-    expect(s.pt).toEqual({ status: "unavailable", error: "rpc down" })
+    expect(s.pt).toMatchObject({ status: "unavailable", error: "rpc down" })
     expect(s.underlying.status).toBe("live")
   })
 
@@ -186,7 +186,7 @@ describe("fetchAccountState", () => {
     table[`${sac}.identity_verifier`] = VERIFIER
     table[`${VERIFIER}.verify_identity`] = undefined
     const s = await fetchAccountState(fakeReader(table, calls), horizonWith(trusted(true)), manifest, market.marketId, ACCOUNT, "sep57")
-    expect(s.sep57).toEqual({
+    expect(s.sep57).toMatchObject({
       frozen: { status: "live", value: false, ledger: 9 },
       identityVerified: { status: "live", value: true, ledger: 9 },
     })

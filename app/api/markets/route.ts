@@ -4,7 +4,10 @@ import "server-only"
  * `/api/markets` (spec 0002 §1).
  *
  * - `GET`: the markets clients see — the manifest seeds and the valid registry rows; the seeds
- *   alone when the database is down. Read from the cached verdicts, never validated inline (R2-36).
+ *   alone when the database is down. Read from the cached verdicts, never validated inline (R2-36),
+ *   with the bounded read (`where valid is true`, D-26 item 1). Cached 60 s at the CDN
+ *   (stale-while-revalidate 300 s) when the registry answered; the seeds-only fallback and errors
+ *   are never cached.
  * - `POST { pool }`: the wizard's step 7. The pool is validated first (topology, wiring, pinned
  *   Wasm); only a valid market is written, as `published`, so it lists at the next page load. An
  *   invalid pool is 422 with the reason (this app's own words), an unverifiable one (the RPC
@@ -13,15 +16,16 @@ import "server-only"
  *   (the faucet's approach, R42/R42c).
  *
  * `connection()` keeps GET out of the build's prerender: without it a database that is down at
- * build time would bake the seeds into a static response.
+ * build time would bake the seeds into a static response. While the Mainnet manifest is the pending
+ * stub, both methods answer 503 `not_configured` (D-24).
  */
 import { StrKey } from "@stellar/stellar-sdk"
 import { connection } from "next/server"
-import { activeManifest } from "@/lib/protocol/manifest-source"
 import { createRpcReader } from "@/lib/protocol/reader"
 import { createRpcServer } from "@/lib/protocol/stellar"
 import { DatabaseConfigError, sql } from "@/lib/server/db"
-import { logOutcome, PUBLISH_WINDOW_MS, publishMarket, resolvedMarkets, sqlRegistryStore, takePublishSlot } from "@/lib/server/registry"
+import { deployedManifest } from "@/lib/server/mainnet-pending"
+import { listedMarkets, logOutcome, PUBLISH_WINDOW_MS, publishMarket, sqlRegistryStore, takePublishSlot } from "@/lib/server/registry"
 import { clientIp, isCrossSite, isJson, readBody } from "@/lib/server/request"
 
 // ~40 simulations and ledger-entry reads for one pool.
@@ -66,6 +70,9 @@ const MESSAGES: Record<ErrorCode, string> = {
   failed: "Publishing failed. Try again in a minute.",
 }
 
+/** Only a list the registry answered is cached: the seeds-only fallback and errors are not. */
+const CACHED = "public, s-maxage=60, stale-while-revalidate=300"
+
 /** The only reason an unverifiable pool gets: what the RPC said is logged, never echoed (R2-40). */
 const UNVERIFIED_REASON = "The market could not be checked right now; try again later."
 
@@ -91,12 +98,22 @@ function poolFrom(text: string): string | null {
 
 export async function GET(): Promise<Response> {
   await connection()
-  const manifest = activeManifest()
-  const markets = await resolvedMarkets({ store: sqlRegistryStore(sql), manifest })
-  return json({ markets })
+  const manifest = deployedManifest()
+  if (manifest instanceof Response) return manifest
+  // Defensive: `listedMarkets` already answers the seeds on any database failure, so only a bug can
+  // land here. It is kept so such a bug answers a fixed 500 that is never cached, without its text.
+  try {
+    const { markets, fromRegistry } = await listedMarkets({ store: sqlRegistryStore(sql), manifest })
+    return json({ markets }, 200, fromRegistry ? { "cache-control": CACHED } : {})
+  } catch (error) {
+    console.error("markets route: the list failed:", error instanceof Error ? error.name : "unknown")
+    return json({ error: "failed", message: "The markets could not be listed. Try again in a minute." }, 500)
+  }
 }
 
 export async function POST(request: Request): Promise<Response> {
+  const manifest = deployedManifest()
+  if (manifest instanceof Response) return manifest
   if (isCrossSite(request)) return refuse("cross_site")
   if (!isJson(request)) return refuse("invalid_content_type")
   const body = await readBody(request, MAX_BODY_BYTES)
@@ -106,7 +123,6 @@ export async function POST(request: Request): Promise<Response> {
   // Taken before any read: a refused request costs no RPC call.
   if (!takePublishSlot(clientIp(request), Date.now())) return refuse("rate_limited")
 
-  const manifest = activeManifest()
   try {
     const outcome = await publishMarket(
       { store: sqlRegistryStore(sql), reader: createRpcReader(manifest), rpc: createRpcServer(manifest.rpcUrl), manifest },

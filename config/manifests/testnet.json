@@ -7,6 +7,13 @@
   "friendbotUrl": "https://friendbot.stellar.org",
   "generatedAt": "2026-11-13T09:08:56Z",
   "sourceCommit": "665bb6760372d30307a1a035da24e51776f727e8",
+  "deployLedger": 5707342,
+  "oracleSources": [
+    {
+      "hash": "8f157e8dfc6b0bef22553de5a980e24fc7c7c9eacc8bccbb8df0f2cab866b3b4",
+      "preimage": "principal-oracle-source:testnet:USDY:app-team:keeper"
+    }
+  ],
   "shared": {
     "router": "CC4BQRFRQQZF5VQUHZV3PS4LSIPNNAGI3UOL3K24DZNTCHGZQ3JHQ3E2",
     "oracle": "CDYGBFGO7KD446CDTGJ7M4OWUXC7UPBGPVM5CUWP2NSNX2CKK2TYYIPS",

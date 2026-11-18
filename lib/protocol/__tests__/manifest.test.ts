@@ -1,10 +1,12 @@
 // @vitest-environment node
+import { createHash } from "node:crypto"
 import { describe, expect, it } from "vitest"
 // The interim 3 Oct 2026 Testnet file (v1), frozen as a fixture: the committed testnet.json changes with each deployment.
 import testnetJson from "@/lib/protocol/__tests__/fixtures/testnet-interim.json"
 import committedTestnetJson from "@/config/manifests/testnet.json"
 import localExample from "@/config/manifests/local.example.json"
-import { getMarket, parseManifest, validateManifest } from "../manifest"
+import mainnetJson from "@/config/manifests/mainnet.json"
+import { getMarket, MainnetPendingError, parseManifest, validateManifest } from "../manifest"
 import type { Manifest } from "../types"
 
 const testnet = (): Manifest => parseManifest(structuredClone(testnetJson))
@@ -186,5 +188,93 @@ describe("manifest v2", () => {
     expect(errors(badRouter).some((f) => f.message.includes("router"))).toBe(true)
     const badOracle = { ...m, markets: [{ ...m.markets[0], contracts: { ...m.markets[0].contracts, oracle: other } }] }
     expect(errors(badOracle).some((f) => f.message.includes("oracle"))).toBe(true)
+  })
+})
+
+describe("manifest monitoring fields", () => {
+  const base = () => structuredClone(committedTestnetJson) as Record<string, unknown>
+  const HASH = "8f157e8d" + "0".repeat(56)
+
+  it("accepts deployLedger, oracleSources and rpcFallbackUrls", () => {
+    const m = parseManifest({
+      ...base(),
+      deployLedger: 5707342,
+      oracleSources: [{ hash: HASH, preimage: "principal-oracle-source:testnet:USDY:app-team:keeper" }],
+      rpcFallbackUrls: ["https://rpc.example.org"],
+    })
+    expect(m.deployLedger).toBe(5707342)
+    expect(m.oracleSources?.[0].hash).toBe(HASH)
+    expect(m.rpcFallbackUrls).toEqual(["https://rpc.example.org"])
+    expect(errors(m)).toEqual([])
+  })
+
+  it("refuses an oracle source hash that is not 64 hex characters", () => {
+    for (const hash of ["8f157e8d", HASH + "0", "z".repeat(64)]) {
+      expect(() => parseManifest({ ...base(), oracleSources: [{ hash, preimage: "x" }] })).toThrow(/oracleSources/)
+    }
+  })
+
+  it("refuses a non-https fallback RPC off local and allows it on local", () => {
+    const bad = parseManifest({ ...base(), rpcFallbackUrls: ["http://rpc.example.org"] })
+    expect(errors(bad).some((f) => f.message.includes("rpcFallbackUrls"))).toBe(true)
+    const local = parseManifest({ ...structuredClone(localExample), rpcFallbackUrls: ["http://localhost:8001"] })
+    expect(errors(local)).toEqual([])
+  })
+
+  it("refuses a non-positive deployLedger", () => {
+    expect(() => parseManifest({ ...base(), deployLedger: 0 })).toThrow(/deployLedger/)
+  })
+
+  it("pins testnet.json: every oracle source hash is sha256 of its preimage", () => {
+    const m = parseManifest(committedTestnetJson)
+    expect(m.deployLedger).toBeGreaterThan(0)
+    expect(m.oracleSources?.length).toBeGreaterThan(0)
+    for (const s of m.oracleSources ?? []) {
+      expect(createHash("sha256").update(s.preimage).digest("hex")).toBe(s.hash)
+    }
+  })
+})
+
+describe("deployLedger off local (Task 2, carried to Task 11)", () => {
+  const base = () => structuredClone(committedTestnetJson) as Record<string, unknown>
+
+  it("refuses a testnet or mainnet manifest without deployLedger", () => {
+    const testnetFile = base()
+    delete testnetFile.deployLedger
+    expect(() => parseManifest(testnetFile)).toThrow(/deployLedger: Required on testnet/)
+    const mainnetFile: Record<string, unknown> = { ...base(), network: "mainnet", networkPassphrase: "Public Global Stellar Network ; September 2015" }
+    delete mainnetFile.deployLedger
+    expect(() => parseManifest(mainnetFile)).toThrow(/deployLedger: Required on mainnet/)
+  })
+
+  it("leaves it optional on local", () => {
+    expect(parseManifest(localExample).deployLedger).toBeUndefined()
+  })
+
+  it("the committed testnet.json carries it", () => {
+    expect(parseManifest(committedTestnetJson).deployLedger).toBe(5707342)
+  })
+})
+
+describe("the pending Mainnet stub (D-24)", () => {
+  it("is exactly { network: mainnet, pending: true } and parses to MainnetPendingError", () => {
+    expect(mainnetJson).toEqual({ network: "mainnet", pending: true })
+    expect(() => parseManifest(mainnetJson)).toThrow(MainnetPendingError)
+    expect(() => parseManifest(mainnetJson)).toThrow("Mainnet contracts are not deployed yet.")
+  })
+
+  it("refuses a pending stub that carries an address or a market", () => {
+    const withShared = { network: "mainnet", pending: true, shared: { router: "C".padEnd(56, "A") } }
+    const withMarkets = { network: "mainnet", pending: true, markets: [] }
+    const withRpc = { network: "mainnet", pending: true, rpcUrl: "https://rpc.example.org" }
+    for (const stub of [withShared, withMarkets, withRpc]) {
+      expect(() => parseManifest(stub)).toThrow(/Invalid manifest: a pending stub/)
+      expect(() => parseManifest(stub)).not.toThrow(MainnetPendingError)
+    }
+  })
+
+  it("refuses a pending stub for another network, and a full manifest that says pending", () => {
+    expect(() => parseManifest({ network: "testnet", pending: true })).toThrow(/Invalid manifest: a pending stub/)
+    expect(() => parseManifest({ ...structuredClone(committedTestnetJson), pending: false })).toThrow(/Invalid manifest: a pending stub/)
   })
 })

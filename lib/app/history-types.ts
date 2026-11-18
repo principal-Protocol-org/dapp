@@ -12,3 +12,9 @@ export type MarketHistory = {
   underlyingWindowSeconds: number | null
 }
 export type Spark = { points: Series; changePts: number | null; stale: boolean }
+
+/**
+ * The most pools one `GET /api/markets/sparks` request names: the route refuses more, and `useSparks`
+ * asks in chunks of this size (D-26 item 2).
+ */
+export const SPARKS_CHUNK = 50

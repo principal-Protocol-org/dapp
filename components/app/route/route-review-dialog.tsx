@@ -89,10 +89,14 @@ export function RouteSteps({
   )
 }
 
+/** D-26 item 4: shown above the sign button; a warning, never a blocker. */
+export const STEP_QUOTE_WARNING = "This step's quote is worse than the route preview by more than your slippage setting."
+
 /**
  * Reviewing and signing one step of a route. Opens as soon as the route is started, with the
  * whole route listed; the sign button names the step ("Sign step 1 of 3"). Closing it before
- * signing drops the unsigned review.
+ * signing drops the unsigned review. A later step whose fresh quote is worse than the route preview
+ * by more than the slippage setting says so above the sign button, which stays on.
  */
 export function RouteReviewDialog({
   title,
@@ -105,6 +109,7 @@ export function RouteReviewDialog({
   ledgerTime,
   signing,
   blockers,
+  quoteWarning = false,
   onSign,
   onClose,
 }: {
@@ -119,6 +124,8 @@ export function RouteReviewDialog({
   ledgerTime: number | null
   signing: boolean
   blockers: Blocker[]
+  /** The step's fresh quote is worse than the route preview by more than the slippage setting. */
+  quoteWarning?: boolean
   onSign(): void
   onClose(): void
 }) {
@@ -150,6 +157,11 @@ export function RouteReviewDialog({
           <p className="text-sm text-ink">Preparing step {step} with the network…</p>
         )}
         {blockers.length > 0 ? <GateList blockers={blockers} /> : null}
+        {review && quoteWarning ? (
+          <p role="status" className="rounded-lg border border-line-strong bg-surface p-3 text-sm text-ink">
+            {STEP_QUOTE_WARNING}
+          </p>
+        ) : null}
         <DialogFooter className="items-center">
           {signing ? <p className="text-sm text-ink-muted sm:mr-auto">Waiting for your wallet…</p> : null}
           <Button type="button" variant="secondary" onClick={onClose} disabled={signing}>

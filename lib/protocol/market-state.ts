@@ -53,8 +53,13 @@ export type MarketState = {
   }
   swapFeeRate: Live<bigint>
   exchangeRate: Live<bigint>
-  /** SY shares the PrincipalManager holds (`SYWrapper.balance_of(manager)`), for TVL. */
-  managerSy: Live<bigint>
+  /**
+   * `SYWrapper.total_underlying()`: underlying the SY wrapper holds. With `escrowUnderlying`, the TVL
+   * `/app` and the dashboard share (D-8, `tvlOf`).
+   */
+  syUnderlying: Live<bigint>
+  /** The underlying SAC's `balance(recoveryEscrow)`: underlying RecoveryEscrow holds after unwrapping seized positions. */
+  escrowUnderlying: Live<bigint>
   syPaused: Live<boolean>
   poolPaused: Live<boolean>
   riskPaused: Live<boolean>
@@ -93,13 +98,15 @@ function parseReserves(raw: unknown): [bigint, bigint] {
   return [toBigint(raw[0]), toBigint(raw[1])]
 }
 
-function parseSource(raw: unknown): string | null {
+/** An oracle source id (`Option<BytesN<32>>`) as hex; null for `None`. */
+export function parseSource(raw: unknown): string | null {
   if (raw === null || raw === undefined) return null
   if (raw instanceof Uint8Array && raw.length === 32) return bytesToHex(raw)
   throw new Error("source id is not 32 bytes")
 }
 
-function parseRejection(raw: unknown): OracleRejection | null {
+/** `OracleAdapter.last_rejection()`; null for `None`. */
+export function parseRejection(raw: unknown): OracleRejection | null {
   if (raw === null || raw === undefined) return null
   const o = asObject<Record<string, unknown>>(raw, "last_rejection")
   if (typeof o.reason !== "string") throw new Error("rejection reason is not a symbol")
@@ -195,7 +202,8 @@ export async function fetchMarketState(reader: ContractReader, m: Manifest, mark
     oracleRate, oracleTimestamp, oracleFresh, oracleMaxStaleSeconds,
     oracleMaxDeviationBps, oraclePrimarySource, oracleFallbackSource, oracleLastRejection, settledRate, ytFrozen, ytAccruedIndex, totalPt, totalYt,
     lpTotalSupply, tokenizationBps, ytBps, swapTierBps, protocolShareBps, exchangeRate, syPaused, poolPaused,
-    riskPaused, managerPaused, cbLimit, cbVolume, assetLimit, assetVolume, poolState, seeded, swapFeeRate, info, matured, managerSy,
+    riskPaused, managerPaused, cbLimit, cbVolume, assetLimit, assetVolume, poolState, seeded, swapFeeRate, info, matured, syUnderlying,
+    escrowUnderlying,
   ] = await Promise.all([
     big(c.oracle, "get_reference_value"),
     big(c.oracle, "get_reference_timestamp"),
@@ -231,7 +239,9 @@ export async function fetchMarketState(reader: ContractReader, m: Manifest, mark
     swapFeeChain,
     routerInfo,
     maturity,
-    big(c.sy, "balance_of", [{ type: "address", value: c.manager }]),
+    // TVL (D-8): what the SY wrapper holds plus what RecoveryEscrow holds.
+    big(c.sy, "total_underlying"),
+    big(market.underlying.sac, "balance", [{ type: "address", value: c.recoveryEscrow }]),
   ])
 
   return {
@@ -257,7 +267,8 @@ export async function fetchMarketState(reader: ContractReader, m: Manifest, mark
     fees: { tokenizationBps, ytBps, swapTierBps, protocolShareBps },
     swapFeeRate,
     exchangeRate,
-    managerSy,
+    syUnderlying,
+    escrowUnderlying,
     syPaused,
     poolPaused,
     riskPaused,

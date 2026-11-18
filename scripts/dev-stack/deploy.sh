@@ -158,6 +158,13 @@ else
   log "Reusing built contracts for $COMMIT"
 fi
 
+# The manifest's deployLedger, where the event indexer starts: the latest ledger before this deploy's
+# first transaction (set-options, the SAC, every upload and contract), so no event of it comes before.
+# Written on every network; the schema requires it off the local one.
+DEPLOY_LEDGER="$(latest_ledger)" || die "could not read the latest ledger from $RPC_URL"
+[[ "$DEPLOY_LEDGER" =~ ^[1-9][0-9]{0,9}$ ]] || die "the RPC answered an unexpected latest ledger: '$DEPLOY_LEDGER'"
+log "Deploy ledger: $DEPLOY_LEDGER"
+
 # ---------------------------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------------------------
@@ -376,7 +383,7 @@ MANIFEST_TMP="$(mktemp "$(dirname "$MANIFEST")/.manifest.XXXXXX")"
 jq -n \
   --arg passphrase "$NETWORK_PASSPHRASE" --arg rpc "$RPC_URL" --arg horizon "$HORIZON_URL" \
   --arg friendbot "$FRIENDBOT_URL" --arg generatedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  --arg commit "$COMMIT" --arg risk "$RISK_CONTROL" --arg perm "$PERMISSIONING" --arg factory "$FACTORY" \
+  --arg commit "$COMMIT" --argjson deployLedger "$DEPLOY_LEDGER" --arg risk "$RISK_CONTROL" --arg perm "$PERMISSIONING" --arg factory "$FACTORY" \
   --arg id "$MARKET_ID" --arg issuer "$ISSUER" --arg sac "$SAC" --argjson maturity "$MATURITY" --arg network "$NETWORK" \
   --arg code "$ASSET_CODE" --arg display "$ASSET_DISPLAY" --argjson fns "$ROUTER_FUNCTIONS" \
   --arg router "$ROUTER" --arg oracle "$ORACLE" --arg sy "$SY" --arg pt "$PT" --arg yt "$YT" \
@@ -384,7 +391,7 @@ jq -n \
   --argjson hashes "$HASHES_JSON" '{
     schemaVersion: 2, network: $network, networkPassphrase: $passphrase,
     rpcUrl: $rpc, horizonUrl: $horizon, friendbotUrl: $friendbot,
-    generatedAt: $generatedAt, sourceCommit: $commit,
+    generatedAt: $generatedAt, sourceCommit: $commit, deployLedger: $deployLedger,
     shared: { router: $router, oracle: $oracle, permissioning: $perm, riskControl: $risk, factory: $factory },
     wasmHashes: $hashes,
     routerFunctions: $fns,

@@ -7,6 +7,7 @@
   "friendbotUrl": "https://friendbot.stellar.org",
   "generatedAt": "2026-10-04T00:00:00Z",
   "sourceCommit": "6cf257afb588c63d694f2262d8b289d4809be8ee",
+  "deployLedger": 1,
   "shared": {
     "riskControl": "CCQKY4S4TC5G3LZIT37I5IBSSDVEZIIVPZSMCJVSOTASGKC6XKTZKLYR",
     "permissioning": "CDX64AORDY5FMDPQH633WIMNH5NBABW34UIXEDIS5E3IFWU7QFQ6YMCF"

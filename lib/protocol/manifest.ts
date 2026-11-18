@@ -51,6 +51,8 @@ const marketSchema = z.object({
   }),
   /** Optional (spec §1): the Wasm hash (hex) each contract runs, by contract name. The only trust anchor for restoring contract code (R29b). */
   wasmHashes: z.record(z.string().min(1), hexHash).optional(),
+  /** Optional, registry markets: the ledger discovery saw the factory build it at (the indexer's start for it). */
+  createdLedger: z.number().int().positive().optional(),
 })
 
 const envelope = {
@@ -61,6 +63,14 @@ const envelope = {
   friendbotUrl: z.string().url().optional(),
   generatedAt: z.string().datetime(),
   sourceCommit: z.string().min(1),
+  /** Ledger of the deployment's first contract creation: where the indexer starts. */
+  deployLedger: z.number().int().positive().optional(),
+  /** Oracle source hashes the monitor recognises: sha256(preimage) = hash. */
+  oracleSources: z
+    .array(z.object({ hash: z.string().regex(/^[0-9a-fA-F]{64}$/, "Expected a 32-byte hash in hex"), preimage: z.string().min(1) }))
+    .optional(),
+  /** RPC endpoints tried, in order, after `rpcUrl`. */
+  rpcFallbackUrls: z.array(z.string().url()).optional(),
 }
 
 const manifestSchemaV1 = z.object({
@@ -70,29 +80,55 @@ const manifestSchemaV1 = z.object({
   markets: z.array(marketSchema).min(1, "At least one market is required"),
 })
 
-export const manifestSchema = z.object({
-  schemaVersion: z.literal(2),
-  ...envelope,
-  shared: z.object({
-    router: contractId,
-    oracle: contractId,
-    permissioning: contractId,
-    riskControl: contractId,
-    factory: contractId.optional(),
-  }),
-  wasmHashes,
-  routerFunctions: z.array(z.string().min(1)),
-  testAsset: z
-    .object({
-      code: z.string().min(1).max(12),
-      issuer: accountId,
-      sac: contractId,
-      decimals: z.number().int().min(0).max(18),
-      displayName: z.string().min(1),
-    })
-    .optional(),
-  markets: z.array(marketSchema),
-})
+export const manifestSchema = z
+  .object({
+    schemaVersion: z.literal(2),
+    ...envelope,
+    shared: z.object({
+      router: contractId,
+      oracle: contractId,
+      permissioning: contractId,
+      riskControl: contractId,
+      factory: contractId.optional(),
+    }),
+    wasmHashes,
+    routerFunctions: z.array(z.string().min(1)),
+    testAsset: z
+      .object({
+        code: z.string().min(1).max(12),
+        issuer: accountId,
+        sac: contractId,
+        decimals: z.number().int().min(0).max(18),
+        displayName: z.string().min(1),
+      })
+      .optional(),
+    markets: z.array(marketSchema),
+  })
+  // The indexer starts at `deployLedger`: off the local network, a manifest without it would make
+  // the indexer guess (or read from the RPC's oldest ledger and claim no gap). Local stacks start empty.
+  .superRefine((m, ctx) => {
+    if (m.network !== "local" && m.deployLedger === undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["deployLedger"], message: `Required on ${m.network}: the ledger where the indexer starts` })
+    }
+  })
+
+/** What the app shows, and the API answers, while the Mainnet manifest is the pending stub (D-24). */
+export const MAINNET_PENDING_MESSAGE = "Mainnet contracts are not deployed yet."
+
+/**
+ * The manifest is the committed stub `{ "network": "mainnet", "pending": true }`: the contracts are
+ * not deployed yet. Pages show one clear page and the API answers 503 `not_configured`; nothing is
+ * guessed. Replacing the stub with the real manifest is the whole switch.
+ */
+export class MainnetPendingError extends Error {
+  constructor() {
+    super(MAINNET_PENDING_MESSAGE)
+    this.name = "MainnetPendingError"
+  }
+}
+
+/** The stub, and nothing else: one carrying an address, a URL or a market is refused (D-24). */
+const pendingStubSchema = z.object({ network: z.literal("mainnet"), pending: z.literal(true) }).strict()
 
 export const PASSPHRASES: Record<Network, string> = {
   local: "Standalone Network ; February 2017",
@@ -118,8 +154,18 @@ function upgradeV1(v1: z.infer<typeof manifestSchemaV1>): unknown {
   }
 }
 
-/** Accepts a v1 or v2 manifest and returns v2. */
+/**
+ * Accepts a v1 or v2 manifest and returns v2. The pending Mainnet stub throws `MainnetPendingError`;
+ * any other file with a `pending` key is refused.
+ */
 export function parseManifest(json: unknown): Manifest {
+  if (typeof json === "object" && json !== null && "pending" in json) {
+    const stub = pendingStubSchema.safeParse(json)
+    if (!stub.success) {
+      throw new Error(`Invalid manifest: a pending stub is exactly { "network": "mainnet", "pending": true } (${describe(stub.error)})`)
+    }
+    throw new MainnetPendingError()
+  }
   let input = json
   if (typeof json === "object" && json !== null && (json as { schemaVersion?: unknown }).schemaVersion === 1) {
     const v1 = manifestSchemaV1.safeParse(json)
@@ -148,6 +194,9 @@ export function validateManifest(m: Manifest): Finding[] {
   if (m.network !== "local") {
     if (!m.rpcUrl.startsWith("https://")) error(`rpcUrl must use https:// on ${m.network}.`)
     if (!m.horizonUrl.startsWith("https://")) error(`horizonUrl must use https:// on ${m.network}.`)
+    for (const url of m.rpcFallbackUrls ?? []) {
+      if (!url.startsWith("https://")) error(`rpcFallbackUrls must use https:// on ${m.network}: ${url}.`)
+    }
     if (m.friendbotUrl && !m.friendbotUrl.startsWith("https://")) {
       error(`friendbotUrl must use https:// on ${m.network}.`)
     }

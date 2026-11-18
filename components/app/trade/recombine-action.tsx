@@ -22,7 +22,7 @@ import { formatTokenAmount } from "@/lib/protocol/format"
 import { getMarket } from "@/lib/protocol/manifest"
 import type { MarketState } from "@/lib/protocol/market-state"
 import { previewRecombine, previewWithdraw } from "@/lib/protocol/previews"
-import { planRoute, type RouteRequest } from "@/lib/protocol/routes"
+import { planRoute, type RouteRequest, type StepPreview } from "@/lib/protocol/routes"
 
 /** The Quick action's menu label and dialog title: the token received is chosen in the form. */
 export const RECOMBINE_TITLE = "Recombine PT + YT"
@@ -135,6 +135,9 @@ export function RecombineAction({
   const steps = plans.length
   const exactLabel = f?.syExact ? (receive === "sy" ? "Exact (simulated)" : "Step 1 exact (simulated)") : "Indicative"
   const details = f ? detailLines(f, amount, receive, code, amountText, underlyingDecimals, note) : []
+  // D-26 item 4: step 2's withdraw is checked against the USDY this preview shows.
+  const preview: StepPreview | undefined =
+    f?.underlying !== undefined && steps >= 2 && plans[steps - 1].action === "withdraw" ? { step: steps, amount: f.underlying, token: "underlying" } : undefined
 
   return (
     <div className="grid min-w-0 gap-5">
@@ -213,6 +216,7 @@ export function RecombineAction({
         request={route.request}
         kind="recombine"
         plans={plans}
+        preview={preview}
         canStart={route.canStart}
         blockers={route.blockers}
         showStart={!matured}

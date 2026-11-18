@@ -516,7 +516,7 @@ describe("defaults come from the current market's config", () => {
 
   it("a default that cannot be read is unavailable with its reason, never a guess", async () => {
     const d = await readDefaults(tableReader({ ...answers, [`${c.config}.yt_fee_bps`]: new Error("rpc 503") }), market)
-    expect(d.ytFeeBps).toEqual({ status: "unavailable", error: "rpc 503" })
+    expect(d.ytFeeBps).toMatchObject({ status: "unavailable", error: "rpc 503" })
     const matured = { ...answers, [`${c.pool}.pool_state`]: { ...poolState, exponent: WAD, seconds_to_maturity: 0n } }
     expect((await readDefaults(tableReader(matured), market)).timeStretchYears.status).toBe("unavailable")
   })

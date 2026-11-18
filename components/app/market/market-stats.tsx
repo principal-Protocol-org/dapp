@@ -5,7 +5,7 @@ import { useMarketHistory } from "@/hooks/use-market-history"
 import { useMarketState } from "@/hooks/use-market-state"
 import { formatAmount, formatPercent } from "@/lib/protocol/format"
 import { getMarket } from "@/lib/protocol/manifest"
-import { leverage, marketTvl } from "@/lib/protocol/rates"
+import { leverage, tvlOf } from "@/lib/protocol/rates"
 import type { MarketState } from "@/lib/protocol/market-state"
 import { useManifest } from "@/components/app/manifest-provider"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -61,7 +61,8 @@ export function MarketStats({ marketId }: { marketId: string }) {
   const { decimals, code } = market.underlying
   const amount = (v: bigint) => `≈ ${formatAmount(v, decimals, 2, { group: true })} ${code}`
   const l = liquidityOf(ms)
-  const tvl = marketTvl(ms)
+  // D-8: total_underlying + RecoveryEscrow, the same TVL the dashboard shows.
+  const tvl = tvlOf(ms)
   // Developer's request: each value on one line, in a smaller type than the titles. From 900 px the
   // five stats share the row by content (the amounts need more room than "317x"); values sit at the
   // bottom so they line up when a title wraps.

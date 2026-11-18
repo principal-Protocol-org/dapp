@@ -19,3 +19,12 @@ export function formatDuration(totalSeconds: number): string {
   if (m > 0) return `${m}m ${sec}s`
   return `${sec}s`
 }
+
+/** A figure's text, plus why it could not be shown when it could not (`ReasonFigure` renders it). */
+export type FigureText = { text: string; reason?: string }
+
+/** Like `showLive`, but an unavailable read also returns why, so a row can show the reason. */
+export function showLiveReason<T>(value: Live<T> | undefined, format: (v: T) => string): FigureText {
+  if (value && value.status === "live") return { text: format(value.value) }
+  return value ? { text: UNAVAILABLE, reason: value.error } : { text: UNAVAILABLE }
+}

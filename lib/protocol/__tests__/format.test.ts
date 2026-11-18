@@ -2,6 +2,7 @@
 import { describe, expect, it } from "vitest";
 import {
   formatAmount,
+  formatAmountFixed,
   formatBps,
   formatFeeRate,
   formatGainLoss,
@@ -26,6 +27,17 @@ describe("parseDecimalToRaw", () => {
     expect(parseDecimalToRaw("1e3", 7)).toBeNull();
     expect(parseDecimalToRaw("-1", 7)).toBeNull();
     expect(parseDecimalToRaw("", 7)).toBeNull();
+  });
+});
+
+describe("formatAmountFixed", () => {
+  it("keeps every fraction digit asked for, grouped, truncated", () => {
+    expect(formatAmountFixed(2_230_113_029_038n, 7)).toBe("223,011.30");
+    expect(formatAmountFixed(1_052_000_000_000n, 7)).toBe("105,200.00");
+    expect(formatAmountFixed(19_999_999n, 7)).toBe("1.99");
+    expect(formatAmountFixed(0n, 7)).toBe("0.00");
+    expect(formatAmountFixed(1_234_567n, 7, 4)).toBe("0.1234");
+    expect(formatAmountFixed(5n, 0)).toBe("5");
   });
 });
 

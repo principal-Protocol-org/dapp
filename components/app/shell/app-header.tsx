@@ -15,6 +15,8 @@ const NAV = [
   { href: "/app", label: "Markets" },
   { href: "/app/portfolio", label: "Portfolio" },
   { href: "/app/history", label: "History" },
+  // The public, no-wallet dashboard (spec 0004 D-3); it is outside /app, so never the active link here.
+  { href: "/dashboard", label: "Dashboard" },
 ] as const
 const MANAGE = { href: "/app/manage", label: "Manage" } as const
 
@@ -38,7 +40,7 @@ export function AppHeader() {
         </Link>
         <nav
           aria-label="App"
-          className="order-last flex w-full items-center gap-5 min-[900px]:order-none min-[900px]:mr-auto min-[900px]:ml-8 min-[900px]:w-auto"
+          className="order-last flex w-full flex-wrap items-center gap-x-5 min-[900px]:order-none min-[900px]:mr-auto min-[900px]:ml-8 min-[900px]:w-auto"
         >
           {items.map(({ href, label }) => {
             const active = isActive(pathname, href)

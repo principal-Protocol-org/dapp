@@ -20,7 +20,7 @@ const mocks = vi.hoisted(() => ({
   getLedgerClock: vi.fn(),
 }))
 
-vi.mock("@/lib/protocol/manifest-source", () => ({ activeManifest: () => mocks.manifest }))  // TestnetBanner (a server component)
+vi.mock("@/lib/protocol/manifest-source", () => ({ activeManifest: () => mocks.manifest, activeNetwork: () => mocks.manifest.network })) // TestnetBanner (a server component)
 vi.mock("@/components/app/manifest-provider", () => ({ useManifest: () => mocks.manifest }))
 vi.mock("@/lib/protocol/wallet", () => ({ freighterAdapter: mocks.adapter }))
 vi.mock("@/lib/protocol/stellar", () => ({
@@ -338,13 +338,17 @@ describe("useLedgerClock", () => {
 })
 
 describe("app header", () => {
-  it("has the logo link and the three nav links", () => {
+  it("has the logo link and the four nav links, Dashboard last (spec 0004 D-3)", () => {
     render(<Providers><AppHeader /></Providers>)
     expect(screen.getByRole("link", { name: /principal home/i }).getAttribute("href")).toBe("/")
     expect(screen.getByRole("link", { name: "Markets" }).getAttribute("href")).toBe("/app")
     expect(screen.getByRole("link", { name: "Portfolio" }).getAttribute("href")).toBe("/app/portfolio")
     expect(screen.getByRole("link", { name: "History" }).getAttribute("href")).toBe("/app/history")
+    expect(screen.getByRole("link", { name: "Dashboard" }).getAttribute("href")).toBe("/dashboard")
     expect(screen.getByRole("link", { name: "Markets" }).getAttribute("aria-current")).toBe("page")
+    expect(screen.getByRole("link", { name: "Dashboard" }).getAttribute("aria-current")).toBeNull()
+    const nav = screen.getByRole("navigation", { name: "App" })
+    expect([...nav.querySelectorAll("a")].map((a) => a.textContent)).toEqual(["Markets", "Portfolio", "History", "Dashboard"])
   })
   it("never pushes its right side off screen: the row may wrap, and the nav joins it only from 900 px", () => {
     render(<Providers><AppHeader /></Providers>)
@@ -357,5 +361,7 @@ describe("app header", () => {
     expect(nav.className).toContain("order-last")
     expect(nav.className).toContain("min-[900px]:order-none")
     expect(nav.className).not.toContain("min-[700px]:order-none")
+    // Five links (with Manage) are wider than a 375 px row: they wrap instead of scrolling the page.
+    expect(nav.className).toContain("flex-wrap")
   })
 })

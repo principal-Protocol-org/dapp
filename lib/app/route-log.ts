@@ -1,6 +1,6 @@
 import { ACTION_META, type ActionId } from "@/lib/protocol/actions"
 import type { ActionOutput } from "@/lib/protocol/guards"
-import type { RouteKind, RouteRequest, StepPlan } from "@/lib/protocol/routes"
+import type { RouteKind, RouteRequest, StepPlan, StepPreview } from "@/lib/protocol/routes"
 
 /**
  * Multi-step routes started from this browser, per account (spec 0002 §4 "Progress"): a reload
@@ -38,6 +38,12 @@ export type RouteRun = {
   request: RouteRequest
   /** The plans themselves (plain data), so a reload resumes without planning again. */
   plans: StepPlan[]
+  /**
+   * What the route preview showed for a later step's output, when one step alone makes it (D-26
+   * item 4): that step's review warns when its fresh quote is worse by more than the slippage setting.
+   * Read defensively (`previewOf`): a malformed one is ignored, never a reason to skip the run.
+   */
+  preview?: StepPreview
   /** Decoded output of each confirmed step, by index; null when it could not be read. */
   outputs: (ActionOutput | null)[]
   steps: RouteStep[]

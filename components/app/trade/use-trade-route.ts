@@ -9,8 +9,8 @@ import type { AmountCheck } from "@/lib/app/amounts"
 import type { ActionInput } from "@/lib/protocol/actions"
 import { evaluateGates, type Blocker } from "@/lib/protocol/gates"
 import { preStartDraft, routePreStartBlockers } from "@/lib/protocol/route-gates"
-import type { RouteRequest, StepPlan } from "@/lib/protocol/routes"
-import { currentContractsAdapter, toRouteRequest, type PlanContext, type TradeAdapter, type TradeQuote, type TradeRequest, type TradeState } from "@/lib/protocol/trade-adapter"
+import type { RouteRequest, StepPlan, StepPreview } from "@/lib/protocol/routes"
+import { currentContractsAdapter, stepPreview, toRouteRequest, type PlanContext, type TradeAdapter, type TradeQuote, type TradeRequest, type TradeState } from "@/lib/protocol/trade-adapter"
 import type { Live } from "@/lib/protocol/types"
 import { useManifest } from "@/components/app/manifest-provider"
 
@@ -28,6 +28,12 @@ export type TradeRoute = {
   plans: StepPlan[]
   /** The adapter's figures for this trade; null while there is no amount or no market data. */
   quote: Live<TradeQuote> | null
+  /**
+   * The quote's figure for the later step that alone makes the trade's output (`stepPreview`), which
+   * `RouteFlow` logs with the run: that step's review warns when its fresh quote is worse by more than
+   * the slippage setting (D-26 item 4). Undefined for a one-step route or without a live quote.
+   */
+  preview?: StepPreview
   /**
    * The adapter's figures for the same trade at another amount, on the indicative path (no
    * simulation): what Max asks before it fills the field. Null without market data.
@@ -90,6 +96,7 @@ export function useTradeRoute({
   const lp = gate.account?.lp
   const held = lp?.status === "live" ? { heldLp: lp.value } : {}
   const quote = ms && trade.amount > 0n ? adapter.quote(trade, { ms, slippageBps, plans, ...held, ...(firstStep ? { firstStep } : {}) }) : null
+  const preview = quote?.status === "live" ? stepPreview(trade, quote.value, plans) : undefined
   const quoteFor = (amount: bigint): Live<TradeQuote> | null => {
     if (!ms) return null
     const at = { ...trade, amount }
@@ -102,6 +109,7 @@ export function useTradeRoute({
     request: start.request,
     plans,
     quote,
+    ...(preview ? { preview } : {}),
     quoteFor,
     sim,
     blockers: start.blockers,

@@ -9,7 +9,7 @@ import { useMarketStates } from "@/hooks/use-market-state"
 import { useManifest } from "@/components/app/manifest-provider"
 import { aprToApy } from "@/lib/protocol/math"
 import { formatAmount, formatPercent } from "@/lib/protocol/format"
-import { leverage, marketTvl } from "@/lib/protocol/rates"
+import { leverage, tvlOf } from "@/lib/protocol/rates"
 import type { MarketState } from "@/lib/protocol/market-state"
 import type { Manifest, Market } from "@/lib/protocol/types"
 import { Badge } from "@/components/ui/badge"
@@ -162,8 +162,9 @@ function LiquidityTvl({
   )
 }
 
-function tvlOf(ms: MarketState) {
-  const t = marketTvl(ms)
+/** TVL (D-8, `tvlOf`: total_underlying + RecoveryEscrow), as this list shows it. */
+function tvlFigure(ms: MarketState) {
+  const t = tvlOf(ms)
   return t.status === "live" ? ({ kind: "value", value: t.value } as const) : ({ kind: "unavailable" } as const)
 }
 
@@ -272,7 +273,7 @@ function MaturityRow({
       {ms ? (
         <>
           <Cell label="Liquidity / TVL">
-            <LiquidityTvl liquidity={liquidityOf(ms)} tvl={tvlOf(ms)} decimals={decimals} unit={unit} />
+            <LiquidityTvl liquidity={liquidityOf(ms)} tvl={tvlFigure(ms)} decimals={decimals} unit={unit} />
           </Cell>
           <Cell label="Underlying APY (7 d)" className="font-mono tabular-nums">
             <UnderlyingApy pool={market.contracts.pool} />
@@ -369,14 +370,15 @@ function AssetGroup({
   ledgerTime: number | null
   clockLoading: boolean
   defaultOpen: boolean
-  sparks: { map: Record<string, Spark> | undefined; isPending: boolean; failed: boolean }
+  /** `failed`: every pool's sparks failed (the whole read), else only those in `failedPools` (their chunk). */
+  sparks: { map: Record<string, Spark> | undefined; isPending: boolean; failed: boolean; failedPools: ReadonlySet<string> }
 }) {
   const [open, setOpen] = useState(defaultOpen)
   const listId = useId()
   const states = slots.map((s) => (s.stale ? undefined : s.data))
   const loading = slots.some((s) => s.isPending && s.data === undefined)
   const liquidity = total(states.map((ms) => (ms ? liquidityOf(ms) : undefined)))
-  const tvl = total(states.map((ms) => (ms ? tvlOf(ms) : undefined)))
+  const tvl = total(states.map((ms) => (ms ? tvlFigure(ms) : undefined)))
   const liveStates = states.filter((ms): ms is MarketState => ms !== undefined && isLive(ms, ledgerTime))
   const bestLev = best(liveStates.map(leverageOf))
   const bestApy = best(liveStates.map((ms) => fixedApyOf(ms, ledgerTime)))
@@ -441,7 +443,11 @@ function AssetGroup({
               slot={slots[i]}
               ledgerTime={ledgerTime}
               clockLoading={clockLoading}
-              sparks={{ spark: sparks.map?.[market.contracts.pool], isPending: sparks.isPending, failed: sparks.failed }}
+              sparks={{
+                spark: sparks.map?.[market.contracts.pool],
+                isPending: sparks.isPending,
+                failed: sparks.failed || sparks.failedPools.has(market.contracts.pool),
+              }}
             />
           ))}
         </ul>
@@ -449,6 +455,8 @@ function AssetGroup({
     </li>
   )
 }
+
+const NO_POOLS: ReadonlySet<string> = new Set()
 
 export function MarketGroups() {
   const manifest = useManifest()
@@ -478,7 +486,12 @@ export function MarketGroups() {
             ledgerTime={ledgerTime}
             clockLoading={clockLoading}
             defaultOpen={groups.length === 1}
-            sparks={{ map: sparks.data?.sparks, isPending: sparks.isPending && sparks.fetchStatus !== "idle", failed: sparks.isError }}
+            sparks={{
+              map: sparks.data?.sparks,
+              isPending: sparks.isPending && sparks.fetchStatus !== "idle",
+              failed: sparks.isError,
+              failedPools: sparks.data?.failed ?? NO_POOLS,
+            }}
           />
         ))}
       </ul>
