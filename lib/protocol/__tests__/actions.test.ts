@@ -2,7 +2,8 @@
 import { describe, expect, it } from "vitest"
 import testnetJson from "@/lib/protocol/__tests__/fixtures/testnet-interim.json"
 import { parseManifest } from "../manifest"
-import { ACTION_META, invocationFor, type ActionId, type ActionInput } from "../actions"
+import { abiSecondaryAmount, ACTION_META, invocationFor, STALE_PLAN, type ActionId, type ActionInput } from "../actions"
+import { previewDeposit, previewMint } from "../previews"
 import type { ScArg } from "../stellar"
 
 const m = parseManifest(structuredClone(testnetJson))
@@ -145,5 +146,94 @@ describe("invocationFor", () => {
     expect(ACTION_META.sell_pt_underlying).toEqual({ label: "Sell PT", ...sensitive, tab: "trade" })
     expect(ACTION_META.sell_yt_underlying).toEqual({ label: "Sell YT", ...sensitive, tab: "trade" })
     expect(ACTION_META.add_liquidity_keep_yt).toEqual({ label: "Add liquidity, keep YT", ...sensitive, tab: "liquidity" })
+  })
+
+  it("on version 1 a second amount on mint, buy_pt_underlying or buy_yt is not signed", () => {
+    expect(invocationFor(m, base("mint", { secondaryAmount: 100n })).args).toEqual([from, p, i(100n), i(90n), DL])
+    expect(invocationFor(m, base("buy_pt_underlying", { secondaryAmount: 100n })).args).toEqual([from, p, i(100n), i(90n), DL])
+    expect(invocationFor(m, base("buy_yt", { secondaryAmount: 95n })).args).toEqual([from, p, i(100n), i(90n), i(70n), DL])
+  })
+})
+
+/** The same deployment declared on the contracts at principal 3af9388 (plan 0009, M-5). */
+const m2 = { ...m, protocolAbi: 2 as const }
+
+describe("invocationFor on protocolAbi 2 (principal 3af9388)", () => {
+  const table: [ActionId, string, ScArg[], Partial<ActionInput>][] = [
+    // wrap_and_mint(from, pool, amount, sy_in, min_pt_out, deadline)
+    ["mint", "wrap_and_mint", [from, p, i(100n), i(100n), i(90n), DL], { secondaryAmount: 100n }],
+    // swap_underlying_for_pt(from, pool, underlying_amount, sy_in, min_pt_out, deadline)
+    ["buy_pt_underlying", "swap_underlying_for_pt", [from, p, i(100n), i(100n), i(90n), DL], { secondaryAmount: 100n }],
+    // swap_sy_for_yt(from, pool, sy_in, pt_in, min_yt_out, max_net_cost, deadline)
+    ["buy_yt", "swap_sy_for_yt", [from, p, i(100n), i(95n), i(90n), i(70n), DL], { secondaryAmount: 95n }],
+  ]
+
+  it("the three changed Router calls take the literal in the middle of their list", () => {
+    for (const [action, functionName, args, extra] of table) {
+      expect(invocationFor(m2, base(action, extra))).toEqual({ contractId: router, functionName, args })
+    }
+  })
+
+  it("each of the three without its literal is refused: a plan from before the upgrade is started again", () => {
+    for (const [action] of table) {
+      expect(() => invocationFor(m2, base(action))).toThrow(STALE_PLAN)
+    }
+    expect(STALE_PLAN).toBe("This trade was prepared for an older version of the contracts. Start it again.")
+  })
+
+  it("every other action keeps its version-1 argument list", () => {
+    const changed = new Set(table.map((r) => r[0]))
+    const extras: Partial<Record<ActionId, Partial<ActionInput>>> = {
+      add_liquidity: { secondaryAmount: 55n },
+      add_liquidity_keep_yt: { secondaryAmount: 55n, desired: { pt: 40n, sy: 15n } },
+      buy_yt_flash: { secondaryAmount: 60n },
+      buy_yt_flash_underlying: { secondaryAmount: 60n },
+      add_liquidity_underlying: { secondaryAmount: 60n },
+    }
+    for (const action of Object.keys(ACTION_META) as ActionId[]) {
+      if (changed.has(action)) continue
+      expect(invocationFor(m2, base(action, extras[action]))).toEqual(invocationFor(m, base(action, extras[action])))
+    }
+  })
+})
+
+describe("abiSecondaryAmount", () => {
+  const r = { exchangeRate: 10_000_000n, oracleRate: 10_500_000n, tokenizationFeeBps: 5n }
+
+  it("on version 1 there is none, for any action", () => {
+    for (const action of Object.keys(ACTION_META) as ActionId[]) expect(abiSecondaryAmount(m, action, 100n, r)).toBeUndefined()
+  })
+
+  it("mint and buy_pt_underlying sign the SY the deposit gives: amount at an exchange rate of 1", () => {
+    expect(abiSecondaryAmount(m2, "mint", 1_234n, r)).toBe(1_234n)
+    expect(abiSecondaryAmount(m2, "buy_pt_underlying", 1_234n, r)).toBe(1_234n)
+  })
+
+  it("follows the exchange rate, floored as SYWrapper.deposit floors it", () => {
+    const at = { ...r, exchangeRate: 12_500_000n }
+    expect(abiSecondaryAmount(m2, "mint", 10n, at)).toBe(8n)
+    expect(abiSecondaryAmount(m2, "buy_pt_underlying", 10n, at)).toBe(previewDeposit(10n, 12_500_000n))
+  })
+
+  it("buy_yt signs the PT minting sy_in yields after the fee", () => {
+    const syIn = 1_000_000_000n
+    expect(abiSecondaryAmount(m2, "buy_yt", syIn, r)).toBe(previewMint(syIn, r.oracleRate, r.tokenizationFeeBps).pt)
+  })
+
+  it("to-verify 4: the pt_in never exceeds what the mint gives, at the quoted rate or any later one", () => {
+    // The oracle value never decreases; PrincipalManager.mint rounds exactly as previewMint does.
+    for (const syIn of [1n, 7n, 999n, 1_000_000_000n, 123_456_789_012n]) {
+      const quoted = abiSecondaryAmount(m2, "buy_yt", syIn, r)!
+      for (const later of [r.oracleRate, r.oracleRate + 1n, 11_000_000n]) {
+        expect(quoted).toBeLessThanOrEqual(previewMint(syIn, later, r.tokenizationFeeBps).pt)
+      }
+    }
+  })
+
+  it("no other action signs one", () => {
+    for (const action of Object.keys(ACTION_META) as ActionId[]) {
+      if (action === "mint" || action === "buy_pt_underlying" || action === "buy_yt") continue
+      expect(abiSecondaryAmount(m2, action, 100n, r)).toBeUndefined()
+    }
   })
 })

@@ -555,3 +555,114 @@ describe("a later step's fresh quote against the route preview (D-26 item 4)", (
     expect(worse({ kind: "remove_liquidity", pt: 1n, sy: 1n }, { preview: { ...preview, token: "sy" }, action: "remove_liquidity" })).toBe(false)
   })
 })
+
+describe("protocolAbi 2 (principal 3af9388): the literal each changed Router call signs, in secondaryAmount", () => {
+  const XR = 12_500_000n
+  const abi2: RouteContext = { ...ctx, protocolAbi: 2, exchangeRate: XR, buyYt: { syIn: 90n, depositUnderlying: 95n, ptIn: 88n } }
+  const ONE: RouteContext = { ...abi2, routerFunctions: ["swap_underlying_for_pt"] }
+  const plan = (r: RouteRequest, c: RouteContext) => {
+    const p = planRoute(r, c)
+    if ("disabled" in p) throw new Error(p.disabled)
+    return p
+  }
+  const value = (v: bigint) => ({ from: "value", value: v })
+
+  it("the split's mint step and the one-step Buy PT carry the SY their deposit gives, previewDeposit(amount, exchangeRate)", () => {
+    const sy = previewDeposit(base.amount, XR)
+    expect(sy).toBe(80n)
+    expect(plan({ ...base, kind: "split" }, abi2)).toEqual([{ action: "mint", amount: { from: "input" }, secondaryAmount: value(sy), gives: "USDY", takes: "PT + YT" }])
+    expect(plan({ ...base, kind: "buy_pt" }, ONE)).toEqual([
+      { action: "buy_pt_underlying", amount: { from: "input" }, secondaryAmount: value(sy), gives: "USDY", takes: "PT" },
+    ])
+    const r = { ...base, kind: "split" as const }
+    expect(resolveStep(plan(r, abi2)[0], r, [])).toEqual({ amount: 100n, secondaryAmount: sy })
+  })
+
+  it("on version 1 (absent or 1) neither carries one: the plans are as before", () => {
+    for (const protocolAbi of [undefined, 1] as const) {
+      const c: RouteContext = { ...abi2, protocolAbi }
+      expect(plan({ ...base, kind: "split" }, c)).toEqual([{ action: "mint", amount: { from: "input" }, gives: "USDY", takes: "PT + YT" }])
+      expect(plan({ ...base, kind: "buy_pt" }, { ...c, routerFunctions: ["swap_underlying_for_pt"] })).toEqual([
+        { action: "buy_pt_underlying", amount: { from: "input" }, gives: "USDY", takes: "PT" },
+      ])
+      expect(plan({ ...base, kind: "lp_keep_yt" }, c)[0]).toEqual({ action: "mint", amount: value(40n), gives: "USDY", takes: "PT + YT" })
+      for (const s of plan({ ...base, kind: "buy_yt" }, c)) expect(s.secondaryAmount).toBeUndefined()
+      expect(plan({ ...base, kind: "buy_yt" }, c)).toEqual(plan({ ...base, kind: "buy_yt" }, ctx))
+    }
+  })
+
+  it("Keep YT's multi-step mint signs the SY of its own part of the payment", () => {
+    const [mint, dep, add] = plan({ ...base, kind: "lp_keep_yt" }, abi2)
+    expect(mint).toEqual({ action: "mint", amount: value(40n), secondaryAmount: value(previewDeposit(40n, XR)), gives: "USDY", takes: "PT + YT" })
+    expect(dep.secondaryAmount).toBeUndefined()
+    expect(add).toMatchObject({ action: "add_liquidity", amount: { from: "step", index: 0, field: "pt_minted" }, secondaryAmount: { from: "step", index: 1, field: "value" } })
+  })
+
+  it("the multi-step Buy YT signs sy_in as its amount and the PT its mint gives (pt_in) as the second amount", () => {
+    const [, buy] = plan({ ...base, kind: "buy_yt" }, abi2)
+    expect(buy).toMatchObject({ action: "buy_yt", amount: value(90n), secondaryAmount: value(88n) })
+    const [only] = plan({ ...base, kind: "buy_yt", pay: "sy" }, abi2)
+    expect(only).toMatchObject({ action: "buy_yt", amount: value(90n), secondaryAmount: value(88n) })
+    // The deposit check before the buy is unchanged.
+    expect(() => resolveStep(buy, base, [{ kind: "amount", value: 89n }])).toThrow(/less SY/)
+    expect(resolveStep(buy, base, [{ kind: "amount", value: 90n }])).toEqual({ amount: 90n, secondaryAmount: 88n })
+  })
+
+  it("without the reads a literal needs, the plan is disabled with a plain reason, never built without it", () => {
+    const noRate: RouteContext = { ...abi2, exchangeRate: undefined }
+    expect(planRoute({ ...base, kind: "split" }, noRate)).toEqual({ disabled: expect.stringMatching(/SY exchange rate/) })
+    expect(planRoute({ ...base, kind: "lp_keep_yt" }, noRate)).toEqual({ disabled: expect.stringMatching(/SY exchange rate/) })
+    expect(planRoute({ ...base, kind: "buy_pt" }, { ...noRate, routerFunctions: ["swap_underlying_for_pt"] })).toEqual({
+      disabled: expect.stringMatching(/SY exchange rate/),
+    })
+    expect(planRoute({ ...base, kind: "buy_yt" }, { ...abi2, buyYt: { syIn: 90n, depositUnderlying: 95n } })).toEqual({ disabled: expect.stringMatching(/PT/) })
+    // A route with none of the three actions needs neither.
+    expect(planRoute({ ...base, kind: "buy_pt" }, noRate)).toEqual(planRoute({ ...base, kind: "buy_pt" }, ctx))
+    expect(planRoute({ ...base, kind: "sell_pt" }, noRate)).toEqual(planRoute({ ...base, kind: "sell_pt" }, ctx))
+  })
+
+  it("the holdings of an interrupted route read the amount, never the literal: the same as on version 1", () => {
+    const S = 10_000_000n
+    const scaled = { routerFunctions: [], exchangeRate: XR, buyYt: { syIn: 90n * S, depositUnderlying: 95n * S, ptIn: 88n * S }, keepYtSplit: { mintUnderlying: 40n * S, depositUnderlying: 60n * S } }
+    const keep = { ...base, kind: "lp_keep_yt" as const }
+    const keepOuts: ActionOutput[] = [
+      { kind: "mint", pt_minted: 40n * S, yt_minted: 40n * S, fee_shares: 1n },
+      { kind: "amount", value: 59n * S },
+    ]
+    const v1 = routeHoldings(keep, plan(keep, scaled), keepOuts, 2)
+    expect(routeHoldings(keep, plan(keep, { ...scaled, protocolAbi: 2 }), keepOuts, 2)).toEqual(v1)
+    expect(v1).toEqual({ pt: 40n * S, yt: 40n * S, sy: 59n * S })
+    const buyYt = { ...base, kind: "buy_yt" as const }
+    const ytOuts: ActionOutput[] = [
+      { kind: "amount", value: 92n * S },
+      { kind: "buy_yt", yt_out: 40n * S, sy_back: 85n * S },
+    ]
+    expect(routeHoldings(buyYt, plan(buyYt, { ...scaled, protocolAbi: 2 }), ytOuts, 2)).toEqual({ yt: 40n * S, sy: 87n * S })
+    const split = { ...base, kind: "split" as const, amount: 100n * S }
+    const splitOut: ActionOutput[] = [{ kind: "mint", pt_minted: 79n * S, yt_minted: 79n * S, fee_shares: 1n }]
+    expect(routeHoldings(split, plan(split, { ...scaled, protocolAbi: 2 }), splitOut, 1)).toEqual({ pt: 79n * S, yt: 79n * S })
+  })
+
+  it("the plans stay serializable data", () => {
+    const enc = (v: unknown) => JSON.stringify(v, (_, x) => (typeof x === "bigint" ? { $big: String(x) } : x))
+    const dec = (j: string) => JSON.parse(j, (_, x) => (x && typeof x === "object" && "$big" in x ? BigInt(x.$big) : x))
+    for (const kind of ["buy_pt", "buy_yt", "lp_keep_yt", "split"] as const) {
+      const p = plan({ ...base, kind }, abi2)
+      expect(dec(enc(p))).toEqual(p)
+    }
+  })
+
+  it("each step's call is the version-2 argument list", () => {
+    const m2 = { ...m, protocolAbi: 2 as const }
+    const call = (s: StepPlan, r: RouteRequest) => {
+      const a = resolveStep(s, r, [{ kind: "amount", value: 90n }])
+      return invocationFor(m2, { action: s.action, marketId: market.marketId, source: "GCWFJKLE45TMVZS42TMIYKAORKGBWE74753YPOSCC5ESJR2G2UMBXBDB", ...a, guards: { minOut: 1n, maxNetCost: 1n }, deadline: 1n })
+    }
+    const split = { ...base, kind: "split" as const }
+    expect(call(plan(split, abi2)[0], split).args).toHaveLength(6)
+    const buy = { ...base, kind: "buy_pt" as const }
+    expect(call(plan(buy, ONE)[0], buy).args).toHaveLength(6)
+    const yt = { ...base, kind: "buy_yt" as const }
+    expect(call(plan(yt, abi2)[1], yt).args).toHaveLength(7)
+  })
+})

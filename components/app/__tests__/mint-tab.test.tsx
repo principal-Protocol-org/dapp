@@ -1,7 +1,7 @@
 import { screen, within } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { ActionInput } from "@/lib/protocol/actions"
-import { accountState, live, marketState } from "./fixtures"
+import { accountState, down, live, marketState } from "./fixtures"
 
 const mocks = await vi.hoisted(async () => (await import("./panel-mocks")).createPanelMocks())
 
@@ -28,8 +28,8 @@ vi.mock("@/lib/protocol/review", async (orig) => ({
   executeRestore: mocks.executeRestore,
 }))
 
-import { A, MARKET } from "./panel-mocks"
-import { disconnect, enter, gateList, installDefaults, renderUi, reviewButton, simulateReturns, teardown, tipOf, valueIn } from "./panel-harness"
+import { A, MANIFEST, MARKET } from "./panel-mocks"
+import { disconnect, enter, gateList, installDefaults, renderUi, reviewButton, settle, simulateReturns, teardown, tipOf, user, valueIn } from "./panel-harness"
 import { ActionPanel } from "../actions/action-panel"
 import { depositPanel, mintPanel, withdrawPanel } from "../actions/mint-tab"
 
@@ -52,7 +52,10 @@ function input(action: ActionInput["action"], amount: bigint): ActionInput {
   return { action, marketId: "m1", source: A, amount, guards: {}, deadline: 0n }
 }
 
-beforeEach(() => installDefaults(mocks))
+beforeEach(() => {
+  installDefaults(mocks)
+  mocks.manifest = MANIFEST
+})
 afterEach(teardown)
 
 describe("Deposit panel", () => {
@@ -202,6 +205,60 @@ describe("Split panel (mint PT + YT from the underlying)", () => {
     expect(valueIn("Market (indicative)", "Circuit breaker, protocol-wide")).toBe("200.0000 STA of 150.0000 STA left")
     expect(within(gateList()).getByText(/circuit breaker.*counts twice/)).toBeTruthy()
     expect(reviewButton("Mint PT + YT").disabled).toBe(true)
+  })
+})
+
+describe("Split panel on protocolAbi 2 (principal 3af9388): wrap_and_mint signs sy_in", () => {
+  const fees5bps = { tokenizationBps: live(5n), ytBps: live(0n), swapTierBps: live(0n), protocolShareBps: live(0n) }
+  const minted = { pt_minted: 839_580_000n, yt_minted: 839_580_000n, fee_shares: 400_000n }
+  const abi2 = () => {
+    mocks.manifest = { ...MANIFEST, protocolAbi: 2 } as typeof mocks.manifest
+  }
+
+  it("simulates and signs the SY the deposit gives, worked out from the exchange rate (previewDeposit)", async () => {
+    abi2()
+    mocks.accounts[A] = funded()
+    mocks.fetchMarketState.mockResolvedValue(marketState({ fees: fees5bps, exchangeRate: live(12_500_000n) }))
+    simulateReturns(mocks, minted)
+    await renderUi(<ActionPanel config={MINT} marketId="m1" />)
+    await enter("STA to mint with", "100")
+    const { invocation } = mocks.simulateInvocation.mock.calls.at(-1)![0]
+    expect(invocation.functionName).toBe("wrap_and_mint")
+    // (from, pool, amount, sy_in, min_pt_out, deadline): 100 STA at 1.25 STA per SY is 80 SY.
+    expect(invocation.args).toHaveLength(6)
+    expect(invocation.args[2]).toEqual({ type: "i128", value: STA_100 })
+    expect(invocation.args[3]).toEqual({ type: "i128", value: 800_000_000n })
+    expect(reviewButton("Mint PT + YT").disabled).toBe(false)
+    await user().click(reviewButton("Mint PT + YT"))
+    await settle()
+    const { input } = mocks.prepareReview.mock.calls[0][0] as { input: ActionInput }
+    expect(input).toMatchObject({ action: "mint", amount: STA_100, secondaryAmount: 800_000_000n })
+    // The preview the user reads is unchanged: the same give and get lines as on version 1.
+    expect(valueIn("Exact (simulated)", "You receive")).toBe("83.9580 PT + 83.9580 YT")
+  })
+
+  it("without a read the sy_in needs, nothing is simulated and signing stays off, with the reason", async () => {
+    abi2()
+    mocks.accounts[A] = funded()
+    mocks.fetchMarketState.mockResolvedValue(marketState({ exchangeRate: down() }))
+    simulateReturns(mocks, minted)
+    await renderUi(<ActionPanel config={MINT} marketId="m1" />)
+    await enter("STA to mint with", "100")
+    expect(mocks.simulateInvocation).not.toHaveBeenCalled()
+    expect(within(gateList()).getByText(/Could not read the SY exchange rate \(rpc down\)/)).toBeTruthy()
+    expect(reviewButton("Mint PT + YT").disabled).toBe(true)
+  })
+
+  it("on version 1 the split signs as before, and an unread exchange rate does not stop its simulation", async () => {
+    mocks.accounts[A] = funded()
+    mocks.fetchMarketState.mockResolvedValue(marketState({ fees: fees5bps, exchangeRate: down() }))
+    simulateReturns(mocks, minted)
+    await renderUi(<ActionPanel config={MINT} marketId="m1" />)
+    await enter("STA to mint with", "100")
+    const { invocation } = mocks.simulateInvocation.mock.calls.at(-1)![0]
+    expect(invocation.functionName).toBe("wrap_and_mint")
+    expect(invocation.args).toHaveLength(5)
+    expect(invocation.args[2]).toEqual({ type: "i128", value: STA_100 })
   })
 })
 

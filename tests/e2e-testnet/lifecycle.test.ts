@@ -50,13 +50,13 @@ vi.mock("server-only", () => ({}))
 
 import { derive, ratesFrom } from "@/hooks/use-simulation"
 import { fetchAccountState, type AccountState, type ComplianceKind } from "@/lib/protocol/account-state"
-import { invocationFor, type ActionInput } from "@/lib/protocol/actions"
+import { abiSecondaryAmount, invocationFor, signsAbiSecondary, type ActionInput } from "@/lib/protocol/actions"
 import { evaluateAccountCompliance } from "@/lib/protocol/compliance"
 import { errorMessage } from "@/lib/protocol/errors"
 import { evaluateGates, type Blocker } from "@/lib/protocol/gates"
 import { openGuards, type ActionOutput } from "@/lib/protocol/guards"
 import { createHorizon } from "@/lib/protocol/horizon"
-import { parseManifest, validateManifest } from "@/lib/protocol/manifest"
+import { parseManifest, protocolAbi, validateManifest } from "@/lib/protocol/manifest"
 import { fetchMarketState } from "@/lib/protocol/market-state"
 import { SCALE } from "@/lib/protocol/math"
 import { previewDeposit } from "@/lib/protocol/previews"
@@ -67,7 +67,7 @@ import type { TradeRequest } from "@/lib/protocol/trade-adapter"
 import type { Finding, Live, Manifest, Market } from "@/lib/protocol/types"
 import { pendingYield } from "@/lib/protocol/yield"
 import { nextReferenceValue } from "@/lib/server/oracle-keeper"
-import { createRunner, DEADLINE_SECONDS, live, runTrade, SLIPPAGE_BPS, type Runner, type StepRecord, type TradeRun } from "../integration/route-runner"
+import { abiReads, createRunner, DEADLINE_SECONDS, live, runTrade, SLIPPAGE_BPS, type Runner, type StepRecord, type TradeRun } from "../integration/route-runner"
 import {
   finalizeRecord,
   oracleSetSafetyParams,
@@ -464,8 +464,10 @@ describe("Suite B: the ephemeral lifecycle on a throwaway Testnet market (plan 0
     return { what: draft.action, account, ledger: clock.sequence, ledgerTime: Math.floor(clock.now()), simulatedLedger, blockers, simulation }
   }
 
-  const draftFor = async (who: Who, action: ActionInput["action"], amount: bigint, secondaryAmount?: bigint): Promise<ActionInput> => {
+  const draftFor = async (who: Who, action: ActionInput["action"], amount: bigint, given?: bigint): Promise<ActionInput> => {
     const ms = await fetchMarketState(reader(), manifest, market.marketId)
+    // A version-2 mint, buy_pt_underlying or buy_yt signs its literal, worked out as the app does it.
+    const secondaryAmount = given ?? (signsAbiSecondary(manifest, action) ? abiSecondaryAmount(manifest, action, amount, abiReads(ms)) : undefined)
     return {
       action,
       marketId: market.marketId,
@@ -628,7 +630,9 @@ describe("Suite B: the ephemeral lifecycle on a throwaway Testnet market (plan 0
       for (const k of ["pt", "yt", "lp"] as const) expect(dep.b1[k] - dep.b0[k], `${who} deposit: ${k} moved`).toBe(0n)
 
       const req: RouteRequest = { kind: "split", marketId: market.marketId, source: accountOf(who), amount: split, pay: "underlying", receive: "sy", matured: false }
-      const plans = planRoute(req, { routerFunctions: manifest.routerFunctions ?? [] })
+      // A version-2 split signs the SY its deposit gives (`sy_in`), from the exchange rate the panel reads.
+      const xr = live((await fetchMarketState(reader(), manifest, market.marketId)).exchangeRate, "SY exchange rate")
+      const plans = planRoute(req, { routerFunctions: manifest.routerFunctions ?? [], protocolAbi: protocolAbi(manifest), exchangeRate: xr })
       if (!Array.isArray(plans)) throw new Error(plans.disabled)
       expect(plans.map((p) => p.action)).toEqual(["mint"])
       const mint = await quickAction(who, "split", req, plans)

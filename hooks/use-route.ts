@@ -460,6 +460,10 @@ export function useRoute(opts: UseRouteOptions): RouteControls {
           guards: openGuards(plan.action, amounts.amount, rates),
           deadline: BigInt(ledgerAt + latest.current.deadlineSeconds),
         }
+        // The call this manifest's contracts take, built before anything is simulated: a plan logged
+        // before the version-2 arguments (a step without its `sy_in` or `pt_in`) stops here with the
+        // reason, and nothing is sent with the wrong argument count (plan 0009, Review Focus 1).
+        invocationFor(latest.current.manifest, draft)
         const outcome = await simulate(latest.current.manifest, draft)
         if (!live(g)) return
         const restore =

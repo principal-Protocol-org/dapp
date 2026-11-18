@@ -4,7 +4,7 @@ import type { AccountState } from "@/lib/protocol/account-state"
 import type { ActionId, ActionInput, GuardValues } from "@/lib/protocol/actions"
 import type { ActionOutput } from "@/lib/protocol/guards"
 import type { MarketState } from "@/lib/protocol/market-state"
-import type { Live } from "@/lib/protocol/types"
+import type { Live, Manifest } from "@/lib/protocol/types"
 
 export type { FieldKey }
 
@@ -64,6 +64,12 @@ export type ResultContext = { input: ActionInput }
 export type FloorSpec = { label: string; unit: string }
 
 /**
+ * A second amount the call signs that no field gives (`PanelConfig.signedSecondary`): the amount, none
+ * (`amount` absent), or `missing`, the reason it cannot be worked out now (a read it needs failed).
+ */
+export type SignedSecondary = { amount?: bigint } | { missing: string }
+
+/**
  * One action panel (Tasks 15–18 write these). The panel owns everything else: parsing and MAX,
  * the gates, the exact simulation, the floors, the review, signing and the result.
  */
@@ -97,4 +103,11 @@ export type PanelConfig = {
   floors?: Partial<Record<keyof GuardValues, FloorSpec>>
   /** Plain-words notes under the preview (e.g. what an SY balance can be used for). */
   notes?(ctx: { ms?: MarketState; account?: AccountState }): string[]
+  /**
+   * The second amount the call signs when no field gives it, from the market reads and the amount:
+   * Split's `sy_in` on a version-2 Router (`abiSecondaryAmount`, plan 0009). `{}` when the call signs
+   * none on this deployment, whatever the reads. While it is `missing` (or the market data has not
+   * loaded), nothing is simulated or signed, and nothing stands in for it.
+   */
+  signedSecondary?(manifest: Manifest, ms: MarketState | undefined, amount: bigint): SignedSecondary
 }

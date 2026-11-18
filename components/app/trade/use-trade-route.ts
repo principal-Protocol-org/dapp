@@ -8,6 +8,7 @@ import { useSimulation, type Simulation } from "@/hooks/use-simulation"
 import type { AmountCheck } from "@/lib/app/amounts"
 import type { ActionInput } from "@/lib/protocol/actions"
 import { evaluateGates, type Blocker } from "@/lib/protocol/gates"
+import { protocolAbi } from "@/lib/protocol/manifest"
 import { preStartDraft, routePreStartBlockers } from "@/lib/protocol/route-gates"
 import type { RouteRequest, StepPlan, StepPreview } from "@/lib/protocol/routes"
 import { currentContractsAdapter, stepPreview, toRouteRequest, type PlanContext, type TradeAdapter, type TradeQuote, type TradeRequest, type TradeState } from "@/lib/protocol/trade-adapter"
@@ -75,13 +76,15 @@ export function useTradeRoute({
   const { wallet, ms } = gate
   const source = wallet.status === "connected" ? wallet.publicKey : null
 
-  // The manifest alone decides a one-step route (R5-4). The plan sizes with the quote's slippage, so
-  // the flash Buy YT's planned sy_in is the one quoted (R5-2).
+  // The manifest alone decides a one-step route (R5-4), and the argument lists its contracts take
+  // (`protocolAbi`, plan 0009). The plan sizes with the quote's slippage, so the flash Buy YT's
+  // planned sy_in is the one quoted (R5-2).
   const ctx: PlanContext = {
     marketId,
     source: source ?? "",
     matured,
     routerFunctions: manifest.routerFunctions ?? [],
+    protocolAbi: protocolAbi(manifest),
     slippageBps,
     ...(ms ? { ms } : {}),
   }

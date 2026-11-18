@@ -578,6 +578,23 @@ describe("prepareReview", () => {
       })
     })
 
+    it("protocolAbi 2: sy_in and pt_in are signed, never shown as something the user gives or gets (plan 0009)", async () => {
+      const m2: Manifest = { ...manifest, protocolAbi: 2 }
+      const g: GuardValues = { minOut: 1_2345678n, maxNetCost: 3_5000000n }
+      for (const [action, literal, args] of [
+        ["mint", 10_0000000n, 6],
+        ["buy_pt_underlying", 10_0000000n, 6],
+        ["buy_yt", 9_8000000n, 7],
+      ] as const) {
+        const v1 = await review(action, { guards: g })
+        const v2 = await prepareReview({ manifest: m2, input: input(action, { guards: g, secondaryAmount: literal }), rpc: fakeRpc() })
+        expect(v2.invocation.args, action).toHaveLength(args)
+        expect(v2.invocation.args[3], action).toEqual({ type: "i128", value: literal })
+        expect({ ...v2.summary, validUntil: 0 }, action).toEqual({ ...v1.summary, validUntil: 0 })
+        expect(v2.callTree, action).toEqual(v1.callTree)
+      }
+    })
+
     it("LP only from USDY and the exit to USDY (R5-5, R5-6)", async () => {
       const g: GuardValues = { minOut: 1_2345678n }
       const lines = async (action: ActionId, extra: Partial<ActionInput> = {}) => {

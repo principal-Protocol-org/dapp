@@ -30,6 +30,7 @@ import { describe, expect, it, vi } from "vitest"
 vi.mock("server-only", () => ({}))
 
 import { buyExactPt, buyPt, sellPt, zapSplit, type CurveQuote, type CurveState } from "@/lib/protocol/curve"
+import { protocolAbi } from "@/lib/protocol/manifest"
 import { fetchMarketState, type MarketState } from "@/lib/protocol/market-state"
 import { previewAddLiquiditySingleSy, previewDeposit, previewMint, previewRemoveLiquidity, previewSellYt, previewWithdraw } from "@/lib/protocol/previews"
 import {
@@ -121,6 +122,7 @@ function adapterQuote(manifest: Manifest, ms: MarketState, req: TradeRequest, ex
     source: SOURCE,
     matured: false,
     routerFunctions: manifest.routerFunctions ?? [],
+    protocolAbi: protocolAbi(manifest),
     slippageBps: SLIPPAGE_BPS,
     ms,
   }
@@ -293,7 +295,15 @@ describe.skipIf(skip !== null)("curve port vs the live pool's quote views", () =
     // Budgets the solver can fill on this pool: a YT costs well under a thousandth of an SY two days out.
     for (const [pay, budget] of [["sy", 5_000_000n], ["underlying", 5_000_000n], ["sy", 50_000n]] as const) {
       const req: TradeRequest = { kind: "buy_yt", amount: budget, pay, receive: "underlying" }
-      const ctx: PlanContext = { marketId: manifest!.markets[0].marketId, source: SOURCE, matured: false, routerFunctions: manifest!.routerFunctions ?? [], slippageBps: SLIPPAGE_BPS, ms }
+      const ctx: PlanContext = {
+        marketId: manifest!.markets[0].marketId,
+        source: SOURCE,
+        matured: false,
+        routerFunctions: manifest!.routerFunctions ?? [],
+        protocolAbi: protocolAbi(manifest!),
+        slippageBps: SLIPPAGE_BPS,
+        ms,
+      }
       const plans = currentContractsAdapter.plan(req, ctx)
       if (!Array.isArray(plans)) throw new Error(`buy_yt (${pay}): not offered: ${plans.disabled}`)
       expect(plans.map((p) => p.action)).toEqual([pay === "sy" ? "buy_yt_flash" : "buy_yt_flash_underlying"])

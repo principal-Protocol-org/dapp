@@ -100,8 +100,13 @@ export function ActionPanel({ config, marketId }: { config: PanelConfig; marketI
   for (const f of fields) if (f.check.ok) inputs[f.spec.id] = f.check.raw
   const fieldError = fields.some((f) => !f.check.ok)
   const amount = inputs.amount ?? 0n
-  const secondaryAmount = config.fields.some((f) => f.id === "secondaryAmount") ? (inputs.secondaryAmount ?? 0n) : undefined
-  const complete = !fieldError && amountsComplete(config.action, amount, secondaryAmount)
+  // A second amount no field gives (Split's version-2 `sy_in`) is worked out from the market reads;
+  // while it cannot be, the amounts are not complete: nothing is simulated or signed.
+  const signed = config.signedSecondary?.(manifest, ms, amount)
+  const secondaryMissing = signed !== undefined && "missing" in signed
+  const fieldSecondary = config.fields.some((f) => f.id === "secondaryAmount") ? (inputs.secondaryAmount ?? 0n) : undefined
+  const secondaryAmount = signed !== undefined && "amount" in signed ? signed.amount : fieldSecondary
+  const complete = !fieldError && !secondaryMissing && amountsComplete(config.action, amount, secondaryAmount)
   const deadlineAt = (t: number) => BigInt(Math.floor(t) + deadlineSeconds)
 
   // --- Exact quote (R28: every action), as the connected user, once the network clock is known.
@@ -115,6 +120,8 @@ export function ActionPanel({ config, marketId }: { config: PanelConfig; marketI
   let blockers: Blocker[] = gate.unavailable
   if (gate.base) {
     blockers = evaluateGates({ ...draft, guards: {}, deadline: 0n }, { ...gate.base, simulation: sim.outcome })
+    // The read the signed second amount needs, when it failed (the gates already say so when the market data did not load).
+    if (signed !== undefined && "missing" in signed) blockers = [...blockers, { code: "unavailable", message: signed.missing }]
     if (sim.guards && !sim.guards.ok) blockers = [...blockers, { code: "quote", message: sim.guards.reason }]
     // Nothing is simulated until the amounts are complete: the amount is the reason, not a missing quote.
     if (!complete) blockers = blockers.filter((b) => b.code !== "quote")

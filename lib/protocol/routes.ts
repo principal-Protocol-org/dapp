@@ -94,11 +94,18 @@ export const FLASH_BUY_YT: Record<Token, SingleStep> = {
 export type RouteContext = {
   routerFunctions: string[]
   /**
+   * The manifest's contract-interface version (`protocolAbi()`); absent means 1. On 2 (principal
+   * 3af9388) the `mint`, `buy_pt_underlying` and `buy_yt` steps sign a literal in `secondaryAmount`:
+   * the SY the deposit gives (`sy_in`, from `exchangeRate`), or Buy YT's `pt_in` (`buyYt.ptIn`).
+   */
+  protocolAbi?: 1 | 2
+  /**
    * Buy YT, from `solveBuyYt` (Task 5). `syIn` is the exact `sy_in` the buy_yt call must use.
    * `depositUnderlying` (only when paying in underlying) is the underlying the deposit step spends,
-   * chosen by the caller so the deposit yields at least `syIn` SY.
+   * chosen by the caller so the deposit yields at least `syIn` SY. `ptIn` is the PT minting `syIn`
+   * gives after the fee, which a version-2 `swap_sy_for_yt` signs as its `pt_in`.
    */
-  buyYt?: { syIn: bigint; depositUnderlying?: bigint }
+  buyYt?: { syIn: bigint; depositUnderlying?: bigint; ptIn?: bigint }
   /**
    * The flash Buy YT (R5-2): the `sy_in` it mints, from `solveBuyYt` for the target net cost, sized by
    * the caller. The budget is the input.
@@ -140,6 +147,23 @@ const WITHDRAW = (amount: AmountSource, gives = "SY"): StepPlan => ({
 
 function disabledIf(reason: string): RouteDisabled {
   return { disabled: reason }
+}
+
+/** The second amount a version-2 step signs, or nothing on version 1. */
+type Literal = { secondaryAmount?: AmountSource }
+
+/**
+ * `sy_in` of a version-2 `wrap_and_mint` or `swap_underlying_for_pt` (principal 3af9388): the SY the
+ * deposit of `underlying` gives at the exchange rate (`previewDeposit`), signed as a literal. Nothing
+ * on version 1. Without the rate the route is disabled, never built without it.
+ */
+function syInOf(ctx: RouteContext, underlying: bigint, what: string): Literal | RouteDisabled {
+  if (ctx.protocolAbi !== 2) return {}
+  const xr = ctx.exchangeRate
+  if (xr === undefined || xr <= 0n) {
+    return disabledIf(`${what} needs the SY exchange rate, to size the SY it signs. It is not offered until the market data loads.`)
+  }
+  return { secondaryAmount: { from: "value", value: previewDeposit(underlying, xr) } }
 }
 
 /** Kinds paid for with `pay`; `receive` is ignored for them. The others ignore `pay`. */
@@ -217,8 +241,12 @@ function oneStep(req: RouteRequest, ctx: RouteContext, single: SingleStep): Step
       }
       return [{ ...shape, amount: input, secondaryAmount: value(previewDeposit(req.amount, xr)) }]
     }
-    default:
-      return [{ ...shape, amount: input }]
+    default: {
+      // A version-2 swap_underlying_for_pt signs the SY its deposit gives (`sy_in`).
+      const literal = single.action === "buy_pt_underlying" ? syInOf(ctx, req.amount, "Buying PT in one signature") : {}
+      if ("disabled" in literal) return literal
+      return [{ ...shape, amount: input, ...literal }]
+    }
   }
 }
 
@@ -248,9 +276,14 @@ function multiStep(req: RouteRequest, ctx: RouteContext): StepPlan[] | RouteDisa
     case "buy_yt": {
       const syIn = ctx.buyYt?.syIn
       if (syIn === undefined) return disabledIf("Buy YT needs the solved SY amount first.")
+      // A version-2 swap_sy_for_yt signs the PT its mint gives (`pt_in`) as a literal.
+      const ptIn = ctx.buyYt?.ptIn
+      if (ctx.protocolAbi === 2 && ptIn === undefined) return disabledIf("Buy YT needs the PT its mint gives first, to size the PT it sells.")
+      const literal: Literal = ctx.protocolAbi === 2 && ptIn !== undefined ? { secondaryAmount: { from: "value", value: ptIn } } : {}
       const buy = (idx: number): StepPlan => ({
         action: "buy_yt",
         amount: { from: "value", value: syIn },
+        ...literal,
         gives: "SY",
         takes: "YT",
         ...(idx === 1
@@ -275,8 +308,10 @@ function multiStep(req: RouteRequest, ctx: RouteContext): StepPlan[] | RouteDisa
       const split = ctx.keepYtSplit
       if (!payUnderlying) return disabledIf("Keeping YT while adding liquidity needs USDY: pay in USDY.")
       if (!split) return disabledIf("Adding liquidity and keeping YT needs the USDY split first.")
+      const literal = syInOf(ctx, split.mintUnderlying, "Adding liquidity and keeping YT")
+      if ("disabled" in literal) return literal
       return [
-        { action: "mint", amount: { from: "value", value: split.mintUnderlying }, gives: "USDY", takes: "PT + YT" },
+        { action: "mint", amount: { from: "value", value: split.mintUnderlying }, ...literal, gives: "USDY", takes: "PT + YT" },
         DEPOSIT({ from: "value", value: split.depositUnderlying }),
         {
           action: "add_liquidity",
@@ -318,7 +353,9 @@ function multiStep(req: RouteRequest, ctx: RouteContext): StepPlan[] | RouteDisa
     }
     case "split": {
       if (!payUnderlying) return disabledIf("Splitting needs USDY: pay in USDY.")
-      return [{ action: "mint", amount: input, gives: "USDY", takes: "PT + YT" }]
+      const literal = syInOf(ctx, req.amount, "Splitting")
+      if ("disabled" in literal) return literal
+      return [{ action: "mint", amount: input, ...literal, gives: "USDY", takes: "PT + YT" }]
     }
     case "recombine": {
       const rec: StepPlan = { action: "recombine", amount: input, gives: "PT + YT", takes: "SY" }

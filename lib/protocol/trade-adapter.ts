@@ -179,6 +179,11 @@ export type PlanContext = {
   source: string
   matured: boolean
   routerFunctions: string[]
+  /**
+   * The manifest's contract-interface version (`protocolAbi(manifest)`); absent means 1. On 2 the
+   * route's `mint`, `buy_pt_underlying` and `buy_yt` steps sign their literal (`RouteContext.protocolAbi`).
+   */
+  protocolAbi?: 1 | 2
   /** The market's reads, for adapters that size a step from them (Buy YT's `sy_in`, Task 17). */
   ms?: MarketState
   /**
@@ -1008,7 +1013,10 @@ function plan(req: TradeRequest, ctx: PlanContext): StepPlan[] | RouteDisabled {
   const xr = ctx.ms?.exchangeRate
   const base: RouteContext = {
     routerFunctions: ctx.routerFunctions,
-    // LP only's one call signs the SY its deposit gives at this rate (R5-5).
+    // Version 2 signs a literal on mint, buy_pt_underlying and buy_yt (plan 0009, M-5).
+    ...(ctx.protocolAbi !== undefined ? { protocolAbi: ctx.protocolAbi } : {}),
+    // LP only's one call signs the SY its deposit gives at this rate (R5-5), and so do version 2's
+    // wrap_and_mint and swap_underlying_for_pt.
     ...(xr?.status === "live" ? { exchangeRate: xr.value } : {}),
   }
   // Keep YT's split is sized from the market's reads; paid in SY, the planner gives R2-22's reason.
@@ -1017,14 +1025,17 @@ function plan(req: TradeRequest, ctx: PlanContext): StepPlan[] | RouteDisabled {
   const flash = singleStepFor(route, base) !== undefined
   // With no amount yet, the route keeps its shape and moves nothing: it cannot start (there is no
   // request), its gates see nothing to move, and the amount field's own refusal stands.
-  if (req.amount <= 0n) return planRoute(route, { ...base, buyYt: { syIn: 0n, depositUnderlying: 0n }, buyYtFlash: { syIn: 0n } })
+  if (req.amount <= 0n) return planRoute(route, { ...base, buyYt: { syIn: 0n, depositUnderlying: 0n, ptIn: 0n }, buyYtFlash: { syIn: 0n } })
   if (!ctx.ms) return { disabled: "Buy YT is sized from this market's data, which has not loaded yet. Try again in a moment." }
   const m = readsOf(ctx.ms)
   if (typeof m === "string") return { disabled: `Buy YT cannot be sized now. ${m}` }
   try {
     if (flash) return planRoute(route, { ...base, buyYtFlash: { syIn: sizeBuyYtFlash(req, m, ctx.ms, ctx.slippageBps).syIn } })
-    const { solution, depositUnderlying } = sizeBuyYt(req, m, ctx.ms)
-    return planRoute(route, { ...base, buyYt: { syIn: solution.syIn, ...(depositUnderlying !== undefined ? { depositUnderlying } : {}) } })
+    const { solution, depositUnderlying, feeBps } = sizeBuyYt(req, m, ctx.ms)
+    // pt_in (signed by a version-2 swap_sy_for_yt): the PT minting sy_in gives after the fee, as
+    // `abiSecondaryAmount` works it out, from the same reads.
+    const ptIn = previewMint(solution.syIn, m.oracleRate, feeBps).pt
+    return planRoute(route, { ...base, buyYt: { syIn: solution.syIn, ...(depositUnderlying !== undefined ? { depositUnderlying } : {}), ptIn } })
   } catch (error) {
     return { disabled: `Buy YT is not offered for this amount. ${errorText(error)}` }
   }

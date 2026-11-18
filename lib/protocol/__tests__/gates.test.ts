@@ -1609,3 +1609,41 @@ describe("breakerReport and capCharge for the one-transaction Router actions (R2
     }
   })
 })
+
+describe("protocolAbi 2: the literal in secondaryAmount of mint, buy_pt_underlying and buy_yt is never read as an amount (plan 0009)", () => {
+  /** On version 2 these three carry sy_in (or Buy YT's pt_in) there: a value the user neither gives nor holds. */
+  const THREE: ActionId[] = ["mint", "buy_pt_underlying", "buy_yt"]
+  const literal = (action: ActionId) => (action === "buy_yt" ? 9n * UNIT : 10n * UNIT)
+
+  it("the amount gate reads the amount alone: a literal never stands in for it, nor refuses a valid one", () => {
+    for (const action of THREE) {
+      expect(gates(action, undefined, { secondaryAmount: literal(action) }), action).toEqual(gates(action))
+      expect(codes(gates(action, undefined, { amount: 0n, secondaryAmount: literal(action) })), action).toContain("amount")
+      expect(gates(action, undefined, { secondaryAmount: 0n }), action).toEqual([])
+    }
+  })
+
+  it("balances: the literal is not checked against any balance (no PT is needed for Buy YT's pt_in, no SY for a split's sy_in)", () => {
+    const none: Mutate = (c) => {
+      c.account!.pt = live(0n)
+      c.account!.sy = live(0n)
+    }
+    expect(gates("mint", none, { secondaryAmount: BIG })).toEqual([])
+    expect(gates("buy_pt_underlying", none, { secondaryAmount: BIG })).toEqual([])
+    expect(gates("buy_yt", (c) => (c.account!.pt = live(0n)), { secondaryAmount: BIG })).toEqual([])
+    // The amount is still what is spent.
+    expect(codes(gates("buy_yt", (c) => (c.account!.sy = live(UNIT)), { secondaryAmount: literal("buy_yt") }))).toContain("balance")
+  })
+
+  it("the breaker report and the deposit cap charge count the amount, as on version 1", () => {
+    const market = healthyMarket()
+    for (const action of THREE) {
+      const v1 = inputFor(action)
+      const v2 = inputFor(action, { secondaryAmount: literal(action) * 3n })
+      expect(breakerReport(v2, { market }), action).toBe(breakerReport(v1, { market }))
+      expect(capCharge(v2), action).toBe(capCharge(v1))
+    }
+    expect(breakerReport(inputFor("mint", { secondaryAmount: 7n * UNIT }), { market })).toBe(20n * UNIT)
+    expect(capCharge(inputFor("buy_pt_underlying", { secondaryAmount: 7n * UNIT }))).toBe(10n * UNIT)
+  })
+})

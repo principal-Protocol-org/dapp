@@ -1319,3 +1319,59 @@ describe("the route preview a later step's fresh quote is checked against (D-26 
     expect(stepPreview(buy("underlying"), quoted(quote(buy("underlying"), { plans })), plans)).toBeUndefined()
   })
 })
+
+describe("trade adapter #1 — protocolAbi 2 (principal 3af9388): the literals the changed Router calls sign", () => {
+  const XR = 10_200_000n
+  const V2: PlanContext = { ...CTX, protocolAbi: 2 }
+  const planned = (req: TradeRequest, ms = market(), extra: Partial<PlanContext> = {}) => {
+    const plans = currentContractsAdapter.plan(req, { ...V2, ms, ...extra })
+    if (!Array.isArray(plans)) throw new Error(plans.disabled)
+    return plans
+  }
+
+  it("Buy PT with USDY in one call signs the SY its deposit gives at the exchange rate", () => {
+    const plans = planned(buy("underlying"), market({ exchangeRate: live(XR) }), { routerFunctions: FIVE })
+    expect(plans).toEqual([
+      { action: "buy_pt_underlying", amount: { from: "input" }, secondaryAmount: { from: "value", value: previewDeposit(SY_100, XR) }, gives: "USDY", takes: "PT" },
+    ])
+  })
+
+  it("the multi-step Buy YT signs the solver's sy_in and the PT its mint gives after the fee (pt_in)", () => {
+    const ms = market({ exchangeRate: live(XR) })
+    const r = solved(previewDeposit(USDY_100, XR))
+    const [, buyStep] = planned(buyYt("underlying"), ms)
+    expect(buyStep).toMatchObject({ action: "buy_yt", amount: { from: "value", value: r.syIn }, secondaryAmount: { from: "value", value: previewMint(r.syIn, ORACLE, FEE_BPS).pt } })
+    const [only] = planned(buyYt("sy"))
+    const s = solved(USDY_100)
+    expect(only).toMatchObject({ action: "buy_yt", amount: { from: "value", value: s.syIn }, secondaryAmount: { from: "value", value: previewMint(s.syIn, ORACLE, FEE_BPS).pt } })
+  })
+
+  it("Keep YT's multi-step mint signs the SY of the part it splits", () => {
+    const ms = market({ exchangeRate: live(XR) })
+    const [mint] = planned(keepYt(), ms)
+    expect(mint.action).toBe("mint")
+    if (mint.amount.from !== "value") throw new Error("expected a sized amount")
+    expect(mint.secondaryAmount).toEqual({ from: "value", value: previewDeposit(mint.amount.value, XR) })
+  })
+
+  it("with no amount yet, Buy YT keeps its shape on version 2 too", () => {
+    expect(planned(buyYt("underlying", 0n)).map((p) => p.action)).toEqual(["deposit", "buy_yt", "withdraw"])
+  })
+
+  it("without the SY exchange rate the version-2 Buy PT is not offered, and says why", () => {
+    expect(currentContractsAdapter.plan(buy("underlying"), { ...V2, routerFunctions: FIVE, ms: market({ exchangeRate: down }) })).toEqual({
+      disabled: expect.stringMatching(/SY exchange rate/),
+    })
+  })
+
+  it("on version 1 the same trades plan exactly as before", () => {
+    const ms = market({ exchangeRate: live(XR) })
+    for (const req of [buy("underlying"), buyYt("underlying"), buyYt("sy"), keepYt()]) {
+      for (const routerFunctions of [[], FIVE]) {
+        const v1 = currentContractsAdapter.plan(req, { ...CTX, routerFunctions, ms })
+        expect(currentContractsAdapter.plan(req, { ...CTX, routerFunctions, ms, protocolAbi: 1 })).toEqual(v1)
+        if (Array.isArray(v1)) for (const p of v1) if (p.action === "mint" || p.action === "buy_yt" || p.action === "buy_pt_underlying") expect(p.secondaryAmount).toBeUndefined()
+      }
+    }
+  })
+})

@@ -28,6 +28,8 @@ const mocks = vi.hoisted(() => ({
   ledgerTime: 1_700_000_000 as number | null,
   /** The manifest market's maturity (unix s); undefined: not known, so never matured. */
   maturity: undefined as number | undefined,
+  /** The manifest's `protocolAbi`; undefined: version 1, as on Testnet. */
+  protocolAbi: undefined as 1 | 2 | undefined,
   simulateInvocation: vi.fn(),
   getTransaction: vi.fn(),
   fetchMarketState: vi.fn(),
@@ -43,6 +45,9 @@ vi.mock("@/components/app/manifest-provider", () => {
     network: "testnet",
     rpcUrl: "https://rpc",
     networkPassphrase: "Test SDF Network ; September 2015",
+    get protocolAbi() {
+      return mocks.protocolAbi
+    },
     markets: [
       {
         marketId: "m1",
@@ -83,6 +88,8 @@ const SIMULATED: Partial<Record<ActionInput["action"], unknown>> = {
   remove_liquidity: [10n * S, 5n * S],
   // flash_mint_yt_from_underlying -> (yt_out, net_cost, underlying_back)
   buy_yt_flash_underlying: [40n * S, 15n * S, 85n * S],
+  // swap_sy_for_yt -> (yt_out, sy_back)
+  buy_yt: [40n * S, 850n * S],
 }
 
 let xdrSeq = 0
@@ -158,6 +165,7 @@ beforeEach(() => {
   client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   mocks.ledgerTime = LEDGER
   mocks.maturity = undefined
+  mocks.protocolAbi = undefined
   mocks.exec.prepare.mockReset().mockImplementation(async (input: ActionInput) => fakeReview(input))
   mocks.exec.execute.mockReset()
   mocks.getTransaction.mockReset()
@@ -170,6 +178,7 @@ beforeEach(() => {
       swap_pt_for_sy: "sell_pt",
       remove_liquidity: "remove_liquidity",
       flash_mint_yt_from_underlying: "buy_yt_flash_underlying",
+      swap_sy_for_yt: "buy_yt",
     }
     const action = byFn[p.invocation.functionName]
     return { ok: true, retval: SIMULATED[action], latestLedger: 1, minResourceFee: "1" }
@@ -560,6 +569,79 @@ describe("useRoute", () => {
     expect(result.current.state).toMatchObject({ step: 2, holdings: "You hold 998 SY" })
     expect(mocks.exec.prepare).not.toHaveBeenCalled()
     expect(loggedRun()?.outputs[0]).toEqual({ kind: "amount", value: 998n * S })
+  })
+
+  it("a stored plan without sy_in is refused on abi 2", async () => {
+    // Review Focus 1 (plan 0009): routes logged before the upgrade carry no literal on their mint,
+    // buy_pt_underlying or buy_yt step. On a version-2 deployment Continue refuses the step with
+    // the reason, and nothing is simulated, prepared or signed: never a call with the wrong argument count.
+    mocks.protocolAbi = 2
+    const STALE = "This trade was prepared for an older version of the contracts. Start it again."
+    const deposited = (over: Partial<RouteRun>): RouteRun => ({
+      id: "run-stale",
+      account: A,
+      marketId: "m1",
+      kind: "split",
+      request: { ...buyPt, kind: "split", receive: "sy" },
+      plans: [],
+      outputs: [{ kind: "amount", value: 998n * S }],
+      steps: [],
+      startedAt: 1,
+      ...over,
+    })
+    // A mint logged without its sy_in, after a confirmed step (a reload resumes only a run that holds funds).
+    writeRoute(
+      deposited({
+        plans: [
+          { action: "deposit", amount: { from: "value", value: 1_000n * S }, gives: "USDY", takes: "SY" },
+          { action: "mint", amount: { from: "input" }, gives: "USDY", takes: "PT + YT" },
+        ],
+        steps: [
+          { action: "deposit", status: "confirmed", hash: "f".repeat(64) },
+          { action: "mint", status: "pending" },
+        ],
+      }),
+    )
+    const split = setup(() => [], { kinds: ["split"] })
+    await waitFor(() => expect(split.result.current.state.phase).toBe("interrupted"))
+    act(() => split.result.current.continue())
+    await waitFor(() => expect(split.result.current.state.error).toBe(STALE))
+    expect(split.result.current.state).toMatchObject({ phase: "interrupted", step: 2 })
+    expect(mocks.simulateInvocation).not.toHaveBeenCalled()
+    expect(mocks.exec.prepare).not.toHaveBeenCalled()
+    expect(mocks.exec.execute).not.toHaveBeenCalled()
+    expect(loggedRun()?.steps[1]).toEqual({ action: "mint", status: "pending" })
+    split.unmount()
+
+    // The real shape of the same case: a Buy YT paid in USDY, its deposit confirmed, its buy logged without pt_in.
+    const yt: RouteRequest = { ...buyPt, kind: "buy_yt" }
+    writeRoute(
+      deposited({
+        id: "run-stale-yt",
+        kind: "buy_yt",
+        request: yt,
+        plans: planRoute(yt, { routerFunctions: [], buyYt: { syIn: 900n * S, depositUnderlying: 1_000n * S } }) as StepPlan[],
+        steps: [
+          { action: "deposit", status: "confirmed", hash: "e".repeat(64) },
+          { action: "buy_yt", status: "pending" },
+          { action: "withdraw", status: "pending" },
+        ],
+        startedAt: 2,
+      }),
+    )
+    const buyYt = setup(() => [], { kinds: ["buy_yt", "sell_yt"] })
+    await waitFor(() => expect(buyYt.result.current.state.phase).toBe("interrupted"))
+    act(() => buyYt.result.current.continue())
+    await waitFor(() => expect(buyYt.result.current.state.error).toBe(STALE))
+    expect(mocks.simulateInvocation).not.toHaveBeenCalled()
+    expect(mocks.exec.prepare).not.toHaveBeenCalled()
+
+    // The same stored run on a version-1 deployment (Testnet) continues as it always has.
+    mocks.protocolAbi = undefined
+    act(() => buyYt.result.current.continue())
+    await untilReview(buyYt.result, 2)
+    expect(mocks.exec.prepare.mock.calls[0][0]).toMatchObject({ action: "buy_yt", amount: 900n * S })
+    expect(mocks.exec.prepare.mock.calls[0][0].secondaryAmount).toBeUndefined()
   })
 
   it("unwind builds the single call back to USDY, withdraw for SY holdings", async () => {
