@@ -52,6 +52,10 @@ while IFS= read -r id; do
   [[ "$id" =~ ^C[A-Z2-7]{55}$ ]] || die "manifest oracle id is not a contract id (is $NETWORK.json still the example file?)"
 done <<<"$ORACLES"
 if [ -n "${ORACLE_TICK_ORACLE:-}" ]; then
+  # One contract id and nothing else, before the list check: grep reads each line of its pattern as a pattern
+  # of its own, so a value of several lines (one of them listed) would pass it and then be ticked as given.
+  # `=~` refuses any newline, a trailing one too, and a CLI alias.
+  [[ "$ORACLE_TICK_ORACLE" =~ ^C[A-Z2-7]{55}$ ]] || die "ORACLE_TICK_ORACLE is not a contract id (one line: C and 55 base32 characters)"
   grep -qxF -- "$ORACLE_TICK_ORACLE" <<<"$ORACLES" ||
     die "ORACLE_TICK_ORACLE $ORACLE_TICK_ORACLE is not an oracle of $MANIFEST (it names $(tr '\n' ' ' <<<"$ORACLES" | sed 's/ $//'))"
   ORACLES="$ORACLE_TICK_ORACLE"

@@ -30,11 +30,12 @@ scripts/dev-stack/oracle-tick.sh                          # run this every 30 mi
   `principal-localdev-admin`, deploys its SAC, and runs steps 1-11 of the repository's
   `docs/DEPLOYMENT.md`. It then deposits 200,000 USDY, mints PT/YT from 100,000 SY, and seeds the
   pool with all the PT and 95 % of its value in SY. It also deploys the stateless `MarketFactory` (its address is `shared.factory`, the wasm hashes of the seven market contracts are recorded) and runs `scripts/db-migrate.mjs` when that file exists (migrations 0001 to 0003; 0003 adds `market_salts`). Every run deploys new markets and overwrites `config/manifests/local.json`.
-  Allow for the run: a deploy takes a few minutes, so do not set `MATURITY_SECONDS` below about 600.
+  Allow for the run: a one-market deploy takes a few minutes, so do not set `MATURITY_SECONDS` below about
+  600. A two-market local deploy (the default) needs about 90 s more, or set `SECOND_MARKET=0`.
 - A second market, on the local network only. Mainnet has several markets, each on its own asset with
   its own oracle, so the local stack has two. After the first market, `deploy.sh` issues a second asset,
-  `GILT` (`ASSET_CODE_2`, shown as "GILT (test)"), from the same key, with its own SAC, flags and
-  trustlines. It deploys a second OracleAdapter for it, set up like the first, with its own primary source
+  `GILT` (`ASSET_CODE_2`, shown as "GILT (test)"), from the same key, with its own SAC and trustlines
+  (the issuer's flags are already set). It deploys a second OracleAdapter for it, set up like the first, with its own primary source
   (the hash of `principal-oracle-source:local:GILT:app-team:keeper`) and the genesis value `14000000`
   (1.4). Then it deploys the second market's own SY, PT, YT, config, manager, pool and escrow on that
   oracle, with the same maturity. They use the same Permissioning, RiskControl and Router as the first

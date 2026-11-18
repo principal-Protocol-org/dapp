@@ -6,10 +6,11 @@
  * taken from the RPC before the deploy's first transaction, and the manifest's jq object carries it.
  * The local deploy proves the output end to end (task 11, fix round 1).
  */
-import { execFileSync } from "node:child_process"
-import { readFileSync } from "node:fs"
+import { execFileSync, spawnSync } from "node:child_process"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { describe, expect, it } from "vitest"
+import { afterAll, beforeAll, describe, expect, it } from "vitest"
 
 const DIR = join(process.cwd(), "scripts", "dev-stack")
 const deploy = readFileSync(join(DIR, "deploy.sh"), "utf8")
@@ -242,6 +243,16 @@ describe("oracle-tick.sh: every oracle of the manifest", () => {
     expect(tick.search(/\[ -z "\$RATE_ARG" \] \|\| \[ "\$COUNT" -eq 1 \]/)).toBeGreaterThan(0)
   })
 
+  // Fix round 1: grep -F reads each line of a multi-line value as a pattern of its own, so the list check
+  // alone let `<listed oracle>\n<anything>` through, to be ticked as given.
+  it("checks that ORACLE_TICK_ORACLE is one contract id before the list check and before any network call", () => {
+    const id = tick.indexOf('[[ "$ORACLE_TICK_ORACLE" =~ ^C[A-Z2-7]{55}$ ]] || die "ORACLE_TICK_ORACLE is not a contract id')
+    expect(id).toBeGreaterThan(0)
+    expect(id).toBeLessThan(tick.indexOf('grep -qxF -- "$ORACLE_TICK_ORACLE"'))
+    expect(id).toBeLessThan(tick.indexOf("rpc_healthy"))
+    expect(id).toBeLessThan(tick.indexOf("stellar keys address"))
+  })
+
   it("drill.sh ticks its own oracle only, so the hash it records as oracle_tick is that oracle's", () => {
     const drill = readFileSync(join(DIR, "drill.sh"), "utf8")
     const call = drill.match(/^\s+if PRINCIPAL_NETWORK=[^\n]*\\\n\s+"\$DEV_STACK_DIR\/oracle-tick\.sh"/m)?.[0] ?? ""
@@ -253,5 +264,76 @@ describe("oracle-tick.sh: every oracle of the manifest", () => {
     expect(tick).toContain('echo "$label rate $current -> $new at ledger time $ts"')
     expect(tick).toMatch(/label="oracle"/)
     expect(tick).toMatch(/label="oracle \$id"/)
+  })
+})
+
+/**
+ * Fix round 1, run for real: oracle-tick.sh with `stellar` and `curl` replaced by stubs that record any
+ * call and fail, against a two-oracle manifest in a temporary directory (ORACLE_TICK_MANIFEST, local).
+ * A bad ORACLE_TICK_ORACLE must stop it before either stub is called; a listed id goes on to the
+ * network check (the curl stub), which shows the harness reaches that far.
+ */
+describe("oracle-tick.sh refuses an ORACLE_TICK_ORACLE that is not exactly one listed contract id", () => {
+  const A = `C${"A".repeat(55)}`
+  const B = `C${"B".repeat(55)}`
+  let dir: string
+  let calls: string
+  let manifest: string
+  let stubs: string
+
+  beforeAll(() => {
+    dir = mkdtempSync(join(tmpdir(), "oracle-tick-guards-"))
+    calls = join(dir, "calls.log")
+    stubs = join(dir, "bin")
+    mkdirSync(stubs)
+    for (const tool of ["stellar", "curl"]) {
+      writeFileSync(join(stubs, tool), `#!/bin/sh\necho "${tool} $*" >> "${calls}"\nexit 97\n`)
+      chmodSync(join(stubs, tool), 0o755)
+    }
+    manifest = join(dir, "local.json")
+    writeFileSync(manifest, JSON.stringify({ shared: { oracle: A }, markets: [{ contracts: { oracle: A } }, { contracts: { oracle: B } }] }))
+  })
+
+  afterAll(() => {
+    if (dir) rmSync(dir, { recursive: true, force: true })
+  })
+
+  const tickWith = (oracle: string) => {
+    rmSync(calls, { force: true })
+    // Only these variables: no Stellar CLI override, key name or ORACLE_TICK_* of the test run leaks in.
+    const env: Record<string, string> = { PATH: `${stubs}:${process.env.PATH ?? ""}`, PRINCIPAL_NETWORK: "local", ORACLE_TICK_MANIFEST: manifest, ORACLE_TICK_ORACLE: oracle }
+    const r = spawnSync("bash", [join(DIR, "oracle-tick.sh")], {
+      env: env as NodeJS.ProcessEnv,
+      encoding: "utf8",
+      timeout: 4_000,
+    })
+    return { code: r.status, stderr: r.stderr, calls: existsSync(calls) ? readFileSync(calls, "utf8") : "" }
+  }
+
+  it.each([
+    ["two lines, the first a listed oracle", `${A}\n${`C${"Z".repeat(55)}`}`],
+    ["two lines, both listed oracles", `${A}\n${B}`],
+    ["a listed oracle with a trailing newline", `${A}\n`],
+    ["an alias-like word", "my-oracle"],
+  ])("%s: exits non-zero before any stellar or curl call", (_, value) => {
+    const r = tickWith(value)
+    expect(r.code).not.toBe(0)
+    expect(r.stderr).toContain("ORACLE_TICK_ORACLE is not a contract id")
+    expect(r.calls).toBe("")
+  })
+
+  it("an unlisted contract id is refused by the list check, also before any call", () => {
+    const r = tickWith(`C${"Z".repeat(55)}`)
+    expect(r.code).not.toBe(0)
+    expect(r.stderr).toContain("is not an oracle of")
+    expect(r.calls).toBe("")
+  })
+
+  it("a listed oracle passes both checks and reaches the network check (the curl stub), never stellar", () => {
+    const r = tickWith(B)
+    expect(r.code).not.toBe(0)
+    expect(r.stderr).toContain("is not answering")
+    expect(r.calls).toMatch(/^curl /)
+    expect(r.calls).not.toMatch(/^stellar /m)
   })
 })
