@@ -21,14 +21,12 @@ import "server-only"
  * `connection()` keeps it out of the build's prerender.
  */
 import { connection } from "next/server"
-import { MainnetPendingError } from "@/lib/protocol/manifest"
 import { activeManifest } from "@/lib/protocol/manifest-source"
 import { createRpcServer, getLedgerClock } from "@/lib/protocol/stellar"
 import type { Manifest } from "@/lib/protocol/types"
 import { openAlertCounts } from "@/lib/server/alerts"
 import { DatabaseConfigError, sql } from "@/lib/server/db"
 import { getIndexedEvents } from "@/lib/server/indexer"
-import { mainnetPendingResponse } from "@/lib/server/mainnet-pending"
 import { keeperHealth, ORACLE_TICK_INTERVAL_SECONDS } from "@/lib/server/oracle-ticks"
 
 /** Uptime monitors give up after a few seconds: no part waits longer than this. */
@@ -66,8 +64,7 @@ export async function GET() {
   let manifest: Manifest | null = null
   try {
     manifest = activeManifest()
-  } catch (error) {
-    if (error instanceof MainnetPendingError) return mainnetPendingResponse()
+  } catch {
     const none: Unavailable = { status: "unavailable", reason: "the manifest could not be read" }
     return Response.json({ network: null, ledger: none, indexer: none, keeper: none, openAlerts: none }, { status: 503, headers: { "cache-control": "no-store" } })
   }

@@ -16,6 +16,9 @@ const SAC = new Asset("USDY", ISSUER).contractId(PASSPHRASES.local)
 const KINDS: MarketContractName[] = ["sy", "pt", "yt", "config", "manager", "pool", "recoveryEscrow"]
 const PINS = { sy: hash(1), pt: hash(2), yt: hash(3), config: hash(4), manager: hash(5), pool: hash(6), recoveryEscrow: hash(7) }
 const SHARED = { router: cid(1), oracle: cid(2), permissioning: cid(3), riskControl: cid(4), factory: cid(5) }
+/** A second oracle a manifest market may use (Mainnet has one per market), and one no manifest names. */
+const ORACLE_B = cid(200)
+const STRANGER_ORACLE = cid(210)
 const MATURITY = 1_900_000_000
 
 type Contracts = Record<MarketContractName, string>
@@ -51,10 +54,14 @@ class Chain {
     })
   }
 
-  /** Deploys a fully wired market running the pinned code, registered with the Router (at `contracts` when given). */
-  deploy(n: number, opts: { register?: boolean; maturity?: number; contracts?: Contracts } = {}): Contracts {
+  /**
+   * Deploys a fully wired market running the pinned code, registered with the Router (at `contracts`
+   * when given), its manager and YT on `oracle` (the shared one by default).
+   */
+  deploy(n: number, opts: { register?: boolean; maturity?: number; contracts?: Contracts; oracle?: string } = {}): Contracts {
     const c = opts.contracts ?? contractsOf(n)
     const maturity = BigInt(opts.maturity ?? MATURITY)
+    const oracle = opts.oracle ?? SHARED.oracle
     const set = (id: string, fn: string, v: Answer) => this.views.set(`${id}.${fn}`, v)
     set(c.pool, "config_address", c.config)
     set(c.pool, "recovery_escrow", c.recoveryEscrow)
@@ -64,7 +71,7 @@ class Chain {
     set(c.pool, "manager_address", c.manager)
     set(c.pool, "maturity", maturity)
     set(c.pool, "underlying_address", SAC)
-    set(c.manager, "oracle_address", SHARED.oracle)
+    set(c.manager, "oracle_address", oracle)
     set(c.manager, "permissioning_address", SHARED.permissioning)
     set(c.manager, "config_address", c.config)
     set(c.manager, "risk_control", SHARED.riskControl)
@@ -78,7 +85,7 @@ class Chain {
     set(c.pt, "minter", c.manager)
     set(c.yt, "minter", c.manager)
     set(c.yt, "permissioning_address", SHARED.permissioning)
-    set(c.yt, "oracle_address", SHARED.oracle)
+    set(c.yt, "oracle_address", oracle)
     set(c.yt, "recovery_escrow", c.recoveryEscrow)
     set(c.config, "underlying", SAC)
     set(c.config, "maturity", maturity)
@@ -174,13 +181,13 @@ function instanceEntry(contractId: string, hex: string) {
 
 // ---------------------------------------------------------------- manifest, store
 
-function seedMarket(c: Contracts): Market {
+function seedMarket(c: Contracts, oracle: string = SHARED.oracle): Market {
   return {
     marketId: `local-usdy-${MATURITY}`,
     displayName: "USDY (test)",
     underlying: { code: "USDY", issuer: ISSUER, sac: SAC, decimals: 7 },
     maturity: MATURITY,
-    contracts: { router: SHARED.router, oracle: SHARED.oracle, ...c },
+    contracts: { router: SHARED.router, oracle, ...c },
   }
 }
 
@@ -203,8 +210,10 @@ function manifestWith(markets: Market[], overrides: Partial<Manifest> = {}): Man
 }
 
 import {
+  allowedOracles,
   discover,
   invalidMarkets,
+  listedMarkets,
   marketFromPool,
   publishMarket,
   resolvedMarkets,
@@ -382,12 +391,49 @@ describe("validateMarket", () => {
     expect(v.reason).toMatch(/yt.*oracle/i)
   })
 
-  it("wrong wiring hides market: a market on another Router or oracle", async () => {
-    const market = seedMarket(chain.deploy(10))
-    const foreign = { ...market, contracts: { ...market.contracts, oracle: cid(79) } }
-    const v = await validateMarket(chain.reader, chain.rpc, manifestWith([foreign]), foreign)
+  it("a market on its own manifest oracle is valid", async () => {
+    const a = seedMarket(chain.deploy(10))
+    const b = { ...seedMarket(chain.deploy(20, { oracle: ORACLE_B }), ORACLE_B), marketId: "local-usdy-b" }
+    const manifest = manifestWith([a, b])
+    expect(await validateMarket(chain.reader, chain.rpc, manifest, a)).toEqual({ valid: true })
+    expect(await validateMarket(chain.reader, chain.rpc, manifest, b)).toEqual({ valid: true })
+  })
+
+  // The factory is permissionless: anyone can build a market wired, end to end, to an oracle of their own.
+  it("a market on an oracle the manifest does not name is refused", async () => {
+    const seed = seedMarket(chain.deploy(10))
+    const stranger = seedMarket(chain.deploy(20, { oracle: STRANGER_ORACLE }), STRANGER_ORACLE)
+    chain.reads = []
+    const v = await validateMarket(chain.reader, chain.rpc, manifestWith([seed]), stranger)
     expect(v.valid).toBe(false)
+    expect(v.reason).toContain(STRANGER_ORACLE)
     expect(v.reason).toMatch(/oracle/i)
+    // Refused before any read, like a market on another Router.
+    expect(chain.reads).toEqual([])
+  })
+
+  it("a manager wired to another manifest oracle than its market's is refused", async () => {
+    const a = seedMarket(chain.deploy(10))
+    const c = chain.deploy(20, { oracle: ORACLE_B })
+    const b = { ...seedMarket(c, ORACLE_B), marketId: "local-usdy-b" }
+    const manifest = manifestWith([a, b])
+    chain.views.set(`${c.manager}.oracle_address`, SHARED.oracle)
+    const manager = await validateMarket(chain.reader, chain.rpc, manifest, b)
+    expect(manager.valid).toBe(false)
+    expect(manager.reason).toContain(`manager oracle_address is ${SHARED.oracle}, not ${ORACLE_B}`)
+
+    // The YT is held to the market's own oracle too.
+    chain.views.set(`${c.manager}.oracle_address`, ORACLE_B)
+    chain.views.set(`${c.yt}.oracle_address`, SHARED.oracle)
+    const yt = await validateMarket(chain.reader, chain.rpc, manifest, b)
+    expect(yt.valid).toBe(false)
+    expect(yt.reason).toContain(`yt oracle_address is ${SHARED.oracle}, not ${ORACLE_B}`)
+  })
+
+  it("allowedOracles is the manifest markets' oracles and shared.oracle", () => {
+    const b = { ...seedMarket(contractsOf(20), ORACLE_B), marketId: "local-usdy-b" }
+    expect([...allowedOracles(manifestWith([]))]).toEqual([SHARED.oracle])
+    expect([...allowedOracles(manifestWith([seedMarket(contractsOf(10)), b]))].sort()).toEqual([SHARED.oracle, ORACLE_B].sort())
   })
 
   it("wrong wiring hides market: PT or YT minted by another contract than the manager (R2-40)", async () => {
@@ -663,10 +709,13 @@ describe("discover and resolvedMarkets", () => {
     expect(run2.checked).toEqual([good.pool, junk[2], junk[3]])
   })
 
-  it("rows left by another Router are never re-checked", async () => {
+  it("rows left by another Router, or on an oracle the manifest does not name, are never re-checked", async () => {
     const manifest = manifestWith([])
     const old = { ...seedMarket(contractsOf(30)), marketId: "local-usdy-old", contracts: { ...seedMarket(contractsOf(30)).contracts, router: cid(90) } }
-    store.rowsMap.set(old.contracts.pool, { pool: old.contracts.pool, source: "discovered", valid: true, reason: null, market: old, marketId: old.marketId, updatedAt: null })
+    const stranger = { ...seedMarket(contractsOf(40), STRANGER_ORACLE), marketId: "local-usdy-stranger" }
+    for (const m of [old, stranger]) {
+      store.rowsMap.set(m.contracts.pool, { pool: m.contracts.pool, source: "discovered", valid: true, reason: null, market: m, marketId: m.marketId, updatedAt: null })
+    }
     expect((await revalidate(depsFor(manifest))).checked).toEqual([])
   })
 
@@ -687,15 +736,45 @@ describe("discover and resolvedMarkets", () => {
     expect(listed.wasmHashes).toEqual(PINS)
   })
 
-  it("resolvedMarkets drops rows from another Router or oracle, and rows whose market does not parse", async () => {
-    const manifest = manifestWith([])
+  it("resolvedMarkets drops rows from another Router or an oracle the manifest does not name, and rows whose market does not parse", async () => {
+    const seedB = { ...seedMarket(contractsOf(80), ORACLE_B), marketId: "local-usdy-seed-b" }
+    const manifest = manifestWith([seedB])
     const good = { ...seedMarket(contractsOf(20)), marketId: "local-usdy-good" }
     const stale = { ...seedMarket(contractsOf(30)), marketId: "local-usdy-stale", contracts: { ...seedMarket(contractsOf(30)).contracts, router: cid(90) } }
     const broken = { ...seedMarket(contractsOf(40)), marketId: "" }
-    for (const m of [good, stale, broken]) {
+    const stranger = { ...seedMarket(contractsOf(50), STRANGER_ORACLE), marketId: "local-usdy-stranger" }
+    // On an oracle the manifest names, though not shared.oracle: kept.
+    const onB = { ...seedMarket(contractsOf(60), ORACLE_B), marketId: "local-usdy-on-b" }
+    for (const m of [good, stale, broken, stranger, onB]) {
       store.rowsMap.set(m.contracts.pool, { pool: m.contracts.pool, source: "discovered", valid: true, reason: null, market: m, marketId: m.marketId, updatedAt: null })
     }
-    expect((await resolvedMarkets({ store, manifest })).map((m) => m.marketId)).toEqual(["local-usdy-good"])
+    expect((await resolvedMarkets({ store, manifest })).map((m) => m.marketId)).toEqual(["local-usdy-seed-b", "local-usdy-good", "local-usdy-on-b"])
+  })
+
+  describe("seeds only on Mainnet", () => {
+    const seed = seedMarket(contractsOf(10))
+    const discovered = { ...seedMarket(contractsOf(20)), marketId: "local-usdy-discovered" }
+    const on = (network: "mainnet" | "testnet") => manifestWith([seed], { network, networkPassphrase: PASSPHRASES[network] })
+    beforeEach(() => {
+      store.rowsMap.set(discovered.contracts.pool, { pool: discovered.contracts.pool, source: "discovered", valid: true, reason: null, market: discovered, marketId: discovered.marketId, updatedAt: null })
+    })
+
+    it("on mainnet a valid discovered market is not listed", async () => {
+      const listed = await listedMarkets({ store, manifest: on("mainnet") })
+      expect(listed.markets.map((m) => m.marketId)).toEqual([seed.marketId])
+      // The registry did answer (the seeds' verdicts): the indexer's market groups still run.
+      expect(listed.fromRegistry).toBe(true)
+    })
+
+    it("on mainnet a seed the registry marked invalid stays hidden", async () => {
+      await store.record({ pool: seed.contracts.pool, source: "seed", valid: false, reason: "its PT is not wired to the manager", market: seed })
+      expect((await listedMarkets({ store, manifest: on("mainnet") })).markets).toEqual([])
+    })
+
+    it("on testnet it is", async () => {
+      const listed = await listedMarkets({ store, manifest: on("testnet") })
+      expect(listed.markets.map((m) => m.marketId)).toEqual([seed.marketId, discovered.marketId])
+    })
   })
 })
 
@@ -1197,14 +1276,20 @@ describe("invalidMarkets (R2-38: the manager view lists them with their reason)"
     ])
   })
 
-  it("leaves out a row from another deployment (its stored market has another Router or oracle)", async () => {
+  it("leaves out a row from another deployment (its stored market has another Router, or an oracle the manifest does not name)", async () => {
     const seed = seedMarket(chain.deploy(50))
-    const manifest = manifestWith([seed])
+    const seedB = { ...seedMarket(contractsOf(80), ORACLE_B), marketId: "local-usdy-seed-b" }
+    const manifest = manifestWith([seed, seedB])
     const old = seedMarket(chain.deploy(60))
     const otherRouter = { ...old, contracts: { ...old.contracts, router: seedMarket(chain.deploy(70)).contracts.pool } }
     await store.record({ pool: old.contracts.pool, source: "seed", valid: false, reason: "matured and unpinned", market: otherRouter })
+    const stranger = { ...seedMarket(contractsOf(20), STRANGER_ORACLE), displayName: "stranger" }
+    await store.record({ pool: stranger.contracts.pool, source: "discovered", valid: false, reason: "its oracle is not one of this network's oracles", market: stranger })
+    // On an oracle the manifest names, though not shared.oracle: this deployment's, so listed.
+    const onB = { ...seedMarket(contractsOf(30), ORACLE_B), displayName: "on B" }
+    await store.record({ pool: onB.contracts.pool, source: "discovered", valid: false, reason: "the pool is not registered with the Router", market: onB })
     const result = await invalidMarkets({ store, manifest })
-    expect(result).toEqual({ status: "ok", rows: [] })
+    expect(result).toEqual({ status: "ok", rows: [{ pool: onB.contracts.pool, name: "on B", reason: "the pool is not registered with the Router" }] })
   })
 
   it("says it is unavailable when the registry cannot be read, instead of an empty list", async () => {

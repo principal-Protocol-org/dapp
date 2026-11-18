@@ -7,9 +7,9 @@ import "server-only"
  * Cached 60 s at the CDN (stale-while-revalidate 300 s) when the answer came from the database.
  */
 import { SPARKS_CHUNK } from "@/lib/app/history-types"
+import { activeManifest } from "@/lib/protocol/manifest-source"
 import { sql } from "@/lib/server/db"
 import { getSparks, type Spark } from "@/lib/server/history"
-import { deployedManifest } from "@/lib/server/mainnet-pending"
 import { resolvedMarkets, sqlRegistryStore } from "@/lib/server/registry"
 
 const POOL = /^C[A-Z2-7]{55}$/
@@ -23,19 +23,16 @@ const json = (body: unknown, status = 200, cache = "no-store") =>
   Response.json(body, { status, headers: { "cache-control": cache } })
 
 export async function GET(request: Request) {
-  const manifest = deployedManifest()
-  if (manifest instanceof Response) return manifest
   const raw = new URL(request.url).searchParams.get("pools") ?? ""
   const pools = [...new Set(raw.split(",").filter(Boolean))]
   if (pools.length === 0 || pools.length > MAX_POOLS || !pools.every((p) => POOL.test(p))) {
     return json({ error: "invalid_pools" }, 400)
   }
 
-  // Seeds and valid registry markets (R2-33): a discovered pool has a maturity too.
-  const maturities: Record<string, number> = {}
-  for (const m of await resolvedMarkets({ store: sqlRegistryStore(sql), manifest })) maturities[m.contracts.pool] = m.maturity
-
   try {
+    // Seeds and valid registry markets (R2-33): a discovered pool has a maturity too.
+    const maturities: Record<string, number> = {}
+    for (const m of await resolvedMarkets({ store: sqlRegistryStore(sql), manifest: activeManifest() })) maturities[m.contracts.pool] = m.maturity
     const sparks = await getSparks(sql, pools, maturities)
     // Each spark carries its own `stale`; the top-level flag is set when any pool is stale.
     return json({ sparks, stale: Object.values(sparks).some((s) => s.stale) }, 200, CACHED)

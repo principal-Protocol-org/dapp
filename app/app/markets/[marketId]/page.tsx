@@ -4,8 +4,7 @@ import { seedMarketParams } from "@/lib/app/static-params"
 import { MarketRoute } from "./market-route"
 
 // Cache Components needs at least one prerendered param; other ids (registry markets) render on
-// request. A manifest without seeds, or the pending Mainnet stub, still builds: its placeholder id
-// is not a market (404).
+// request. A manifest without seeds still builds: its placeholder id is not a market (404).
 export function generateStaticParams() {
   return seedMarketParams()
 }

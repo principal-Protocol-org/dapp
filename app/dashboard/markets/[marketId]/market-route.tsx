@@ -1,7 +1,6 @@
 import { notFound } from "next/navigation"
 import { MarketPanel } from "@/components/dashboard/market-panel"
 import { getMarket } from "@/lib/protocol/manifest"
-import { manifestPending } from "@/lib/protocol/manifest-source"
 import { resolvedManifest } from "@/lib/server/manifest"
 
 /**
@@ -11,9 +10,6 @@ import { resolvedManifest } from "@/lib/server/manifest"
  * and Next adds `noindex`.
  */
 export async function DashboardMarketRoute({ params }: { params: Promise<{ marketId: string }> }) {
-  // Next renders pages in parallel with their layout, even one it does not show: while the Mainnet
-  // manifest is the pending stub (D-24) the layout shows "not deployed yet", and this reads nothing.
-  if (manifestPending()) return null
   const { marketId } = await params
   if (!getMarket(await resolvedManifest(), marketId)) notFound()
   return <MarketPanel marketId={marketId} />

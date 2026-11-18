@@ -5,8 +5,7 @@ import { describe, expect, it } from "vitest"
 import testnetJson from "@/lib/protocol/__tests__/fixtures/testnet-interim.json"
 import committedTestnetJson from "@/config/manifests/testnet.json"
 import localExample from "@/config/manifests/local.example.json"
-import mainnetJson from "@/config/manifests/mainnet.json"
-import { getMarket, MainnetPendingError, manifestOracles, parseManifest, protocolAbi, ROUTER_ABI_BY_WASM, validateManifest } from "../manifest"
+import { getMarket, manifestOracles, parseManifest, protocolAbi, ROUTER_ABI_BY_WASM, validateManifest } from "../manifest"
 import type { Manifest } from "../types"
 
 const testnet = (): Manifest => parseManifest(structuredClone(testnetJson))
@@ -243,23 +242,59 @@ describe("manifest protocolAbi and Mainnet fields", () => {
     expect(five.map((e) => e.markets[0].marketId)).toEqual(["m0", "m1", "m2", "m3", "m4"])
   })
 
+  it("manifestOracles of a manifest without markets is empty", () => {
+    expect(manifestOracles({ markets: [] })).toEqual([])
+  })
+
+  // The Router hashes are pinned here, not read from the committed testnet.json: a redeploy changes that file.
+  const V1_ROUTER = "9cd0403a156b192e09c1c614743e99c0b167e9a3c65c7e5553596639e772fd39"
+  const V2_ROUTER = "2a0997317651edb0f7e2bd753570b03a88462aa6d216c14b06ebec246bb3c1c2"
+  const withRouter = (router: string | undefined): Manifest => {
+    const m = parsed()
+    const wasmHashes = { ...m.wasmHashes }
+    if (router === undefined) delete wasmHashes.router
+    else wasmHashes.router = router
+    return { ...m, wasmHashes }
+  }
+
   it("ROUTER_ABI_BY_WASM pins the two known Router hashes", () => {
-    expect(ROUTER_ABI_BY_WASM["9cd0403a156b192e09c1c614743e99c0b167e9a3c65c7e5553596639e772fd39"]).toBe(1)
-    expect(ROUTER_ABI_BY_WASM["2a0997317651edb0f7e2bd753570b03a88462aa6d216c14b06ebec246bb3c1c2"]).toBe(2)
+    expect(ROUTER_ABI_BY_WASM[V1_ROUTER]).toBe(1)
+    expect(ROUTER_ABI_BY_WASM[V2_ROUTER]).toBe(2)
   })
 
   it("validateManifest cross-checks protocolAbi against the Router code hash", () => {
-    const m = parsed()
-    expect(m.wasmHashes.router).toBe("9cd0403a156b192e09c1c614743e99c0b167e9a3c65c7e5553596639e772fd39")
-    expect(errors(m)).toEqual([])
-    expect(errors({ ...m, protocolAbi: 1 })).toEqual([])
-    expect(errors({ ...m, protocolAbi: 2 }).map((f) => f.message)).toEqual(["protocolAbi is 2 but the Router code is the version-1 one."])
-    const v2 = { ...m, wasmHashes: { ...m.wasmHashes, router: "2a0997317651edb0f7e2bd753570b03a88462aa6d216c14b06ebec246bb3c1c2" } }
+    const v1 = withRouter(V1_ROUTER)
+    expect(errors(v1)).toEqual([])
+    expect(errors({ ...v1, protocolAbi: 1 })).toEqual([])
+    expect(errors({ ...v1, protocolAbi: 2 }).map((f) => f.message)).toEqual(["protocolAbi is 2 but the Router code is the version-1 one."])
+    const v2 = withRouter(V2_ROUTER)
     expect(errors(v2).map((f) => f.message)).toEqual(["protocolAbi is 1 but the Router code is the version-2 one."])
     expect(errors({ ...v2, protocolAbi: 2 })).toEqual([])
-    const unknown = { ...m, wasmHashes: { ...m.wasmHashes, router: "ab".repeat(32) } }
+    const unknown = withRouter("ab".repeat(32))
     expect(errors(unknown)).toEqual([])
     expect(errors({ ...unknown, protocolAbi: 2 })).toEqual([])
+  })
+
+  it("a manifest that pins no Router hash gives no cross-check finding", () => {
+    const none = withRouter(undefined)
+    expect(none.wasmHashes.router).toBeUndefined()
+    expect(errors(none)).toEqual([])
+    expect(errors({ ...none, protocolAbi: 2 })).toEqual([])
+  })
+
+  it("an upper-case Router hash is still matched", () => {
+    const upper = withRouter(V2_ROUTER.toUpperCase())
+    expect(errors(upper).map((f) => f.message)).toEqual(["protocolAbi is 1 but the Router code is the version-2 one."])
+    expect(errors({ ...upper, protocolAbi: 2 })).toEqual([])
+  })
+
+  it("a Router hash named like a prototype member finds no version", () => {
+    for (const key of ["constructor", "__proto__"]) {
+      const messages = validateManifest({ ...withRouter(key), protocolAbi: 2 }).map((f) => f.message)
+      // The schema refuses the hash; the cross-check says nothing about it.
+      expect(messages.some((msg) => msg.startsWith("wasmHashes.router"))).toBe(true)
+      expect(messages.filter((msg) => msg.startsWith("protocolAbi"))).toEqual([])
+    }
   })
 })
 
@@ -325,28 +360,5 @@ describe("deployLedger off local (Task 2, carried to Task 11)", () => {
 
   it("the committed testnet.json carries it", () => {
     expect(parseManifest(committedTestnetJson).deployLedger).toBe(5707342)
-  })
-})
-
-describe("the pending Mainnet stub (D-24)", () => {
-  it("is exactly { network: mainnet, pending: true } and parses to MainnetPendingError", () => {
-    expect(mainnetJson).toEqual({ network: "mainnet", pending: true })
-    expect(() => parseManifest(mainnetJson)).toThrow(MainnetPendingError)
-    expect(() => parseManifest(mainnetJson)).toThrow("Mainnet contracts are not deployed yet.")
-  })
-
-  it("refuses a pending stub that carries an address or a market", () => {
-    const withShared = { network: "mainnet", pending: true, shared: { router: "C".padEnd(56, "A") } }
-    const withMarkets = { network: "mainnet", pending: true, markets: [] }
-    const withRpc = { network: "mainnet", pending: true, rpcUrl: "https://rpc.example.org" }
-    for (const stub of [withShared, withMarkets, withRpc]) {
-      expect(() => parseManifest(stub)).toThrow(/Invalid manifest: a pending stub/)
-      expect(() => parseManifest(stub)).not.toThrow(MainnetPendingError)
-    }
-  })
-
-  it("refuses a pending stub for another network, and a full manifest that says pending", () => {
-    expect(() => parseManifest({ network: "testnet", pending: true })).toThrow(/Invalid manifest: a pending stub/)
-    expect(() => parseManifest({ ...structuredClone(committedTestnetJson), pending: false })).toThrow(/Invalid manifest: a pending stub/)
   })
 })

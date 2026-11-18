@@ -16,15 +16,14 @@ import "server-only"
  *   (the faucet's approach, R42/R42c).
  *
  * `connection()` keeps GET out of the build's prerender: without it a database that is down at
- * build time would bake the seeds into a static response. While the Mainnet manifest is the pending
- * stub, both methods answer 503 `not_configured` (D-24).
+ * build time would bake the seeds into a static response.
  */
 import { StrKey } from "@stellar/stellar-sdk"
 import { connection } from "next/server"
+import { activeManifest } from "@/lib/protocol/manifest-source"
 import { createRpcReader } from "@/lib/protocol/reader"
 import { createRpcServer } from "@/lib/protocol/stellar"
 import { DatabaseConfigError, sql } from "@/lib/server/db"
-import { deployedManifest } from "@/lib/server/mainnet-pending"
 import { listedMarkets, logOutcome, PUBLISH_WINDOW_MS, publishMarket, sqlRegistryStore, takePublishSlot } from "@/lib/server/registry"
 import { clientIp, isCrossSite, isJson, readBody } from "@/lib/server/request"
 
@@ -98,12 +97,11 @@ function poolFrom(text: string): string | null {
 
 export async function GET(): Promise<Response> {
   await connection()
-  const manifest = deployedManifest()
-  if (manifest instanceof Response) return manifest
-  // Defensive: `listedMarkets` already answers the seeds on any database failure, so only a bug can
-  // land here. It is kept so such a bug answers a fixed 500 that is never cached, without its text.
+  // Defensive: `listedMarkets` already answers the seeds on any database failure, so only a bug (or
+  // a manifest that cannot be read) can land here. It is kept so such a bug answers a fixed 500 that
+  // is never cached, without its text.
   try {
-    const { markets, fromRegistry } = await listedMarkets({ store: sqlRegistryStore(sql), manifest })
+    const { markets, fromRegistry } = await listedMarkets({ store: sqlRegistryStore(sql), manifest: activeManifest() })
     return json({ markets }, 200, fromRegistry ? { "cache-control": CACHED } : {})
   } catch (error) {
     console.error("markets route: the list failed:", error instanceof Error ? error.name : "unknown")
@@ -112,8 +110,6 @@ export async function GET(): Promise<Response> {
 }
 
 export async function POST(request: Request): Promise<Response> {
-  const manifest = deployedManifest()
-  if (manifest instanceof Response) return manifest
   if (isCrossSite(request)) return refuse("cross_site")
   if (!isJson(request)) return refuse("invalid_content_type")
   const body = await readBody(request, MAX_BODY_BYTES)
@@ -124,6 +120,7 @@ export async function POST(request: Request): Promise<Response> {
   if (!takePublishSlot(clientIp(request), Date.now())) return refuse("rate_limited")
 
   try {
+    const manifest = activeManifest()
     const outcome = await publishMarket(
       { store: sqlRegistryStore(sql), reader: createRpcReader(manifest), rpc: createRpcServer(manifest.rpcUrl), manifest },
       pool,

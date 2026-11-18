@@ -52,15 +52,10 @@ It is read at build time, so set it before `pnpm dev` or `pnpm build`. The three
 imported statically by `lib/protocol/manifest-source.ts`. The app refuses to sign when the wallet is
 on another network.
 
-`mainnet` reads `config/manifests/mainnet.json`. Until the Mainnet contracts are deployed it is the
-committed stub `{ "network": "mainnet", "pending": true }`:
-
-- `/app` and `/dashboard` show one page, "Mainnet contracts are not deployed yet.", and read nothing.
-- Every API route answers 503 `not_configured` with that message (the cron routes still refuse
-  other callers first).
-
-Pointing the app at Mainnet is then replacing that one file with the real manifest. The validator
-refuses a `pending` stub that carries any address, URL or market.
+`mainnet` reads `config/manifests/mainnet.json`: the Mainnet deployment, five markets on mock
+assets, each with its own oracle (see Manifest). On Mainnet the app lists the manifest's own markets
+only. A market someone else builds with the factory is checked and cached, but never listed. CI also
+builds the app for Mainnet, so a Mainnet manifest that does not parse fails the pull request.
 
 ## Manifest
 
@@ -89,7 +84,15 @@ market.
   or 429, the RPC's busy answer `-32004`). A contract's own error is never asked again elsewhere. Each
   read records the endpoint that answered, and a page's "Ledger N" line adds "via fallback <host>"
   when one of its reads came from a fallback.
-- `mainnet.json` is the pending stub until the Mainnet deployment (see Network selection).
+- `mainnet.json` is the contracts team's file, `deployments/mainnet-dapp-manifest.json` on the
+  `principal` branch `mainnet` (from `principal` at `3af9388`), with our additions: `deployLedger`
+  (65525735, the ledger before the first contract was created), `protocolAbi` 2 (the contract
+  interface its Router speaks; absent means 1, as on Testnet) and each market's `underlying.tracks`
+  (the asset its mock stands for, such as `USDY`). A test checks that removing these additions gives
+  back the contracts team's file unchanged (`lib/protocol/__tests__/fixtures/mainnet-handover.json`).
+- Each market names its own oracle. The registry accepts a market only when its oracle is one the
+  manifest names (a market's oracle or `shared.oracle`), and its manager and YT read that same
+  oracle. The factory is open to anyone, so a market on any other oracle is never listed.
 - `deployLedger` is required off the local network: the schema refuses a `testnet` or `mainnet`
   manifest without it, since the event indexer starts there. `deploy.sh` writes it on every network
   (the latest ledger before the deploy's first transaction). A file whose `network` is not the one
@@ -171,7 +174,7 @@ Copy `.env.example` to `.env.local`. Never commit real keys.
 
 | Variable | Where | Purpose |
 |---|---|---|
-| `NEXT_PUBLIC_PRINCIPAL_NETWORK` | Browser and server | `testnet` (default), `local` or `mainnet`. `mainnet` reads the pending stub until the Mainnet contracts are deployed: one "not deployed yet" page, and 503 from every API route (see Network selection). |
+| `NEXT_PUBLIC_PRINCIPAL_NETWORK` | Browser and server | `testnet` (default), `local` or `mainnet` (see Network selection). |
 | `FAUCET_ISSUER_SECRET` | Server only | Required for "Get test tokens". Secret key of the test asset issuer. |
 | `FAUCET_PERMISSIONING_ADMIN_SECRET` | Server only | Optional. Defaults to the issuer key. |
 | `DATABASE_URL` | Server only | Postgres for the market recorder (pooled string on Neon; the local stack writes one for `principal-pg`). |
@@ -325,10 +328,6 @@ at the edge, errors never cached (503 `not_configured` or `unavailable`). `healt
 2 × `intervalSeconds` (1,800 s, the schedule). `lastTickAt` null means no run is recorded: an unknown
 state, which the oracle page reads "No keeper run recorded yet". The answer is cached, so the page
 measures the last success's age itself, on the ledger clock, with the same rule.
-
-Do not create the mainnet schedule before the Mainnet contracts are deployed. Until then
-`config/manifests/mainnet.json` is the pending stub, and with `NEXT_PUBLIC_PRINCIPAL_NETWORK=mainnet`
-every cron route answers 503 `not_configured` and records nothing.
 
 Vercel Cron also works, on Production only: add
 `{ "crons": [{ "path": "/api/cron/record", "schedule": "*/15 * * * *" }] }` to `vercel.json` and set
@@ -582,11 +581,10 @@ Each part is read on its own, within 4 s. A part that fails or hangs reads
 group (no cursor yet, for example `market` and `escrow` before the first market) the indexer reads
 `{ "status": "pending", "reason": "no index run yet", …, "pendingGroups": ["escrow", "market"] }`,
 with `indexedThrough` 0 and `lagSeconds` null. Pending is not unavailable: it changes no status code.
-When every part is unavailable it answers 503 (not cached), with the same body. While the Mainnet manifest is the
-pending stub it answers 503 `{ "error": "not_configured", "message": "Mainnet contracts are not
-deployed yet." }` instead, like every API route. `keeper.healthy` is null while no keeper
-run is recorded. `openAlerts.critical` counts an `oracle_unavailable` only once confirmed. An uptime
-monitor can watch the status code, `ledger.status`, `indexer.lagSeconds` or `openAlerts.critical`.
+When every part is unavailable it answers 503 (not cached), with the same body. `keeper.healthy` is
+null while no keeper run is recorded. `openAlerts.critical` counts an `oracle_unavailable` only once
+confirmed. An uptime monitor can watch the status code, `ledger.status`, `indexer.lagSeconds` or
+`openAlerts.critical`.
 
 ## Operations for Tranche 3 go-live
 
@@ -802,7 +800,8 @@ WIZARD_LIVE=1 pnpm test:integration
 Two workflows run on pull requests:
 
 - `.github/workflows/ci.yml` runs lint, typecheck, test and build on every pull request, then the
-  server-secret bundle check.
+  server-secret bundle check. It then builds again with `NEXT_PUBLIC_PRINCIPAL_NETWORK=mainnet` and
+  runs the same check on that bundle.
 - `.github/workflows/e2e-testnet.yml` runs the live end-to-end suites on Stellar Testnet on every
   pull request to `testnet`, and also nightly and by hand (see below). They sign real Testnet transactions with keypairs made in the run. The workflow uses no
   repository secret, and no key is set in its environment.

@@ -1,6 +1,5 @@
 import { notFound } from "next/navigation"
 import { getMarket } from "@/lib/protocol/manifest"
-import { manifestPending } from "@/lib/protocol/manifest-source"
 import { MarketView } from "@/components/app/market/market-view"
 import { resolvedManifest } from "@/lib/server/manifest"
 
@@ -11,9 +10,6 @@ import { resolvedManifest } from "@/lib/server/manifest"
  * Next adds `noindex`. Known ids are the resolved markets: seeds and valid registry markets.
  */
 export async function MarketRoute({ params }: { params: Promise<{ marketId: string }> }) {
-  // Next renders pages in parallel with their layout, even one it does not show: while the Mainnet
-  // manifest is the pending stub (D-24) the layout shows "not deployed yet", and this reads nothing.
-  if (manifestPending()) return null
   const { marketId } = await params
   if (!getMarket(await resolvedManifest(), marketId)) notFound()
   return <MarketView marketId={marketId} />

@@ -10,11 +10,11 @@ import "server-only"
  * the network, and this one does both, so it is never prerendered. No `runtime` export: Cache
  * Components runs handlers on the default Node.js runtime.
  */
+import { activeManifest } from "@/lib/protocol/manifest-source"
 import { createRpcReader } from "@/lib/protocol/reader"
 import { createRpcServer } from "@/lib/protocol/stellar"
 import { DatabaseConfigError, sql } from "@/lib/server/db"
 import { cronAuthorized, cronJson as json } from "@/lib/server/cron-auth"
-import { deployedManifest } from "@/lib/server/mainnet-pending"
 import { recordAll } from "@/lib/server/recorder"
 import { discover, resolvedMarkets, revalidate, sqlRegistryStore } from "@/lib/server/registry"
 
@@ -31,9 +31,9 @@ const RECORDER_ROWS_TIMEOUT_MS = 10_000
 export async function GET(request: Request) {
   if (!(await cronAuthorized(request))) return json({ error: "unauthorized" }, 401)
 
-  const manifest = deployedManifest()
-  if (manifest instanceof Response) return manifest
   try {
+    // Inside the try: a manifest that cannot be read answers this route's JSON, never a bare 500.
+    const manifest = activeManifest()
     const server = createRpcServer(manifest.rpcUrl)
     const reader = createRpcReader(manifest)
     const store = sqlRegistryStore(sql)

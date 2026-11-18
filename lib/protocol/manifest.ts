@@ -125,24 +125,6 @@ export const manifestSchema = z
     }
   })
 
-/** What the app shows, and the API answers, while the Mainnet manifest is the pending stub (D-24). */
-export const MAINNET_PENDING_MESSAGE = "Mainnet contracts are not deployed yet."
-
-/**
- * The manifest is the committed stub `{ "network": "mainnet", "pending": true }`: the contracts are
- * not deployed yet. Pages show one clear page and the API answers 503 `not_configured`; nothing is
- * guessed. Replacing the stub with the real manifest is the whole switch.
- */
-export class MainnetPendingError extends Error {
-  constructor() {
-    super(MAINNET_PENDING_MESSAGE)
-    this.name = "MainnetPendingError"
-  }
-}
-
-/** The stub, and nothing else: one carrying an address, a URL or a market is refused (D-24). */
-const pendingStubSchema = z.object({ network: z.literal("mainnet"), pending: z.literal(true) }).strict()
-
 /** Router code hashes (hex) whose interface version is known. */
 export const ROUTER_ABI_BY_WASM: Readonly<Record<string, 1 | 2>> = {
   // Testnet, 665bb67
@@ -191,18 +173,8 @@ function upgradeV1(v1: z.infer<typeof manifestSchemaV1>): unknown {
   }
 }
 
-/**
- * Accepts a v1 or v2 manifest and returns v2. The pending Mainnet stub throws `MainnetPendingError`;
- * any other file with a `pending` key is refused.
- */
+/** Accepts a v1 or v2 manifest and returns v2. */
 export function parseManifest(json: unknown): Manifest {
-  if (typeof json === "object" && json !== null && "pending" in json) {
-    const stub = pendingStubSchema.safeParse(json)
-    if (!stub.success) {
-      throw new Error(`Invalid manifest: a pending stub is exactly { "network": "mainnet", "pending": true } (${describe(stub.error)})`)
-    }
-    throw new MainnetPendingError()
-  }
   let input = json
   if (typeof json === "object" && json !== null && (json as { schemaVersion?: unknown }).schemaVersion === 1) {
     const v1 = manifestSchemaV1.safeParse(json)
@@ -240,7 +212,8 @@ export function validateManifest(m: Manifest): Finding[] {
   }
 
   const routerHash = m.wasmHashes?.router?.toLowerCase()
-  const known = routerHash ? ROUTER_ABI_BY_WASM[routerHash] : undefined
+  // Own keys only: a hash such as "constructor" must not find a prototype member.
+  const known = routerHash && Object.hasOwn(ROUTER_ABI_BY_WASM, routerHash) ? ROUTER_ABI_BY_WASM[routerHash] : undefined
   if (known !== undefined && known !== protocolAbi(m)) {
     error(`protocolAbi is ${protocolAbi(m)} but the Router code is the version-${known} one.`)
   }

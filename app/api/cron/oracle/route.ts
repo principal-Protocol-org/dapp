@@ -27,10 +27,10 @@ import "server-only"
  * error only.
  */
 import { StrKey } from "@stellar/stellar-sdk"
+import { activeManifest } from "@/lib/protocol/manifest-source"
 import type { Manifest, Network } from "@/lib/protocol/types"
 import { cronAuthorized, cronJson as json } from "@/lib/server/cron-auth"
 import { sql } from "@/lib/server/db"
-import { deployedManifest } from "@/lib/server/mainnet-pending"
 import { keeperSigner, OracleKeeperConfigError, OracleSubmitError, tickFeed, tickOracle, type KeeperMode, type OracleTick } from "@/lib/server/oracle-keeper"
 import { lastSubmittedRejection, recordTick, type KeeperFailure } from "@/lib/server/oracle-ticks"
 
@@ -89,10 +89,7 @@ export async function GET(request: Request) {
   let outcome: OracleTick | KeeperFailure
   let response: Response
   try {
-    const deployed = deployedManifest()
-    // Nothing runs, and no tick is recorded, until the Mainnet contracts are deployed (D-24).
-    if (deployed instanceof Response) return deployed
-    manifest = deployed
+    manifest = activeManifest()
     oracle = manifest.shared.oracle
     if (!knownMode) throw new OracleKeeperConfigError("ORACLE_KEEPER_MODE is neither push nor feed.")
     let tick: OracleTick
