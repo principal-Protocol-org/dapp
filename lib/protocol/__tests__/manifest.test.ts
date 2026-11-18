@@ -6,7 +6,7 @@ import testnetJson from "@/lib/protocol/__tests__/fixtures/testnet-interim.json"
 import committedTestnetJson from "@/config/manifests/testnet.json"
 import localExample from "@/config/manifests/local.example.json"
 import mainnetJson from "@/config/manifests/mainnet.json"
-import { getMarket, MainnetPendingError, parseManifest, validateManifest } from "../manifest"
+import { getMarket, MainnetPendingError, manifestOracles, parseManifest, protocolAbi, ROUTER_ABI_BY_WASM, validateManifest } from "../manifest"
 import type { Manifest } from "../types"
 
 const testnet = (): Manifest => parseManifest(structuredClone(testnetJson))
@@ -180,14 +180,86 @@ describe("manifest v2", () => {
     expect(() => parseManifest(raw)).toThrow(/wasmHashes/)
   })
 
-  it("validateManifest flags a market whose router or oracle differs from shared", () => {
+  it("validateManifest flags a market whose router differs from shared, but not one on its own oracle", () => {
     const m = testnet()
     expect(errors(m)).toEqual([])
     const other = testnetJson.shared.riskControl
     const badRouter = { ...m, markets: [{ ...m.markets[0], contracts: { ...m.markets[0].contracts, router: other } }] }
     expect(errors(badRouter).some((f) => f.message.includes("router"))).toBe(true)
-    const badOracle = { ...m, markets: [{ ...m.markets[0], contracts: { ...m.markets[0].contracts, oracle: other } }] }
-    expect(errors(badOracle).some((f) => f.message.includes("oracle"))).toBe(true)
+    const ownOracle = { ...m, markets: [{ ...m.markets[0], contracts: { ...m.markets[0].contracts, oracle: other } }] }
+    expect(errors(ownOracle)).toEqual([])
+  })
+})
+
+describe("manifest protocolAbi and Mainnet fields", () => {
+  const committed = () => structuredClone(committedTestnetJson) as Record<string, unknown>
+  const parsed = () => parseManifest(committed())
+  const C1 = testnetJson.shared.riskControl
+  const C2 = testnetJson.shared.permissioning
+
+  it("protocolAbi defaults to 1 and accepts 1 or 2 only", () => {
+    expect(protocolAbi({})).toBe(1)
+    expect(protocolAbi({ protocolAbi: 2 })).toBe(2)
+    expect(parseManifest({ ...committed(), protocolAbi: 2 }).protocolAbi).toBe(2)
+    expect(() => parseManifest({ ...committed(), protocolAbi: 3 })).toThrow(/protocolAbi/)
+    expect(() => parseManifest({ ...committed(), protocolAbi: "2" })).toThrow(/protocolAbi/)
+  })
+
+  it("accessContact.url accepts https and mailto only", () => {
+    const ok = (url: string) => parseManifest({ ...committed(), accessContact: { label: "Help", url } })
+    expect(ok("https://example.org/help").accessContact).toEqual({ label: "Help", url: "https://example.org/help" })
+    expect(ok("mailto:a@b.org").accessContact?.url).toBe("mailto:a@b.org")
+    expect(() => ok("http://example.org")).toThrow(/accessContact/)
+    expect(() => ok("javascript:alert(1)")).toThrow(/accessContact/)
+  })
+
+  it("tracks is 1 to 12 characters and survives parsing", () => {
+    const withTracks = (tracks: string) => {
+      const raw = committed() as { markets: { underlying: Record<string, unknown> }[] }
+      raw.markets[0].underlying.tracks = tracks
+      return parseManifest(raw)
+    }
+    expect(withTracks("USDY").markets[0].underlying.tracks).toBe("USDY")
+    expect(() => withTracks("")).toThrow(/tracks/)
+    expect(() => withTracks("X".repeat(13))).toThrow(/tracks/)
+  })
+
+  it("createdLedgers keys are contract ids and values positive integers", () => {
+    expect(parseManifest({ ...committed(), createdLedgers: { [C1]: 100 } }).createdLedgers).toEqual({ [C1]: 100 })
+    expect(() => parseManifest({ ...committed(), createdLedgers: { nope: 100 } })).toThrow(/createdLedgers/)
+    expect(() => parseManifest({ ...committed(), createdLedgers: { [C1]: 0 } })).toThrow(/createdLedgers/)
+    expect(() => parseManifest({ ...committed(), createdLedgers: { [C1]: 1.5 } })).toThrow(/createdLedgers/)
+  })
+
+  it("manifestOracles groups markets by distinct oracle in first-seen order", () => {
+    const m = parsed()
+    const mk = (id: string, oracle: string) => ({ ...m.markets[0], marketId: id, contracts: { ...m.markets[0].contracts, oracle } })
+    const shared = manifestOracles({ markets: [mk("a", C1), mk("b", C1)] })
+    expect(shared).toHaveLength(1)
+    expect(shared[0].markets.map((x) => x.marketId)).toEqual(["a", "b"])
+    const ids = [C2, C1, m.markets[0].contracts.oracle, m.markets[0].contracts.sy, m.markets[0].contracts.pt]
+    const five = manifestOracles({ markets: ids.map((o, i) => mk(`m${i}`, o)) })
+    expect(five.map((e) => e.oracle)).toEqual(ids)
+    expect(five.map((e) => e.markets[0].marketId)).toEqual(["m0", "m1", "m2", "m3", "m4"])
+  })
+
+  it("ROUTER_ABI_BY_WASM pins the two known Router hashes", () => {
+    expect(ROUTER_ABI_BY_WASM["9cd0403a156b192e09c1c614743e99c0b167e9a3c65c7e5553596639e772fd39"]).toBe(1)
+    expect(ROUTER_ABI_BY_WASM["2a0997317651edb0f7e2bd753570b03a88462aa6d216c14b06ebec246bb3c1c2"]).toBe(2)
+  })
+
+  it("validateManifest cross-checks protocolAbi against the Router code hash", () => {
+    const m = parsed()
+    expect(m.wasmHashes.router).toBe("9cd0403a156b192e09c1c614743e99c0b167e9a3c65c7e5553596639e772fd39")
+    expect(errors(m)).toEqual([])
+    expect(errors({ ...m, protocolAbi: 1 })).toEqual([])
+    expect(errors({ ...m, protocolAbi: 2 }).map((f) => f.message)).toEqual(["protocolAbi is 2 but the Router code is the version-1 one."])
+    const v2 = { ...m, wasmHashes: { ...m.wasmHashes, router: "2a0997317651edb0f7e2bd753570b03a88462aa6d216c14b06ebec246bb3c1c2" } }
+    expect(errors(v2).map((f) => f.message)).toEqual(["protocolAbi is 1 but the Router code is the version-2 one."])
+    expect(errors({ ...v2, protocolAbi: 2 })).toEqual([])
+    const unknown = { ...m, wasmHashes: { ...m.wasmHashes, router: "ab".repeat(32) } }
+    expect(errors(unknown)).toEqual([])
+    expect(errors({ ...unknown, protocolAbi: 2 })).toEqual([])
   })
 })
 

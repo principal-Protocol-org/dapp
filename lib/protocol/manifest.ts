@@ -36,6 +36,8 @@ const marketSchema = z.object({
     issuer: accountId,
     sac: contractId,
     decimals: z.number().int().min(0).max(18),
+    /** Optional: the asset this underlying tracks (e.g. the token behind a wrapped one), shown beside it. */
+    tracks: z.string().min(1).max(12).optional(),
   }),
   maturity: z.number().int().positive(),
   contracts: z.object({
@@ -102,6 +104,17 @@ export const manifestSchema = z
         displayName: z.string().min(1),
       })
       .optional(),
+    /** Contract-interface version the Router speaks. Absent means 1 (Testnet). */
+    protocolAbi: z.union([z.literal(1), z.literal(2)]).optional(),
+    /** Where a person without access can ask for it. */
+    accessContact: z
+      .object({
+        label: z.string().min(1),
+        url: z.string().url().refine((u) => /^(https:|mailto:)/i.test(u), "Expected an https: or mailto: URL"),
+      })
+      .optional(),
+    /** Ledger each contract was created at, by contract id. */
+    createdLedgers: z.record(contractId, z.number().int().positive()).optional(),
     markets: z.array(marketSchema),
   })
   // The indexer starts at `deployLedger`: off the local network, a manifest without it would make
@@ -129,6 +142,30 @@ export class MainnetPendingError extends Error {
 
 /** The stub, and nothing else: one carrying an address, a URL or a market is refused (D-24). */
 const pendingStubSchema = z.object({ network: z.literal("mainnet"), pending: z.literal(true) }).strict()
+
+/** Router code hashes (hex) whose interface version is known. */
+export const ROUTER_ABI_BY_WASM: Readonly<Record<string, 1 | 2>> = {
+  // Testnet, 665bb67
+  "9cd0403a156b192e09c1c614743e99c0b167e9a3c65c7e5553596639e772fd39": 1,
+  // Mainnet, 3af9388
+  "2a0997317651edb0f7e2bd753570b03a88462aa6d216c14b06ebec246bb3c1c2": 2,
+}
+
+/** The contract-interface version a manifest declares; 1 when it does not say. */
+export function protocolAbi(m: Pick<Manifest, "protocolAbi">): 1 | 2 {
+  return m.protocolAbi ?? 1
+}
+
+/** The distinct oracles of a manifest in first-seen order, each with the markets that use it. */
+export function manifestOracles(m: Pick<Manifest, "markets">): { oracle: string; markets: Market[] }[] {
+  const byOracle = new Map<string, Market[]>()
+  for (const market of m.markets) {
+    const list = byOracle.get(market.contracts.oracle)
+    if (list) list.push(market)
+    else byOracle.set(market.contracts.oracle, [market])
+  }
+  return [...byOracle].map(([oracle, markets]) => ({ oracle, markets }))
+}
 
 export const PASSPHRASES: Record<Network, string> = {
   local: "Standalone Network ; February 2017",
@@ -202,13 +239,16 @@ export function validateManifest(m: Manifest): Finding[] {
     }
   }
 
+  const routerHash = m.wasmHashes?.router?.toLowerCase()
+  const known = routerHash ? ROUTER_ABI_BY_WASM[routerHash] : undefined
+  if (known !== undefined && known !== protocolAbi(m)) {
+    error(`protocolAbi is ${protocolAbi(m)} but the Router code is the version-${known} one.`)
+  }
+
   const seen = new Set<string>()
   for (const market of m.markets) {
     if (market.contracts.router !== m.shared.router) {
       error(`Market "${market.marketId}" router differs from shared.router.`)
-    }
-    if (market.contracts.oracle !== m.shared.oracle) {
-      error(`Market "${market.marketId}" oracle differs from shared.oracle.`)
     }
     if (seen.has(market.marketId)) error(`Duplicate marketId "${market.marketId}".`)
     seen.add(market.marketId)

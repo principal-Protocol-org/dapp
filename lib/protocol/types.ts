@@ -32,7 +32,7 @@ export type TestAsset = { code: string; issuer: string; sac: string; decimals: n
 export type Market = {
   marketId: string
   displayName: string
-  underlying: { code: string; issuer: string; sac: string; decimals: number }
+  underlying: { code: string; issuer: string; sac: string; decimals: number; tracks?: string }
   maturity: number
   contracts: MarketContracts
   /** Wasm hash (hex) each contract runs, by contract name; optional in the manifest. */
@@ -67,6 +67,12 @@ export type Manifest = {
   /** Router functions the dApp may call in user flows. */
   routerFunctions: string[]
   testAsset?: TestAsset
+  /** Contract-interface version the Router speaks; absent means 1 (see `protocolAbi()`). */
+  protocolAbi?: 1 | 2
+  /** Where a person without access can ask for it (https: or mailto:). */
+  accessContact?: { label: string; url: string }
+  /** Ledger each contract was created at, by contract id. */
+  createdLedgers?: Record<string, number>
   markets: Market[]
 }
 
