@@ -2,8 +2,8 @@ import "server-only"
 
 /**
  * The manifest pages render with (spec 0002 §1): the static manifest, its `markets` replaced by
- * the resolved list — the seeds and the valid registry markets, or the seeds alone when the
- * database is down (R2-36). It reads cached verdicts only; nothing is validated here.
+ * the resolved list — the markets this network lists (the seeds and the valid registry markets; on
+ * Mainnet, the manifest's markets only), or the seeds alone when the database is down (R2-36). It reads cached verdicts only; nothing is validated here.
  *
  * `connection()` makes it request-time: without it, a database that is down during the build
  * would let the seeds-only answer be prerendered into the static shell. Callers read it inside

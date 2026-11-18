@@ -2,8 +2,8 @@ import "server-only"
 
 /**
  * `GET /api/markets/sparks?pools=a,b`: the last 30 days of fixed APY and the change in percentage
- * points for each pool (spec 0002 §6; ruling R2-32). Bad input is 400. When the database is down
- * the answer is 200 with empty sparks and `stale: true`.
+ * points for each pool (spec 0002 §6; ruling R2-32). Bad input is 400. When the database is down,
+ * or the manifest cannot be read, the answer is 200 with empty sparks and `stale: true`, never cached.
  * Cached 60 s at the CDN (stale-while-revalidate 300 s) when the answer came from the database.
  */
 import { SPARKS_CHUNK } from "@/lib/app/history-types"
@@ -30,7 +30,7 @@ export async function GET(request: Request) {
   }
 
   try {
-    // Seeds and valid registry markets (R2-33): a discovered pool has a maturity too.
+    // The markets this network lists (on Mainnet, the manifest's markets only; R2-33), each with its maturity.
     const maturities: Record<string, number> = {}
     for (const m of await resolvedMarkets({ store: sqlRegistryStore(sql), manifest: activeManifest() })) maturities[m.contracts.pool] = m.maturity
     const sparks = await getSparks(sql, pools, maturities)

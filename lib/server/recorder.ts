@@ -40,7 +40,7 @@ export type RecordDeps = {
   refreshRegistry?: (deadline: number) => Promise<unknown>
   /** The refresh's time budget; REGISTRY_BUDGET_MS by default. */
   registryBudgetMs?: number
-  /** The markets to record: the seeds and valid registry markets (`resolvedMarkets`). */
+  /** The markets to record: the markets this network lists (`resolvedMarkets`; on Mainnet, the seeds only). */
   markets: () => Promise<Market[]>
   /** Wall clock in ms. */
   now: () => number

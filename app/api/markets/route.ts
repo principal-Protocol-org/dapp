@@ -3,8 +3,8 @@ import "server-only"
 /**
  * `/api/markets` (spec 0002 §1).
  *
- * - `GET`: the markets clients see — the manifest seeds and the valid registry rows; the seeds
- *   alone when the database is down. Read from the cached verdicts, never validated inline (R2-36),
+ * - `GET`: the markets clients see — the manifest seeds and the valid registry rows (on Mainnet,
+ *   the seeds only); the seeds alone when the database is down. Read from the cached verdicts, never validated inline (R2-36),
  *   with the bounded read (`where valid is true`, D-26 item 1). Cached 60 s at the CDN
  *   (stale-while-revalidate 300 s) when the registry answered; the seeds-only fallback and errors
  *   are never cached.
@@ -13,14 +13,15 @@ import "server-only"
  *   invalid pool is 422 with the reason (this app's own words), an unverifiable one (the RPC
  *   failed) 503 with a fixed reason, the RPC's detail logged only (R2-40); nothing is written for
  *   either. Same-origin JSON only, a 1 KiB body, rate-limited per IP and per instance
- *   (the faucet's approach, R42/R42c).
+ *   (the faucet's approach, R42/R42c). On Mainnet it answers 403 `not_available` before reading or
+ *   writing anything: markets there are the protocol team's, named by the manifest.
  *
  * `connection()` keeps GET out of the build's prerender: without it a database that is down at
  * build time would bake the seeds into a static response.
  */
 import { StrKey } from "@stellar/stellar-sdk"
 import { connection } from "next/server"
-import { activeManifest } from "@/lib/protocol/manifest-source"
+import { activeManifest, activeNetwork } from "@/lib/protocol/manifest-source"
 import { createRpcReader } from "@/lib/protocol/reader"
 import { createRpcServer } from "@/lib/protocol/stellar"
 import { DatabaseConfigError, sql } from "@/lib/server/db"
@@ -35,6 +36,7 @@ const MAX_BODY_BYTES = 1_024
 const RETRY_AFTER_SECONDS = PUBLISH_WINDOW_MS / 1_000
 
 type ErrorCode =
+  | "not_available"
   | "cross_site"
   | "invalid_content_type"
   | "request_too_large"
@@ -46,6 +48,7 @@ type ErrorCode =
   | "failed"
 
 const STATUS: Record<ErrorCode, number> = {
+  not_available: 403,
   cross_site: 403,
   invalid_content_type: 415,
   request_too_large: 413,
@@ -58,6 +61,7 @@ const STATUS: Record<ErrorCode, number> = {
 }
 
 const MESSAGES: Record<ErrorCode, string> = {
+  not_available: "Markets are created by the protocol team on Mainnet.",
   cross_site: "Markets can only be published from this app's own pages.",
   invalid_content_type: "The request must be sent as application/json.",
   request_too_large: `The request body is larger than ${MAX_BODY_BYTES} bytes; send only { "pool": "C…" }.`,
@@ -110,6 +114,8 @@ export async function GET(): Promise<Response> {
 }
 
 export async function POST(request: Request): Promise<Response> {
+  // The network alone decides, without parsing the manifest: nothing is read or written on Mainnet.
+  if (activeNetwork() === "mainnet") return refuse("not_available")
   if (isCrossSite(request)) return refuse("cross_site")
   if (!isJson(request)) return refuse("invalid_content_type")
   const body = await readBody(request, MAX_BODY_BYTES)

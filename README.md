@@ -54,8 +54,10 @@ on another network.
 
 `mainnet` reads `config/manifests/mainnet.json`: the Mainnet deployment, five markets on mock
 assets, each with its own oracle (see Manifest). On Mainnet the app lists the manifest's own markets
-only. A market someone else builds with the factory is checked and cached, but never listed. CI also
-builds the app for Mainnet, so a Mainnet manifest that does not parse fails the pull request.
+only. A market someone else builds with the factory is checked and cached, but never listed, and the
+manager view does not show it either. `POST /api/markets` answers 403 `not_available` there: markets
+are created by the protocol team. CI also builds the app for Mainnet, so a Mainnet manifest that
+does not parse fails the pull request.
 
 ## Manifest
 
@@ -84,12 +86,13 @@ market.
   or 429, the RPC's busy answer `-32004`). A contract's own error is never asked again elsewhere. Each
   read records the endpoint that answered, and a page's "Ledger N" line adds "via fallback <host>"
   when one of its reads came from a fallback.
-- `mainnet.json` is the contracts team's file, `deployments/mainnet-dapp-manifest.json` on the
-  `principal` branch `mainnet` (from `principal` at `3af9388`), with our additions: `deployLedger`
-  (65525735, the ledger before the first contract was created), `protocolAbi` 2 (the contract
-  interface its Router speaks; absent means 1, as on Testnet) and each market's `underlying.tracks`
-  (the asset its mock stands for, such as `USDY`). A test checks that removing these additions gives
-  back the contracts team's file unchanged (`lib/protocol/__tests__/fixtures/mainnet-handover.json`).
+- `mainnet.json` is the contracts team's file `deployments/mainnet-dapp-manifest.json`, taken from
+  the `mainnet` branch of the contracts repository (`principal`). Its contracts were built from
+  `principal` at `3af9388`, the manifest's `sourceCommit`. We add `deployLedger` (65525735, the
+  ledger before the first contract was created), `protocolAbi` 2 (the contract interface its Router
+  speaks; absent means 1, as on Testnet) and each market's `underlying.tracks` (the asset its mock
+  stands for, such as `USDY`). A test checks that removing these additions gives back the contracts
+  team's file unchanged (`lib/protocol/__tests__/fixtures/mainnet-handover.json`).
 - Each market names its own oracle. The registry accepts a market only when its oracle is one the
   manifest names (a market's oracle or `shared.oracle`), and its manager and YT read that same
   oracle. The factory is open to anyone, so a market on any other oracle is never listed.

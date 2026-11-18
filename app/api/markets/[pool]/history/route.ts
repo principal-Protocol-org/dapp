@@ -3,9 +3,10 @@ import "server-only"
 /**
  * `GET /api/markets/[pool]/history?range=7d|30d|90d|all`: the market's fixed APY, 7-day underlying
  * APY and liquidity series (spec 0002 §6). Pages must never break: when the database is down or
- * not configured the answer is 200 with an empty history and `stale: true`. Bad input is 400, a
- * pool that is not a known market (a seed or a valid registry market, R2-33) is 404. Params are
- * async in this Next; the route is dynamic.
+ * not configured, or the manifest cannot be read, the answer is 200 with an empty history and
+ * `stale: true`, never cached. Bad input is 400, a pool that is not one of the markets this network
+ * lists (on Mainnet, the manifest's markets only; R2-33) is 404. Params are async in this Next; the
+ * route is dynamic.
  */
 import { activeManifest } from "@/lib/protocol/manifest-source"
 import { sql } from "@/lib/server/db"

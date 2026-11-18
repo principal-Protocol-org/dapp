@@ -5,9 +5,10 @@ import type { Manifest } from "@/lib/protocol/types"
 
 /**
  * The manifest client code reads (spec 0002 §1): resolved on the server by the app layout — the
- * static manifest with the seeds and the valid registry markets — and passed down once. Client code
- * never reads the static manifest itself, so a market discovered or published since the deploy is
- * listed without a redeploy. 0001's topology gate still runs before every action.
+ * static manifest with the markets this network lists (the seeds and the valid registry markets; on
+ * Mainnet, the manifest's markets only) — and passed down once. Client code never reads the static
+ * manifest itself, so off Mainnet a market discovered or published since the deploy is listed
+ * without a redeploy. 0001's topology gate still runs before every action.
  *
  * `seedCount` is the static manifest's market count: the resolved list leaves out a seed the
  * registry marked invalid, so "N of M markets listed" needs M from the server.
