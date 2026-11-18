@@ -73,6 +73,27 @@ describe("readLive", () => {
     const live = await readLive(reader, { contractId: "C", functionName: "balance" })
     expect(live).toMatchObject({ status: "unavailable", error: "HostError: Error(Contract, #13)" })
   })
+
+  it("records the arguments as plain JSON-safe data: bigints as decimal strings at any depth (an enum's value, a struct's fields)", async () => {
+    const reader: ContractReader = async <T,>() => ({ value: 1n as T, latestLedger: 9, minResourceFee: "1", rawXdr: "AAAA", rpcUrl: "https://rpc.test" })
+    const args: ScArg[] = [
+      { type: "enum", variant: "Amount", value: { type: "i128", value: 5n } },
+      { type: "struct", value: { at: { type: "u64", value: 7n }, inner: { type: "enum", variant: "Other", value: { type: "symbol", value: "USDY" } } } },
+      { type: "enum", variant: "None" },
+      { type: "i128", value: 12n },
+    ]
+    for (const live of [await readLive(reader, { contractId: "C", functionName: "f", args }), await readLive(async () => Promise.reject(new Error("down")), { contractId: "C", functionName: "f", args })]) {
+      expect(live.source?.args).toEqual([
+        { type: "enum", variant: "Amount", value: { type: "i128", value: "5" } },
+        { type: "struct", value: { at: { type: "u64", value: "7" }, inner: { type: "enum", variant: "Other", value: { type: "symbol", value: "USDY" } } } },
+        { type: "enum", variant: "None" },
+        { type: "i128", value: "12" },
+      ])
+      expect(() => JSON.stringify(live.source)).not.toThrow()
+    }
+    // The call itself still carries the bigints: only the record is plain.
+    expect(args[0]).toEqual({ type: "enum", variant: "Amount", value: { type: "i128", value: 5n } })
+  })
 })
 
 describe("dedupeReads", () => {

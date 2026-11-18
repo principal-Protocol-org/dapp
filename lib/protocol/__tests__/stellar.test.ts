@@ -99,6 +99,33 @@ describe("scArgToVal: a contracttype struct (MarketFactory params, R5-10)", () =
   });
 });
 
+describe("scArgToVal: a contracttype enum (the SEP-40 feed's Sep40Asset)", () => {
+  const sac = StrKey.encodeContract(new Uint8Array(32).fill(5));
+
+  it("a tuple variant is a vec of its name as a symbol, then its value", () => {
+    const other: ScArg = { type: "enum", variant: "Other", value: { type: "symbol", value: "USDY" } };
+    expect(scArgToVal(other).toXDR("base64")).toBe(xdr.ScVal.scvVec([xdr.ScVal.scvSymbol("Other"), xdr.ScVal.scvSymbol("USDY")]).toXDR("base64"));
+    expect(scValToNative(scArgToVal(other))).toEqual(["Other", "USDY"]);
+    const stellar: ScArg = { type: "enum", variant: "Stellar", value: { type: "address", value: sac } };
+    expect(scArgToVal(stellar).toXDR("base64")).toBe(
+      xdr.ScVal.scvVec([xdr.ScVal.scvSymbol("Stellar"), nativeToScVal(sac, { type: "address" })]).toXDR("base64"),
+    );
+    expect(scValToNative(scArgToVal(stellar))).toEqual(["Stellar", sac]);
+  });
+
+  it("a unit variant is a one-element vec of its name", () => {
+    expect(scArgToVal({ type: "enum", variant: "None" }).toXDR("base64")).toBe(xdr.ScVal.scvVec([xdr.ScVal.scvSymbol("None")]).toXDR("base64"));
+  });
+
+  it("scArgEquals compares the encoding: same variant and value are equal, another variant or value is not", () => {
+    const a: ScArg = { type: "enum", variant: "Other", value: { type: "symbol", value: "USDY" } };
+    expect(scArgEquals(a, structuredClone(a))).toBe(true);
+    expect(scArgEquals(a, { type: "enum", variant: "Other", value: { type: "symbol", value: "XLM" } })).toBe(false);
+    expect(scArgEquals(a, { type: "enum", variant: "Stellar", value: { type: "address", value: sac } })).toBe(false);
+    expect(scArgEquals(a, { type: "symbol", value: "USDY" })).toBe(false);
+  });
+});
+
 describe("buildInvokeTransaction", () => {
   it("builds parseable unsigned XDR for a Principal Router call", () => {
     const source = Keypair.random().publicKey();

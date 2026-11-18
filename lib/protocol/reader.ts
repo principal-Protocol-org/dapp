@@ -68,9 +68,17 @@ export function createRpcReader(m: Manifest, opts: { serverFor?: (rpcUrl: string
   return Object.assign(read, { rpcUrl: m.rpcUrl })
 }
 
-/** The call's arguments as plain, JSON-safe data (bigints as decimal strings). */
+/** `value` with every bigint, at any depth (a struct's fields, an enum's value), as its decimal string. */
+function plain(value: unknown): unknown {
+  if (typeof value === "bigint") return value.toString()
+  if (Array.isArray(value)) return value.map(plain)
+  if (value !== null && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, plain(v)]))
+  return value
+}
+
+/** The call's arguments as plain, JSON-safe data (bigints as decimal strings, at any depth), in their `ScArg` shape. */
 function plainArgs(args: ScArg[] | undefined): unknown[] {
-  return (args ?? []).map((a) => ({ ...a, value: typeof a.value === "bigint" ? a.value.toString() : a.value }))
+  return (args ?? []).map(plain)
 }
 
 /**

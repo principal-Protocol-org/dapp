@@ -1,5 +1,5 @@
 // @vitest-environment node
-import { Address, nativeToScVal, xdr } from "@stellar/stellar-sdk"
+import { Address, StrKey, nativeToScVal, xdr } from "@stellar/stellar-sdk"
 import { describe, expect, it } from "vitest"
 import { allLive, liveValue, readLive, unavailable } from "../../reader"
 import type { Live, ReadSource } from "../../types"
@@ -87,8 +87,24 @@ describe("verifyCommand", () => {
     expect(() => verifyCommand("testnet", source("mystery", [{ type: "u32", value: 1 }]))).toThrow(/mystery/)
   })
 
+  it("a SEP-40 lastprice takes its asset enum in the CLI's JSON form, quoted for the shell", () => {
+    const FEED = StrKey.encodeContract(Buffer.alloc(32, 7))
+    const stellar = { type: "enum", variant: "Stellar", value: { type: "address", value: SAC } }
+    expect(verifyCommand("testnet", source("lastprice", [stellar], FEED))).toBe(
+      `stellar contract invoke --network testnet --id ${FEED} --source-account ${NULL_ACCOUNT} --send=no -- lastprice --asset '{"Stellar":"${SAC}"}'`,
+    )
+    const other = { type: "enum", variant: "Other", value: { type: "symbol", value: "USDY" } }
+    expect(verifyCommand("testnet", source("lastprice", [other], FEED)).endsWith(`-- lastprice --asset '{"Other":"USDY"}'`)).toBe(true)
+  })
+
+  it("an enum's unit variant is its name; a nested enum nests its JSON", () => {
+    expect(verifyCommand("testnet", source("lastprice", [{ type: "enum", variant: "Native" }])).endsWith("-- lastprice --asset Native")).toBe(true)
+    const nested = { type: "enum", variant: "Wrap", value: { type: "enum", variant: "Other", value: { type: "symbol", value: "USDY" } } }
+    expect(verifyCommand("testnet", source("lastprice", [nested])).endsWith(`-- lastprice --asset '{"Wrap":{"Other":"USDY"}}'`)).toBe(true)
+  })
+
   it("the map covers every view with arguments the dashboard reads", () => {
-    for (const fn of ["get_record", "balance", "pending_claim", "last_claimed_index", "is_consumer", "get_asset_limit", "get_asset_volume", "swap_fee_rate", "balance_of", "market"]) {
+    for (const fn of ["get_record", "balance", "pending_claim", "last_claimed_index", "is_consumer", "get_asset_limit", "get_asset_volume", "swap_fee_rate", "balance_of", "market", "lastprice"]) {
       expect(ARG_NAMES[fn], fn).toBeDefined()
     }
   })

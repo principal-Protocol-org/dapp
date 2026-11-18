@@ -213,7 +213,7 @@ export function Overview() {
   const m = useManifest()
   const { ledgerTime, isError: clockFailed } = useLedgerClock()
   const protocol = useProtocolState()
-  const oracle = useOracleView()
+  const oracle = useOracleView(m.shared.oracle)
   const risk = useRiskView()
   const pauses = usePauses()
 

@@ -34,6 +34,7 @@ export const NULL_ACCOUNT = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
  * | `market` | Router `:464` | `pool` |
  * | `is_allowed` | Permissioning `:87` | `account` |
  * | `is_allowed_for_asset` | Permissioning `:119` | `account`, `asset` |
+ * | `lastprice` | SEP-40 price feed (principal 3af9388 `oracle_adapter:172-176` `Sep40Interface`; the mock `tests/fixtures/sep40-mock` `:62`) | `asset` |
  *
  * `balance` is ambiguous: PTToken and YTToken name it `account`, not `id`. A read of those records
  * the name on its source with `nameArgs`, which wins over this map.
@@ -58,10 +59,11 @@ export const ARG_NAMES: Readonly<Record<string, readonly string[]>> = {
   market: ["pool"],
   is_allowed: ["account"],
   is_allowed_for_asset: ["account", "asset"],
+  lastprice: ["asset"],
 }
 
-/** A source argument as `readLive` records it (`{ type, value }`, bigints as decimal strings), maybe named. */
-type RecordedArg = { type?: unknown; value?: unknown; name?: unknown }
+/** A source argument as `readLive` records it (`{ type, value }`, an enum's `variant`, bigints as decimal strings), maybe named. */
+type RecordedArg = { type?: unknown; value?: unknown; variant?: unknown; name?: unknown }
 
 const asRecorded = (arg: unknown): RecordedArg => (arg && typeof arg === "object" ? (arg as RecordedArg) : { value: arg })
 
@@ -72,8 +74,24 @@ export function nameArgs<T>(live: Live<T>, names: readonly string[]): Live<T> {
   return { ...live, source: { ...live.source, args } } as Live<T>
 }
 
-/** The argument value as the CLI takes it: addresses, numbers and symbols as they are, bytes as hex, structs as JSON. */
+const isEnum = (arg: RecordedArg): arg is RecordedArg & { variant: string } => arg.type === "enum" && typeof arg.variant === "string"
+
+/**
+ * A recorded enum in the CLI's JSON form: `{"Stellar":"C…"}`, `{"Other":"USDY"}` for a tuple variant
+ * (an enum inside nests its own form), the variant's name alone for a unit variant.
+ */
+function enumJson(arg: RecordedArg & { variant: string }): unknown {
+  if (arg.value === undefined) return arg.variant
+  const inner = asRecorded(arg.value)
+  return { [arg.variant]: isEnum(inner) ? enumJson(inner) : inner.value }
+}
+
+/** The argument value as the CLI takes it: addresses, numbers and symbols as they are, bytes as hex, enums in the CLI's JSON form, structs as JSON. */
 function argValue(arg: RecordedArg): string {
+  if (isEnum(arg)) {
+    const json = enumJson(arg)
+    return typeof json === "string" ? json : JSON.stringify(json)
+  }
   const v = arg.value
   if (typeof v === "string") return v
   if (typeof v === "number" || typeof v === "boolean" || typeof v === "bigint") return String(v)

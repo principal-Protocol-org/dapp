@@ -274,9 +274,9 @@ as that key, and acts on the result. The reason comes from the simulation's `ref
 | Simulation | Reasons | The route | Answer |
 |---|---|---|---|
 | `true` | | Submits. | 200 `synced` with `value` (the oracle's, 7 decimals), `timestamp` and `hash` |
-| `false`, routine | `stale_ts` (no newer price), `no_data` (the feed has none) | Sends nothing, pays no fee. | 200 `skipped` with `reason` |
+| `false`, routine | `stale_ts` (no newer price), `no_data` (the feed has none), `throttle` (sooner than the oracle's minimum interval after its last accepted feed update; principal 3af9388) | Sends nothing, pays no fee. | 200 `skipped` with `reason` |
 | `false`, significant | `oob`, `decrease`, `deviate`, `fb_value` | Submits once per new (reason, value), so the rejection is on-chain with a hash; the same rejection again is not sent. The alert check raises `oracle_rejection`. | 200 `rejected` with `reason`, and `hash` when sent |
-| `false`, broken feed | `bad_price`, `rescale`, `future_ts` | Sends nothing. The alert check raises `feed_broken`. | 200 `rejected` with `reason` |
+| `false`, broken feed | `bad_price`, `rescale`, `future_ts`, `feed_err` (the feed's `decimals` or `lastprice` call failed; principal 3af9388) | Sends nothing. The alert check raises `feed_broken`. | 200 `rejected` with `reason` |
 | `false`, no `ref_rej` event | | Sends nothing. | 200 `rejected`, reason `unknown` |
 
 A feed-mode `rejected` run answers 200, not 500, and is logged as a warning: the rejection is the
@@ -499,7 +499,7 @@ table is also the evidence store: every alert's open and close times, and every 
 | `oracle_stale` | critical | The age is over `max_stale_seconds`, or the contract's own `is_available()` is false. It replaces the warning. | The same. |
 | `oracle_unavailable` | critical | The oracle, or the latest ledger, cannot be read by this server. It opens at once but is posted, and counts as critical, only once a check at least 120 s after it opened still cannot read it (`payload.confirmedAt`); one that clears before then closes without a post. A scheduler retry seconds later never confirms it. | The same. |
 | `oracle_rejection` | warning | A significant rejection (`oob`, `decrease`, `deviate`, `fb_value`) in the last 24 h, one alert per reason (the payload names the newest value). It closes, without a post, 24 h after its last occurrence. | The indexed `ref_rej` events, and the keeper's `rejected` runs in `oracle_ticks`. |
-| `feed_broken` | warning | A keeper run with reason `bad_price`, `rescale` or `future_ts` in the last 2 × the keeper interval (3,600 s). It closes without a post. | `oracle_ticks` (feed mode). |
+| `feed_broken` | warning | A keeper run with reason `bad_price`, `rescale`, `future_ts` or `feed_err` in the last 2 × the keeper interval (3,600 s). It closes without a post. | `oracle_ticks` (feed mode). |
 | `keeper_unhealthy` | critical | Keeper runs are recorded and the last success (`pushed` or `synced`) is 2 × the interval (3,600 s) old or more. No run recorded is unknown: no alert. | `oracle_ticks`. |
 | `paused` | warning | A contract is paused. One alert per contract; the subject is its role and short id (`sy:CA62…7F2I`). | `is_paused` of RiskControl and of each market's SY wrapper, pool and manager. |
 | `risk_warning` | warning | The circuit breaker's window volume is at least 90% of its limit, protocol-wide or for one asset. | RiskControl `get_cb_limit`, `get_cb_volume`, `get_asset_limit`, `get_asset_volume`. |

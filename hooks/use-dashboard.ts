@@ -93,19 +93,20 @@ export function usePendingClaim(marketId: string, account: string | null, ms: Ma
 }
 
 /**
- * The oracle (`fetchOracleView`) every 15 s, with the ledger time its freshness and time to block
- * were computed at, so a countdown can follow the ledger clock between reads (`secondsToBlockNow`).
- * It waits for the first ledger time: a view read without one would have no time to block.
+ * The oracle `oracle` (an OracleAdapter id; `fetchOracleView`) every 15 s, with the ledger time its
+ * freshness and time to block were computed at, so a countdown can follow the ledger clock between
+ * reads (`secondsToBlockNow`). It waits for the first ledger time: a view read without one would
+ * have no time to block. Each oracle has its own query.
  */
-export function useOracleView() {
+export function useOracleView(oracle: string) {
   const m = useManifest()
   const { ledgerTime } = useLedgerClock()
   return withStale(
     useQuery({
-      queryKey: ["dashboard", "oracle", m.network],
+      queryKey: ["dashboard", "oracle", m.network, oracle],
       queryFn: async (): Promise<{ view: OracleView; ledgerTime: number }> => {
         const at = ledgerTime as number
-        return { view: await fetchOracleView(createRpcReader(m), m, at), ledgerTime: at }
+        return { view: await fetchOracleView(createRpcReader(m), m, oracle, at), ledgerTime: at }
       },
       enabled: ledgerTime !== null,
       refetchInterval: DASHBOARD_LIVE_MS,

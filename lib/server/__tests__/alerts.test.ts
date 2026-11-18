@@ -78,6 +78,9 @@ function oracle(freshness: Freshness, o: { age?: number; maxStale?: number; reas
     path: { status: "unsupported" },
     lastRejection: live(null),
     blockedWhenStale: BLOCKED_WHEN_STALE,
+    feed: { status: "unsupported" },
+    feedMinInterval: { status: "unsupported" },
+    feedPrice: null,
   }
 }
 
@@ -233,11 +236,11 @@ describe("evaluateAlerts: each kind's trigger and resolution (D-20)", () => {
       expect(kinds(alerts)).toEqual(["oracle_rejection deviate"])
       expect(alerts[0].payload).toMatchObject({ value: "12000300", occurrences: 3, lastAt: ago(60) })
     })
-    it("routine reasons (stale_ts, no_data) and broken-feed reasons are not significant rejections", () => {
+    it("routine reasons (stale_ts, no_data, throttle) and broken-feed reasons are not significant rejections", () => {
       const alerts = evaluateAlerts(
         input({
-          rejectionEvents: [event({ reason: "stale_ts" }), event({ reason: "no_data" })],
-          ticks: [tick({ reason: "stale_ts" }), tick({ reason: "bad_price", age: 99_999 })],
+          rejectionEvents: [event({ reason: "stale_ts" }), event({ reason: "no_data" }), event({ reason: "throttle" }), event({ reason: "feed_err" })],
+          ticks: [tick({ reason: "stale_ts" }), tick({ reason: "bad_price", age: 99_999 }), tick({ reason: "feed_err", age: 99_999 })],
         }),
       )
       expect(alerts).toEqual([])
@@ -268,6 +271,15 @@ describe("evaluateAlerts: each kind's trigger and resolution (D-20)", () => {
     })
     it("resolves once the last broken tick is 2 × interval old", () => {
       expect(evaluateAlerts(input({ ticks: [tick("bad_price", 3_600)] }))).toEqual([])
+    })
+    it("feed_err (3af9388: the feed could not be read) opens feed_broken too", () => {
+      expect(evaluateAlerts(input({ ticks: [tick("feed_err", 60), tick("bad_price", 120)] }))).toEqual([
+        { kind: "feed_broken", subject: ORACLE, severity: "warning", payload: { reasons: ["feed_err", "bad_price"], lastAt: ago(60), occurrences: 2 } },
+      ])
+    })
+    it("a routine reason, throttle included, is no broken feed", () => {
+      const skipped = (reason: string) => ({ at: ago(60), decision: "skipped" as const, reason, value: null, txHash: null })
+      expect(evaluateAlerts(input({ ticks: [skipped("throttle"), skipped("stale_ts"), skipped("no_data")] }))).toEqual([])
     })
   })
 

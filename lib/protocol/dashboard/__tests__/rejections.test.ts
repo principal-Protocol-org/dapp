@@ -4,6 +4,8 @@ import { BROKEN, isSignificantRejection, lastRejectionNote, rejectionText, ORACL
 
 // Our Testnet oracle: principal 665bb67, built by the app team (config/manifests/testnet.json wasmHashes.oracle).
 const OURS = "adb87f76c1bafd93c67489645fe49df771ede639edc0d1919233563ffae86bce"
+// The Mainnet oracles: principal 3af9388 (config/manifests/mainnet.json wasmHashes.oracle).
+const MAINNET = "8581bbba82bb57f5c5c9c00adf98b1691ad20821840e55a67ad8d7ecace0c1b0"
 
 describe("rejectionText", () => {
   it.each([
@@ -16,6 +18,8 @@ describe("rejectionText", () => {
     ["bad_price", "The feed's price was zero or negative"],
     ["rescale", "The feed's price could not be converted to 7 decimals"],
     ["future_ts", "Dated after the current ledger time"],
+    ["throttle", "Too soon after the last accepted feed update"],
+    ["feed_err", "The feed could not be read"],
   ])("words %s", (reason, text) => {
     expect(rejectionText(reason)).toBe(text)
   })
@@ -26,29 +30,30 @@ describe("rejectionText", () => {
 
   it("splits significant reasons as the contract does at 24d980d", () => {
     expect(["oob", "decrease", "deviate", "fb_value"].every(isSignificantRejection)).toBe(true)
-    expect(["stale_ts", "no_data", "bad_price", "rescale", "future_ts", "x"].some(isSignificantRejection)).toBe(false)
+    expect(["stale_ts", "no_data", "bad_price", "rescale", "future_ts", "throttle", "feed_err", "x"].some(isSignificantRejection)).toBe(false)
   })
 })
 
-describe("the rejection classes (D-21): one source, a partition of the nine reasons", () => {
-  const NINE = ["bad_price", "decrease", "deviate", "fb_value", "future_ts", "no_data", "oob", "rescale", "stale_ts"]
+describe("the rejection classes (D-21): one source, a partition of the eleven reasons", () => {
+  // principal 3af9388 `oracle_adapter/src/lib.rs`: the nine of 24d980d, plus throttle and feed_err.
+  const ELEVEN = ["bad_price", "decrease", "deviate", "fb_value", "feed_err", "future_ts", "no_data", "oob", "rescale", "stale_ts", "throttle"]
 
-  it("the three classes are disjoint and their union is the contract's nine reasons, each with words", () => {
+  it("the three classes are disjoint and their union is the contract's eleven reasons, each with words", () => {
     const classes = [SIGNIFICANT, ROUTINE, BROKEN] as readonly (readonly string[])[]
     const all = classes.flat()
     expect(new Set(all).size).toBe(all.length)
-    expect([...all].sort()).toEqual(NINE)
+    expect([...all].sort()).toEqual(ELEVEN)
     for (const r of all) expect(rejectionText(r), r).not.toBe(r)
   })
 
-  it("names each class as D-21 does", () => {
+  it("names each class as D-21 does: throttle is routine, feed_err a broken feed", () => {
     expect(SIGNIFICANT).toEqual(["oob", "decrease", "deviate", "fb_value"])
-    expect(ROUTINE).toEqual(["stale_ts", "no_data"])
-    expect(BROKEN).toEqual(["bad_price", "rescale", "future_ts"])
+    expect(ROUTINE).toEqual(["stale_ts", "no_data", "throttle"])
+    expect(BROKEN).toEqual(["bad_price", "rescale", "future_ts", "feed_err"])
   })
 
   it("isSignificantRejection and the pull oracles' routine reasons derive from the classes", () => {
-    for (const r of NINE) expect(isSignificantRejection(r), r).toBe((SIGNIFICANT as readonly string[]).includes(r))
+    for (const r of ELEVEN) expect(isSignificantRejection(r), r).toBe((SIGNIFICANT as readonly string[]).includes(r))
     const pull = ORACLE_WASM_LAST_REJECTION.cf58bbd831957b817f8bfa7bf52313a8e9ba6256344ad34ab0c69916c8b1f85d.routine
     expect([...pull]).toEqual([...ROUTINE, ...BROKEN])
   })
@@ -99,6 +104,17 @@ describe("lastRejectionNote", () => {
     expect([...ORACLE_WASM_LAST_REJECTION[hash].routine]).toEqual([...ROUTINE, ...BROKEN])
     expect(lastRejectionNote(hash)).toBe(lastRejectionNote("cf58bbd831957b817f8bfa7bf52313a8e9ba6256344ad34ab0c69916c8b1f85d"))
     expect(lastRejectionNote(hash)).not.toMatch(/may/)
+  })
+
+  it("the Mainnet oracles' 3af9388 build keeps only significant reasons, with every routine reason of its code", () => {
+    expect(ORACLE_WASM_LAST_REJECTION[MAINNET]).toMatchObject({ commit: "3af9388", keeps: "significant" })
+    expect([...ORACLE_WASM_LAST_REJECTION[MAINNET].routine]).toEqual([...ROUTINE, ...BROKEN])
+    expect(ORACLE_WASM_LAST_REJECTION[MAINNET].routine).toEqual(expect.arrayContaining(["throttle", "feed_err"]))
+    const note = lastRejectionNote(MAINNET)
+    expect(note).toMatch(/keeps only significant/)
+    expect(note).toMatch(/Routine rejections appear only in the rejection history/)
+    expect(note).not.toMatch(/may/)
+    expect(lastRejectionNote(MAINNET.toUpperCase())).toBe(note)
   })
 
   it("an unknown hash may keep only significant reasons", () => {

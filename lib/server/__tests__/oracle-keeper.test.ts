@@ -354,10 +354,10 @@ function fakeFeedChain(state: {
 }
 
 describe("the rejection classes (D-21)", () => {
-  it("split the contract's reasons as 24d980d does: routine, significant, broken feed", () => {
-    expect(ROUTINE).toEqual(["stale_ts", "no_data"])
+  it("split the contract's reasons as 3af9388 does: routine (throttle included), significant, broken feed (feed_err included)", () => {
+    expect(ROUTINE).toEqual(["stale_ts", "no_data", "throttle"])
     expect(SIGNIFICANT).toEqual(["oob", "decrease", "deviate", "fb_value"])
-    expect(BROKEN).toEqual(["bad_price", "rescale", "future_ts"])
+    expect(BROKEN).toEqual(["bad_price", "rescale", "future_ts", "feed_err"])
     // The same significant split as the dashboard and the alert check use, from their one source.
     for (const r of [...ROUTINE, ...SIGNIFICANT, ...BROKEN]) expect(isSignificantRejection(r), r).toBe((SIGNIFICANT as readonly string[]).includes(r))
     expect(ROUTINE).toBe(classes.ROUTINE)
@@ -404,10 +404,14 @@ describe("tickFeed (D-21): sync_from_feed with a role-less key", () => {
     expect(sent).toEqual([])
   })
 
-  it("a routine rejection (stale_ts, no_data) is skipped: no submit, the reason kept", async () => {
+  it("a routine rejection (stale_ts, no_data, throttle) is skipped: no submit, the reason kept", async () => {
     const stale = fakeFeedChain({ sim: { retval: false, events: [refRej(10_000_000n, 1_700_000_000n, "stale_ts")] } })
     expect(await tickFeed({ manifest, secret, chain: stale.chain })).toEqual({ ...run, status: "skipped", value: "10000000", timestamp: 1_700_000_000, reason: "stale_ts" })
     expect(stale.sent).toEqual([])
+    // throttle (3af9388): a feed update sooner than the minimum interval after the last accepted one; it carries the feed's rescaled point.
+    const soon = fakeFeedChain({ sim: { retval: false, events: [refRej(10_000_500n, 1_700_000_060n, "throttle")] } })
+    expect(await tickFeed({ manifest, secret, chain: soon.chain })).toEqual({ ...run, status: "skipped", value: "10000500", timestamp: 1_700_000_060, reason: "throttle" })
+    expect(soon.sent).toEqual([])
     // no_data carries the contract's placeholders (0, 0): no value, no timestamp.
     const empty = fakeFeedChain({ sim: { retval: false, events: [refRej(0n, 0n, "no_data")] } })
     expect(await tickFeed({ manifest, secret, chain: empty.chain })).toEqual({ ...run, status: "skipped", value: null, timestamp: null, reason: "no_data" })
@@ -447,12 +451,19 @@ describe("tickFeed (D-21): sync_from_feed with a role-less key", () => {
   })
 
   it("a broken-feed rejection (bad_price, rescale, future_ts) is rejected and never submitted", async () => {
-    for (const reason of BROKEN) {
+    for (const reason of ["bad_price", "rescale", "future_ts"]) {
       const { chain, sent } = fakeFeedChain({ sim: { retval: false, events: [refRej(-1n, 1_700_000_000n, reason)] } })
       const tick = await tickFeed({ manifest, secret, chain })
       expect(tick).toEqual({ ...run, status: "rejected", value: "-1", timestamp: 1_700_000_000, reason })
       expect(sent).toEqual([])
     }
+  })
+
+  it("feed_err (3af9388: the feed's decimals or lastprice call failed) is a broken feed: rejected, never submitted, its (0, 0) placeholders blanked", async () => {
+    expect(BROKEN).toContain("feed_err")
+    const { chain, sent } = fakeFeedChain({ sim: { retval: false, events: [refRej(0n, 0n, "feed_err")] } })
+    expect(await tickFeed({ manifest, secret, chain })).toEqual({ ...run, status: "rejected", value: null, timestamp: null, reason: "feed_err" })
+    expect(sent).toEqual([])
   })
 
   it("false with no ref_rej event is rejected with reason unknown, not submitted", async () => {
@@ -469,6 +480,9 @@ describe("tickFeed (D-21): sync_from_feed with a role-less key", () => {
       landed: [refRej(9_000_000n, 1_700_000_200n, "decrease")],
     })
     expect(await tickFeed({ manifest, secret, chain })).toEqual({ ...run, status: "rejected", value: "9000000", timestamp: 1_700_000_200, hash: HASH, reason: "decrease" })
+    // The feed failed by the time it landed: feed_err's (0, 0) are placeholders, not a point.
+    const failed = fakeFeedChain({ sim: { retval: false, events: [refRej(11_500_000n, 1_700_000_100n, "deviate")] }, landed: [refRej(0n, 0n, "feed_err")] })
+    expect(await tickFeed({ manifest, secret, chain: failed.chain })).toEqual({ ...run, status: "rejected", value: null, timestamp: null, hash: HASH, reason: "feed_err" })
   })
 
   it("without the landed ref_rej (no events, or none of the oracle's), the simulated pair stands", async () => {

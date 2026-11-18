@@ -177,7 +177,7 @@ export type OracleTick = { mode: KeeperMode; signer: string } & (
   | { status: "rejected"; value: string | null; timestamp: number | null; hash?: string; reason: string }
   /** Feed: the oracle took its feed's value (`ref_set`), in transaction `hash`. Null value: the landed call disagreed with its simulation. */
   | { status: "synced"; value: string | null; timestamp: number | null; hash: string }
-  /** Feed: a routine rejection (`stale_ts`, `no_data`), never sent. `no_data` has no value or timestamp. */
+  /** Feed: a routine rejection (`stale_ts`, `no_data`, `throttle`), never sent. `no_data` has no value or timestamp. */
   | { status: "skipped"; value: string | null; timestamp: number | null; reason: string }
 )
 
@@ -341,12 +341,14 @@ function pointOf(event: DecodedEvent | undefined): Point {
 }
 
 type Rejection = { reason: string; point: Point }
-/** The `ref_rej` among `events` as a reason and its (value, timestamp); `no_data` carries the contract's placeholders (0, 0), not a price. */
+/** Reasons whose `ref_rej` carries the contract's placeholders (0, 0), not a price: the feed gave none (3af9388 `sync_from_feed`). */
+const NO_PRICE_REASONS: ReadonlySet<string> = new Set(["no_data", "feed_err"])
+/** The `ref_rej` among `events` as a reason and its (value, timestamp); `no_data` and `feed_err` have no point. */
 function rejectionOf(events: DecodedEvent[]): Rejection | null {
   const event = events.find((e) => e.topic === "ref_rej")
   const reason = event?.fields.reason
   if (typeof reason !== "string") return null
-  return { reason, point: reason === "no_data" ? NO_POINT : pointOf(event) }
+  return { reason, point: NO_PRICE_REASONS.has(reason) ? NO_POINT : pointOf(event) }
 }
 
 /**
@@ -356,11 +358,11 @@ function rejectionOf(events: DecodedEvent[]): Rejection | null {
  * keeper, then:
  * - `true`: submits, and reports `synced` with the `ref_set` value;
  * - `false`: reads the reason from the simulation's `ref_rej` event:
- *   - routine (`stale_ts`, `no_data`): `skipped`, nothing sent;
+ *   - routine (`stale_ts`, `no_data`, `throttle`): `skipped`, nothing sent;
  *   - significant (`oob`, `decrease`, `deviate`, `fb_value`): submitted when its (reason, value) is
  *     not `lastSubmittedRejection` (the last one this keeper put on-chain), so each distinct rejection
  *     has a transaction; a repeat is `rejected` with no hash;
- *   - broken feed (`bad_price`, `rescale`, `future_ts`), or a reason this app does not know: `rejected`, nothing sent;
+ *   - broken feed (`bad_price`, `rescale`, `future_ts`, `feed_err`), or a reason this app does not know: `rejected`, nothing sent;
  *   - no `ref_rej` event: `rejected` with reason `unknown`, nothing sent.
  * The call that lands has the last word: its return value decides synced or rejected (it can differ
  * from the simulation when the feed moved in between), and its own `ref_set` or `ref_rej` event, when

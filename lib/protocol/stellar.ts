@@ -30,7 +30,13 @@ export type ScArg =
    * A Soroban `#[contracttype]` struct: a map with one symbol key per field, sorted, as the host
    * encodes it (R5-10: the MarketFactory's `TokenParams`, `EngineParams`, ... structs).
    */
-  | { type: "struct"; value: Record<string, ScArg> };
+  | { type: "struct"; value: Record<string, ScArg> }
+  /**
+   * A Soroban `#[contracttype]` enum value: a vec of the variant's name as a symbol, then its value
+   * (a unit variant is the name alone), as the host encodes it (the SEP-40 feed's `Sep40Asset`,
+   * `Stellar(Address)` or `Other(Symbol)`).
+   */
+  | { type: "enum"; variant: string; value?: ScArg };
 
 export type ContractInvocation = {
   contractId: string;
@@ -118,6 +124,10 @@ export function scArgToVal(arg: ScArg): xdr.ScVal {
     return xdr.ScVal.scvMap(
       names.map((name) => new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol(name), val: scArgToVal(arg.value[name]) })),
     );
+  }
+  if (arg.type === "enum") {
+    const variant = xdr.ScVal.scvSymbol(arg.variant);
+    return xdr.ScVal.scvVec(arg.value === undefined ? [variant] : [variant, scArgToVal(arg.value)]);
   }
   return nativeToScVal(arg.value, { type: arg.type });
 }

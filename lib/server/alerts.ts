@@ -213,7 +213,7 @@ function rejectionAlerts(i: AlertInput): DesiredAlert[] {
     })
 }
 
-/** The keeper's runs with a broken-feed reason (`bad_price`, `rescale`, `future_ts`) in the last 2 × interval. */
+/** The keeper's runs with a broken-feed reason (`bad_price`, `rescale`, `future_ts`, `feed_err`) in the last 2 × interval. */
 function feedAlerts(i: AlertInput): DesiredAlert[] {
   if (!Array.isArray(i.ticks)) return []
   const since = i.now - 2 * i.intervalSeconds * 1000
@@ -884,7 +884,8 @@ export async function collectAlertInput(deps: AlertDeps): Promise<AlertInput> {
   const afterClock = <T,>(read: (c: { sequence: number; closeTime: number }) => Promise<T>) =>
     clock.then((c): Promise<T | Unread> => (unread(c) ? Promise.resolve(noLedger) : guard(read(c))))
   const [oracle, risk, pauses, ticks, rejectionEvents, keeper, indexer, signer] = await Promise.all([
-    by(afterClock((c) => fetchOracleView(reader, manifest, c.closeTime)), readsBy),
+    // The manifest's shared oracle for now; one check per market's oracle comes with the per-oracle alerts.
+    by(afterClock((c) => fetchOracleView(reader, manifest, oracleId, c.closeTime)), readsBy),
     by(afterClock((c) => fetchRiskView(reader, manifest, c.sequence)), readsBy),
     by(guard(fetchPauses(reader, manifest)), readsBy),
     by(guard(readTicks(sql, network, oracleId, since)), readsBy),

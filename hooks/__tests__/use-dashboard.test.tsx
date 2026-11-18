@@ -180,17 +180,25 @@ describe("usePendingClaim", () => {
 })
 
 describe("useOracleView", () => {
-  it("passes the ledger time and returns it with the view, every 15 s", async () => {
-    const { result } = renderHook(() => useOracleView(), { wrapper })
+  it("reads the oracle it is given at the ledger time and returns that time with the view, every 15 s", async () => {
+    const { result } = renderHook(() => useOracleView("CORACLE1"), { wrapper })
     await waitFor(() => expect(result.current.data).toBeDefined())
-    expect(mocks.fetchOracleView).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ network: "testnet" }), 1_000_000)
+    expect(mocks.fetchOracleView).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ network: "testnet" }), "CORACLE1", 1_000_000)
     expect(result.current.data).toEqual({ view: { contractId: "ORACLE" }, ledgerTime: 1_000_000 })
-    expect(interval(["dashboard", "oracle", "testnet"])).toBe(DASHBOARD_LIVE_MS)
+    expect(interval(["dashboard", "oracle", "testnet", "CORACLE1"])).toBe(DASHBOARD_LIVE_MS)
+  })
+
+  it("keys each oracle apart: two oracles are two reads", async () => {
+    const a = renderHook(() => useOracleView("CORACLE1"), { wrapper })
+    const b = renderHook(() => useOracleView("CORACLE2"), { wrapper })
+    await waitFor(() => expect(a.result.current.data).toBeDefined())
+    await waitFor(() => expect(b.result.current.data).toBeDefined())
+    expect(mocks.fetchOracleView.mock.calls.map((c) => c[2]).sort()).toEqual(["CORACLE1", "CORACLE2"])
   })
 
   it("waits for the ledger clock instead of reading with no time", () => {
     mocks.clock = { ledgerTime: null, sequence: null, isError: false }
-    renderHook(() => useOracleView(), { wrapper })
+    renderHook(() => useOracleView("CORACLE1"), { wrapper })
     expect(mocks.fetchOracleView).not.toHaveBeenCalled()
   })
 })

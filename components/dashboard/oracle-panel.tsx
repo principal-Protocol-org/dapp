@@ -277,7 +277,7 @@ function KeeperPanel({ network, ledgerTime }: { network: Network; ledgerTime: nu
 export function OraclePanel() {
   const m = useManifest()
   const { ledgerTime, isError: clockFailed, sinceReadSeconds } = useLedgerClock()
-  const oracle = useOracleView()
+  const oracle = useOracleView(m.shared.oracle)
   // One rounding for every age on the page: whole seconds of ledger time, floored.
   const nowSeconds = ledgerTime === null ? null : Math.floor(ledgerTime)
   // The clock's time is extrapolated between reads; past 2 × its cadence without a new read, say so.
