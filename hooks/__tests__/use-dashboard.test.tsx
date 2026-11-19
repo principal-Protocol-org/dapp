@@ -202,7 +202,8 @@ describe("useOracleView", () => {
     mocks.clock = { ledgerTime: null, sequence: null, isError: false }
     renderHook(() => useOracleView("CORACLE1"), { wrapper })
     expect(mocks.fetchOracleView).not.toHaveBeenCalled()
-  })})
+  })
+})
 
 describe("useOracleViews", () => {
   it("reads every oracle it is given, one query each, under useOracleView's key and cadence", async () => {

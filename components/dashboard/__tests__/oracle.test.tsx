@@ -121,13 +121,20 @@ const feedPriceOf = (value: bigint, timestamp = BigInt(LEDGER_TIME - 90)) => ({
   sources: [srcOn(FEED, "decimals"), srcOn(FEED, "lastprice", [ASSET_ARG])],
 })
 
+/** The freshness reads of oracle `id`, each on that oracle: 12 minutes after its last update. */
+const freshnessOn = (id: string) => ({
+  timestamp: liveOn(id, BigInt(LEDGER_TIME - 720), "get_reference_timestamp"),
+  available: liveOn(id, true, "is_available"),
+  maxStale: liveOn(id, 3_600n, "max_stale_seconds"),
+  timeToBlock: { status: "live", value: 2_880, ledger: 5_720_087, sources: [srcOn(id, "get_reference_timestamp"), srcOn(id, "max_stale_seconds")] },
+})
+
 /** A 3af9388 oracle reading a feed: its stored value and the feed's, both at 7 decimals. */
 function feedOracle(id: string, stored: bigint, feed: bigint, over: Record<string, unknown> = {}) {
   return oracleView({
     contractId: id,
     value: liveOn(id, stored, "get_reference_value"),
-    timestamp: liveOn(id, BigInt(LEDGER_TIME - 720), "get_reference_timestamp"),
-    available: liveOn(id, true, "is_available"),
+    ...freshnessOn(id),
     path: liveOn(id, "feed", "last_update_was_feed"),
     feed: liveOn(id, { contract: FEED, asset: { kind: "Other", symbol: "USDY" } }, "feed_source"),
     feedMinInterval: liveOn(id, 300n, "feed_min_interval_seconds"),
@@ -141,6 +148,7 @@ function noFeedOracle(id: string, stored: bigint) {
   return oracleView({
     contractId: id,
     value: liveOn(id, stored, "get_reference_value"),
+    ...freshnessOn(id),
     path: liveOn(id, "push", "last_update_was_feed"),
     feed: liveOn(id, null, "feed_source"),
     feedMinInterval: liveOn(id, 300n, "feed_min_interval_seconds"),
@@ -435,8 +443,16 @@ describe("the oracle page (/dashboard/oracle, D-17)", () => {
     client.clear()
 
     mocks.fetchOracleView.mockResolvedValue(oracleView({ path: live("push", "last_update_was_feed") }))
-    render(wrap(<OraclePanel />))
+    const second = render(wrap(<OraclePanel />))
     expect(await region("Update path").findByText("Push: the value was set by the oracle's admin (set_reference_value)")).toBeTruthy()
+    expect(row(region("Sources"), "Active source")).toContain(PRIMARY)
+    second.unmount()
+    client.clear()
+
+    // The path could not be read: whether the value came from the feed is not known, so Active source stays.
+    mocks.fetchOracleView.mockResolvedValue(oracleView({ path: down("HostError: boom") }))
+    render(wrap(<OraclePanel />))
+    expect(await region("Update path").findByRole("button", { name: "Why Update path is unavailable, and how to verify it" })).toBeTruthy()
     expect(row(region("Sources"), "Active source")).toContain(PRIMARY)
   })
 
@@ -662,7 +678,115 @@ describe("every oracle of the manifest (plan 0009: five on Mainnet)", () => {
     const rows = await oracleRows()
     await waitFor(() => expect(within(rows[1]).getAllByText("Stale").length).toBeGreaterThan(1))
     expect(within(rows[3]).getAllByText("Unavailable").length).toBeGreaterThan(0)
-    expect(within(rows[3]).getAllByRole("button", { name: /^More about MOCKCETES/ }).length).toBeGreaterThan(0)
+    // Its drawer says why, and gives the call that failed.
+    expect(within(rows[3]).getAllByRole("button", { name: "Why Freshness · MOCKCETES is unavailable, and how to verify it" }).length).toBeGreaterThan(0)
+  })
+
+  it("every figure in the table opens its drawer, whose commands name that row's oracle", async () => {
+    const user = userEvent.setup()
+    render(wrap(<OraclePanel />))
+    const rows = await oracleRows()
+    await waitFor(() => expect(within(rows[0]).getAllByText("Fresh").length).toBeGreaterThan(0))
+    const open = async (name: string) => {
+      await user.click(screen.getAllByRole("button", { name })[0])
+      return screen.findByRole("dialog")
+    }
+    const close = async () => {
+      await user.keyboard("{Escape}")
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
+    }
+    for (const [id, code] of MAINNET_ORACLES) {
+      const state = await open(`How to verify Freshness · ${code}`)
+      for (const fn of ["get_reference_timestamp", "max_stale_seconds", "is_available"]) expect(commands(state, new RegExp(`--id ${id} .* -- ${fn}$`)), `${code} ${fn}`).toHaveLength(1)
+      await close()
+      const countdown = await open(`How to verify Time until operations block · ${code}`)
+      expect(commands(countdown, new RegExp(`--id ${id} .* -- get_reference_timestamp$`))).toHaveLength(1)
+      await close()
+      const path = await open(`How to verify Update path · ${code}`)
+      expect(commands(path, new RegExp(`--id ${id} .* -- last_update_was_feed$`))).toHaveLength(1)
+      // Another oracle's id never appears in this row's commands.
+      expect(commands(path, /--id /).every((c) => (c.textContent ?? "").includes(`--id ${id} `))).toBe(true)
+      await close()
+    }
+  })
+
+  it("the copied evidence table covers every oracle's state, countdown and path, labelled with its asset", async () => {
+    const user = userEvent.setup()
+    const writeText = vi.fn<(text: string) => Promise<void>>(async () => {})
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true })
+    render(wrap(<OraclePanel />))
+    const rows = await oracleRows()
+    await waitFor(() => expect(within(rows[4]).getAllByText("Fresh").length).toBeGreaterThan(0))
+    await region("Feed").findByText("Differs by a factor of 10.0")
+    await user.click(screen.getByRole("button", { name: "Copy evidence table" }))
+    const lines = String(writeText.mock.calls[0][0]).split("\n")
+    for (const [id, code] of MAINNET_ORACLES) {
+      for (const label of ["Freshness", "Time until operations block", "Update path"]) {
+        const line = lines.filter((l) => l.startsWith(`| ${label} · ${code} |`))
+        expect(line, `${label} · ${code}`).toHaveLength(1)
+        expect(line[0]).toContain(id)
+      }
+    }
+    // The selected oracle's own figures are still there.
+    expect(lines.some((l) => l.startsWith("| Stored value against feed |"))).toBe(true)
+  })
+
+  it("a stored value of zero or below: the comparison is Unavailable with the get_reference_value call and a plain reason", async () => {
+    const user = userEvent.setup()
+    mocks.fetchOracleView.mockImplementation(viewsBy({ ...mainnetViews(), [O1]: feedOracle(O1, 0n, 10_807_670n) }))
+    render(wrap(<OraclePanel />))
+    const feed = region("Feed")
+    await user.click(await feed.findByRole("button", { name: "Why Stored value against feed is unavailable, and how to verify it" }))
+    const drawer = await screen.findByRole("dialog")
+    expect(within(drawer).getAllByText(/The stored value is not positive, so it has no ratio to the feed's price/).length).toBeGreaterThan(0)
+    expect(commands(drawer, new RegExp(`--id ${O1} .* -- get_reference_value$`))).toHaveLength(1)
+  })
+
+  it("an interval of 0 reads No minimum; a Stellar asset key reads Stellar and the short address, the full one in its title", async () => {
+    const SAC = "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
+    mocks.fetchOracleView.mockImplementation(
+      viewsBy({
+        ...mainnetViews(),
+        [O1]: feedOracle(O1, 10_000_000n, 10_000_000n, {
+          feedMinInterval: liveOn(O1, 0n, "feed_min_interval_seconds"),
+          feed: liveOn(O1, { contract: FEED, asset: { kind: "Stellar", address: SAC } }, "feed_source"),
+        }),
+      }),
+    )
+    render(wrap(<OraclePanel />))
+    const feed = region("Feed")
+    expect(await feed.findByText("No minimum")).toBeTruthy()
+    expect(row(feed, "Asset key")).toBe("Stellar CDLZ…CYSC")
+    expect(feed.getByTitle(SAC).textContent).toBe("Stellar CDLZ…CYSC")
+  })
+
+  it("each Feed figure's drawer gives the commands of its own reads", async () => {
+    const user = userEvent.setup()
+    render(wrap(<OraclePanel />))
+    const feed = region("Feed")
+    await feed.findByText("Differs by a factor of 10.0")
+    const drawerFor = async (label: string) => {
+      await user.click(feed.getByRole("button", { name: `How to verify ${label}` }))
+      return screen.findByRole("dialog")
+    }
+    const close = async () => {
+      await user.keyboard("{Escape}")
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
+    }
+    const expectCommands = (drawer: HTMLElement, expected: RegExp[]) => {
+      expect(commands(drawer, /--send=no/)).toHaveLength(expected.length)
+      for (const re of expected) expect(commands(drawer, re), String(re)).toHaveLength(1)
+    }
+    expectCommands(await drawerFor("Feed contract"), [new RegExp(`--id ${O1} .* -- feed_source$`)])
+    await close()
+    expectCommands(await drawerFor("Asset key"), [new RegExp(`--id ${O1} .* -- feed_source$`)])
+    await close()
+    expectCommands(await drawerFor("Minimum interval between feed updates"), [new RegExp(`--id ${O1} .* -- feed_min_interval_seconds$`)])
+    await close()
+    expectCommands(await drawerFor("Feed price"), [new RegExp(`--id ${FEED} .* -- decimals$`), new RegExp(`--id ${FEED} .* -- lastprice --asset '\\{"Other":"USDY"\\}'$`)])
+    await close()
+    // The age comes from lastprice alone.
+    expectCommands(await drawerFor("Feed tick age"), [new RegExp(`--id ${FEED} .* -- lastprice --asset '\\{"Other":"USDY"\\}'$`)])
   })
 
   it("?oracle=<third> shows the third oracle's values and asks for its keeper runs and its history only", async () => {
@@ -811,6 +935,16 @@ describe("Testnet's one oracle, on 665bb67", () => {
     const feed = region("Feed")
     expect(await feed.findByText("Not supported by this oracle's code")).toBeTruthy()
     expect(feed.queryByText("No feed source set: updated by push only.")).toBeNull()
+    // Above that sentence, the card's description is true for code without a feed too.
+    expect(feed.getByText(/the SEP-40 price feed this oracle reads with sync_from_feed, when its code supports one and one is set/)).toBeTruthy()
+    expect(screen.getByText(/its sources and, when its code supports one, the price feed it reads\./)).toBeTruthy()
+    // The table's path cell: "Not supported", with the call that shows it.
+    await user.click(within(rows[0]).getAllByRole("button", { name: "How to verify Update path · USDY" })[0])
+    const pathDrawer = await screen.findByRole("dialog")
+    expect(commands(pathDrawer, new RegExp(`--id ${ORACLE} .* -- last_update_was_feed$`))).toHaveLength(1)
+    expect(within(pathDrawer).getAllByText(/MissingValue/).length).toBeGreaterThan(0)
+    await user.keyboard("{Escape}")
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
     // The path is unsupported: Active source stays, as before.
     expect(row(region("Sources"), "Active source")).toContain(PRIMARY)
     await user.click(feed.getByRole("button", { name: "How to verify Feed source" }))

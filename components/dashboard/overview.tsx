@@ -21,9 +21,10 @@ import {
 import { useLedgerClock } from "@/hooks/use-ledger-clock"
 import { alertTitle, countsAsCritical, type Alert } from "@/lib/app/alert-types"
 import { BLOCKED_WHEN_STALE, type Freshness } from "@/lib/protocol/dashboard/oracle"
+import { FRESHNESS_BADGE, FRESHNESS_RANK, FRESHNESS_WORD, oracleEntries, oracleNow, type OracleNow } from "@/lib/protocol/dashboard/oracle-state"
 import { TVL_LABEL } from "@/lib/protocol/dashboard/protocol-state"
 import type { Remaining } from "@/lib/protocol/dashboard/risk"
-import type { VerifiableFigure } from "@/lib/protocol/dashboard/verify"
+import type { UnreadInput, VerifiableFigure } from "@/lib/protocol/dashboard/verify"
 import { formatAmountFixed } from "@/lib/protocol/format"
 import { allLive, unavailable } from "@/lib/protocol/reader"
 import type { Live, Network } from "@/lib/protocol/types"
@@ -32,50 +33,61 @@ import { CopyEvidence } from "./copy-evidence"
 import { lagText, TxLink } from "./event-list"
 import { accountShort, ago, complianceEventWords, eventSubject } from "./event-words"
 import { decimalsScale, verifiable, type FigureSpec } from "./figure"
-import { FRESHNESS_BADGE, FRESHNESS_WORD, oracleEntries, oracleNow, type OracleNow } from "./oracle-panel"
 import { Panel, Row } from "./panel"
 import { current, NO_LIQUIDITY, noPoolSeeded, readOf, refuse, Shown, unitsOf } from "./query-figures"
 import { WrapAndMintRow, wrapAndMintSpec } from "./risk-panel"
 
 const list = (words: readonly string[]) => (words.length <= 1 ? words.join("") : `${words.slice(0, -1).join(", ")} and ${words[words.length - 1]}`)
 
-/** Worst first: an unread oracle, then a stale one, then one in its warning window. */
-const FRESHNESS_RANK: Record<Freshness, number> = { fresh: 0, warning: 1, stale: 2, unavailable: 3 }
-
-/** Every oracle of the manifest now: how many are fresh, the worst state, and the ones that are not fresh. */
-type OraclesSummary = { fresh: number; total: number; worst: Freshness; notFresh: { asset: string; state: Freshness }[] }
+/** Every oracle of the manifest now: how many are fresh, the worst state, the read ones that are not fresh, and the ones that could not be read. */
+type OraclesSummary = {
+  fresh: number
+  total: number
+  worst: Freshness
+  notFresh: { asset: string; state: Freshness }[]
+  notRead: { asset: string; reason: string }[]
+}
 
 /**
  * The oracle row's figure: "N of M fresh" over every oracle of the manifest, on the ledger clock (as
  * the oracle page's table counts them; Warning is not fresh). Its reads are every readable oracle's
- * timestamp, max_stale and is_available; an oracle that cannot be read counts as not fresh and makes
- * the worst state Unavailable, its reason in the scale. Pending while any oracle's first read is;
- * Unavailable, with the first reason, when none can be read.
+ * timestamp, max_stale and is_available. An oracle that could not be read is named apart, with its
+ * reason, makes the worst state Unavailable, and its attempted call is one of the figure's `unread`
+ * inputs, so the drawer can give it. Pending while any oracle's first read is. When none can be
+ * read: Unavailable, the one oracle's own failure, or, with several, every oracle as unread.
  */
-function oraclesFigure(entries: { asset: string; now: OracleNow }[]): { live: Live<OraclesSummary> | undefined; unread: string[] } {
-  const unread = entries.flatMap((e) => (e.now.live?.status === "unavailable" ? [`${e.asset}: ${e.now.live.error}`] : []))
-  if (entries.length === 0 || entries.some((e) => e.now.live === undefined)) return { live: undefined, unread }
+function oraclesFigure(entries: { asset: string; now: OracleNow }[]): { live: Live<OraclesSummary> | undefined; unread: UnreadInput[] } {
+  const failed = entries.flatMap((e) => (e.now.live?.status === "unavailable" ? [{ asset: e.asset, live: e.now.live }] : []))
+  const unread: UnreadInput[] = failed.map(({ asset, live }) => (live.source ? { name: asset, error: live.error, source: live.source } : { name: asset, error: live.error }))
+  if (entries.length === 0 || entries.some((e) => e.now.live === undefined)) return { live: undefined, unread: [] }
   const readable = entries.flatMap((e) => (e.now.live?.status === "live" ? [e.now.live] : []))
-  // None readable: the first oracle's failure, with the call it attempted (the scale names every oracle's).
-  const first = entries[0].now.live
-  if (readable.length === 0) return { live: first?.status === "unavailable" ? first : unavailable("no oracle could be read"), unread }
+  if (readable.length === 0) {
+    // One oracle: its own failure and its call, as before. Several: each one's reason and call, as unread inputs.
+    if (failed.length === 1) return { live: failed[0].live, unread: [] }
+    return { live: unavailable(`none of the ${entries.length} oracles could be read`), unread }
+  }
+  const read = entries.filter((e) => e.now.live?.status === "live")
   const summary: OraclesSummary = {
-    fresh: entries.filter((e) => e.now.state === "fresh").length,
+    fresh: read.filter((e) => e.now.state === "fresh").length,
     total: entries.length,
-    worst: entries.reduce<Freshness>((w, e) => (FRESHNESS_RANK[e.now.state] > FRESHNESS_RANK[w] ? e.now.state : w), "fresh"),
-    notFresh: entries.filter((e) => e.now.state !== "fresh").map((e) => ({ asset: e.asset, state: e.now.state })),
+    worst: failed.length > 0 ? "unavailable" : read.reduce<Freshness>((w, e) => (FRESHNESS_RANK[e.now.state] > FRESHNESS_RANK[w] ? e.now.state : w), "fresh"),
+    notFresh: read.filter((e) => e.now.state !== "fresh").map((e) => ({ asset: e.asset, state: e.now.state })),
+    notRead: failed.map(({ asset, live }) => ({ asset, reason: live.error })),
   }
   return { live: allLive(readable, () => summary), unread }
 }
 
-/** "Stale · 3 of 5 fresh · Not fresh: … · On a stale oracle's markets, … are blocked": the badge's word first, then the lines under it. */
-function oraclesLine(s: OraclesSummary): string {
-  const parts = [FRESHNESS_WORD[s.worst], `${s.fresh} of ${s.total} fresh`]
-  if (s.notFresh.length > 0) parts.push(`Not fresh: ${s.notFresh.map((o) => `${o.asset} (${FRESHNESS_WORD[o.state]})`).join(", ")}`)
-  if (s.notFresh.some((o) => o.state === "stale")) parts.push(`On a stale oracle's markets, ${list(BLOCKED_WHEN_STALE)} are blocked`)
-  return parts.join(" · ")
+/** The lines under the count: the read oracles that are not fresh, the ones not read and why, and what a stale oracle blocks. */
+function oraclesLines(s: OraclesSummary): string[] {
+  const lines: string[] = []
+  if (s.notFresh.length > 0) lines.push(`Not fresh: ${s.notFresh.map((o) => `${o.asset} (${FRESHNESS_WORD[o.state]})`).join(", ")}`)
+  if (s.notRead.length > 0) lines.push(`Not read: ${s.notRead.map((o) => `${o.asset} (${o.reason})`).join(", ")}`)
+  if (s.notFresh.some((o) => o.state === "stale")) lines.push(`On a stale oracle's markets, ${list(BLOCKED_WHEN_STALE)} are blocked`)
+  return lines
 }
 
+/** "Unavailable · 3 of 5 fresh · Not fresh: … · Not read: … · On a stale oracle's markets, … are blocked": the badge's word, the count, then the lines. */
+const oraclesLine = (s: OraclesSummary) => [FRESHNESS_WORD[s.worst], `${s.fresh} of ${s.total} fresh`, ...oraclesLines(s)].join(" · ")
 
 function ComplianceEvents({ network, ledgerTime }: { network: Network; ledgerTime: number | null }) {
   const q = useComplianceEvents(5)
@@ -300,9 +312,8 @@ export function Overview() {
     label: "Oracle freshness",
     live: oraclesLive,
     format: oraclesLine,
-    scale: `Each oracle of the manifest: fresh while ledger time − its timestamp ≤ max_stale_seconds and is_available() is true; Warning from 75%, not counted fresh${
-      unread.length > 0 ? `. Not read: ${unread.join("; ")}` : ""
-    }`,
+    scale: "Each oracle of the manifest: fresh while ledger time − its timestamp ≤ max_stale_seconds and is_available() is true; Warning from 75%, not counted fresh; an oracle that could not be read is named apart",
+    unread,
     // The oldest of the oracles' reads: the figure is as old as that.
     read: oracleReads.length === oracleQueries.length && oracleReads.length > 0 ? { at: Math.min(...oracleReads.map((q) => q.dataUpdatedAt)), cadenceMs: DASHBOARD_LIVE_MS } : undefined,
   }
@@ -390,12 +401,11 @@ export function Overview() {
             <Row label="Oracles">
               <Shown
                 {...oracleFreshness}
-                render={(s, display) => {
-                  const [, count, ...lines] = display.split(" · ")
+                render={(s) => {
                   return (
                     <>
-                      <Badge status={FRESHNESS_BADGE[s.worst]}>{FRESHNESS_WORD[s.worst]}</Badge> <span>{count}</span>
-                      {lines.map((line) => (
+                      <Badge status={FRESHNESS_BADGE[s.worst]}>{FRESHNESS_WORD[s.worst]}</Badge> <span>{`${s.fresh} of ${s.total} fresh`}</span>
+                      {oraclesLines(s).map((line) => (
                         <span key={line} className="block font-sans text-xs/5 text-ink-muted">
                           {line}
                         </span>

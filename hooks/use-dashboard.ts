@@ -6,7 +6,8 @@ import { useManifest } from "@/components/app/manifest-provider"
 import { parseOpenAlerts, type OpenAlertsAnswer } from "@/lib/app/alert-types"
 import { useLedgerClock } from "@/hooks/use-ledger-clock"
 import { fetchAssetCompliance, fetchEscrowRecords } from "@/lib/protocol/dashboard/compliance"
-import { fetchOracleView, type OracleView } from "@/lib/protocol/dashboard/oracle"
+import { fetchOracleView } from "@/lib/protocol/dashboard/oracle"
+import type { OracleViewAt } from "@/lib/protocol/dashboard/oracle-state"
 import { fetchPauses } from "@/lib/protocol/dashboard/pauses"
 import { fetchPausers, indexedPausers } from "@/lib/protocol/dashboard/pausers"
 import { createHorizon } from "@/lib/protocol/horizon"
@@ -14,7 +15,7 @@ import { fetchMarketDashboard, fetchProtocolState, pendingClaim, type MarketDash
 import { getMarket } from "@/lib/protocol/manifest"
 import { fetchRiskView } from "@/lib/protocol/dashboard/risk"
 import { createRpcReader } from "@/lib/protocol/reader"
-import type { Live, Manifest } from "@/lib/protocol/types"
+import type { Manifest } from "@/lib/protocol/types"
 import type { IndexedEvent, IndexedEvents, IndexGroup } from "@/lib/server/indexer"
 import type { KeeperHealth, RecordedTick } from "@/lib/server/oracle-ticks"
 
@@ -23,7 +24,9 @@ export const DASHBOARD_LIVE_MS = 15_000
 /** Aggregates (the every-market sweep and its totals) and history (the index) refresh every 60 s. */
 export const DASHBOARD_AGGREGATE_MS = 60_000
 
-export type { IndexedEvent, IndexedEvents, IndexGroup, KeeperHealth, RecordedTick }
+export type { IndexedEvent, IndexedEvents, IndexGroup, KeeperHealth, OracleViewAt, RecordedTick }
+/** The oracle pages' clock rule, kept here for the hook's callers (it lives in `lib/protocol/dashboard/oracle-state`). */
+export { secondsToBlockNow } from "@/lib/protocol/dashboard/oracle-state"
 
 /**
  * The query, plus `stale`: a failed refetch keeps the old `data`, and `stale` tells callers not to
@@ -92,9 +95,6 @@ export function usePendingClaim(marketId: string, account: string | null, ms: Ma
   )
 }
 
-/** An oracle's view and the ledger time it was computed at. */
-export type OracleViewAt = { view: OracleView; ledgerTime: number }
-
 /** One oracle's query: the same key, read and cadence wherever it is asked, so pages share it. */
 function oracleViewQuery(m: Manifest, oracle: string, ledgerTime: number | null) {
   return {
@@ -129,17 +129,6 @@ export function useOracleViews(oracles: readonly string[]) {
   const m = useManifest()
   const { ledgerTime } = useLedgerClock()
   return useQueries({ queries: oracles.map((oracle) => oracleViewQuery(m, oracle, ledgerTime)) }).map(withStale)
-}
-
-/**
- * Seconds until operations block, now: the read's `timeToBlock` less the ledger time elapsed since
- * it was computed. It follows the ledger clock (ledger time plus elapsed seconds), never the
- * browser's wall clock alone. Null without a ledger time or a time to block.
- */
-export function secondsToBlockNow(timeToBlock: Live<number>, readLedgerTime: number, ledgerTimeNow: number | null): number | null {
-  if (timeToBlock.status !== "live" || ledgerTimeNow === null) return null
-  // `fetchOracleView` floors the ledger time it is given; whole seconds left, rounded down.
-  return Math.floor(timeToBlock.value + Math.floor(readLedgerTime) - ledgerTimeNow)
 }
 
 /**

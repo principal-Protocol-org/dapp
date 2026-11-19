@@ -146,12 +146,20 @@ export function verifyCommand(network: Network, source: ReadSource | Omit<ReadSo
   ].join(" ")
 }
 
+/**
+ * An input a figure needed but could not read (one oracle among several): whose it is (`name`), why,
+ * and the call attempted, so the reader can repeat it. The figure's value is computed without it.
+ */
+export type UnreadInput = { name: string; error: string; source?: Omit<ReadSource, "rawXdr" | "ledger"> }
+
 export type VerifiableFigure = {
   label: string
   display: string
   live: Live<unknown>
   /** When the figure's reads arrived (ms) and how often they refresh: the status then says "read Xs ago", and Stale past 2 × the cadence. */
   read?: { at: number; cadenceMs: number }
+  /** Inputs that could not be read: the evidence and the drawer name each, with its attempted call. */
+  unread?: UnreadInput[]
 }
 
 /** What the evidence needs beyond the figure: the manifest (to name contracts by role) and the time now (ms, for the read's age). */
@@ -327,8 +335,26 @@ function liveStatus(f: VerifiableFigure, spread: { min: number; max: number } | 
 const unique = (xs: string[]) => [...new Set(xs.filter((x) => x !== ""))]
 const orNone = (xs: string[], sep: string) => (xs.length > 0 ? xs.join(sep) : NONE)
 
-/** The evidence for one figure, as the drawer and the evidence table read it. */
+/** "Not read: MOCKXAUM: rpc down", for the status. */
+export const unreadText = (unread: UnreadInput[]) => `Not read: ${unread.map((u) => `${u.name}: ${u.error}`).join("; ")}`
+
+/** The evidence for one figure, as the drawer and the evidence table read it; an unread input adds its contract, its attempted call and why. */
 export function figureEvidence(f: VerifiableFigure, ctx: EvidenceContext = {}): FigureEvidence {
+  const e = readEvidence(f, ctx)
+  const unread = f.unread ?? []
+  if (unread.length === 0) return e
+  const calls = unread.flatMap((u) => (u.source ? [`${qualifiedCall(u.source, ctx.manifest)} (not read)`] : []))
+  const contracts = unread.flatMap((u) => (u.source ? [u.source.contractId] : []))
+  const known = (text: string, sep: string) => (text === NONE ? [] : text.split(sep))
+  return {
+    ...e,
+    contract: orNone(unique([...known(e.contract, ", "), ...contracts]), ", "),
+    call: orNone([...known(e.call, "; "), ...calls], "; "),
+    status: `${e.status} · ${unreadText(unread)}`,
+  }
+}
+
+function readEvidence(f: VerifiableFigure, ctx: EvidenceContext): FigureEvidence {
   const { live } = f
   if (live.status === "unavailable") {
     const s = live.source

@@ -4,7 +4,7 @@ import type { ComponentProps, ReactNode } from "react"
 import { InfoIcon } from "lucide-react"
 import { cn } from "cn"
 import { UNAVAILABLE } from "@/components/app/live"
-import type { VerifiableFigure } from "@/lib/protocol/dashboard/verify"
+import type { UnreadInput, VerifiableFigure } from "@/lib/protocol/dashboard/verify"
 import type { Live } from "@/lib/protocol/types"
 import { VerifyDrawer } from "./verify-drawer"
 
@@ -17,6 +17,8 @@ export type FigureSpec<T> = {
   scale?: string
   /** When the reads arrived (ms, React Query's `dataUpdatedAt`) and their refresh cadence: the drawer and the evidence say "read Xs ago", and Stale past 2 × the cadence. */
   read?: { at: number; cadenceMs: number }
+  /** Inputs it could not read (one oracle among several): the drawer and the evidence give each one's reason and attempted call. */
+  unread?: UnreadInput[]
 }
 
 /** The figure's text: its formatted value, or "Unavailable". Never a zero or a dash in its place. */
@@ -28,7 +30,12 @@ export function figureDisplay<T>(live: Live<T> | undefined, format: (value: T) =
 export function verifiable<T>(spec: FigureSpec<T>): VerifiableFigure | null {
   if (!spec.live) return null
   const figure: VerifiableFigure = { label: spec.label, display: figureDisplay(spec.live, spec.format), live: spec.live }
-  return spec.read ? { ...figure, read: spec.read } : figure
+  return withExtras(figure, spec)
+}
+
+/** The figure, with its read time and its unread inputs when it has them. */
+function withExtras(figure: VerifiableFigure, spec: Pick<FigureSpec<unknown>, "read" | "unread">): VerifiableFigure {
+  return { ...figure, ...(spec.read ? { read: spec.read } : {}), ...(spec.unread && spec.unread.length > 0 ? { unread: spec.unread } : {}) }
 }
 
 /** "7 decimals: 10,000,000 = 1 USDY": how a raw amount reads. */
@@ -46,11 +53,11 @@ export type FigureRender<T> = (value: T, display: string) => ReactNode
  * button: callers show a skeleton while the first read is pending. `render` replaces the visible
  * value only, e.g. a shortened address that links to the explorer.
  */
-export function Figure<T>({ label, live, format, scale, read, className, render }: FigureSpec<T> & { className?: string; render?: FigureRender<T> }) {
+export function Figure<T>({ label, live, format, scale, read, unread, className, render }: FigureSpec<T> & { className?: string; render?: FigureRender<T> }) {
   if (!live) return <span className={className}>{UNAVAILABLE}</span>
   const display = figureDisplay(live, format)
   const down = live.status === "unavailable"
-  const figure: VerifiableFigure = read ? { label, display, live, read } : { label, display, live }
+  const figure = withExtras({ label, display, live }, { read, unread })
   return (
     <span className={cn("inline-flex max-w-full min-w-0 items-center gap-1.5", className)}>
       <span className="min-w-0 wrap-anywhere">{render && live.status === "live" ? render(live.value, display) : display}</span>

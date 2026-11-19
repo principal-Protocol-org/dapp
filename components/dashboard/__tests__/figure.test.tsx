@@ -205,6 +205,19 @@ describe("the How to verify drawer (D-7)", () => {
   })
 })
 
+describe("Figure with unread inputs", () => {
+  it("its drawer gives each unread input's attempted call beside the reads, and says why it was not read", async () => {
+    const user = setup()
+    const attempted = { contractId: ESCROW, fn: "record_count", args: [], rpcUrl: RPC }
+    render(<Figure label="Escrows" live={tvl} format={usdy} unread={[{ name: "Escrow 2", error: "rpc down", source: attempted }]} />)
+    await user.click(screen.getByRole("button", { name: "How to verify Escrows" }))
+    const drawer = await screen.findByRole("dialog")
+    expect(within(drawer).getByText("Re-read it: 3 calls")).toBeTruthy()
+    expect(within(drawer).getAllByText((_, el) => el?.tagName === "CODE" && new RegExp(`--id ${ESCROW} .* -- record_count$`).test(el.textContent ?? ""))).toHaveLength(1)
+    expect(within(drawer).getByText(/Not read: Escrow 2: rpc down/)).toBeTruthy()
+  })
+})
+
 describe("CopyEvidence", () => {
   const figures: VerifiableFigure[] = [
     { label: "TVL", display: "223,011.30 USDY", live: tvl },

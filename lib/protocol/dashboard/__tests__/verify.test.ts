@@ -146,6 +146,23 @@ describe("evidenceRows", () => {
     expect(row).toBe(`| Max stale | ${ORACLE} | max_stale_seconds() | 3600 | 1 h | 5719947 | https://soroban-testnet.stellar.org | Live | |`)
   })
 
+  it("an unread input adds its contract, its attempted call and why, after the reads the figure has", () => {
+    const OTHER = "CBHAWS6B4YCNRLYRP2HUP77P4IRP3PZYPSYVPV4OMZNU2ZNKSAQQ2GXU"
+    const f = {
+      label: "Oracle freshness",
+      display: "Unavailable · 1 of 2 fresh",
+      live: live("is_available"),
+      unread: [{ name: "USTRY", error: "rpc down", source: { contractId: OTHER, fn: "is_available", args: [], rpcUrl: "https://soroban-testnet.stellar.org" } }],
+    }
+    const e = figureEvidence(f, { manifest: testnet })
+    expect(e.contract).toBe(`${ORACLE}, ${OTHER}`)
+    expect(e.call).toBe(`is_available(); CBHAWS….is_available() (not read)`)
+    expect(e.status).toBe("Live · Not read: USTRY: rpc down")
+    // Without a call recorded, it is still named.
+    expect(figureEvidence({ ...f, unread: [{ name: "USTRY", error: "rpc down" }] }).status).toBe("Live · Not read: USTRY: rpc down")
+    expect(figureEvidence({ ...f, unread: [] })).toEqual(figureEvidence({ label: f.label, display: f.display, live: f.live }))
+  })
+
   it("keeps the base64 XDR for the drawer, out of the table", () => {
     const f = { label: "Max stale", display: "1 h", live: live("max_stale_seconds") }
     expect(figureEvidence(f)).toMatchObject({ raw: "3600", rawXdr: ["AAAABQAAAAAAAA4Q"], ledger: "5719947", status: "Live" })

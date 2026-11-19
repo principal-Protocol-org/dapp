@@ -9,65 +9,29 @@ import { Metric } from "@/components/app/market/metric"
 import { Badge } from "@/components/ui/badge"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import {
-  DASHBOARD_LIVE_MS,
-  secondsToBlockNow,
-  useOracleTicks,
-  useOracleViews,
-  type IndexedEvent,
-  type KeeperHealth,
-  type OracleViewAt,
-  type RecordedTick,
-} from "@/hooks/use-dashboard"
+import { DASHBOARD_LIVE_MS, useOracleTicks, useOracleViews, type IndexedEvent, type KeeperHealth, type RecordedTick } from "@/hooks/use-dashboard"
 import { LEDGER_CLOCK_REFETCH_MS, useLedgerClock } from "@/hooks/use-ledger-clock"
-import type { FeedPrice, Freshness, OracleFeed, OracleSourceView, OracleView, Sep40Asset } from "@/lib/protocol/dashboard/oracle"
+import type { Freshness, OracleSourceView, OracleView } from "@/lib/protocol/dashboard/oracle"
+import { FRESHNESS_BADGE, FRESHNESS_WORD, freshnessNow, oracleEntries, secondsToBlockNow, type OracleEntry } from "@/lib/protocol/dashboard/oracle-state"
 import { isSignificantRejection, lastRejectionNote, rejectionText } from "@/lib/protocol/dashboard/rejections"
 import type { VerifiableFigure } from "@/lib/protocol/dashboard/verify"
-import { explorerUrl } from "@/lib/protocol/explorer"
-import { formatAmountFixed, formatBps, formatWindow } from "@/lib/protocol/format"
-import { assetCodes, manifestOracles } from "@/lib/protocol/manifest"
+import { formatBps, formatWindow } from "@/lib/protocol/format"
 import type { OracleRejection } from "@/lib/protocol/market-state"
 import { allLive, unavailable } from "@/lib/protocol/reader"
-import type { Live, Manifest, Network } from "@/lib/protocol/types"
+import type { Live, Network } from "@/lib/protocol/types"
 import { AsOf, readsOf } from "./as-of"
 import { CopyEvidence } from "./copy-evidence"
 import { EventList, TxLink, type EventRowText } from "./event-list"
 import { accountShort, ago, closeTimeText } from "./event-words"
-import { verifiable, VerifyButton, type FigureSpec } from "./figure"
+import { verifiable, type FigureSpec } from "./figure"
+import { feedFigures, FeedPanel } from "./oracle-feed"
+import { ORACLE_SCALE, oracleValue, PATH_UNSUPPORTED, timestampText, unsupportedFigure, UnsupportedRow, utc } from "./oracle-shared"
+import { oracleRow, oracleRowFigures, OraclesTable } from "./oracles-table"
 import { Panel, Row } from "./panel"
-import { current, readOf, Shown, type QueryLike } from "./query-figures"
-import { VerifyDrawer } from "./verify-drawer"
+import { current, readOf, Shown } from "./query-figures"
 
 /** The operations the protocol refuses while the oracle is stale (D-17), as the page states them. */
 export const BLOCKED_WHEN_STALE_LINE = "Operations blocked when stale: mint, trades, single-sided liquidity, redemption"
-
-/** What an unsupported view reads: the oracle's code has no `last_update_was_feed` (or `feed_source`) view. */
-export const PATH_UNSUPPORTED = "Not supported by this oracle's code"
-
-/** The Feed card when `feed_source()` is None. */
-export const NO_FEED_SOURCE = "No feed source set: updated by push only."
-
-/** The comparison when the feed's price is zero or negative: `sync_from_feed` rejects it (`bad_price`). */
-export const FEED_NOT_POSITIVE = "The feed's price is not positive: the oracle would refuse it."
-
-/** The oracle's 7-decimal fixed point (`SCALE`), every digit shown: the value as the contract stores it. */
-const oracleValue = (v: bigint) => formatAmountFixed(v, 7, 7)
-const ORACLE_SCALE = "7 decimals: 10,000,000 = 1.0000000 (US dollars per unit of the underlying, oracle units)"
-
-const LINK =
-  "font-medium text-ink underline decoration-line-strong underline-offset-4 hover:decoration-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
-
-/** "2027-01-15 07:48:00 UTC": a unix-seconds timestamp; shown as the raw seconds when it is no date. */
-function utc(seconds: bigint | number): string {
-  const ms = Number(seconds) * 1000
-  return Number.isFinite(ms) && Math.abs(ms) <= 8.64e15 ? closeTimeText(new Date(ms).toISOString()) : `${seconds} (unix seconds)`
-}
-
-/** A timestamp and, once the ledger clock has passed it, its age on that clock. */
-function timestampText(ts: bigint, nowSeconds: number | null): string {
-  const age = nowSeconds !== null ? nowSeconds - Number(ts) : null
-  return age !== null && age >= 0 ? `${utc(ts)} · ${formatDuration(age)} ago on the ledger clock` : utc(ts)
-}
 
 /** A stored decimal string (an event's `value`) as the oracle value; as stored when it is no integer, never guessed. */
 function storedValue(raw: unknown): string {
@@ -92,49 +56,6 @@ function storedTime(raw: unknown): string {
 /** Single quotes for a shell: the preimage as one argument, whatever it holds. */
 const shellQuote = (text: string) => `'${text.replace(/'/g, `'\\''`)}'`
 
-/** A read's value through `f`, keeping its provenance. */
-function mapLive<T, U>(live: Live<T>, f: (value: T) => U): Live<U> {
-  return live.status === "live" ? { ...live, value: f(live.value) } : live
-}
-
-/** Of a figure built from several reads, only the read of `fn`: the one its value comes from. */
-function onlyRead<T>(live: Live<T>, fn: string): Live<T> {
-  const source = live.status === "live" ? live.sources?.find((s) => s.fn === fn) : undefined
-  return live.status === "live" && source ? { status: "live", value: live.value, ledger: source.ledger, source } : live
-}
-
-/**
- * Freshness now, on the ledger clock: from the seconds left until operations block (`secondsToBlockNow`),
- * as the contract counts it (fresh while age ≤ `max_stale`). Warning from 75% of `max_stale`. The
- * contract's own `is_available() = false` reads Stale.
- */
-function freshnessNow(view: OracleView, left: number | null): { state: Freshness; age: number | null; max: number | null } {
-  const max = view.maxStale.status === "live" ? Number(view.maxStale.value) : null
-  if (view.available.status === "live" && !view.available.value) return { state: "stale", age: max !== null && left !== null ? max - left : null, max }
-  if (view.freshness === "unavailable" || left === null || max === null) return { state: view.freshness, age: null, max }
-  // A ledger clock behind the oracle's timestamp counts as age 0 (the contract refuses future timestamps).
-  const age = Math.max(0, max - left)
-  if (left < 0) return { state: "stale", age, max }
-  return { state: age * 4 >= max * 3 ? "warning" : "fresh", age, max }
-}
-
-export const FRESHNESS_WORD: Record<Freshness, string> = { fresh: "Fresh", warning: "Warning", stale: "Stale", unavailable: "Unavailable" }
-export const FRESHNESS_BADGE: Record<Freshness, "live" | "soon" | "paused" | "neutral"> = { fresh: "live", warning: "soon", stale: "paused", unavailable: "neutral" }
-
-/**
- * One oracle now, as its Freshness figure reads it: the state on the ledger clock, the seconds until
- * operations block, and the reads behind both (`timeToBlock` and `is_available`). Unavailable when
- * any of them is, with that read's reason in `live`; `live` undefined while the first read is pending.
- */
-export type OracleNow = { state: Freshness; left: number | null; live: Live<number> | undefined }
-
-export function oracleNow(q: QueryLike<OracleViewAt>, nowSeconds: number | null, blocked?: string): OracleNow {
-  const live = current(q, (d) => allLive([d.view.timeToBlock, d.view.available] as const, ([seconds]) => seconds), blocked)
-  if (!live || live.status === "unavailable" || q.stale || !q.data) return { state: "unavailable", left: null, live }
-  const left = secondsToBlockNow(q.data.view.timeToBlock, q.data.ledgerTime, nowSeconds)
-  return { state: freshnessNow(q.data.view, left).state, left, live }
-}
-
 function freshnessDetail(f: { state: Freshness; age: number | null; max: number | null }, available: boolean): string {
   if (!available) return "is_available() reads false"
   if (f.age === null || f.max === null) return ""
@@ -151,43 +72,6 @@ function countdownText(left: number, available: boolean): string {
 
 const sourceText = (v: string | null) => (v === null ? "None set" : v)
 
-/**
- * The stored value against the feed's, both at 7 decimals, in integer math only: "Equal"; below a
- * factor of 2, the difference as a percent of the smaller, rounded down to 0.01 % ("less than
- * 0.01 %" when that is zero); from a factor of 2, the larger over the smaller (`larger × 1000 /
- * smaller`, floored) to the nearest 0.1. A feed price of zero or below is the oracle's `bad_price`:
- * no comparison. A stored value of zero or below has no ratio: that throws.
- */
-export function storedAgainstFeed(stored: bigint, feed: bigint): string {
-  if (feed <= 0n) return FEED_NOT_POSITIVE
-  if (stored === feed) return "Equal"
-  if (stored <= 0n) throw new RangeError("the stored value is not positive, so it has no ratio to the feed's price")
-  const [larger, smaller] = stored > feed ? [stored, feed] : [feed, stored]
-  if (larger >= 2n * smaller) {
-    const tenths = ((larger * 1000n) / smaller + 50n) / 100n
-    return `Differs by a factor of ${tenths / 10n}.${tenths % 10n}`
-  }
-  const hundredths = ((larger - smaller) * 10_000n) / smaller
-  if (hundredths === 0n) return "Differs by less than 0.01 %"
-  return `Differs by ${hundredths / 100n}.${String(hundredths % 100n).padStart(2, "0")} %`
-}
-
-const COMPARISON_SCALE =
-  "get_reference_value against the feed's lastprice at 7 decimals, in integer math: Equal; below a factor of 2, the difference as a percent of the smaller value, rounded down to 0.01 %; from a factor of 2, the larger over the smaller, to the nearest 0.1"
-
-const assetKey = (a: Sep40Asset) => (a.kind === "Stellar" ? `Stellar ${accountShort(a.address)}` : `Other ${a.symbol}`)
-
-/** A contract outside the manifest (a feed): its short id, linking to stellar.expert when the network has it. */
-function ContractLink({ network, label, id }: { network: Network; label: string; id: string }) {
-  const url = explorerUrl(network, "contract", id)
-  if (!url) return <span title={id}>{accountShort(id)}</span>
-  return (
-    <a href={url} target="_blank" rel="noreferrer" title={id} aria-label={`${label} ${id} on stellar.expert`} className={LINK}>
-      {accountShort(id)}
-    </a>
-  )
-}
-
 /** One source: its id (with its drawer) and, when the manifest knows it, the preimage and the command that hashes it. */
 function SourceRow({ label, spec, view }: { label: string; spec: FigureSpec<string | null>; view: OracleSourceView | undefined }) {
   const hash = view?.hash.status === "live" ? view.hash.value : null
@@ -203,18 +87,6 @@ function SourceRow({ label, spec, view }: { label: string; spec: FigureSpec<stri
       ) : hash !== null ? (
         <span className="mt-1 block font-sans text-xs/5 text-ink-muted">No preimage in the manifest</span>
       ) : null}
-    </Row>
-  )
-}
-
-/** A figure the oracle's code does not have: the sentence, and a drawer giving the call that shows the host's MissingValue. */
-function UnsupportedRow({ label, figure }: { label: string; figure: VerifiableFigure }) {
-  return (
-    <Row label={label}>
-      <span className="inline-flex max-w-full min-w-0 items-center gap-1.5">
-        <span className="min-w-0 font-sans wrap-anywhere">{PATH_UNSUPPORTED}</span>
-        <VerifyDrawer figure={figure} trigger={<VerifyButton name={`How to verify ${figure.label}`} />} />
-      </span>
     </Row>
   )
 }
@@ -389,101 +261,6 @@ function KeeperPanel({ network, oracle, ledgerTime }: { network: Network; oracle
   )
 }
 
-/** One oracle of the manifest: its id and the underlying codes of the markets that use it. */
-export type OracleEntry = { oracle: string; asset: string }
-
-/** The oracles a dashboard page shows: the manifest's, in market order; the shared oracle when no market is listed. */
-export function oracleEntries(m: Manifest): OracleEntry[] {
-  const oracles = manifestOracles(m)
-  return oracles.length > 0 ? oracles.map((o) => ({ oracle: o.oracle, asset: assetCodes(o.markets) })) : [{ oracle: m.shared.oracle, asset: "OracleAdapter" }]
-}
-
-/** "Push", "Feed", "Not supported", or why the path is not known; null while the first read is pending. */
-function pathWord(q: QueryLike<OracleViewAt>): { text: string } | { reason: string } | null {
-  if (q.stale) return { reason: `the last refresh failed: ${q.error?.message ?? "unknown error"}` }
-  if (!q.data) return null
-  const path = q.data.view.path
-  if (path.status === "unsupported") return { text: "Not supported" }
-  if (path.status === "unavailable") return { reason: path.error }
-  return { text: path.value === "feed" ? "Feed" : "Push" }
-}
-
-const CELL_SKELETON = <Skeleton className="inline-block h-4 w-14 max-w-full align-middle" />
-
-/**
- * Every oracle of the manifest, one row each: its asset and short id, its state now, the time until
- * operations block, and how its value was last set. Each row links to `?oracle=<id>`, its detail
- * below. Below 520 px the countdown, and below 720 px the path, fold under the oracle's name, so
- * the table never scrolls inside its card.
- */
-function OraclesTable({
-  rows,
-  selected,
-  onChoose,
-}: {
-  rows: { entry: OracleEntry; now: OracleNow; path: ReturnType<typeof pathWord> }[]
-  selected: string
-  onChoose: (event: MouseEvent<HTMLAnchorElement>, oracle: string) => void
-}) {
-  return (
-    <Table aria-label="Oracles">
-      <TableHeader>
-        <TableRow>
-          <TableHead className="max-[520px]:px-3">Oracle</TableHead>
-          <TableHead className="max-[520px]:px-3">State</TableHead>
-          <TableHead className="max-[520px]:hidden">Blocks in</TableHead>
-          <TableHead className="max-[720px]:hidden">Update path</TableHead>
-        </TableRow>
-      </TableHeader>
-      <TableBody>
-        {rows.map(({ entry, now, path }) => {
-          const label = `${entry.asset} oracle`
-          const loading = now.live === undefined
-          let countdown: ReactNode
-          if (loading) countdown = CELL_SKELETON
-          else if (now.state === "stale") countdown = "Stale"
-          else if (now.state === "unavailable" || now.left === null)
-            countdown = <UnavailableTip label={label} reason={now.live?.status === "unavailable" ? now.live.error : "the ledger time is not known yet"} />
-          else countdown = formatDuration(now.left)
-          const pathText = path === null ? CELL_SKELETON : "text" in path ? path.text : <UnavailableTip label={`${label} update path`} reason={path.reason} />
-          const isSelected = entry.oracle === selected
-          return (
-            <TableRow key={entry.oracle} className={isSelected ? "bg-surface-sunk" : undefined}>
-              <TableCell className="font-sans text-ink whitespace-normal max-[520px]:px-3">
-                <a
-                  href={`/dashboard/oracle?oracle=${encodeURIComponent(entry.oracle)}`}
-                  aria-current={isSelected ? "true" : undefined}
-                  onClick={(event) => onChoose(event, entry.oracle)}
-                  className={LINK}
-                >
-                  {entry.asset}
-                </a>
-                {/* Each piece stays whole; the separators between them are where the line may wrap. */}
-                <span className="block font-mono text-xs text-ink-muted">
-                  <span title={entry.oracle} className="whitespace-nowrap">
-                    {accountShort(entry.oracle)}
-                  </span>
-                  <span className="min-[520px]:hidden">
-                    {" · "}
-                    <span className="whitespace-nowrap">{countdown}</span>
-                  </span>
-                  <span className="min-[720px]:hidden">
-                    {" · "}
-                    <span className="whitespace-nowrap">{pathText}</span>
-                  </span>
-                </span>
-              </TableCell>
-              <TableCell className="max-[520px]:px-3">{loading ? CELL_SKELETON : <Badge status={FRESHNESS_BADGE[now.state]}>{FRESHNESS_WORD[now.state]}</Badge>}</TableCell>
-              <TableCell className="max-[520px]:hidden">{countdown}</TableCell>
-              <TableCell className="font-sans max-[720px]:hidden">{pathText}</TableCell>
-            </TableRow>
-          )
-        })}
-      </TableBody>
-    </Table>
-  )
-}
-
 /** The oracle a link names (`?oracle=`): one of the manifest's, else the first, silently. */
 function selectedFrom(params: URLSearchParams | null, oracles: readonly OracleEntry[]): string {
   const asked = params?.get("oracle") ?? null
@@ -506,8 +283,8 @@ function Heading() {
         Oracle
       </h1>
       <p className="mt-2 max-w-[68ch] text-ink-muted">
-        Each market&apos;s OracleAdapter, read live against ledger time: its reference value and freshness, its policy, its sources and the price feed
-        it can read. Pick an oracle in the list to see it in detail. Its update and rejection history comes from the event index, and the keeper&apos;s
+        Each market&apos;s OracleAdapter, read live against ledger time: its reference value and freshness, its policy, its sources and, when its code
+        supports one, the price feed it reads. Pick an oracle in the list to see it in detail. Its update and rejection history comes from the event index, and the keeper&apos;s
         health from its recorded runs. No wallet is needed.
       </p>
     </div>
@@ -568,7 +345,7 @@ function OraclesView() {
   const clockLag = sinceReadSeconds != null && sinceReadSeconds > (2 * LEDGER_CLOCK_REFETCH_MS) / 1000 ? Math.floor(sinceReadSeconds) : null
 
   const noClock = clockFailed && ledgerTime === null ? "the ledger time could not be read" : undefined
-  const tableRows = oracles.map((o, i) => ({ entry: o, now: oracleNow(views[i], nowSeconds, noClock), path: pathWord(views[i]) }))
+  const tableRows = oracles.map((o, i) => oracleRow(o, views[i], nowSeconds, noClock))
   const read = readOf(oracle, DASHBOARD_LIVE_MS)
   const view = oracle.stale ? undefined : oracle.data
   const pick = <T,>(f: (v: OracleView) => Live<T>) => current(oracle, (d) => f(d.view), noClock)
@@ -640,78 +417,10 @@ function OraclesView() {
     read,
   }
   // Not supported is a definite answer, not a failed read: its drawer gives the call that shows the host's MissingValue.
-  const pathFigure: VerifiableFigure | null = pathUnsupported
-    ? {
-        label: "Update path",
-        display: PATH_UNSUPPORTED,
-        live: unavailable(`${PATH_UNSUPPORTED}: last_update_was_feed answers HostError: Error(WasmVm, MissingValue)`, pathUnsupported.source),
-        ...(read ? { read } : {}),
-      }
-    : null
+  const pathFigure: VerifiableFigure | null = pathUnsupported ? unsupportedFigure("Update path", "last_update_was_feed", pathUnsupported.source, read) : null
 
-  // The Feed card (3af9388): what feed_source() says decides which rows it has. Not known (a failed refresh, no clock): every row, each Unavailable.
-  const feedRead = view?.view.feed
-  const feedState: "loading" | "unsupported" | "none" | "set" =
-    oracle.stale || (!view && noClock) ? "set" : !view || !feedRead ? "loading" : feedRead.status === "unsupported" ? "unsupported" : feedRead.status === "live" && feedRead.value === null ? "none" : "set"
-  const feedLive = (v: OracleView): Live<OracleFeed | null> => (v.feed.status === "unsupported" ? unavailable(PATH_UNSUPPORTED, v.feed.source) : v.feed)
-  const noFeedPrice = (v: OracleView): Live<FeedPrice> => v.feedPrice ?? unavailable("no feed source is set")
-  const feedSource: FigureSpec<OracleFeed | null> = {
-    label: feedState === "none" ? "Feed source" : "Feed contract",
-    live: pick(feedLive),
-    format: (f) => (f === null ? NO_FEED_SOURCE : f.contract),
-    scale: "feed_source(): the SEP-40 price feed this oracle reads and the asset it asks for; None until set_feed_source",
-    read,
-  }
-  const assetSpec: FigureSpec<Sep40Asset | null> = {
-    label: "Asset key",
-    live: pick((v) => mapLive(feedLive(v), (f) => f?.asset ?? null)),
-    format: (a) => (a === null ? NO_FEED_SOURCE : assetKey(a)),
-    scale: "Sep40Asset, the key the oracle passes to the feed's lastprice: Stellar(address) or Other(symbol)",
-    read,
-  }
-  const minInterval: FigureSpec<bigint> = {
-    label: "Minimum interval between feed updates",
-    live: pick((v) =>
-      v.feedMinInterval.status === "unsupported"
-        ? unavailable(`${PATH_UNSUPPORTED}: feed_min_interval_seconds answers HostError: Error(WasmVm, MissingValue)`, v.feedMinInterval.source)
-        : v.feedMinInterval,
-    ),
-    format: (s) => (s === 0n ? "No minimum" : `${s.toLocaleString("en-US")} s`),
-    scale: "Seconds: sync_from_feed refuses (throttle) a feed update sooner than this after the last accepted one; 300 unless set",
-    read,
-  }
-  const feedPrice: FigureSpec<FeedPrice> = {
-    label: "Feed price",
-    live: pick(noFeedPrice),
-    format: (p) => oracleValue(p.value),
-    scale: `The feed's lastprice in its own decimals (decimals()), rescaled to 7 as the oracle does, truncated: ${ORACLE_SCALE}`,
-    read,
-  }
-  const feedAge: FigureSpec<bigint> = {
-    label: "Feed tick age",
-    live: pick((v) => onlyRead(mapLive(noFeedPrice(v), (p) => p.timestamp), "lastprice")),
-    format: (ts) => timestampText(ts, nowSeconds),
-    scale: "Unix seconds (UTC): the timestamp of the feed's lastprice; its age is ledger time − that timestamp",
-    read,
-  }
-  const comparison: FigureSpec<string> = {
-    label: "Stored value against feed",
-    live: pick((v) => allLive([v.value, noFeedPrice(v)] as const, ([stored, p]) => storedAgainstFeed(stored, p.value))),
-    format: (text) => text,
-    scale: COMPARISON_SCALE,
-    read,
-  }
-  const feedUnsupported = !oracle.stale && feedRead?.status === "unsupported" ? feedRead : null
-  const feedFigure: VerifiableFigure | null = feedUnsupported
-    ? {
-        label: "Feed source",
-        display: PATH_UNSUPPORTED,
-        live: unavailable(`${PATH_UNSUPPORTED}: feed_source answers HostError: Error(WasmVm, MissingValue)`, feedUnsupported.source),
-        ...(read ? { read } : {}),
-      }
-    : null
-  const feedSpecs: FigureSpec<unknown>[] =
-    feedState === "set" ? ([feedSource, assetSpec, minInterval, feedPrice, feedAge, comparison] as FigureSpec<unknown>[]) : feedState === "none" ? [feedSource as FigureSpec<unknown>] : []
+  // The Feed card (3af9388): what feed_source() says decides which rows it has.
+  const feed = feedFigures(oracle, read, nowSeconds, noClock)
 
   const lastRejection: FigureSpec<OracleRejection | null> = {
     label: "Last rejection",
@@ -727,7 +436,7 @@ function OraclesView() {
     timestamp,
     freshness,
     timeToBlock,
-    ...feedSpecs,
+    ...feed.specs,
     maxStale,
     deviation,
     bounds,
@@ -737,7 +446,8 @@ function OraclesView() {
     pathSpec,
     lastRejection,
   ] as FigureSpec<unknown>[]
-  const figures = [...specs.map(verifiable), feedFigure, pathFigure].filter((f): f is VerifiableFigure => f !== null)
+  // The table's figures first (every oracle, labelled with its asset), then the selected oracle's.
+  const figures = [...oracleRowFigures(tableRows), ...[...specs.map(verifiable), feed.unsupported, pathFigure].filter((f): f is VerifiableFigure => f !== null)]
   const freshState = fresh?.state ?? "unavailable"
 
   const describeRejection = (r: IndexedEvent): EventRowText => ({
@@ -801,48 +511,7 @@ function OraclesView() {
           <p className="text-sm text-ink">{BLOCKED_WHEN_STALE_LINE}</p>
         </Panel>
 
-        <Panel
-          title="Feed"
-          meta={<p className="text-xs/5 text-ink-muted">feed_source(): the SEP-40 price feed this oracle reads (sync_from_feed), and the feed&apos;s latest price beside the stored value</p>}
-        >
-          <dl className="grid gap-3">
-            {feedState === "loading" ? (
-              <Row label="Feed contract">
-                <Shown {...feedSource} />
-              </Row>
-            ) : feedState === "unsupported" && feedFigure ? (
-              <UnsupportedRow label="Feed source" figure={feedFigure} />
-            ) : feedState === "none" ? (
-              <Row label="Feed source">
-                <Shown {...feedSource} className="font-sans" />
-              </Row>
-            ) : (
-              <>
-                <Row label="Feed contract">
-                  <Shown {...feedSource} render={(f, display) => (f === null ? display : <ContractLink network={m.network} label="Feed contract" id={f.contract} />)} />
-                </Row>
-                <Row label="Asset key">
-                  <Shown {...assetSpec} render={(a, display) => (a?.kind === "Stellar" ? <span title={a.address}>{display}</span> : display)} />
-                </Row>
-                <Row label="Minimum interval between feed updates">
-                  <Shown {...minInterval} />
-                </Row>
-                <Row label="Feed price">
-                  <Shown {...feedPrice} />
-                </Row>
-                <Row label="Feed tick age">
-                  <Shown {...feedAge} />
-                </Row>
-                <Row label="Stored value against feed">
-                  <Shown {...comparison} className="font-sans" />
-                </Row>
-              </>
-            )}
-          </dl>
-          {feedState === "unsupported" ? (
-            <p className="text-xs/5 text-ink-muted">This oracle&apos;s code has no feed_source view: the read answers HostError: Error(WasmVm, MissingValue).</p>
-          ) : null}
-        </Panel>
+        <FeedPanel network={m.network} feed={feed} />
 
         <Panel title="Policy" meta={<p className="text-xs/5 text-ink-muted">How old the value may be, how far one update may move it, and the range it must stay in</p>}>
           <dl className="grid gap-3">

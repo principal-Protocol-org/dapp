@@ -457,6 +457,13 @@ function viewOn(id: string, left: number, over: Record<string, unknown> = {}) {
   })
 }
 
+/** A failed read on oracle `id`, with the call it attempted. */
+const downOn = (id: string, fn: string, error: string): Live<never> => ({ status: "unavailable", error, source: { contractId: id, fn, args: [], rpcUrl: RPC } })
+
+/** The command block in `drawer` that reads `fn` on contract `id`. */
+const command = (drawer: HTMLElement, id: string, fn: string) =>
+  within(drawer).queryAllByText((_, el) => el?.tagName === "CODE" && (el.textContent ?? "").includes(`--id ${id} `) && (el.textContent ?? "").endsWith(` -- ${fn}`))
+
 const by = (views: Record<string, unknown>) => async (_r: unknown, _m: unknown, oracle: string) => {
   if (!(oracle in views)) throw new Error(`no fixture for ${oracle}`)
   return views[oracle] instanceof Promise ? await views[oracle] : views[oracle]
@@ -490,31 +497,44 @@ describe("the overview with several oracles (plan 0009)", () => {
     expect(await safety.findByText("5 of 5 fresh")).toBeTruthy()
     await user.click(safety.getByRole("button", { name: "How to verify Oracle freshness" }))
     const drawer = await screen.findByRole("dialog")
-    const command = (id: string, fn: string) => within(drawer).queryAllByText((_, el) => el?.tagName === "CODE" && (el.textContent ?? "").includes(`--id ${id} `) && (el.textContent ?? "").endsWith(` -- ${fn}`))
-    for (const [id] of FIVE) for (const fn of ["get_reference_timestamp", "max_stale_seconds", "is_available"]) expect(command(id, fn).length, `${id} ${fn}`).toBe(1)
+    for (const [id] of FIVE) for (const fn of ["get_reference_timestamp", "max_stale_seconds", "is_available"]) expect(command(drawer, id, fn).length, `${id} ${fn}`).toBe(1)
   })
 
-  it("an oracle that cannot be read counts as not fresh and colors the badge Unavailable; the others are still counted", async () => {
+  it("one oracle unread and one stale among five: the unread one is named apart with its reason, never as not fresh, and its call is in the drawer", async () => {
     const [a, b, c, d, e] = FIVE.map(([id]) => id)
     mocks.fetchOracleView.mockImplementation(
-      by({ [a]: viewOn(a, 2_892), [b]: viewOn(b, 2_892), [c]: viewOn(c, -40), [d]: viewOn(d, 2_892), [e]: viewOn(e, 2_892, { available: down("is_available: rpc down") }) }),
+      by({ [a]: viewOn(a, 2_892), [b]: viewOn(b, 2_892), [c]: viewOn(c, -40), [d]: viewOn(d, 2_892), [e]: viewOn(e, 2_892, { available: downOn(e, "is_available", "rpc down") }) }),
     )
     const user = userEvent.setup()
     render(wrap(<Overview />))
     const safety = region("Safety")
     expect(await safety.findByText("3 of 5 fresh")).toBeTruthy()
     const oracles = within(safety.getByText("Oracles", { selector: "dt" }).parentElement!)
+    // An oracle nobody could read colors the badge Unavailable.
     expect(oracles.getByText("Unavailable")).toBeTruthy()
-    expect(oracles.getByText("Not fresh: MOCKGILTS (Stale), MOCKXAUM (Unavailable)")).toBeTruthy()
-    // The drawer says what could not be read, and why.
+    expect(oracles.getByText("Not fresh: MOCKGILTS (Stale)")).toBeTruthy()
+    expect(oracles.getByText("Not read: MOCKXAUM (rpc down)")).toBeTruthy()
+    expect(oracles.queryByText(/MOCKXAUM \(Unavailable\)/)).toBeNull()
     await user.click(safety.getByRole("button", { name: "How to verify Oracle freshness" }))
-    expect((await screen.findAllByText(/MOCKXAUM: is_available: rpc down/)).length).toBeGreaterThan(0)
+    const drawer = await screen.findByRole("dialog")
+    // The failed read's attempted call, beside the others' reads.
+    expect(command(drawer, e, "is_available")).toHaveLength(1)
+    expect(command(drawer, a, "is_available")).toHaveLength(1)
+    expect(within(drawer).getAllByText(/Not read: MOCKXAUM: rpc down/).length).toBeGreaterThan(0)
   })
 
-  it("every oracle unreadable: Unavailable, with the reason", async () => {
-    mocks.fetchOracleView.mockRejectedValue(new Error("rpc down"))
+  it("every oracle unread: the row is Unavailable, and its drawer gives each oracle's reason and attempted call", async () => {
+    mocks.fetchOracleView.mockImplementation(by(Object.fromEntries(FIVE.map(([id], i) => [id, viewOn(id, 2_892, { available: downOn(id, "is_available", `rpc down ${i}`) })]))))
+    const user = userEvent.setup()
     render(wrap(<Overview />))
-    expect(await region("Safety").findByRole("button", { name: "Why Oracle freshness is unavailable, and how to verify it" })).toBeTruthy()
+    const safety = region("Safety")
+    await user.click(await safety.findByRole("button", { name: "Why Oracle freshness is unavailable, and how to verify it" }))
+    const drawer = await screen.findByRole("dialog")
+    expect(within(drawer).getAllByText(/none of the 5 oracles could be read/).length).toBeGreaterThan(0)
+    for (const [i, [id, code]] of FIVE.entries()) {
+      expect(within(drawer).getAllByText(new RegExp(`${code}: rpc down ${i}`)).length).toBeGreaterThan(0)
+      expect(command(drawer, id, "is_available"), code).toHaveLength(1)
+    }
   })
 
   it("while any oracle is still being read, the row is a skeleton, never a partial count", async () => {
