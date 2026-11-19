@@ -456,9 +456,11 @@ describe("Suite B: the ephemeral lifecycle on a throwaway Testnet market (plan 0
       wallet: { status: "connected", publicKey: account, networkPassphrase: manifest.networkPassphrase },
       market: ms,
       account: acc,
-      compliance: evaluateAccountCompliance(acc, kind),
+      compliance: evaluateAccountCompliance(acc, kind, undefined, manifest.network),
       ledgerTime: clock.now(),
       managerId: market.contracts.manager,
+      network: manifest.network,
+      protocolAbi: protocolAbi(manifest),
       simulation,
     })
     return { what: draft.action, account, ledger: clock.sequence, ledgerTime: Math.floor(clock.now()), simulatedLedger, blockers, simulation }

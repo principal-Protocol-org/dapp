@@ -98,7 +98,7 @@ function riskView(over: Record<string, unknown> = {}) {
     effectiveWrapAndMint: null,
     doubleReporting: [],
     consumers: {},
-    window: { start: live(5_707_351), length: live(17_280), lapsed: live(false) },
+    window: { kind: "fixed", start: live(5_707_351), length: live(17_280), lapsed: live(false) },
     assetLimits: [],
     paused: live(false),
     ...over,

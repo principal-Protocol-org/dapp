@@ -13,13 +13,13 @@
  */
 import type { AccountState } from "./account-state"
 import type { ActionId, ActionInput } from "./actions"
-import type { ComplianceItem } from "./compliance"
+import { COMPLIANCE_ITEM_LABEL, type ComplianceItem } from "./compliance"
 import { errorReason, failureSentence } from "./errors"
 import { formatAmount, formatWindow } from "./format"
 import type { MarketState } from "./market-state"
 import { SCALE } from "./math"
 import type { SimulationOutcome } from "./stellar"
-import type { Finding, Live, WalletState } from "./types"
+import type { Finding, Live, Network, WalletState } from "./types"
 import { pendingYield } from "./yield"
 
 /**
@@ -68,6 +68,10 @@ export type GateContext = {
   simulation?: SimulationOutcome
   /** The market's PrincipalManager: its `Error(Contract, #9)` is `Paused`. */
   managerId: string
+  /** The deployment's network. Wording only: no gate picks a contract interface from it. */
+  network: Network
+  /** The contract-interface version (`protocolAbi(manifest)`): 2 has RiskControl's sliding window. */
+  protocolAbi: 1 | 2
 }
 
 /** Token decimals: every Principal token, and the release's underlying, use 7. */
@@ -183,15 +187,6 @@ const NEEDS_PT_GRANT = new Set<ActionId>([
   "add_liquidity_keep_yt",
 ])
 const NEEDS_YT_GRANT = new Set<ActionId>(["mint", "buy_yt", "sell_yt", "sell_yt_underlying", "add_liquidity_keep_yt", ...FLASH_BUY_YT])
-
-const ITEM_LABEL: Record<ComplianceItem["id"], string> = {
-  account: "account",
-  trustline: "trustline",
-  authorized: "issuer authorization",
-  permissioning: "Principal permissioning",
-  perm_pt: "PT permissioning",
-  perm_yt: "YT permissioning",
-}
 
 const fmt = (raw: bigint) => formatAmount(raw, DECIMALS, DECIMALS)
 const max0 = (value: bigint) => (value > 0n ? value : 0n)
@@ -547,7 +542,7 @@ function complianceGate(input: ActionInput, ctx: GateContext, g: Gates): void {
   for (const id of ids) {
     const found = items.find((i) => i.id === id)
     if (!found) {
-      g.unverified(`compliance:${id}`, `The ${ITEM_LABEL[id]} check has not run yet, so this cannot be allowed. Wait for it to load.`)
+      g.unverified(`compliance:${id}`, `The ${COMPLIANCE_ITEM_LABEL[id]} check has not run yet, so this cannot be allowed. Wait for it to load.`)
     } else if (found.status === "unavailable") {
       g.unverified(`compliance:${id}`, found.message)
     } else if (found.status !== "ok") {
@@ -663,6 +658,15 @@ export function routeCapBlocker(total: bigint, acc: AccountState | undefined): B
   }
 }
 
+/**
+ * What to do about a tripped breaker. Version 1 counts in a fixed window that lapses; version 2's
+ * window slides (the counted volume decays as older deposits leave it), so it never resets.
+ */
+const BREAKER_NEXT: Record<GateContext["protocolAbi"], string> = {
+  1: "Lower the amount or wait for the window to reset.",
+  2: "The protocol's deposit limit is reached for now. Room frees up gradually: try a smaller amount or try again later.",
+}
+
 /** `RiskControl.check_deposit`: each limit trips on `volume + amount > limit`; a limit of 0 disables it. */
 function breakerGate(input: ActionInput, ctx: GateContext, g: Gates): void {
   const a = input.action
@@ -695,7 +699,7 @@ function breakerGate(input: ActionInput, ctx: GateContext, g: Gates): void {
             : ""
     g.block(
       "risk",
-      `This would trip the ${scope} circuit breaker: ${fmt(volume)} of its ${fmt(limit)} limit is already used in the current window and this adds ${fmt(adds)}.${twice} Room left: ${fmt(max0(limit - volume))}. Lower the amount or wait for the window to reset.`,
+      `This would trip the ${scope} circuit breaker: ${fmt(volume)} of its ${fmt(limit)} limit is already used in the current window and this adds ${fmt(adds)}.${twice} Room left: ${fmt(max0(limit - volume))}. ${BREAKER_NEXT[ctx.protocolAbi]}`,
     )
   }
 

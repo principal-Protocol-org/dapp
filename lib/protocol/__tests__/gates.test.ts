@@ -159,6 +159,8 @@ function healthyCtx(action: ActionId): GateContext {
     ledgerTime: action === "redeem" ? AFTER : BEFORE,
     simulation: okSimulation,
     managerId: MANAGER,
+    network: "testnet",
+    protocolAbi: 1,
   }
 }
 
@@ -1645,5 +1647,51 @@ describe("protocolAbi 2: the literal in secondaryAmount of mint, buy_pt_underlyi
     }
     expect(breakerReport(inputFor("mint", { secondaryAmount: 7n * UNIT }), { market })).toBe(20n * UNIT)
     expect(capCharge(inputFor("buy_pt_underlying", { secondaryAmount: 7n * UNIT }))).toBe(10n * UNIT)
+  })
+})
+
+describe("the circuit-breaker message by contract version (plan 0009)", () => {
+  const FIXED_TAIL = "Lower the amount or wait for the window to reset."
+  const SLIDING_TAIL = "The protocol's deposit limit is reached for now. Room frees up gradually: try a smaller amount or try again later."
+  const protocolFull: Mutate = (c) => {
+    c.market.cb.limit = live(100n * UNIT)
+    c.market.cb.volume = live(95n * UNIT)
+  }
+  const assetFull: Mutate = (c) => {
+    c.market.cb.assetLimit = live(100n * UNIT)
+    c.market.cb.assetVolume = live(95n * UNIT)
+  }
+  const breaker = (ctx: Pick<GateContext, "network" | "protocolAbi">, full: Mutate = protocolFull) => {
+    const found = gates("deposit", (c, a) => {
+      c.network = ctx.network
+      c.protocolAbi = ctx.protocolAbi
+      full(c, a)
+    }).filter((b) => b.code === "risk")
+    expect(found).toHaveLength(1)
+    return found[0].message
+  }
+
+  it("version 1 (a fixed window): the message is unchanged", () => {
+    expect(breaker({ network: "testnet", protocolAbi: 1 })).toBe(
+      "This would trip the protocol-wide circuit breaker: 95 of its 100 limit is already used in the current window and this adds 10. Room left: 5. Lower the amount or wait for the window to reset.",
+    )
+  })
+
+  it("version 2 (a sliding window): the same figures, then room that frees up gradually; no reset", () => {
+    const v1 = breaker({ network: "testnet", protocolAbi: 1 })
+    const v2 = breaker({ network: "mainnet", protocolAbi: 2 })
+    expect(v2).toBe(v1.replace(FIXED_TAIL, SLIDING_TAIL))
+    expect(v2.endsWith(`Room left: 5. ${SLIDING_TAIL}`)).toBe(true)
+    expect(v2).not.toMatch(/reset/)
+  })
+
+  it("the per-asset breaker follows the version the same way", () => {
+    expect(breaker({ network: "testnet", protocolAbi: 1 }, assetFull)).toMatch(/^This would trip the per-asset circuit breaker: 95 of its 100 limit .* Lower the amount or wait for the window to reset\.$/)
+    expect(breaker({ network: "mainnet", protocolAbi: 2 }, assetFull)).toBe(breaker({ network: "testnet", protocolAbi: 1 }, assetFull).replace(FIXED_TAIL, SLIDING_TAIL))
+  })
+
+  it("the version decides it, never the network (the local stack is version 2)", () => {
+    expect(breaker({ network: "local", protocolAbi: 2 })).toBe(breaker({ network: "mainnet", protocolAbi: 2 }))
+    expect(breaker({ network: "mainnet", protocolAbi: 1 })).toBe(breaker({ network: "testnet", protocolAbi: 1 }))
   })
 })

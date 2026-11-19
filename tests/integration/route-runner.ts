@@ -190,7 +190,7 @@ export function createRunner(p: {
         continue
       }
       if (unread.length === 0 || attempt >= SNAPSHOT_ATTEMPTS) {
-        return { ms, acc, compliance: evaluateAccountCompliance(acc, kind), ledgerTime: clock.now() }
+        return { ms, acc, compliance: evaluateAccountCompliance(acc, kind, undefined, manifest.network), ledgerTime: clock.now() }
       }
       log(`snapshot attempt ${attempt}: read again, the RPC did not answer ${unread.join("; ")}`)
       await sleep(1_000)
@@ -229,6 +229,8 @@ export function createRunner(p: {
       compliance: s.compliance,
       ledgerTime: s.ledgerTime,
       managerId: market.contracts.manager,
+      network: manifest.network,
+      protocolAbi: protocolAbi(manifest),
     }
   }
 

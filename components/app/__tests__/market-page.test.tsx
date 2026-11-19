@@ -1,3 +1,4 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { cleanup, render, screen, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { beforeEach, describe, expect, it, vi } from "vitest"
@@ -114,7 +115,13 @@ import { MarketStats } from "../market/market-stats"
 import { MarketView } from "../market/market-view"
 import { SafetyContent } from "../market/safety-card"
 
-const wrap = (ui: React.ReactElement) => render(<TooltipProvider>{ui}</TooltipProvider>)
+// The compliance card's Add trustline button refreshes the account reads through the query client.
+const wrap = (ui: React.ReactElement) =>
+  render(
+    <QueryClientProvider client={new QueryClient()}>
+      <TooltipProvider>{ui}</TooltipProvider>
+    </QueryClientProvider>,
+  )
 const sac = live({
   kind: "sac" as const,
   authRequired: true,
@@ -441,7 +448,9 @@ describe("ComplianceContent", () => {
     mocks.network = "mainnet"
     wrap(<ComplianceContent marketId="m1" onGetTestTokens={() => {}} />)
     expect(screen.queryByRole("button", { name: "Get test tokens" })).toBeNull()
-    expect(screen.getAllByText(/Fix: Ask the market's administrator/).length).toBeGreaterThan(0)
+    // Mainnet: the grants are asked of the protocol team (plan 0009, Task 12).
+    expect(screen.getAllByText(/Fix: Request access below\./).length).toBeGreaterThan(0)
+    expect(screen.getByRole("region", { name: "Request access" })).toBeTruthy()
   })
 })
 

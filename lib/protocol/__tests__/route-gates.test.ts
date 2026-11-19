@@ -93,6 +93,8 @@ function base(patch: (b: Omit<GateContext, "simulation">) => void = () => {}): O
     compliance,
     ledgerTime: BEFORE,
     managerId: "CMANAGER",
+    network: "testnet",
+    protocolAbi: 1,
   }
   patch(b)
   return b

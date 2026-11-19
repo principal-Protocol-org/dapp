@@ -10,7 +10,7 @@ import type { AccountState } from "@/lib/protocol/account-state"
 import { evaluateAccountCompliance } from "@/lib/protocol/compliance"
 import { errorReason } from "@/lib/protocol/errors"
 import type { Blocker, GateContext } from "@/lib/protocol/gates"
-import { getMarket } from "@/lib/protocol/manifest"
+import { getMarket, protocolAbi } from "@/lib/protocol/manifest"
 import { useManifest } from "@/components/app/manifest-provider"
 import type { MarketState } from "@/lib/protocol/market-state"
 import type { WalletState } from "@/lib/protocol/types"
@@ -98,9 +98,11 @@ export function useGateContext(marketId: string): GateInputs {
       wallet,
       market: ms,
       account,
-      compliance: account ? evaluateAccountCompliance(account, kind, kindError) : [],
+      compliance: account ? evaluateAccountCompliance(account, kind, kindError, manifest.network) : [],
       ledgerTime,
       managerId,
+      network: manifest.network,
+      protocolAbi: protocolAbi(manifest),
     }
   }
 

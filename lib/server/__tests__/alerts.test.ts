@@ -98,7 +98,7 @@ function risk(limit: bigint, volume: bigint, assets: { asset: string; limit: big
     effectiveWrapAndMint: null,
     doubleReporting: [],
     consumers: {},
-    window: { start: live(5_707_351), length: live(17_280), lapsed: live(false) },
+    window: { kind: "fixed", start: live(5_707_351), length: live(17_280), lapsed: live(false) },
     assetLimits: assets.map((a) => ({ asset: a.asset, limit: live(a.limit), volume: live(a.volume), remaining: live(remaining(a.limit, a.volume)) })),
     paused: live(false),
   }

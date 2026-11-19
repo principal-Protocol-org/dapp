@@ -29,7 +29,7 @@ import { fetchAccountHistory } from "@/lib/protocol/events"
 import { evaluateGates, type GateContext } from "@/lib/protocol/gates"
 import { guardsFrom, openGuards, parseOutput, type ActionOutput } from "@/lib/protocol/guards"
 import { createHorizon } from "@/lib/protocol/horizon"
-import { validateManifest } from "@/lib/protocol/manifest"
+import { protocolAbi, validateManifest } from "@/lib/protocol/manifest"
 import { fetchMarketState, type MarketState } from "@/lib/protocol/market-state"
 import { BPS, ceilDiv } from "@/lib/protocol/math"
 import { addTrustline, fetchMarketPermissions, onboardingSteps } from "@/lib/protocol/onboarding"
@@ -218,7 +218,7 @@ describe.skipIf(skip !== null)("protocol layer on the local network", () => {
       fetchMarketState(reader(), manifest, market.marketId),
       fetchAccountState(reader(), horizon(), manifest, market.marketId, account, kind),
     ])
-    return { ms, acc, compliance: evaluateAccountCompliance(acc, kind), ledgerTime: clock.now() }
+    return { ms, acc, compliance: evaluateAccountCompliance(acc, kind, undefined, manifest.network), ledgerTime: clock.now() }
   }
 
   function gateContext(s: Snapshot, simulation: SimulationOutcome): GateContext {
@@ -231,6 +231,8 @@ describe.skipIf(skip !== null)("protocol layer on the local network", () => {
       ledgerTime: s.ledgerTime,
       simulation,
       managerId: market.contracts.manager,
+      network: manifest.network,
+      protocolAbi: protocolAbi(manifest),
     }
   }
 

@@ -133,12 +133,36 @@ describe("fetchRiskView", () => {
     const view = await fetchRiskView(fakeReader(table()), manifest, ledger)
     expect(view.window.start).toMatchObject({ status: "live", value: 5_707_351 })
     expect(view.window.length).toMatchObject({ status: "live", value: 17_280 })
-    expect(view.window.lapsed).toMatchObject({ status: "live", value: lapsed })
+    expect(view.window.kind).toBe("fixed")
+    expect(view.window.kind === "fixed" && view.window.lapsed).toMatchObject({ status: "live", value: lapsed })
   })
 
   it("lapsed is unavailable when the start cannot be read", async () => {
     const view = await fetchRiskView(fakeReader(table({ [`${R}.get_window_start`]: new Error("down") })), manifest, 5_710_000)
-    expect(view.window.lapsed.status).toBe("unavailable")
+    expect(view.window.kind === "fixed" && view.window.lapsed.status).toBe("unavailable")
+  })
+
+  describe("the window kind follows the contract version (plan 0009)", () => {
+    it("version 1 (no protocolAbi, Testnet): a fixed window, with lapsed", async () => {
+      expect(manifest.protocolAbi).toBeUndefined()
+      const view = await fetchRiskView(fakeReader(table()), { ...manifest, protocolAbi: 1 }, 5_707_351 + 17_280)
+      expect(view.window).toMatchObject({ kind: "fixed", lapsed: { status: "live", value: true } })
+    })
+
+    it("version 2 (Mainnet, the local stack): a sliding window, start and length read, and no lapsed worked out", async () => {
+      const view = await fetchRiskView(fakeReader(table()), { ...manifest, protocolAbi: 2 }, 5_707_351 + 50_000)
+      expect(view.window.kind).toBe("sliding")
+      expect(view.window.start).toMatchObject({ status: "live", value: 5_707_351 })
+      expect(view.window.length).toMatchObject({ status: "live", value: 17_280 })
+      expect(Object.keys(view.window).sort()).toEqual(["kind", "length", "start"])
+    })
+
+    it("version 2: the volume is what the contract counts now, read as on version 1", async () => {
+      const v1 = await fetchRiskView(fakeReader(table()), manifest, 5_710_000)
+      const v2 = await fetchRiskView(fakeReader(table()), { ...manifest, protocolAbi: 2 }, 5_710_000)
+      expect(v2.volume).toEqual(v1.volume)
+      expect(v2.remaining).toEqual(v1.remaining)
+    })
   })
 
   it("per-asset limits for each market underlying", async () => {
