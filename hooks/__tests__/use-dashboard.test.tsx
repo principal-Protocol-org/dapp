@@ -67,6 +67,7 @@ import {
   useOpenAlerts,
   useOracleTicks,
   useOracleView,
+  useOracleViews,
   usePauses,
   usePendingClaim,
   useProtocolState,
@@ -200,6 +201,42 @@ describe("useOracleView", () => {
   it("waits for the ledger clock instead of reading with no time", () => {
     mocks.clock = { ledgerTime: null, sequence: null, isError: false }
     renderHook(() => useOracleView("CORACLE1"), { wrapper })
+    expect(mocks.fetchOracleView).not.toHaveBeenCalled()
+  })})
+
+describe("useOracleViews", () => {
+  it("reads every oracle it is given, one query each, under useOracleView's key and cadence", async () => {
+    const { result } = renderHook(() => useOracleViews(["CORACLE1", "CORACLE2", "CORACLE3"]), { wrapper })
+    await waitFor(() => expect(result.current.every((q) => q.data !== undefined)).toBe(true))
+    expect(result.current).toHaveLength(3)
+    expect(mocks.fetchOracleView.mock.calls.map((c) => c[2])).toEqual(["CORACLE1", "CORACLE2", "CORACLE3"])
+    expect(result.current[1].data).toEqual({ view: { contractId: "ORACLE" }, ledgerTime: 1_000_000 })
+    expect(result.current[0].stale).toBe(false)
+    for (const id of ["CORACLE1", "CORACLE2", "CORACLE3"]) expect(interval(["dashboard", "oracle", "testnet", id])).toBe(DASHBOARD_LIVE_MS)
+  })
+
+  it("shares its queries with useOracleView: the same oracle, asked by both at once, is read once", async () => {
+    const { result } = renderHook(() => ({ many: useOracleViews(["CORACLE1", "CORACLE2"]), one: useOracleView("CORACLE2") }), { wrapper })
+    await waitFor(() => expect(result.current.many.every((q) => q.data !== undefined)).toBe(true))
+    expect(result.current.one.data).toBe(result.current.many[1].data)
+    expect(mocks.fetchOracleView).toHaveBeenCalledTimes(2)
+  })
+
+  it("a failed refresh flags that oracle stale, not the others", async () => {
+    const { result } = renderHook(() => useOracleViews(["CORACLE1", "CORACLE2"]), { wrapper })
+    await waitFor(() => expect(result.current.every((q) => q.data !== undefined)).toBe(true))
+    mocks.fetchOracleView.mockImplementation(async (_r: unknown, _m: unknown, oracle: string) => {
+      if (oracle === "CORACLE2") throw new Error("rpc down")
+      return { contractId: "ORACLE" }
+    })
+    await act(() => client.refetchQueries({ queryKey: ["dashboard", "oracle"] }))
+    await waitFor(() => expect(result.current[1].stale).toBe(true))
+    expect(result.current[0].stale).toBe(false)
+  })
+
+  it("waits for the ledger clock instead of reading with no time", () => {
+    mocks.clock = { ledgerTime: null, sequence: null, isError: false }
+    renderHook(() => useOracleViews(["CORACLE1"]), { wrapper })
     expect(mocks.fetchOracleView).not.toHaveBeenCalled()
   })
 })

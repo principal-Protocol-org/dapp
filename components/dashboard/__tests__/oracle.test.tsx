@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
-import { act, render, screen, within } from "@testing-library/react"
+import { act, render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import type { ReactNode } from "react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -16,8 +16,10 @@ const PREIMAGE = "principal-oracle-source:testnet:USDY:app-team:keeper"
 const OTHER = "cd".repeat(32)
 const WASM_665 = "adb87f76c1bafd93c67489645fe49df771ede639edc0d1919233563ffae86bce"
 
-const src = (fn: string, ledger = 5_720_087): ReadSource => ({ contractId: ORACLE, fn, args: [], rawXdr: "AAAA", ledger, rpcUrl: RPC })
+const srcOn = (contractId: string, fn: string, args: unknown[] = [], ledger = 5_720_087): ReadSource => ({ contractId, fn, args, rawXdr: "AAAA", ledger, rpcUrl: RPC })
+const src = (fn: string, ledger = 5_720_087): ReadSource => srcOn(ORACLE, fn, [], ledger)
 const live = <T,>(value: T, fn = "f"): Live<T> => ({ status: "live", value, ledger: 5_720_087, source: src(fn) })
+const liveOn = <T,>(contractId: string, value: T, fn: string): Live<T> => ({ status: "live", value, ledger: 5_720_087, source: srcOn(contractId, fn) })
 const down = (error = "rpc down"): Live<never> => ({ status: "unavailable", error })
 
 const mocks = vi.hoisted(() => ({
@@ -30,17 +32,19 @@ const mocks = vi.hoisted(() => ({
   },
   fetchOracleView: vi.fn(),
   fetch: vi.fn(),
+  search: "",
 }))
 
 const baseManifest = () => ({
   network: "testnet",
   rpcUrl: RPC,
-  markets: [{ marketId: "testnet-usdy-1802336344", displayName: "USDY", underlying: { code: "USDY", decimals: 7, sac: "CSAC" }, contracts: { pool: "CPOOL" } }],
+  markets: [{ marketId: "testnet-usdy-1802336344", displayName: "USDY", underlying: { code: "USDY", decimals: 7, sac: "CSAC" }, contracts: { pool: "CPOOL", oracle: ORACLE } }],
   shared: { oracle: ORACLE, riskControl: "CRISK", permissioning: "CPERM", router: "CROUTER" },
   oracleSources: [{ hash: PRIMARY, preimage: PREIMAGE }],
   wasmHashes: { oracle: WASM_665 },
 })
 vi.mock("@/components/app/manifest-provider", () => ({ useManifest: () => mocks.manifest }))
+vi.mock("next/navigation", () => ({ useSearchParams: () => new URLSearchParams(mocks.search) }))
 vi.mock("@/lib/protocol/reader", async (importActual) => ({ ...(await importActual<object>()), createRpcReader: () => ({}) }))
 vi.mock("@/hooks/use-ledger-clock", () => ({ useLedgerClock: () => mocks.clock, LEDGER_CLOCK_REFETCH_MS: 6_000 }))
 vi.mock("@/lib/protocol/dashboard/oracle", async (importActual) => ({ ...(await importActual<object>()), fetchOracleView: mocks.fetchOracleView }))
@@ -74,8 +78,89 @@ function oracleView(over: Record<string, unknown> = {}) {
     path: { status: "unsupported", source: { contractId: ORACLE, fn: "last_update_was_feed", args: [], rpcUrl: RPC } },
     lastRejection: live(null, "last_rejection"),
     blockedWhenStale: ["mint", "trade", "single-sided liquidity", "redemption"],
+    // 665bb67 has no feed views.
+    feed: { status: "unsupported", source: { contractId: ORACLE, fn: "feed_source", args: [], rpcUrl: RPC } },
+    feedMinInterval: { status: "unsupported", source: { contractId: ORACLE, fn: "feed_min_interval_seconds", args: [], rpcUrl: RPC } },
+    feedPrice: null,
     ...over,
   }
+}
+
+/** The five Mainnet oracles (`config/manifests/mainnet.json`), one per market. */
+const MAINNET_ORACLES = [
+  ["CCKXG4HSVH57AQTYJDNNXHQBCGNH6KRFNMCMATTMYFUX2TDQ7GD5K7IT", "MOCKUSDY"],
+  ["CBHAWS6B4YCNRLYRP2HUP77P4IRP3PZYPSYVPV4OMZNU2ZNKSAQQ2GXU", "MOCKUSTRY"],
+  ["CDZS34JFW7D24MONUKQDVJZKGBPOMIEVEWQQAHTEG3LYR2VFI4XNFNSZ", "MOCKGILTS"],
+  ["CBJK32UY5UYP764MWWOVQ37NGZNVU5CKPGKN24RW4PV64MG3VGDBPBWC", "MOCKCETES"],
+  ["CCLB6RTJOG24TMIZ74IMVEMBLKYCD6ERDPBNL5IB4L6AGQCKOKGR6IS7", "MOCKXAUM"],
+] as const
+const [O1, O2, O3, O4, O5] = MAINNET_ORACLES.map(([id]) => id)
+const WASM_3AF = "8581bbba82bb57f5c5c9c00adf98b1691ad20821840e55a67ad8d7ecace0c1b0"
+/** A SEP-40 feed contract: not in the manifest. */
+const FEED = "CAL7LXAUKP634THLOVPESX4WBZKKONY2PZN4A2CJ6HM4JW6QKU5ILLCT"
+const ASSET_ARG = { type: "enum", variant: "Other", value: { type: "symbol", value: "USDY" } }
+
+const mainnetManifest = () => ({
+  ...baseManifest(),
+  network: "mainnet",
+  markets: MAINNET_ORACLES.map(([oracle, code], i) => ({
+    marketId: `mainnet-${i}`,
+    displayName: code,
+    underlying: { code, decimals: 7, sac: `CSAC${i}` },
+    contracts: { pool: `CPOOL${i}`, oracle },
+  })),
+  shared: { oracle: O1, riskControl: "CRISK", permissioning: "CPERM", router: "CROUTER" },
+  wasmHashes: { oracle: WASM_3AF },
+})
+
+/** The feed's price, `value` at 7 decimals (raw at 14), read on the feed contract. */
+const feedPriceOf = (value: bigint, timestamp = BigInt(LEDGER_TIME - 90)) => ({
+  status: "live",
+  value: { raw: value * 10_000_000n, decimals: 14, value, timestamp },
+  ledger: 5_720_087,
+  sources: [srcOn(FEED, "decimals"), srcOn(FEED, "lastprice", [ASSET_ARG])],
+})
+
+/** A 3af9388 oracle reading a feed: its stored value and the feed's, both at 7 decimals. */
+function feedOracle(id: string, stored: bigint, feed: bigint, over: Record<string, unknown> = {}) {
+  return oracleView({
+    contractId: id,
+    value: liveOn(id, stored, "get_reference_value"),
+    timestamp: liveOn(id, BigInt(LEDGER_TIME - 720), "get_reference_timestamp"),
+    available: liveOn(id, true, "is_available"),
+    path: liveOn(id, "feed", "last_update_was_feed"),
+    feed: liveOn(id, { contract: FEED, asset: { kind: "Other", symbol: "USDY" } }, "feed_source"),
+    feedMinInterval: liveOn(id, 300n, "feed_min_interval_seconds"),
+    feedPrice: feedPriceOf(feed),
+    ...over,
+  })
+}
+
+/** A 3af9388 oracle with no feed source: updated by push. */
+function noFeedOracle(id: string, stored: bigint) {
+  return oracleView({
+    contractId: id,
+    value: liveOn(id, stored, "get_reference_value"),
+    path: liveOn(id, "push", "last_update_was_feed"),
+    feed: liveOn(id, null, "feed_source"),
+    feedMinInterval: liveOn(id, 300n, "feed_min_interval_seconds"),
+    feedPrice: null,
+  })
+}
+
+/** Mainnet today: four oracles hold ten times their feed's price (Review Focus 5), one has no feed. */
+const mainnetViews = (): Record<string, unknown> => ({
+  [O1]: feedOracle(O1, 108_065_700n, 10_807_670n),
+  [O2]: feedOracle(O2, 11_534_743n, 11_535_907n),
+  [O3]: feedOracle(O3, 13_370_000n, 13_370_000n),
+  [O4]: feedOracle(O4, 5_000_000n, 500_000n),
+  [O5]: noFeedOracle(O5, 26_000_000_000n),
+})
+
+/** `fetchOracleView(reader, manifest, oracle, ledgerTime)` answers per oracle. */
+const viewsBy = (views: Record<string, unknown>) => async (_reader: unknown, _m: unknown, oracle: string) => {
+  if (!(oracle in views)) throw new Error(`no fixture for ${oracle}`)
+  return views[oracle]
 }
 
 const INDEX = {
@@ -140,6 +225,8 @@ const wrap = (ui: ReactNode) => <QueryClientProvider client={client}>{ui}</Query
 beforeEach(() => {
   answers = {}
   mocks.manifest = baseManifest()
+  mocks.search = ""
+  window.history.replaceState(null, "", "/dashboard/oracle")
   client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   mocks.clock = { ledgerTime: LEDGER_TIME, sequence: 5_720_087, isError: false }
   mocks.fetchOracleView.mockReset().mockResolvedValue(oracleView())
@@ -334,12 +421,23 @@ describe("the oracle page (/dashboard/oracle, D-17)", () => {
     expect(within(drawer).getAllByText(/MissingValue/).length).toBeGreaterThan(0)
   })
 
-  it("the path: push or feed when the oracle's code has the view", async () => {
+  it("the path: push or feed when the oracle's code has the view; Active source only on push (after a feed sync it still names the last push source)", async () => {
     mocks.fetchOracleView.mockResolvedValue(oracleView({ path: live("feed", "last_update_was_feed") }))
-    render(wrap(<OraclePanel />))
+    const first = render(wrap(<OraclePanel />))
     const path = region("Update path")
     expect(await path.findByText("Feed: the oracle read its feed (sync_from_feed)")).toBeTruthy()
     expect(path.getByRole("button", { name: "How to verify Update path" })).toBeTruthy()
+    const sources = region("Sources")
+    expect(sources.queryByText("Active source", { selector: "dt" })).toBeNull()
+    expect(sources.queryByRole("button", { name: "How to verify Active source" })).toBeNull()
+    expect(row(sources, "Primary source")).toContain(PRIMARY)
+    first.unmount()
+    client.clear()
+
+    mocks.fetchOracleView.mockResolvedValue(oracleView({ path: live("push", "last_update_was_feed") }))
+    render(wrap(<OraclePanel />))
+    expect(await region("Update path").findByText("Push: the value was set by the oracle's admin (set_reference_value)")).toBeTruthy()
+    expect(row(region("Sources"), "Active source")).toContain(PRIMARY)
   })
 
   it("the last rejection, worded (rejectionText), with its reason symbol and the note for this oracle's wasm", async () => {
@@ -386,8 +484,9 @@ describe("the oracle page (/dashboard/oracle, D-17)", () => {
     expect(await updates.findByText("Value set to 1.0000919")).toBeTruthy()
     expect(updates.getAllByRole("link", { name: `View transaction ${TX2} on stellar.expert` }).length).toBeGreaterThan(0)
     const urls = mocks.fetch.mock.calls.map((c) => String(c[0]))
-    expect(urls.some((u) => u.includes("group=oracle") && u.includes("topic=ref_rej"))).toBe(true)
-    expect(urls.some((u) => u.includes("group=oracle") && u.includes("topic=ref_set"))).toBe(true)
+    // This oracle's history only: the events API's contract filter.
+    expect(urls.some((u) => u.includes("group=oracle") && u.includes(`contract=${ORACLE}`) && u.includes("topic=ref_rej"))).toBe(true)
+    expect(urls.some((u) => u.includes("group=oracle") && u.includes(`contract=${ORACLE}`) && u.includes("topic=ref_set"))).toBe(true)
   })
 
   it("empty histories read their plain text, never an error", async () => {
@@ -409,6 +508,9 @@ describe("the keeper's health on the oracle page (D-19)", () => {
           // Feed mode (D-21): a routine rejection is skipped and keeps its reason.
           tick({ id: "4", mode: "feed", decision: "skipped", reason: "stale_ts", txHash: null }),
           tick({ id: "3", mode: "feed", decision: "skipped", value: null, reason: "no_data", txHash: null }),
+          tick({ id: "2", mode: "feed", decision: "skipped", value: null, reason: "throttle", txHash: null }),
+          tick({ id: "1", mode: "feed", decision: "skipped", value: null, reason: "no_feed", txHash: null }),
+          tick({ id: "0", mode: "feed", decision: "skipped", value: null, reason: null, txHash: null }),
         ])
     render(wrap(<OraclePanel />))
     const keeper = region("Keeper")
@@ -424,13 +526,18 @@ describe("the keeper's health on the oracle page (D-19)", () => {
     expect(within(runs).getByText("Pushed")).toBeTruthy()
     expect(within(runs).getByText("Rejected: Moved more than the cap")).toBeTruthy()
     expect(within(runs).getByText("Failed: TypeError")).toBeTruthy()
+    // A push run that changed nothing: the value was already current (push mode is untouched on Testnet).
     expect(within(runs).getByText("Skipped: the value was already current")).toBeTruthy()
-    expect(within(runs).getByText("Skipped: Not newer than the current value")).toBeTruthy()
-    expect(within(runs).getByText("Skipped: The feed had no price")).toBeTruthy()
+    // Feed mode, by reason: no feed source, the minimum interval, otherwise nothing newer (stale_ts, no_data, none).
+    expect(within(runs).getByText("Skipped: no feed source")).toBeTruthy()
+    expect(within(runs).getByText("Skipped: too soon after the last accepted update")).toBeTruthy()
+    expect(within(runs).getAllByText("Skipped: the feed had nothing newer")).toHaveLength(3)
+    expect(within(runs).queryByText("Skipped: Not newer than the current value")).toBeNull()
     expect(within(runs).getByText("Not configured: ORACLE_ADMIN_SECRET is not set.")).toBeTruthy()
     expect(within(runs).getAllByRole("link", { name: `View transaction ${TX2} on stellar.expert` }).length).toBeGreaterThan(0)
     expect(within(runs).getAllByTitle(SIGNER).length).toBeGreaterThan(0)
-    expect(keeper.getByRole("link", { name: /oracle-ticks/ }).getAttribute("href")).toBe("/api/dashboard/oracle-ticks?limit=100")
+    // The raw telemetry of this oracle.
+    expect(keeper.getByRole("link", { name: /oracle-ticks/ }).getAttribute("href")).toBe(`/api/dashboard/oracle-ticks?oracle=${ORACLE}&limit=100`)
   })
 
   it("the badge follows the ledger clock, not the cached answer: healthy:true but a last run without an error 3,600 s old reads Unhealthy", async () => {
@@ -501,6 +608,215 @@ describe("the keeper's health on the oracle page (D-19)", () => {
     const keeper = region("Keeper")
     expect(await keeper.findByText("Unavailable")).toBeTruthy()
     expect(keeper.queryByText("Healthy")).toBeNull()
+  })
+})
+
+/** The Oracles table's body rows. */
+const oracleRows = async () => within(await screen.findByRole("table", { name: "Oracles" })).getAllByRole("row").slice(1)
+
+/** A `<code>` command in `scope` whose text matches `re` (the command is one span per word). */
+const commands = (scope: HTMLElement, re: RegExp) => within(scope).queryAllByText((_, el) => el?.tagName === "CODE" && re.test(el.textContent ?? ""))
+
+/** No fixed width in `el` or below: only shrinkable boxes (min-w-0, w-full, w-fit, max widths), as the 375 px rule needs. */
+function expectNoFixedWidth(el: HTMLElement) {
+  expect(el.className).toContain("min-w-0")
+  for (const child of el.querySelectorAll("*")) expect(child.getAttribute("class") ?? "").not.toMatch(/(^|\s)(min-w|w)-(\[|[1-9]|px\b)/)
+}
+
+describe("every oracle of the manifest (plan 0009: five on Mainnet)", () => {
+  beforeEach(() => {
+    mocks.manifest = mainnetManifest()
+    mocks.fetchOracleView.mockImplementation(viewsBy(mainnetViews()))
+  })
+
+  it("an Oracles table lists the five, one row each linking to ?oracle=<id>, with its state, countdown and path; the first is shown below", async () => {
+    render(wrap(<OraclePanel />))
+    const rows = await oracleRows()
+    expect(rows).toHaveLength(5)
+    for (const [i, [id, code]] of MAINNET_ORACLES.entries()) {
+      const link = within(rows[i]).getByRole("link", { name: code })
+      expect(link.getAttribute("href")).toBe(`/dashboard/oracle?oracle=${id}`)
+      expect(within(rows[i]).getByTitle(id).textContent).toBe(`${id.slice(0, 4)}…${id.slice(-4)}`)
+    }
+    await waitFor(() => expect(within(rows[0]).getAllByText("Fresh").length).toBeGreaterThan(0))
+    expect(within(rows[0]).getAllByText("48m 0s").length).toBeGreaterThan(0)
+    expect(within(rows[0]).getAllByText("Feed").length).toBeGreaterThan(0)
+    expect(within(rows[4]).getAllByText("Push").length).toBeGreaterThan(0)
+    // The first is selected by default.
+    expect(within(rows[0]).getByRole("link", { name: "MOCKUSDY" }).getAttribute("aria-current")).toBe("true")
+    expect(within(rows[1]).getByRole("link", { name: "MOCKUSTRY" }).getAttribute("aria-current")).toBeNull()
+    expect(await region("Reference value").findByText("10.8065700")).toBeTruthy()
+    // One read per oracle: the detail reuses the selected oracle's query.
+    expect(mocks.fetchOracleView.mock.calls.map((c) => c[2]).sort()).toEqual(MAINNET_ORACLES.map(([id]) => id).sort())
+  })
+
+  it("a stale oracle reads Stale in the list, and one that cannot be read Unavailable with its reason", async () => {
+    mocks.fetchOracleView.mockImplementation(
+      viewsBy({
+        ...mainnetViews(),
+        [O2]: feedOracle(O2, 11_534_743n, 11_535_907n, { available: liveOn(O2, false, "is_available"), freshness: "stale", timeToBlock: { status: "live", value: -40, ledger: 1, sources: [srcOn(O2, "get_reference_timestamp")] } }),
+        [O4]: feedOracle(O4, 5_000_000n, 500_000n, { timestamp: down("HostError: boom"), freshness: "unavailable", timeToBlock: down("HostError: boom") }),
+      }),
+    )
+    render(wrap(<OraclePanel />))
+    const rows = await oracleRows()
+    await waitFor(() => expect(within(rows[1]).getAllByText("Stale").length).toBeGreaterThan(1))
+    expect(within(rows[3]).getAllByText("Unavailable").length).toBeGreaterThan(0)
+    expect(within(rows[3]).getAllByRole("button", { name: /^More about MOCKCETES/ }).length).toBeGreaterThan(0)
+  })
+
+  it("?oracle=<third> shows the third oracle's values and asks for its keeper runs and its history only", async () => {
+    mocks.search = `oracle=${O3}`
+    answers.ticks = () => Response.json({ intervalSeconds: 1_800, oracles: [{ oracle: O3, asset: "MOCKGILTS", health: HEALTHY, ticks: [tick({ oracle: O3 })] }] })
+    render(wrap(<OraclePanel />))
+    expect(await region("Reference value").findByText("1.3370000")).toBeTruthy()
+    expect((await oracleRows())[2].querySelector("a")?.getAttribute("aria-current")).toBe("true")
+    expect(await region("Keeper").findByText("Healthy")).toBeTruthy()
+    await region("Rejection history").findByText("No rejection indexed yet")
+    await region("Update history").findByText("No update indexed yet")
+    const urls = mocks.fetch.mock.calls.map((c) => String(c[0]))
+    expect(urls.filter((u) => u.startsWith("/api/dashboard/oracle-ticks"))).toEqual([`/api/dashboard/oracle-ticks?oracle=${O3}&limit=20`])
+    const events = urls.filter((u) => u.startsWith("/api/dashboard/events"))
+    expect(events.length).toBeGreaterThanOrEqual(2)
+    for (const u of events) expect(u).toContain(`contract=${O3}`)
+    expect(region("Keeper").getByRole("link", { name: /oracle-ticks/ }).getAttribute("href")).toBe(`/api/dashboard/oracle-ticks?oracle=${O3}&limit=100`)
+  })
+
+  it("an ?oracle= that is not one of the manifest's shows the first, and the page says nothing about it", async () => {
+    mocks.search = "oracle=CNOTANORACLE"
+    render(wrap(<OraclePanel />))
+    expect(await region("Reference value").findByText("10.8065700")).toBeTruthy()
+    expect(screen.queryByText(/CNOTANORACLE/)).toBeNull()
+    expect(mocks.fetchOracleView.mock.calls.map((c) => c[2])).not.toContain("CNOTANORACLE")
+  })
+
+  it("picking a row shows that oracle and writes ?oracle= into the address bar, reading nothing again", async () => {
+    const user = userEvent.setup()
+    render(wrap(<OraclePanel />))
+    await region("Reference value").findByText("10.8065700")
+    const reads = mocks.fetchOracleView.mock.calls.length
+    await user.click(screen.getByRole("link", { name: "MOCKUSTRY" }))
+    expect(await region("Reference value").findByText("1.1534743")).toBeTruthy()
+    expect(window.location.search).toBe(`?oracle=${O2}`)
+    expect(screen.getByRole("link", { name: "MOCKUSTRY" }).getAttribute("aria-current")).toBe("true")
+    expect(mocks.fetchOracleView.mock.calls.length).toBe(reads)
+  })
+
+  it("the oracle with no feed source says so, with its drawer, and shows no feed figures", async () => {
+    mocks.search = `oracle=${O5}`
+    render(wrap(<OraclePanel />))
+    const feed = region("Feed")
+    expect(await feed.findByText("No feed source set: updated by push only.")).toBeTruthy()
+    expect(feed.getByRole("button", { name: "How to verify Feed source" })).toBeTruthy()
+    for (const label of ["Feed price", "Stored value against feed", "Asset key"]) expect(feed.queryByText(label, { selector: "dt" })).toBeNull()
+  })
+
+  it("the Feed card: the feed contract, the asset key, the minimum interval, the feed's price and its age, each with its drawer", async () => {
+    render(wrap(<OraclePanel />))
+    const feed = region("Feed")
+    const link = await feed.findByRole("link", { name: `Feed contract ${FEED} on stellar.expert` })
+    expect(link.textContent).toBe("CAL7…LLCT")
+    expect(link.getAttribute("href")).toBe(`https://stellar.expert/explorer/public/contract/${FEED}`)
+    expect(row(feed, "Asset key")).toBe("Other USDY")
+    expect(row(feed, "Minimum interval between feed updates")).toBe("300 s")
+    expect(row(feed, "Feed price")).toBe("1.0807670")
+    expect(row(feed, "Feed tick age")).toContain("1m 30s ago on the ledger clock")
+    expect(row(feed, "Stored value against feed")).toBe("Differs by a factor of 10.0")
+    for (const label of ["Feed contract", "Asset key", "Minimum interval between feed updates", "Feed price", "Feed tick age", "Stored value against feed"])
+      expect(feed.getByRole("button", { name: `How to verify ${label}` })).toBeTruthy()
+  })
+
+  it.each([
+    // Review Focus 5: four Mainnet oracles hold ten times their feed's price.
+    [108_065_700n, 10_807_670n, "Differs by a factor of 10.0"],
+    [11_534_743n, 11_535_907n, "Differs by 0.01 %"],
+    [11_535_907n, 11_535_907n, "Equal"],
+    // Either way round, and at the factor-of-2 boundary.
+    [10_807_670n, 108_065_700n, "Differs by a factor of 10.0"],
+    [20_000_000n, 10_000_000n, "Differs by a factor of 2.0"],
+    [19_999_999n, 10_000_000n, "Differs by 99.99 %"],
+    [10_000_001n, 10_000_000n, "Differs by less than 0.01 %"],
+  ])("Review Focus 5: stored %s against the feed's %s reads %s, both values shown", async (stored, feedValue, text) => {
+    mocks.fetchOracleView.mockImplementation(viewsBy({ ...mainnetViews(), [O1]: feedOracle(O1, stored, feedValue) }))
+    render(wrap(<OraclePanel />))
+    const feed = region("Feed")
+    await feed.findByText(text)
+    expect(row(feed, "Stored value against feed")).toBe(text)
+    const seven = (v: bigint) => `${v / 10_000_000n}.${String(v % 10_000_000n).padStart(7, "0")}`
+    expect(row(feed, "Feed price")).toBe(seven(feedValue))
+    expect(row(region("Reference value"), "Value")).toBe(seven(stored))
+  })
+
+  it("the comparison's drawer lists both inputs: the oracle's stored value and the feed's two reads, each with a command that runs", async () => {
+    const user = userEvent.setup()
+    render(wrap(<OraclePanel />))
+    const feed = region("Feed")
+    await feed.findByText("Differs by a factor of 10.0")
+    await user.click(feed.getByRole("button", { name: "How to verify Stored value against feed" }))
+    const drawer = await screen.findByRole("dialog")
+    expect(commands(drawer, new RegExp(`--id ${O1} .* -- get_reference_value$`))).toHaveLength(1)
+    expect(commands(drawer, new RegExp(`--id ${FEED} .* -- decimals$`))).toHaveLength(1)
+    expect(commands(drawer, new RegExp(`--id ${FEED} .* -- lastprice --asset '\\{"Other":"USDY"\\}'$`))).toHaveLength(1)
+  })
+
+  it("a feed price of zero or below is shown, and in place of a comparison: the oracle would refuse it", async () => {
+    mocks.fetchOracleView.mockImplementation(viewsBy({ ...mainnetViews(), [O1]: feedOracle(O1, 10_000_000n, 0n) }))
+    render(wrap(<OraclePanel />))
+    const feed = region("Feed")
+    expect(await feed.findByText("The feed's price is not positive: the oracle would refuse it.")).toBeTruthy()
+    expect(row(feed, "Feed price")).toBe("0.0000000")
+  })
+
+  it("a feed price that cannot be read: the price, its age and the comparison are Unavailable, with the reason", async () => {
+    const user = userEvent.setup()
+    const call = { contractId: FEED, fn: "lastprice", args: [ASSET_ARG], rpcUrl: RPC }
+    mocks.fetchOracleView.mockImplementation(
+      viewsBy({ ...mainnetViews(), [O1]: feedOracle(O1, 10_000_000n, 0n, { feedPrice: { status: "unavailable", error: "The feed has no price for this asset.", source: call } }) }),
+    )
+    render(wrap(<OraclePanel />))
+    const feed = region("Feed")
+    const why = await feed.findByRole("button", { name: "Why Stored value against feed is unavailable, and how to verify it" })
+    expect(row(feed, "Feed price")).toBe("Unavailable")
+    expect(row(feed, "Feed tick age")).toBe("Unavailable")
+    expect(row(feed, "Stored value against feed")).toBe("Unavailable")
+    await user.click(why)
+    const drawer = await screen.findByRole("dialog")
+    expect(within(drawer).getAllByText(/The feed has no price for this asset/).length).toBeGreaterThan(0)
+    expect(commands(drawer, /-- lastprice --asset/)).toHaveLength(1)
+  })
+
+  it("no fixed width in the Oracles table or the Feed card (375 px), and the table folds its columns rather than scroll", async () => {
+    render(wrap(<OraclePanel />))
+    await region("Feed").findByText("Differs by a factor of 10.0")
+    const table = screen.getByRole("table", { name: "Oracles" })
+    expect(within(table).getByRole("columnheader", { name: "Blocks in" }).className).toContain("max-[520px]:hidden")
+    expect(within(table).getByRole("columnheader", { name: "Update path" }).className).toContain("max-[720px]:hidden")
+    // What a hidden column holds is under the oracle's name below that width.
+    const first = (await oracleRows())[0]
+    expect(first.querySelector(".min-\\[520px\\]\\:hidden")?.textContent).toContain("48m 0s")
+    expect(first.querySelector(".min-\\[720px\\]\\:hidden")?.textContent).toContain("Feed")
+    expectNoFixedWidth(screen.getByRole("region", { name: "Oracles" }))
+    expectNoFixedWidth(screen.getByRole("region", { name: "Feed" }))
+  })
+})
+
+describe("Testnet's one oracle, on 665bb67", () => {
+  it("the table still lists it, and the Feed card says its code has no feed, with the call that shows it", async () => {
+    const user = userEvent.setup()
+    render(wrap(<OraclePanel />))
+    const rows = await oracleRows()
+    expect(rows).toHaveLength(1)
+    expect(within(rows[0]).getByRole("link", { name: "USDY" }).getAttribute("href")).toBe(`/dashboard/oracle?oracle=${ORACLE}`)
+    await waitFor(() => expect(within(rows[0]).getAllByText("Not supported").length).toBeGreaterThan(0))
+    const feed = region("Feed")
+    expect(await feed.findByText("Not supported by this oracle's code")).toBeTruthy()
+    expect(feed.queryByText("No feed source set: updated by push only.")).toBeNull()
+    // The path is unsupported: Active source stays, as before.
+    expect(row(region("Sources"), "Active source")).toContain(PRIMARY)
+    await user.click(feed.getByRole("button", { name: "How to verify Feed source" }))
+    const drawer = await screen.findByRole("dialog")
+    expect(commands(drawer, new RegExp(`--id ${ORACLE} .* -- feed_source$`))).toHaveLength(1)
+    expect(within(drawer).getAllByText(/MissingValue/).length).toBeGreaterThan(0)
   })
 })
 

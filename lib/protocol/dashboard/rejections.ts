@@ -74,6 +74,8 @@ const PULL_ROUTINE = [...ROUTINE, ...BROKEN] as const
  *   `deployments/testnet/deployment-manifest.json`, whose oracle source equals 24d980d's).
  * - `8581bbba…`: principal 3af9388; the five Mainnet oracles (`config/manifests/mainnet.json`
  *   `wasmHashes.oracle`).
+ * - `56786ca6…`: principal 3af9388 built by the app team (`scripts/dev-stack/deploy.sh`); the
+ *   oracles of the local stack (`config/manifests/local.json` `wasmHashes.oracle`).
  *
  * A build by another toolchain hashes differently and falls to the unknown-hash note.
  *
@@ -93,6 +95,8 @@ export const ORACLE_WASM_LAST_REJECTION: Record<string, OracleWasmRejections> = 
   cf58bbd831957b817f8bfa7bf52313a8e9ba6256344ad34ab0c69916c8b1f85d: { commit: "24d980d", keeps: "significant", routine: PULL_ROUTINE },
   "93eb1ae6d6affd455d0878d1ce66849788eb34924f0f084a28e79b7c4eafee88": { commit: "24d980d", keeps: "significant", routine: PULL_ROUTINE },
   "8581bbba82bb57f5c5c9c00adf98b1691ad20821840e55a67ad8d7ecace0c1b0": { commit: "3af9388", keeps: "significant", routine: PULL_ROUTINE },
+  // The app team's local build of 3af9388 (the local stack's oracles).
+  "56786ca6a1b62c3ec7dd004a46b38d3121b8c4b26a3aafaf05ea55c3e137fad8": { commit: "3af9388", keeps: "significant", routine: PULL_ROUTINE },
 }
 
 const lower = (text: string) => text.charAt(0).toLowerCase() + text.slice(1)

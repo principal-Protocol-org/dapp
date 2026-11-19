@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useState } from "react"
-import { useInfiniteQuery, useQuery } from "@tanstack/react-query"
+import { useInfiniteQuery, useQueries, useQuery } from "@tanstack/react-query"
 import { useManifest } from "@/components/app/manifest-provider"
 import { parseOpenAlerts, type OpenAlertsAnswer } from "@/lib/app/alert-types"
 import { useLedgerClock } from "@/hooks/use-ledger-clock"
@@ -14,7 +14,7 @@ import { fetchMarketDashboard, fetchProtocolState, pendingClaim, type MarketDash
 import { getMarket } from "@/lib/protocol/manifest"
 import { fetchRiskView } from "@/lib/protocol/dashboard/risk"
 import { createRpcReader } from "@/lib/protocol/reader"
-import type { Live } from "@/lib/protocol/types"
+import type { Live, Manifest } from "@/lib/protocol/types"
 import type { IndexedEvent, IndexedEvents, IndexGroup } from "@/lib/server/indexer"
 import type { KeeperHealth, RecordedTick } from "@/lib/server/oracle-ticks"
 
@@ -92,6 +92,22 @@ export function usePendingClaim(marketId: string, account: string | null, ms: Ma
   )
 }
 
+/** An oracle's view and the ledger time it was computed at. */
+export type OracleViewAt = { view: OracleView; ledgerTime: number }
+
+/** One oracle's query: the same key, read and cadence wherever it is asked, so pages share it. */
+function oracleViewQuery(m: Manifest, oracle: string, ledgerTime: number | null) {
+  return {
+    queryKey: ["dashboard", "oracle", m.network, oracle],
+    queryFn: async (): Promise<OracleViewAt> => {
+      const at = ledgerTime as number
+      return { view: await fetchOracleView(createRpcReader(m), m, oracle, at), ledgerTime: at }
+    },
+    enabled: ledgerTime !== null,
+    refetchInterval: DASHBOARD_LIVE_MS,
+  }
+}
+
 /**
  * The oracle `oracle` (an OracleAdapter id; `fetchOracleView`) every 15 s, with the ledger time its
  * freshness and time to block were computed at, so a countdown can follow the ledger clock between
@@ -101,17 +117,18 @@ export function usePendingClaim(marketId: string, account: string | null, ms: Ma
 export function useOracleView(oracle: string) {
   const m = useManifest()
   const { ledgerTime } = useLedgerClock()
-  return withStale(
-    useQuery({
-      queryKey: ["dashboard", "oracle", m.network, oracle],
-      queryFn: async (): Promise<{ view: OracleView; ledgerTime: number }> => {
-        const at = ledgerTime as number
-        return { view: await fetchOracleView(createRpcReader(m), m, oracle, at), ledgerTime: at }
-      },
-      enabled: ledgerTime !== null,
-      refetchInterval: DASHBOARD_LIVE_MS,
-    }),
-  )
+  return withStale(useQuery(oracleViewQuery(m, oracle, ledgerTime)))
+}
+
+/**
+ * Every oracle of `oracles`, in that order, as `useOracleView` reads each: one query per oracle,
+ * under the same key, so a page that also shows one of them reads it once. Each result has its own
+ * `stale`: one oracle's failed refresh does not touch the others.
+ */
+export function useOracleViews(oracles: readonly string[]) {
+  const m = useManifest()
+  const { ledgerTime } = useLedgerClock()
+  return useQueries({ queries: oracles.map((oracle) => oracleViewQuery(m, oracle, ledgerTime)) }).map(withStale)
 }
 
 /**

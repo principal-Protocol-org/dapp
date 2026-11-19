@@ -125,6 +125,12 @@ describe("lastRejectionNote", () => {
     expect(lastRejectionNote(MAINNET.toUpperCase())).toBe(note)
   })
 
+  it("the app team's local build of 3af9388 (the local stack's oracles) reads as the Mainnet code: only significant reasons", () => {
+    const local = "56786ca6a1b62c3ec7dd004a46b38d3121b8c4b26a3aafaf05ea55c3e137fad8"
+    expect(ORACLE_WASM_LAST_REJECTION[local]).toEqual({ commit: "3af9388", keeps: "significant", routine: ORACLE_WASM_LAST_REJECTION[MAINNET].routine })
+    expect(lastRejectionNote(local)).toBe(lastRejectionNote(MAINNET))
+  })
+
   it("an unknown hash may keep only significant reasons", () => {
     const note = lastRejectionNote("00".repeat(32))
     expect(note).toMatch(/may keep only significant/)

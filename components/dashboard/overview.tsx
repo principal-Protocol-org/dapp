@@ -1,53 +1,79 @@
 "use client"
 
 import Link from "next/link"
-import { formatDuration } from "@/components/app/live"
 import { InfoTip, UnavailableTip } from "@/components/app/info-tip"
-import { useManifest } from "@/components/app/manifest-provider"
+import { useManifest, useSeedCount } from "@/components/app/manifest-provider"
 import { Metric } from "@/components/app/market/metric"
+import { Badge } from "@/components/ui/badge"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import {
   DASHBOARD_AGGREGATE_MS,
   DASHBOARD_LIVE_MS,
-  secondsToBlockNow,
   useComplianceEvents,
   useIndexStatus,
   useOpenAlerts,
-  useOracleView,
+  useOracleViews,
   usePauses,
   useProtocolState,
   useRiskView,
 } from "@/hooks/use-dashboard"
 import { useLedgerClock } from "@/hooks/use-ledger-clock"
 import { alertTitle, countsAsCritical, type Alert } from "@/lib/app/alert-types"
-import type { OracleView } from "@/lib/protocol/dashboard/oracle"
+import { BLOCKED_WHEN_STALE, type Freshness } from "@/lib/protocol/dashboard/oracle"
 import { TVL_LABEL } from "@/lib/protocol/dashboard/protocol-state"
 import type { Remaining } from "@/lib/protocol/dashboard/risk"
 import type { VerifiableFigure } from "@/lib/protocol/dashboard/verify"
 import { formatAmountFixed } from "@/lib/protocol/format"
-import { allLive } from "@/lib/protocol/reader"
-import type { Network } from "@/lib/protocol/types"
+import { allLive, unavailable } from "@/lib/protocol/reader"
+import type { Live, Network } from "@/lib/protocol/types"
 import { AsOf, readsOf } from "./as-of"
 import { CopyEvidence } from "./copy-evidence"
 import { lagText, TxLink } from "./event-list"
 import { accountShort, ago, complianceEventWords, eventSubject } from "./event-words"
 import { decimalsScale, verifiable, type FigureSpec } from "./figure"
+import { FRESHNESS_BADGE, FRESHNESS_WORD, oracleEntries, oracleNow, type OracleNow } from "./oracle-panel"
 import { Panel, Row } from "./panel"
 import { current, NO_LIQUIDITY, noPoolSeeded, readOf, refuse, Shown, unitsOf } from "./query-figures"
 import { WrapAndMintRow, wrapAndMintSpec } from "./risk-panel"
 
 const list = (words: readonly string[]) => (words.length <= 1 ? words.join("") : `${words.slice(0, -1).join(", ")} and ${words[words.length - 1]}`)
 
+/** Worst first: an unread oracle, then a stale one, then one in its warning window. */
+const FRESHNESS_RANK: Record<Freshness, number> = { fresh: 0, warning: 1, stale: 2, unavailable: 3 }
+
+/** Every oracle of the manifest now: how many are fresh, the worst state, and the ones that are not fresh. */
+type OraclesSummary = { fresh: number; total: number; worst: Freshness; notFresh: { asset: string; state: Freshness }[] }
+
 /**
- * The oracle line: freshness and the countdown until operations block, following the ledger clock
- * between reads. Stale (or past the countdown) says what is blocked; Warning is age ≥ 75% of `max_stale`.
+ * The oracle row's figure: "N of M fresh" over every oracle of the manifest, on the ledger clock (as
+ * the oracle page's table counts them; Warning is not fresh). Its reads are every readable oracle's
+ * timestamp, max_stale and is_available; an oracle that cannot be read counts as not fresh and makes
+ * the worst state Unavailable, its reason in the scale. Pending while any oracle's first read is;
+ * Unavailable, with the first reason, when none can be read.
  */
-function oracleLine(view: OracleView, secondsLeft: number): string {
-  if (view.freshness === "stale" || secondsLeft < 0) return `Stale · ${list(view.blockedWhenStale)} are blocked`
-  const max = view.maxStale.status === "live" ? Number(view.maxStale.value) : null
-  const warning = max !== null ? (max - secondsLeft) * 4 >= max * 3 : view.freshness === "warning"
-  return `${warning ? "Warning" : "Fresh"} · operations block in ${formatDuration(secondsLeft)} without an update`
+function oraclesFigure(entries: { asset: string; now: OracleNow }[]): { live: Live<OraclesSummary> | undefined; unread: string[] } {
+  const unread = entries.flatMap((e) => (e.now.live?.status === "unavailable" ? [`${e.asset}: ${e.now.live.error}`] : []))
+  if (entries.length === 0 || entries.some((e) => e.now.live === undefined)) return { live: undefined, unread }
+  const readable = entries.flatMap((e) => (e.now.live?.status === "live" ? [e.now.live] : []))
+  // None readable: the first oracle's failure, with the call it attempted (the scale names every oracle's).
+  const first = entries[0].now.live
+  if (readable.length === 0) return { live: first?.status === "unavailable" ? first : unavailable("no oracle could be read"), unread }
+  const summary: OraclesSummary = {
+    fresh: entries.filter((e) => e.now.state === "fresh").length,
+    total: entries.length,
+    worst: entries.reduce<Freshness>((w, e) => (FRESHNESS_RANK[e.now.state] > FRESHNESS_RANK[w] ? e.now.state : w), "fresh"),
+    notFresh: entries.filter((e) => e.now.state !== "fresh").map((e) => ({ asset: e.asset, state: e.now.state })),
+  }
+  return { live: allLive(readable, () => summary), unread }
+}
+
+/** "Stale · 3 of 5 fresh · Not fresh: … · On a stale oracle's markets, … are blocked": the badge's word first, then the lines under it. */
+function oraclesLine(s: OraclesSummary): string {
+  const parts = [FRESHNESS_WORD[s.worst], `${s.fresh} of ${s.total} fresh`]
+  if (s.notFresh.length > 0) parts.push(`Not fresh: ${s.notFresh.map((o) => `${o.asset} (${FRESHNESS_WORD[o.state]})`).join(", ")}`)
+  if (s.notFresh.some((o) => o.state === "stale")) parts.push(`On a stale oracle's markets, ${list(BLOCKED_WHEN_STALE)} are blocked`)
+  return parts.join(" · ")
 }
 
 
@@ -211,9 +237,11 @@ function OpenAlerts() {
  */
 export function Overview() {
   const m = useManifest()
+  const seedCount = useSeedCount()
   const { ledgerTime, isError: clockFailed } = useLedgerClock()
   const protocol = useProtocolState()
-  const oracle = useOracleView(m.shared.oracle)
+  const oracles = oracleEntries(m)
+  const oracleQueries = useOracleViews(oracles.map((o) => o.oracle))
   const risk = useRiskView()
   const pauses = usePauses()
 
@@ -264,20 +292,25 @@ export function Overview() {
     format: (names) => (names.length === 0 ? "None paused" : `Paused: ${names.join(", ")}`),
     read: readOf(pauses, DASHBOARD_LIVE_MS),
   }
-  const view = oracle.stale ? undefined : oracle.data
-  // As the oracle page's Freshness: is_available() can turn the line Stale (or, unread, Unavailable), so its read is listed too.
-  const oracleFreshness: FigureSpec<number> = {
+  // As the oracle page counts them: is_available() can turn an oracle Stale (or, unread, Unavailable), so its read is listed too.
+  const nowSeconds = ledgerTime === null ? null : Math.floor(ledgerTime)
+  const { live: oraclesLive, unread } = oraclesFigure(oracles.map((o, i) => ({ asset: o.asset, now: oracleNow(oracleQueries[i], nowSeconds, noClock) })))
+  const oracleReads = oracleQueries.filter((q) => !q.stale && q.dataUpdatedAt > 0)
+  const oracleFreshness: FigureSpec<OraclesSummary> = {
     label: "Oracle freshness",
-    live: current(oracle, (o) => allLive([o.view.timeToBlock, o.view.available] as const, ([seconds]) => seconds), noClock),
-    format: (seconds) => (view ? oracleLine(view.view, secondsToBlockNow(view.view.timeToBlock, view.ledgerTime, ledgerTime) ?? seconds) : String(seconds)),
-    scale: "Seconds: the oracle timestamp + max_stale_seconds − ledger time",
-    read: readOf(oracle, DASHBOARD_LIVE_MS),
+    live: oraclesLive,
+    format: oraclesLine,
+    scale: `Each oracle of the manifest: fresh while ledger time − its timestamp ≤ max_stale_seconds and is_available() is true; Warning from 75%, not counted fresh${
+      unread.length > 0 ? `. Not read: ${unread.join("; ")}` : ""
+    }`,
+    // The oldest of the oracles' reads: the figure is as old as that.
+    read: oracleReads.length === oracleQueries.length && oracleReads.length > 0 ? { at: Math.min(...oracleReads.map((q) => q.dataUpdatedAt)), cadenceMs: DASHBOARD_LIVE_MS } : undefined,
   }
 
   const contractFigures = [tvl, tvlUsd, liquidity, riskRemaining, ...(effective ? [effective] : []), contractPauses, oracleFreshness] as FigureSpec<unknown>[]
   const figures = contractFigures.map(verifiable).filter((f): f is VerifiableFigure => f !== null)
   const lives = contractFigures.map((f) => f.live)
-  const newestUpdate = Math.max(0, ...[protocol, oracle, risk, pauses].map((q) => (q.stale ? 0 : q.dataUpdatedAt)))
+  const newestUpdate = Math.max(0, ...[protocol, ...oracleQueries, risk, pauses].map((q) => (q.stale ? 0 : q.dataUpdatedAt)))
   const fallbacks = m.rpcFallbackUrls ?? []
 
   return (
@@ -317,8 +350,11 @@ export function Overview() {
             </Metric>
             <Metric label="Markets">
               <span className="inline-flex items-center gap-1.5">
-                {m.markets.length}
-                <InfoTip label="Markets">Counted from the registry: markets discovered from the Router and published by the app.</InfoTip>
+                {m.markets.length < seedCount ? `${m.markets.length} of ${seedCount} manifest markets listed` : m.markets.length}
+                <InfoTip label="Markets">
+                  Counted from the registry: markets discovered from the Router and published by the app.
+                  {m.markets.length < seedCount ? ` The manifest names ${seedCount}; a market that fails the registry's checks is not listed.` : null}
+                </InfoTip>
               </span>
             </Metric>
             <Metric label="Pool liquidity">
@@ -338,7 +374,7 @@ export function Overview() {
           meta={
             <AsOf
               sources={readsOf([riskRemaining.live, effective?.live, contractPauses.live, oracleFreshness.live])}
-              updatedAt={Math.max(0, ...[oracle, risk, pauses].map((q) => (q.stale ? 0 : q.dataUpdatedAt))) || null}
+              updatedAt={Math.max(0, ...[...oracleQueries, risk, pauses].map((q) => (q.stale ? 0 : q.dataUpdatedAt))) || null}
               cadenceMs={DASHBOARD_LIVE_MS}
             />
           }
@@ -351,8 +387,26 @@ export function Overview() {
             <Row label="Pauses">
               <Shown {...contractPauses} />
             </Row>
-            <Row label="Oracle">
-              <Shown {...oracleFreshness} />
+            <Row label="Oracles">
+              <Shown
+                {...oracleFreshness}
+                render={(s, display) => {
+                  const [, count, ...lines] = display.split(" · ")
+                  return (
+                    <>
+                      <Badge status={FRESHNESS_BADGE[s.worst]}>{FRESHNESS_WORD[s.worst]}</Badge> <span>{count}</span>
+                      {lines.map((line) => (
+                        <span key={line} className="block font-sans text-xs/5 text-ink-muted">
+                          {line}
+                        </span>
+                      ))}
+                    </>
+                  )
+                }}
+              />
+              <Link href="/dashboard/oracle" className="mt-1 block w-fit font-sans text-xs/5 font-medium text-ink underline decoration-line-strong underline-offset-4 hover:decoration-ink">
+                Each oracle
+              </Link>
             </Row>
             <Row label="Open alerts">
               <OpenAlerts />
