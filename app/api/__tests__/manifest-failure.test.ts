@@ -95,7 +95,7 @@ const CASES: Case[] = [
     route: "GET /api/health",
     call: async () => (await import("../health/route")).GET(),
     status: 503,
-    body: { network: null, ledger: NONE, indexer: NONE, keeper: NONE, openAlerts: NONE },
+    body: { network: null, ledger: NONE, indexer: NONE, keeper: NONE, keepers: null, openAlerts: NONE },
   },
 ]
 

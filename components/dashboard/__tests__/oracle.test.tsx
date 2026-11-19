@@ -111,14 +111,24 @@ const tick = (over: Record<string, unknown> = {}) => ({
   signer: SIGNER,
   ...over,
 })
-const HEALTHY = { healthy: true, lastSuccessAt: new Date((LEDGER_TIME - 720) * 1000).toISOString(), lastTickAt: new Date((LEDGER_TIME - 720) * 1000).toISOString(), rejected24h: 1, failures24h: 2 }
+const HEALTHY = {
+  healthy: true,
+  lastSuccessAt: new Date((LEDGER_TIME - 720) * 1000).toISOString(),
+  lastOkAt: new Date((LEDGER_TIME - 720) * 1000).toISOString(),
+  lastTickAt: new Date((LEDGER_TIME - 720) * 1000).toISOString(),
+  rejected24h: 1,
+  failures24h: 2,
+}
+/** `GET /api/dashboard/oracle-ticks?oracle=…`: the one oracle asked, in the per-oracle shape. */
+const ticksAnswer = (ticks: unknown[], health: Record<string, unknown> = HEALTHY) =>
+  Response.json({ intervalSeconds: 1_800, oracles: [{ oracle: ORACLE, asset: "USDY", health, ticks }] })
 
 type Answers = { rejections?: unknown[]; updates?: unknown[]; ticks?: () => Response }
 let answers: Answers = {}
 
 function answer(url: string): Response {
   if (url.startsWith("/api/dashboard/oracle-ticks"))
-    return answers.ticks ? answers.ticks() : Response.json({ ticks: [tick()], health: HEALTHY, intervalSeconds: 1_800 })
+    return answers.ticks ? answers.ticks() : ticksAnswer([tick()])
   if (url.includes("topic=ref_rej")) return Response.json({ ...INDEX, rows: answers.rejections ?? [] })
   if (url.includes("topic=ref_set")) return Response.json({ ...INDEX, rows: answers.updates ?? [] })
   return Response.json(INDEX)
@@ -390,8 +400,7 @@ describe("the oracle page (/dashboard/oracle, D-17)", () => {
 describe("the keeper's health on the oracle page (D-19)", () => {
   it("healthy: the last success, the rejected and failed runs of 24 h, and the recent runs with their tx and signer", async () => {
     answers.ticks = () =>
-      Response.json({
-        ticks: [
+      ticksAnswer([
           tick(),
           tick({ id: "8", decision: "rejected", value: "12000000", reason: "deviate", txHash: TX }),
           tick({ id: "7", decision: "error", value: null, reason: "failed: TypeError", txHash: null }),
@@ -400,10 +409,7 @@ describe("the keeper's health on the oracle page (D-19)", () => {
           // Feed mode (D-21): a routine rejection is skipped and keeps its reason.
           tick({ id: "4", mode: "feed", decision: "skipped", reason: "stale_ts", txHash: null }),
           tick({ id: "3", mode: "feed", decision: "skipped", value: null, reason: "no_data", txHash: null }),
-        ],
-        health: HEALTHY,
-        intervalSeconds: 1_800,
-      })
+        ])
     render(wrap(<OraclePanel />))
     const keeper = region("Keeper")
     expect(await keeper.findByText("Healthy")).toBeTruthy()
@@ -411,7 +417,9 @@ describe("the keeper's health on the oracle page (D-19)", () => {
     expect(row(keeper, "Last successful update")).toContain("12m ago")
     expect(row(keeper, "Rejected runs (24 h)")).toBe("1")
     expect(row(keeper, "Failed runs (24 h)")).toBe("2")
-    expect(keeper.getByText(/Healthy while the last successful update is under 1 hour old: twice the keeper's schedule, every 30 minutes\./)).toBeTruthy()
+    expect(keeper.getByText(/Healthy while the last run that did not fail is under 1 hour old: twice the keeper's schedule, every 30 minutes\./)).toBeTruthy()
+    // The panel asks for its own oracle only.
+    expect(mocks.fetch.mock.calls.map((c) => String(c[0])).filter((u) => u.startsWith("/api/dashboard/oracle-ticks"))).toEqual([`/api/dashboard/oracle-ticks?oracle=${ORACLE}&limit=20`])
     const runs = keeper.getByRole("table", { name: "Recent keeper runs" })
     expect(within(runs).getByText("Pushed")).toBeTruthy()
     expect(within(runs).getByText("Rejected: Moved more than the cap")).toBeTruthy()
@@ -425,10 +433,10 @@ describe("the keeper's health on the oracle page (D-19)", () => {
     expect(keeper.getByRole("link", { name: /oracle-ticks/ }).getAttribute("href")).toBe("/api/dashboard/oracle-ticks?limit=100")
   })
 
-  it("the badge follows the ledger clock, not the cached answer: healthy:true but a last success 3,600 s old reads Unhealthy", async () => {
+  it("the badge follows the ledger clock, not the cached answer: healthy:true but a last run without an error 3,600 s old reads Unhealthy", async () => {
     // The API answer is cached up to ~6 min: it said healthy when it was computed.
     const at = (ageSeconds: number) => new Date((LEDGER_TIME - ageSeconds) * 1000).toISOString()
-    answers.ticks = () => Response.json({ ticks: [tick({ at: at(3_600) })], health: { ...HEALTHY, healthy: true, lastSuccessAt: at(3_600), lastTickAt: at(3_600) }, intervalSeconds: 1_800 })
+    answers.ticks = () => ticksAnswer([tick({ at: at(3_600) })], { ...HEALTHY, healthy: true, lastSuccessAt: at(3_600), lastOkAt: at(3_600), lastTickAt: at(3_600) })
     const { unmount } = render(wrap(<OraclePanel />))
     const keeper = region("Keeper")
     expect(await keeper.findByText("Unhealthy")).toBeTruthy()
@@ -437,13 +445,22 @@ describe("the keeper's health on the oracle page (D-19)", () => {
     unmount()
     client.clear()
     // 3,599 s: still healthy, even if the cached answer said otherwise.
-    answers.ticks = () => Response.json({ ticks: [tick({ at: at(3_599) })], health: { ...HEALTHY, healthy: false, lastSuccessAt: at(3_599), lastTickAt: at(3_599) }, intervalSeconds: 1_800 })
+    answers.ticks = () => ticksAnswer([tick({ at: at(3_599) })], { ...HEALTHY, healthy: false, lastSuccessAt: at(3_599), lastOkAt: at(3_599), lastTickAt: at(3_599) })
     render(wrap(<OraclePanel />))
     expect(await region("Keeper").findByText("Healthy")).toBeTruthy()
   })
 
-  it("unhealthy when the last success is too old, or there is none", async () => {
-    answers.ticks = () => Response.json({ ticks: [tick({ decision: "error", reason: "failed: Error", txHash: null })], health: { ...HEALTHY, healthy: false, lastSuccessAt: null }, intervalSeconds: 1_800 })
+  it("health follows the last run without an error (M-15), not the last update: a feed run that changed nothing keeps it healthy", async () => {
+    const at = (ageSeconds: number) => new Date((LEDGER_TIME - ageSeconds) * 1000).toISOString()
+    answers.ticks = () => ticksAnswer([tick({ mode: "feed", decision: "skipped", reason: "stale_ts", at: at(300) })], { ...HEALTHY, healthy: true, lastSuccessAt: at(86_000), lastOkAt: at(300), lastTickAt: at(300) })
+    render(wrap(<OraclePanel />))
+    const keeper = region("Keeper")
+    expect(await keeper.findByText("Healthy")).toBeTruthy()
+    expect(row(keeper, "Last successful update")).toContain("23h")
+  })
+
+  it("unhealthy when the last run without an error is too old, or there is none", async () => {
+    answers.ticks = () => ticksAnswer([tick({ decision: "error", reason: "failed: Error", txHash: null })], { ...HEALTHY, healthy: false, lastSuccessAt: null, lastOkAt: null })
     render(wrap(<OraclePanel />))
     const keeper = region("Keeper")
     expect(await keeper.findByText("Unhealthy")).toBeTruthy()
@@ -451,8 +468,7 @@ describe("the keeper's health on the oracle page (D-19)", () => {
   })
 
   it("no run recorded: a neutral 'No keeper run recorded yet', neither healthy nor unhealthy, and no skeleton", async () => {
-    answers.ticks = () =>
-      Response.json({ ticks: [], health: { healthy: false, lastSuccessAt: null, lastTickAt: null, rejected24h: 0, failures24h: 0 }, intervalSeconds: 1_800 })
+    answers.ticks = () => ticksAnswer([], { healthy: false, lastSuccessAt: null, lastOkAt: null, lastTickAt: null, rejected24h: 0, failures24h: 0 })
     render(wrap(<OraclePanel />))
     const keeper = region("Keeper")
     expect((await keeper.findAllByText("No keeper run recorded yet")).length).toBeGreaterThan(0)
@@ -468,6 +484,15 @@ describe("the keeper's health on the oracle page (D-19)", () => {
     // The telemetry query retries once (1 s) before it shows Unavailable.
     expect(await keeper.findByRole("button", { name: /Keeper health/ }, { timeout: 3_000 })).toBeTruthy()
     expect(keeper.getByText("Unavailable")).toBeTruthy()
+  })
+
+  it("an answer without this oracle's entry is Unavailable, never read as healthy", async () => {
+    answers.ticks = () => Response.json({ intervalSeconds: 1_800, oracles: [{ oracle: "CBHAWS6B4YCNRLYRP2HUP77P4IRP3PZYPSYVPV4OMZNU2ZNKSAQQ2GXU", asset: "USTRY", health: HEALTHY, ticks: [] }] })
+    render(wrap(<OraclePanel />))
+    const keeper = region("Keeper")
+    expect(await keeper.findByRole("button", { name: /Keeper health/ })).toBeTruthy()
+    expect(keeper.getByText("Unavailable")).toBeTruthy()
+    expect(keeper.queryByText("Healthy")).toBeNull()
   })
 
   it("an answer not in the expected shape is refused, never read as healthy", async () => {

@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest"
 import testnetJson from "@/lib/protocol/__tests__/fixtures/testnet-interim.json"
 import committedTestnetJson from "@/config/manifests/testnet.json"
 import localExample from "@/config/manifests/local.example.json"
-import { getMarket, manifestOracles, parseManifest, protocolAbi, ROUTER_ABI_BY_WASM, validateManifest } from "../manifest"
+import { assetCodes, getMarket, manifestOracles, parseManifest, protocolAbi, ROUTER_ABI_BY_WASM, validateManifest } from "../manifest"
 import type { Manifest } from "../types"
 
 const testnet = (): Manifest => parseManifest(structuredClone(testnetJson))
@@ -244,6 +244,13 @@ describe("manifest protocolAbi and Mainnet fields", () => {
 
   it("manifestOracles of a manifest without markets is empty", () => {
     expect(manifestOracles({ markets: [] })).toEqual([])
+  })
+
+  it("assetCodes names an oracle's markets by underlying code, distinct, in order", () => {
+    const u = (code: string) => ({ underlying: { ...parsed().markets[0].underlying, code } })
+    expect(assetCodes([u("USDY")])).toBe("USDY")
+    expect(assetCodes([u("USTRY"), u("GILT"), u("USTRY")])).toBe("USTRY, GILT")
+    expect(assetCodes([])).toBe("")
   })
 
   // The Router hashes are pinned here, not read from the committed testnet.json: a redeploy changes that file.

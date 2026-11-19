@@ -278,51 +278,68 @@ const TICK_REASONS: Reasons = {
   unavailable: "the keeper telemetry could not be read",
 }
 
-/** `GET /api/dashboard/oracle-ticks`: the keeper's recent runs, its health and its schedule. */
-export type OracleTicksAnswer = { ticks: RecordedTick[]; health: KeeperHealth; intervalSeconds: number }
+/** One oracle's keeper telemetry: the underlying codes of its markets (`asset`), its health and its recent runs. */
+export type OracleTicksEntry = { oracle: string; asset: string; health: KeeperHealth; ticks: RecordedTick[] }
+/** `GET /api/dashboard/oracle-ticks`: the keeper's schedule and, per oracle of the manifest (or the one asked), its runs and health. */
+export type OracleTicksAnswer = { intervalSeconds: number; oracles: OracleTicksEntry[] }
 
 const isText = (v: unknown) => typeof v === "string"
 const isTextOrNull = (v: unknown) => v === null || typeof v === "string"
 const isCount = (v: unknown) => typeof v === "number" && Number.isInteger(v) && v >= 0
 
-/** The answer, checked field by field: anything else is refused, never read as a healthy keeper. */
-export function parseOracleTicks(body: unknown): OracleTicksAnswer {
-  const b = body as Partial<OracleTicksAnswer> | null
-  const h = b?.health as Partial<KeeperHealth> | undefined
-  const ticksOk =
-    Array.isArray(b?.ticks) &&
-    b.ticks.every(
-      (t) =>
-        t !== null &&
-        typeof t === "object" &&
-        isText(t.id) &&
-        isText(t.at) &&
-        isText(t.oracle) &&
-        isText(t.mode) &&
-        isText(t.decision) &&
-        [t.value, t.reason, t.txHash, t.signer].every(isTextOrNull),
-    )
-  const healthOk =
+function isTick(t: unknown): boolean {
+  const r = t as Partial<RecordedTick> | null
+  return (
+    r !== null &&
+    typeof r === "object" &&
+    isText(r.id) &&
+    isText(r.at) &&
+    isText(r.oracle) &&
+    isText(r.mode) &&
+    isText(r.decision) &&
+    [r.value, r.reason, r.txHash, r.signer].every(isTextOrNull)
+  )
+}
+
+function isHealth(v: unknown): boolean {
+  const h = v as Partial<KeeperHealth> | null | undefined
+  return (
     h !== undefined &&
     h !== null &&
     typeof h.healthy === "boolean" &&
     isTextOrNull(h.lastSuccessAt) &&
+    isTextOrNull(h.lastOkAt) &&
     isTextOrNull(h.lastTickAt) &&
     isCount(h.rejected24h) &&
     isCount(h.failures24h)
-  if (!ticksOk || !healthOk || !isCount(b?.intervalSeconds) || (b?.intervalSeconds as number) <= 0)
+  )
+}
+
+function isEntry(v: unknown): boolean {
+  const e = v as Partial<OracleTicksEntry> | null
+  return e !== null && typeof e === "object" && isText(e.oracle) && isText(e.asset) && isHealth(e.health) && Array.isArray(e.ticks) && e.ticks.every(isTick)
+}
+
+/** The answer, checked field by field: anything else is refused, never read as a healthy keeper. */
+export function parseOracleTicks(body: unknown): OracleTicksAnswer {
+  const b = body as Partial<OracleTicksAnswer> | null
+  if (!Array.isArray(b?.oracles) || !b.oracles.every(isEntry) || !isCount(b.intervalSeconds) || (b.intervalSeconds as number) <= 0)
     throw new Error("the keeper telemetry answered in an unexpected shape")
   return b as OracleTicksAnswer
 }
 
-/** The keeper's telemetry (spec 0004 D-19): its `limit` latest runs and its health, every 60 s (history). */
-export function useOracleTicks(limit = 20) {
+/**
+ * The keeper's telemetry (spec 0004 D-19), every 60 s (history): for `oracle` (one of the manifest's),
+ * or every oracle of the manifest when omitted, its `limit` latest runs and its health.
+ */
+export function useOracleTicks(oracle?: string, limit = 20) {
   const m = useManifest()
   return withStale(
     useQuery({
-      queryKey: ["dashboard", "oracle-ticks", m.network, limit],
+      queryKey: ["dashboard", "oracle-ticks", m.network, oracle ?? null, limit],
       queryFn: async (): Promise<OracleTicksAnswer> => {
-        const body = await getJson<unknown>(`/api/dashboard/oracle-ticks?limit=${limit}`, TICK_REASONS)
+        const query = `${oracle ? `oracle=${encodeURIComponent(oracle)}&` : ""}limit=${limit}`
+        const body = await getJson<unknown>(`/api/dashboard/oracle-ticks?${query}`, TICK_REASONS)
         try {
           return parseOracleTicks(body)
         } catch (error) {

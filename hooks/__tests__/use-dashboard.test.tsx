@@ -53,6 +53,7 @@ import {
   DASHBOARD_AGGREGATE_MS,
   DASHBOARD_LIVE_MS,
   MAX_EVENT_PAGES,
+  parseOracleTicks,
   secondsToBlockNow,
   useAllEvents,
   useAssetCompliance,
@@ -500,28 +501,52 @@ describe("useEscrowRecords and useAssetCompliance", () => {
 })
 
 describe("useOracleTicks (spec 0004 D-19)", () => {
-  const answer = {
+  const ORACLE = "CDYGBFGO7KD446CDTGJ7M4OWUXC7UPBGPVM5CUWP2NSNX2CKK2TYYIPS"
+  const entry = {
+    oracle: ORACLE,
+    asset: "USDY",
+    health: { healthy: true, lastSuccessAt: "2026-11-14T11:00:00.000Z", lastOkAt: "2026-11-14T12:00:00.000Z", lastTickAt: "2026-11-14T12:00:00.000Z", rejected24h: 0, failures24h: 0 },
     ticks: [
-      { id: "9", at: "2026-11-14T12:00:00.000Z", oracle: "CORACLE", mode: "push", decision: "pushed", value: "10000919", reason: null, txHash: "ab".repeat(32), signer: "GSIGNER" },
+      { id: "9", at: "2026-11-14T12:00:00.000Z", oracle: ORACLE, mode: "feed", decision: "skipped", value: "10000919", reason: "stale_ts", txHash: null, signer: "GSIGNER" },
     ],
-    health: { healthy: true, lastSuccessAt: "2026-11-14T12:00:00.000Z", lastTickAt: "2026-11-14T12:00:00.000Z", rejected24h: 0, failures24h: 0 },
-    intervalSeconds: 1_800,
   }
+  const answer = { intervalSeconds: 1_800, oracles: [entry] }
+  const withEntry = (over: Record<string, unknown>) => ({ ...answer, oracles: [{ ...entry, ...over }] })
 
-  it("reads the keeper's runs and health, every 60 s", async () => {
+  it("reads every oracle's keeper runs and health, every 60 s", async () => {
     const fetchMock = vi.fn(async () => Response.json(answer))
     vi.stubGlobal("fetch", fetchMock)
     const { result } = renderHook(() => useOracleTicks(), { wrapper })
     await waitFor(() => expect(result.current.data).toEqual(answer))
     expect(fetchMock).toHaveBeenCalledWith("/api/dashboard/oracle-ticks?limit=20")
-    expect(interval(["dashboard", "oracle-ticks", "testnet", 20])).toBe(DASHBOARD_AGGREGATE_MS)
+    expect(interval(["dashboard", "oracle-ticks", "testnet", null, 20])).toBe(DASHBOARD_AGGREGATE_MS)
+  })
+
+  it("one oracle: ?oracle= in the URL and in the query key", async () => {
+    const fetchMock = vi.fn(async () => Response.json(answer))
+    vi.stubGlobal("fetch", fetchMock)
+    const { result } = renderHook(() => useOracleTicks(ORACLE, 5), { wrapper })
+    await waitFor(() => expect(result.current.data).toEqual(answer))
+    expect(fetchMock).toHaveBeenCalledWith(`/api/dashboard/oracle-ticks?oracle=${ORACLE}&limit=5`)
+    expect(interval(["dashboard", "oracle-ticks", "testnet", ORACLE, 5])).toBe(DASHBOARD_AGGREGATE_MS)
+  })
+
+  it("parseOracleTicks reads the per-oracle shape, lastOkAt included", () => {
+    expect(parseOracleTicks(answer)).toEqual(answer)
+    expect(parseOracleTicks({ intervalSeconds: 300, oracles: [] })).toEqual({ intervalSeconds: 300, oracles: [] })
+    expect(parseOracleTicks(withEntry({ health: { ...entry.health, lastOkAt: null, lastSuccessAt: null } })).oracles[0].health.lastOkAt).toBeNull()
   })
 
   it.each([
-    ["no ticks list", { ...answer, ticks: undefined }],
-    ["a tick without its decision", { ...answer, ticks: [{ ...answer.ticks[0], decision: 3 }] }],
-    ["health without its flag", { ...answer, health: { ...answer.health, healthy: "yes" } }],
-    ["a count that is not a whole number", { ...answer, health: { ...answer.health, rejected24h: -1 } }],
+    ["the old one-oracle shape", { ticks: entry.ticks, health: entry.health, intervalSeconds: 1_800 }],
+    ["no oracles list", { ...answer, oracles: undefined }],
+    ["an entry without its oracle", withEntry({ oracle: undefined })],
+    ["an entry without its asset", withEntry({ asset: 3 })],
+    ["no ticks list", withEntry({ ticks: undefined })],
+    ["a tick without its decision", withEntry({ ticks: [{ ...entry.ticks[0], decision: 3 }] })],
+    ["health without its flag", withEntry({ health: { ...entry.health, healthy: "yes" } })],
+    ["health without lastOkAt", withEntry({ health: { ...entry.health, lastOkAt: undefined } })],
+    ["a count that is not a whole number", withEntry({ health: { ...entry.health, rejected24h: -1 } })],
     ["no interval", { ...answer, intervalSeconds: 0 }],
   ])("refuses an answer it cannot read (%s), without asking again, rather than show a healthy keeper", async (_, body) => {
     client = new QueryClient({ defaultOptions: { queries: { retry: 1, retryDelay: 0 } } })

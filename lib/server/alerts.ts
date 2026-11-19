@@ -6,12 +6,15 @@ import "server-only"
  * times, and the webhook tests (`test = true`).
  *
  * Three parts:
- * - `collectAlertInput` reads what the check judges: the oracle at the latest ledger time, RiskControl,
- *   every pause, the keeper's recorded runs, the indexed `ref_rej` events, the index cursors and the
- *   keeper signer's XLM on Horizon. A source that cannot be read is `Unread`, never a guess.
+ * - `collectAlertInput` reads what the check judges: each oracle of the manifest's markets
+ *   (`manifestOracles`; one per market on Mainnet) at the latest ledger time, with its keeper's
+ *   recorded runs, its indexed `ref_rej` events and its keeper health; the manifest markets' stored
+ *   registry verdicts; RiskControl, every pause, the index cursors and the keeper signer's XLM on
+ *   Horizon. A source that cannot be read is `Unread`, never a guess.
  * - `evaluateAlerts` (pure) turns that into the alerts that should be open (`DesiredAlert[]`), and
- *   `heldKinds` names the kinds it could not judge: their open alerts are kept, not closed, so a
- *   flaky read never closes and reopens an alert (and posts twice).
+ *   `heldSubjects` names what it could not judge, a whole kind or one alert (`kind\0subject`): those
+ *   open alerts are kept, not closed, so a flaky read never closes and reopens an alert (and posts
+ *   twice), and one oracle that cannot be read holds only its own alerts.
  * - `syncAlerts` opens each new alert once (the partial unique index on open alerts), closes each
  *   alert no longer wanted once, and posts each opening and each close to the webhook. A post that
  *   fails keeps the state and is sent again by the next run (migration 0007's `opened_posted`,
@@ -25,6 +28,7 @@ import "server-only"
 import { Keypair } from "@stellar/stellar-sdk"
 import { alertTitle, countsAsCritical, DEBOUNCED_KINDS, type Alert, type AlertSeverity, type RecentAlert } from "@/lib/app/alert-types"
 import { fetchOracleView, type OracleView } from "@/lib/protocol/dashboard/oracle"
+import { assetCodes, manifestOracles } from "@/lib/protocol/manifest"
 import { fetchPauses, type PauseView } from "@/lib/protocol/dashboard/pauses"
 import { BROKEN, isSignificantRejection, rejectionText } from "@/lib/protocol/dashboard/rejections"
 import { fetchRiskView, type RiskView } from "@/lib/protocol/dashboard/risk"
@@ -35,6 +39,7 @@ import type { Live, Manifest, Network } from "@/lib/protocol/types"
 import type { Sql } from "./db"
 import { INDEX_GROUPS, indexCursorName, type IndexGroup } from "./indexer"
 import { keeperHealth, keeperIntervalSeconds, type KeeperHealth, type TickDecision } from "./oracle-ticks"
+import { sqlRegistryStore, type RegistryStore } from "./registry"
 import { redact } from "./request"
 
 // ---------------------------------------------------------------- kinds and thresholds
@@ -46,6 +51,7 @@ export type AlertKind =
   | "oracle_rejection"
   | "feed_broken"
   | "keeper_unhealthy"
+  | "seed_invalid"
   | "paused"
   | "risk_warning"
   | "risk_exhausted"
@@ -61,6 +67,7 @@ export const ALERT_KINDS: readonly AlertKind[] = [
   "oracle_rejection",
   "feed_broken",
   "keeper_unhealthy",
+  "seed_invalid",
   "paused",
   "risk_warning",
   "risk_exhausted",
@@ -71,7 +78,7 @@ export const ALERT_KINDS: readonly AlertKind[] = [
 ]
 
 /** While one of these is open, `cron/alerts` answers 500, so the scheduler's own failure alert fires too. */
-export const CRITICAL: readonly AlertKind[] = ["oracle_stale", "oracle_unavailable", "keeper_unhealthy", "risk_exhausted", "indexer_gap"]
+export const CRITICAL: readonly AlertKind[] = ["oracle_stale", "oracle_unavailable", "keeper_unhealthy", "seed_invalid", "risk_exhausted", "indexer_gap"]
 
 export const isCritical = (kind: string): boolean => (CRITICAL as readonly string[]).includes(kind)
 const severityOf = (kind: AlertKind): AlertSeverity => (isCritical(kind) ? "critical" : "warning")
@@ -111,6 +118,12 @@ export const EVENT_KINDS: readonly AlertKind[] = ["oracle_rejection", "feed_brok
 /** Reasons a pull-mode feed can give that mean its price is unusable (D-21, `BROKEN`): the keeper does not submit them. */
 const BROKEN_FEED: ReadonlySet<string> = new Set(BROKEN)
 
+/** The kinds about one oracle: their payload names its `asset`, and so does the webhook line. */
+const ORACLE_KINDS: readonly string[] = ["oracle_warning", "oracle_stale", "oracle_unavailable", "oracle_rejection", "feed_broken", "keeper_unhealthy"]
+
+/** Why each oracle's keeper health is `Unread` when `ORACLE_KEEPER_INTERVAL_SECONDS` is not valid. */
+const BAD_INTERVAL = "the keeper's interval is not valid"
+
 const STROOPS_PER_XLM = 10_000_000n
 const DAY_MS = 86_400_000
 
@@ -128,20 +141,40 @@ export type CursorSeen = { group: IndexGroup; ledger: number | null; closeTime: 
 /** The keeper signer's native balance (`stroops` null: the account does not exist), or why it could not be read. */
 export type SignerSeen = { account: string; stroops: bigint | null; minStroops: bigint } | { account: string | null; error: string }
 
-export type AlertInput = {
-  network: Network
-  /** Wall-clock time of the check (ms): the windows over recorded rows are measured from it. */
-  now: number
-  /** The keeper's schedule (`keeperIntervalSeconds`): `feed_broken` looks back 2 × this, and the keeper's health is measured against it. */
-  intervalSeconds: number
+/** One oracle of the manifest's markets (`manifestOracles`), as the check reads it. */
+export type OracleInput = {
   oracleId: string
+  /** The underlying codes of the markets on this oracle, joined by ", " ("USDY"): every alert about it names them. */
+  asset: string
   /** `fetchOracleView` at the latest ledger time (its freshness is measured in ledger time). */
-  oracle: OracleView | Unread
+  view: OracleView | Unread
   /** This oracle's recorded runs of the last 24 h, newest first. */
   ticks: TickSeen[] | Unread
   /** This oracle's indexed `ref_rej` events of the last 24 h. */
   rejectionEvents: RejectionEventSeen[] | Unread
+  /** Unread with `BAD_INTERVAL` when the keeper's schedule is not valid: health is measured against it. */
   keeper: KeeperHealth | Unread
+}
+
+/**
+ * A manifest market ("seed") and its stored registry verdict (`market_registry`): `valid` false hides it
+ * from the app; null is no verdict yet (not checked, or unreadable on-chain). No row is null too.
+ */
+export type SeedSeen = { marketId: string; pool: string; asset: string; valid: boolean | null; reason: string | null }
+
+export type AlertInput = {
+  network: Network
+  /** Wall-clock time of the check (ms): the windows over recorded rows are measured from it. */
+  now: number
+  /**
+   * The keeper's schedule (`keeperIntervalSeconds`): `feed_broken` looks back 2 × this, and the keeper's
+   * health is measured against it. Unread when `ORACLE_KEEPER_INTERVAL_SECONDS` is not valid.
+   */
+  intervalSeconds: number | Unread
+  /** One entry per oracle of the manifest's markets, in the manifest's order. */
+  oracles: OracleInput[]
+  /** The manifest markets' stored verdicts, in the manifest's order. */
+  seeds: SeedSeen[] | Unread
   pauses: PauseView | Unread
   risk: RiskView | Unread
   /** Null: no keeper key is configured, so there is no signer to check. */
@@ -157,70 +190,82 @@ const isDown = (l: Live<unknown>): l is Extract<Live<unknown>, { status: "unavai
 /** "CDYG…YIPS": a Stellar id's first and last four characters; anything else as it is. */
 export const shortId = (id: string) => (/^[CG][A-Z2-7]{55}$/.test(id) ? `${id.slice(0, 4)}…${id.slice(-4)}` : id)
 
+/** A subject with every Stellar id in it shortened: "CDYG…YIPS:deviate", "asset:CB2Y…XODZ". */
+export const shortSubject = (subject: string) => subject.replace(/\b[CG][A-Z2-7]{55}\b/g, shortId)
+
+/** A hold of one alert (`heldSubjects`), beside a whole kind's. */
+const holdKey = (kind: string, subject: string) => `${kind}\u0000${subject}`
+
 const alert = (kind: AlertKind, subject: string, payload: Record<string, unknown>): DesiredAlert => ({ kind, subject, severity: severityOf(kind), payload })
 
 // ---------------------------------------------------------------- evaluation
 
-function oracleAlerts(i: AlertInput): DesiredAlert[] {
-  const o = i.oracle
-  if (unread(o)) return [alert("oracle_unavailable", i.oracleId, { reason: o.error })]
-  if (o.freshness === "unavailable") {
-    const down = ([o.timestamp, o.maxStale, o.timeToBlock, o.available, o.value] as Live<unknown>[]).find(isDown)
-    return [alert("oracle_unavailable", o.contractId, { reason: down?.error ?? "the oracle could not be read" })]
+function oracleAlerts(o: OracleInput): DesiredAlert[] {
+  const v = o.view
+  if (unread(v)) return [alert("oracle_unavailable", o.oracleId, { asset: o.asset, reason: v.error })]
+  if (v.freshness === "unavailable") {
+    const down = ([v.timestamp, v.maxStale, v.timeToBlock, v.available, v.value] as Live<unknown>[]).find(isDown)
+    return [alert("oracle_unavailable", o.oracleId, { asset: o.asset, reason: down?.error ?? "the oracle could not be read" })]
   }
-  if (o.freshness === "fresh") return []
-  const maxStale = o.maxStale.status === "live" ? Number(o.maxStale.value) : null
-  const toBlock = o.timeToBlock.status === "live" ? o.timeToBlock.value : null
+  if (v.freshness === "fresh") return []
+  const maxStale = v.maxStale.status === "live" ? Number(v.maxStale.value) : null
+  const toBlock = v.timeToBlock.status === "live" ? v.timeToBlock.value : null
   const age = maxStale !== null && toBlock !== null ? Math.max(0, maxStale - toBlock) : null
-  const timing = { ageSeconds: age, maxStaleSeconds: maxStale, secondsToBlock: toBlock }
+  const timing = { asset: o.asset, ageSeconds: age, maxStaleSeconds: maxStale, secondsToBlock: toBlock }
   // Stale replaces the warning: one alert per state, so a value that ages past max_stale closes one and opens the other.
-  return [alert(o.freshness === "stale" ? "oracle_stale" : "oracle_warning", o.contractId, timing)]
+  return [alert(v.freshness === "stale" ? "oracle_stale" : "oracle_warning", o.oracleId, timing)]
 }
 
 type Occurrence = { at: number; reason: string; value: string; txHash: string | null; source: "event" | "tick" }
 
+/** `oracle_rejection`'s subject: the oracle and the reason, "C…:deviate" (before the per-oracle alerts, the reason alone). */
+const rejectionSubject = (oracle: string, reason: string) => `${oracle}:${reason}`
+
 /**
- * Each significant rejection (`oob`, `decrease`, `deviate`, `fb_value`), from the indexed `ref_rej`
- * events and the keeper's `rejected` runs, keyed by reason: the same rejection seen in its event and in
- * the keeper's run, repeated by the feed-mode keeper without a transaction (D-21), or tried again by
- * the push keeper with each run's new value, is one alert. It stays open while an occurrence is younger
- * than `REJECTION_WINDOW_SECONDS`, then closes silently (an event kind). The payload names the newest value.
+ * Each significant rejection (`oob`, `decrease`, `deviate`, `fb_value`) of one oracle, from its indexed
+ * `ref_rej` events and its keeper's `rejected` runs, keyed by oracle and reason: the same rejection seen
+ * in its event and in the keeper's run, repeated by the feed-mode keeper without a transaction (D-21),
+ * or tried again by the push keeper with each run's new value, is one alert. It stays open while an
+ * occurrence is younger than `REJECTION_WINDOW_SECONDS`, then closes silently (an event kind). The
+ * payload names the newest value.
  */
-function rejectionAlerts(i: AlertInput): DesiredAlert[] {
+function rejectionAlerts(i: AlertInput, o: OracleInput): DesiredAlert[] {
   const since = i.now - REJECTION_WINDOW_SECONDS * 1000
   const seen: Occurrence[] = [
-    ...(Array.isArray(i.rejectionEvents) ? i.rejectionEvents : []).map((e) => ({ at: Date.parse(e.at), reason: e.reason, value: e.value, txHash: e.txHash, source: "event" as const })),
-    ...(Array.isArray(i.ticks) ? i.ticks : [])
+    ...(Array.isArray(o.rejectionEvents) ? o.rejectionEvents : []).map((e) => ({ at: Date.parse(e.at), reason: e.reason, value: e.value, txHash: e.txHash, source: "event" as const })),
+    ...(Array.isArray(o.ticks) ? o.ticks : [])
       .filter((t) => t.decision === "rejected" && t.reason !== null)
       .map((t) => ({ at: Date.parse(t.at), reason: t.reason as string, value: t.value ?? "unknown", txHash: t.txHash, source: "tick" as const })),
-  ].filter((o) => isSignificantRejection(o.reason) && o.at > since)
+  ].filter((x) => isSignificantRejection(x.reason) && x.at > since)
 
-  const bySubject = new Map<string, Occurrence[]>()
-  for (const o of seen) bySubject.set(o.reason, [...(bySubject.get(o.reason) ?? []), o])
-  return [...bySubject.entries()]
+  const byReason = new Map<string, Occurrence[]>()
+  for (const x of seen) byReason.set(x.reason, [...(byReason.get(x.reason) ?? []), x])
+  return [...byReason.entries()]
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-    .map(([subject, all]) => {
+    .map(([reason, all]) => {
       const newest = [...all].sort((a, b) => b.at - a.at)
-      const sources = (["event", "tick"] as const).filter((s) => all.some((o) => o.source === s))
-      return alert("oracle_rejection", subject, {
+      const sources = (["event", "tick"] as const).filter((src) => all.some((x) => x.source === src))
+      return alert("oracle_rejection", rejectionSubject(o.oracleId, reason), {
+        asset: o.asset,
         reason: newest[0].reason,
         value: newest[0].value,
         lastAt: new Date(newest[0].at).toISOString(),
         occurrences: all.length,
-        txHash: newest.find((o) => o.txHash !== null)?.txHash ?? null,
+        txHash: newest.find((x) => x.txHash !== null)?.txHash ?? null,
         sources,
       })
     })
 }
 
-/** The keeper's runs with a broken-feed reason (`bad_price`, `rescale`, `future_ts`, `feed_err`) in the last 2 × interval. */
-function feedAlerts(i: AlertInput): DesiredAlert[] {
-  if (!Array.isArray(i.ticks)) return []
+/** One oracle's keeper runs with a broken-feed reason (`bad_price`, `rescale`, `future_ts`, `feed_err`) in the last 2 × interval. */
+function feedAlerts(i: AlertInput, o: OracleInput): DesiredAlert[] {
+  if (!Array.isArray(o.ticks) || unread(i.intervalSeconds)) return []
   const since = i.now - 2 * i.intervalSeconds * 1000
-  const broken = i.ticks.filter((t) => t.reason !== null && BROKEN_FEED.has(t.reason) && Date.parse(t.at) > since).sort((a, b) => Date.parse(b.at) - Date.parse(a.at))
+  const broken = o.ticks.filter((t) => t.reason !== null && BROKEN_FEED.has(t.reason) && Date.parse(t.at) > since).sort((a, b) => Date.parse(b.at) - Date.parse(a.at))
   if (broken.length === 0) return []
   return [
-    alert("feed_broken", i.oracleId, {
+    alert("feed_broken", o.oracleId, {
+      asset: o.asset,
       reasons: [...new Set(broken.map((t) => t.reason as string))],
       lastAt: new Date(Date.parse(broken[0].at)).toISOString(),
       occurrences: broken.length,
@@ -229,11 +274,12 @@ function feedAlerts(i: AlertInput): DesiredAlert[] {
 }
 
 /** No recorded run is neutral (D-19): nothing is known, so nothing is raised. */
-function keeperAlerts(i: AlertInput): DesiredAlert[] {
-  const k = i.keeper
-  if (unread(k) || k.lastTickAt === null || k.healthy) return []
+function keeperAlerts(i: AlertInput, o: OracleInput): DesiredAlert[] {
+  const k = o.keeper
+  if (unread(k) || unread(i.intervalSeconds) || k.lastTickAt === null || k.healthy) return []
   return [
-    alert("keeper_unhealthy", i.oracleId, {
+    alert("keeper_unhealthy", o.oracleId, {
+      asset: o.asset,
       lastOkAt: k.lastOkAt,
       lastSuccessAt: k.lastSuccessAt,
       lastTickAt: k.lastTickAt,
@@ -242,6 +288,12 @@ function keeperAlerts(i: AlertInput): DesiredAlert[] {
       failures24h: k.failures24h,
     }),
   ]
+}
+
+/** A manifest market whose stored verdict is `valid = false`: the app hides it until a check passes. Subject: its market id. */
+function seedAlerts(i: AlertInput): DesiredAlert[] {
+  if (unread(i.seeds)) return []
+  return i.seeds.filter((m) => m.valid === false).map((m) => alert("seed_invalid", m.marketId, { marketId: m.marketId, pool: m.pool, reason: m.reason, asset: m.asset }))
 }
 
 function pauseAlerts(i: AlertInput): DesiredAlert[] {
@@ -311,12 +363,14 @@ function indexerAlerts(i: AlertInput): DesiredAlert[] {
 }
 
 /**
- * The alerts that should be open now, from the check's input (pure). Thresholds:
+ * The alerts that should be open now, from the check's input (pure). Each oracle is judged on its
+ * own, and every alert about it names it (its subject) and its asset (its payload). Thresholds:
  * - `oracle_warning` at an age ≥ 75% of `max_stale`, `oracle_stale` past it, `oracle_unavailable` when
  *   the oracle cannot be read (the view's own freshness, in ledger time);
- * - `oracle_rejection` per significant (reason, value) seen in the last 24 h;
+ * - `oracle_rejection` per oracle and significant reason seen in the last 24 h;
  * - `feed_broken` on a broken-feed tick in the last 2 × interval;
  * - `keeper_unhealthy` when runs are recorded and the last run that did not fail is 2 × interval old or more (M-15);
+ * - `seed_invalid` per manifest market whose stored verdict is `valid = false`;
  * - `paused` per paused contract;
  * - `risk_warning` at ≥ 90% of a limit, `risk_exhausted` at ≥ 100% (protocol-wide and per asset);
  * - `signer_low` under `ALERT_SIGNER_MIN_XLM`;
@@ -324,10 +378,8 @@ function indexerAlerts(i: AlertInput): DesiredAlert[] {
  */
 export function evaluateAlerts(input: AlertInput): DesiredAlert[] {
   return [
-    ...oracleAlerts(input),
-    ...rejectionAlerts(input),
-    ...feedAlerts(input),
-    ...keeperAlerts(input),
+    ...input.oracles.flatMap((o) => [...oracleAlerts(o), ...rejectionAlerts(input, o), ...feedAlerts(input, o), ...keeperAlerts(input, o)]),
+    ...seedAlerts(input),
     ...pauseAlerts(input),
     ...riskAlerts(input),
     ...signerAlerts(input),
@@ -335,14 +387,23 @@ export function evaluateAlerts(input: AlertInput): DesiredAlert[] {
   ]
 }
 
-/** The kinds the input cannot judge (a source was not read): their open alerts stay open until it can. */
-export function heldKinds(input: AlertInput): AlertKind[] {
-  const held: AlertKind[] = []
-  const o = input.oracle
-  if (unread(o) || o.freshness === "unavailable") held.push("oracle_warning", "oracle_stale")
-  if (unread(input.ticks) || unread(input.rejectionEvents)) held.push("oracle_rejection")
-  if (unread(input.ticks)) held.push("feed_broken")
-  if (unread(input.keeper)) held.push("keeper_unhealthy")
+/**
+ * What the input cannot judge (a source was not read): a whole kind, or one alert as `kind\0subject`.
+ * Those open alerts stay open until it can. One oracle's unread source holds only that oracle's alerts:
+ * its freshness, feed and keeper alerts by its id, its rejections by the prefix `<oracle>:` (a held
+ * subject that ends with ":" holds every subject of its kind that starts with it; `isHeld`).
+ */
+export function heldSubjects(input: AlertInput): string[] {
+  const held: string[] = []
+  for (const o of input.oracles) {
+    const v = o.view
+    if (unread(v) || v.freshness === "unavailable") held.push(holdKey("oracle_warning", o.oracleId), holdKey("oracle_stale", o.oracleId))
+    if (unread(o.ticks) || unread(o.rejectionEvents)) held.push(holdKey("oracle_rejection", rejectionSubject(o.oracleId, "")))
+    // Both need the keeper's schedule: an invalid one holds them for every oracle.
+    if (unread(o.ticks) || unread(input.intervalSeconds)) held.push(holdKey("feed_broken", o.oracleId))
+    if (unread(o.keeper) || unread(input.intervalSeconds)) held.push(holdKey("keeper_unhealthy", o.oracleId))
+  }
+  if (unread(input.seeds)) held.push("seed_invalid")
   const p = input.pauses
   if (unread(p) || p.contracts.some((c) => c.paused.status === "unavailable")) held.push("paused")
   const r = input.risk
@@ -352,10 +413,33 @@ export function heldKinds(input: AlertInput): AlertKind[] {
   return held
 }
 
-/** The input's sources that could not be read, by name, for the run's answer and log. */
+/**
+ * Whether an open alert is held (`heldSubjects`): its kind, the alert itself, or, for a held subject
+ * ending in ":", any subject of that kind that starts with it ("C…:" holds "C…:deviate"; a
+ * subject from before the per-oracle alerts, "deviate", is held by no oracle).
+ */
+function isHeld(held: ReadonlySet<string>, kind: string, subject: string): boolean {
+  if (held.has(kind) || held.has(holdKey(kind, subject))) return true
+  for (let at = subject.indexOf(":"); at >= 0; at = subject.indexOf(":", at + 1)) if (held.has(holdKey(kind, subject.slice(0, at + 1)))) return true
+  return false
+}
+
+/** The input's sources that could not be read, by name (per oracle as `<source>:<oracle id>`), for the run's answer and log. */
 export function unreadSources(input: AlertInput): string[] {
-  const sources = { oracle: input.oracle, ticks: input.ticks, rejectionEvents: input.rejectionEvents, keeper: input.keeper, pauses: input.pauses, risk: input.risk, indexer: input.indexer }
-  return [...Object.entries(sources).filter(([, v]) => unread(v)).map(([k]) => k), ...(input.signer !== null && "error" in input.signer ? ["signer"] : [])]
+  const perOracle = input.oracles.flatMap((o) =>
+    Object.entries({ oracle: o.view, ticks: o.ticks, rejectionEvents: o.rejectionEvents, keeper: o.keeper })
+      .filter(([, v]) => unread(v))
+      .map(([k]) => `${k}:${o.oracleId}`),
+  )
+  const shared = { seeds: input.seeds, pauses: input.pauses, risk: input.risk, indexer: input.indexer }
+  return [
+    ...(unread(input.intervalSeconds) ? ["keeperInterval"] : []),
+    ...perOracle,
+    ...Object.entries(shared)
+      .filter(([, v]) => unread(v))
+      .map(([k]) => k),
+    ...(input.signer !== null && "error" in input.signer ? ["signer"] : []),
+  ]
 }
 
 // ---------------------------------------------------------------- the webhook
@@ -423,6 +507,8 @@ function detail(kind: string, p: Record<string, unknown>): string {
       return `The feed's price could not be used (${Array.isArray(p.reasons) ? p.reasons.join(", ") : s(p.reasons)}), last at ${s(p.lastAt)}.`
     case "keeper_unhealthy":
       return `Last run without an error: ${p.lastOkAt ? s(p.lastOkAt) : "none recorded"}. Last successful update: ${p.lastSuccessAt ? s(p.lastSuccessAt) : "none recorded"}. The keeper runs every ${n(p.intervalSeconds)} s.`
+    case "seed_invalid":
+      return `Market ${s(p.marketId)} (pool ${shortId(s(p.pool))}) failed the registry's checks: ${s(p.reason)}. It is hidden from the app until the check passes.`
     case "paused":
       return `${s(p.label)} (${shortId(s(p.contractId))}) is paused.`
     case "risk_warning":
@@ -444,11 +530,20 @@ function detail(kind: string, p: Record<string, unknown>): string {
 /** Discord refuses a `content` over 2,000 characters. */
 const MAX_TEXT = 1_900
 
-/** The JSON a webhook receives for one opening or close; no URL and no secret-shaped string, ever. */
+/** The asset an alert names after its subject: an oracle's markets, or a manifest market's (not a risk limit's: a contract id, in its sentence). */
+const assetOf = (kind: string, p: Record<string, unknown>) =>
+  (ORACLE_KINDS.includes(kind) || kind === "seed_invalid") && typeof p.asset === "string" && p.asset !== "" ? p.asset : null
+
+/**
+ * The JSON a webhook receives for one opening or close; no URL and no secret-shaped string, ever. The
+ * line shortens every contract id in the subject ("CDYG…YIPS:deviate") and names the asset of an
+ * oracle's or a manifest market's alert; `subject` keeps the whole subject.
+ */
 export function webhookPayload(notice: AlertNotice): WebhookPayload {
   const details = scrubPayload(notice.payload)
   const head = `[Principal ${notice.network}]`
-  const what = `${alertTitle(notice.kind)} (${shortId(notice.subject)})`
+  const asset = assetOf(notice.kind, details)
+  const what = `${alertTitle(notice.kind)} (${shortSubject(notice.subject)}${asset ? `, ${asset}` : ""})`
   let line: string
   if (notice.test) line = `${head} TEST alert: ${detail("test", details)} At ${notice.at}.`
   else if (notice.status === "opened")
@@ -565,7 +660,7 @@ async function deliver(sql: Sql, row: PendingRow, status: "opened" | "resolved",
     await post(webhookPayload(notice))
     return "posted"
   } catch (error) {
-    console.error(`alerts: the ${status} notice of ${row.kind} ${shortId(row.subject)} was not delivered, the next run sends it again: ${postFailure(error)}`)
+    console.error(`alerts: the ${status} notice of ${row.kind} ${shortSubject(row.subject)} was not delivered, the next run sends it again: ${postFailure(error)}`)
     if (status === "opened") await sql`update alerts set opened_posted = false where id = ${row.id}`
     else await sql`update alerts set resolved_posted = false where id = ${row.id}`
     return "failed"
@@ -611,7 +706,10 @@ async function deliverPending(sql: Sql, network: Network, post: PostAlert, opts:
 }
 
 export type SyncOptions = {
-  /** Kinds whose open alerts are kept even when not desired (`heldKinds`). */
+  /**
+   * What is kept open even when not desired (`heldSubjects`): a kind (all its alerts), one alert
+   * (`kind\0subject`), or `kind\0<prefix>:` (every subject of the kind that starts with the prefix).
+   */
   held?: readonly string[]
   /**
    * Wall-clock time (ms) by which every post must have ended: `runAlertCheck` passes the run's start
@@ -626,7 +724,7 @@ export type SyncOptions = {
 /**
  * Brings `network`'s open alerts to `desired`: opens each new one once (`insert … on conflict do
  * nothing` on the partial unique index of open alerts), closes each open one no longer desired once
- * (`resolved_at`), unless its kind is held. The state is written before any post; then every
+ * (`resolved_at`), unless it is held (its kind, itself, or its subject's prefix: `isHeld`). The state is written before any post; then every
  * undelivered notice is posted (`post`), and one that fails stays undelivered for the next run.
  * `now` (ms) stamps `opened_at`, `resolved_at` and a debounced alert's `confirmedAt`.
  *
@@ -639,8 +737,8 @@ export type SyncOptions = {
 export async function syncAlerts(sql: Sql, network: Network, desired: readonly DesiredAlert[], post: PostAlert, now: number, opts: SyncOptions = {}): Promise<SyncResult> {
   const deadline = opts.deadline ?? Date.now() + POST_DEADLINE_MS
   const at = iso(now)
-  const held = new Set(opts.held ?? [])
-  const key = (kind: string, subject: string) => `${kind}\u0000${subject}`
+  const held: ReadonlySet<string> = new Set(opts.held ?? [])
+  const key = holdKey
   const wanted = new Map(desired.map((d) => [key(d.kind, d.subject), d]))
   const before = await openRows(sql, network)
   const isOpen = new Set(before.map((r) => key(r.kind, r.subject)))
@@ -664,7 +762,7 @@ export async function syncAlerts(sql: Sql, network: Network, desired: readonly D
       if (unconfirmed(r) && aged) await sql`update alerts set payload = payload || jsonb_build_object('confirmedAt', ${at}::text) where id = ${r.id} and resolved_at is null`
       continue
     }
-    if (held.has(r.kind)) continue
+    if (isHeld(held, r.kind, r.subject)) continue
     const silentOpen = unconfirmed(r)
     const silentClose = silentOpen || (EVENT_KINDS as readonly string[]).includes(r.kind)
     const closed = await sql`
@@ -865,48 +963,82 @@ export type AlertDeps = {
   ledgerClock?: () => Promise<{ sequence: number; closeTime: number }>
   /** For Horizon; `fetch` by default. */
   fetchImpl?: typeof fetch
+  /** Where the manifest markets' verdicts are read; `sqlRegistryStore(sql)` by default. */
+  registry?: Pick<RegistryStore, "rows">
+}
+
+/** The manifest markets' stored verdicts, through the bounded read pages use (the seeds' own rows). A seed with no row has no verdict. */
+async function readSeeds(registry: Pick<RegistryStore, "rows">, manifest: Manifest): Promise<SeedSeen[]> {
+  const rows = await registry.rows({ listed: manifest.markets.map((m) => m.contracts.pool) })
+  const byPool = new Map(rows.map((r) => [r.pool, r]))
+  return manifest.markets.map((m) => {
+    const row = byPool.get(m.contracts.pool)
+    return { marketId: m.marketId, pool: m.contracts.pool, asset: m.underlying.code, valid: row?.valid ?? null, reason: row?.reason ?? null }
+  })
+}
+
+/** `keeperIntervalSeconds(env)`, or Unread when it is not valid: the check still runs (only the keeper's and the feed's alerts need it). */
+function intervalOf(env: Env): number | Unread {
+  try {
+    return keeperIntervalSeconds(env)
+  } catch {
+    // The variable's name only, never its value.
+    console.error("alerts: ORACLE_KEEPER_INTERVAL_SECONDS is not valid; keeper_unhealthy and feed_broken are held for every oracle")
+    return { error: BAD_INTERVAL }
+  }
 }
 
 /**
- * Reads everything the check judges, all at once: only the oracle and RiskControl wait for the ledger
- * clock (they need its time and sequence). Each source fails alone, and any still pending
- * `READ_BUDGET_MS` after the run's start is `Unread`, so the run always reaches its writes and posts.
+ * Reads everything the check judges, all at once: each oracle's view, ticks, `ref_rej` events and
+ * keeper health side by side (one `fetchOracleView` per oracle, nothing else new on-chain), with the
+ * shared sources. Only the oracles and RiskControl wait for the ledger clock (they need its time and
+ * sequence). Each source fails alone, and any still pending `READ_BUDGET_MS` after the run's start is
+ * `Unread`, so the run always reaches its writes and posts.
  */
 export async function collectAlertInput(deps: AlertDeps): Promise<AlertInput> {
   const { sql, manifest } = deps
   const now = deps.now ?? Date.now()
   const readsBy = (deps.startedAt ?? Date.now()) + (deps.readBudgetMs ?? READ_BUDGET_MS)
   const network = manifest.network
-  const oracleId = manifest.shared.oracle
-  // Read per run from the same environment as the keeper's keys; a bad value throws (the check fails loudly, never on a silent default).
-  const intervalSeconds = keeperIntervalSeconds(deps.env)
+  // Read per run from the same environment as the keeper's keys; a bad value holds the keeper's and the feed's alerts, never a silent default.
+  const intervalSeconds = intervalOf(deps.env)
   const reader = deps.reader ?? createRpcReader(manifest)
+  const registry = deps.registry ?? sqlRegistryStore(sql)
   const since = iso(now - REJECTION_WINDOW_SECONDS * 1000)
   const noLedger: Unread = { error: "the ledger could not be read" }
   const clock = guard(deps.ledgerClock ? deps.ledgerClock() : ledgerClockOf(manifest))
   const afterClock = <T,>(read: (c: { sequence: number; closeTime: number }) => Promise<T>) =>
     clock.then((c): Promise<T | Unread> => (unread(c) ? Promise.resolve(noLedger) : guard(read(c))))
-  const [oracle, risk, pauses, ticks, rejectionEvents, keeper, indexer, signer] = await Promise.all([
-    // The manifest's shared oracle for now; one check per market's oracle comes with the per-oracle alerts.
-    by(afterClock((c) => fetchOracleView(reader, manifest, oracleId, c.closeTime)), readsBy),
+  const readOracle = async ({ oracle, markets }: { oracle: string; markets: Manifest["markets"] }): Promise<OracleInput> => {
+    const [view, ticks, rejectionEvents, keeper] = await Promise.all([
+      by(afterClock((c) => fetchOracleView(reader, manifest, oracle, c.closeTime)), readsBy),
+      by(guard(readTicks(sql, network, oracle, since)), readsBy),
+      by(guard(readRejectionEvents(sql, network, oracle, since)), readsBy),
+      unread(intervalSeconds) ? intervalSeconds : by(guard(keeperHealth(sql, network, intervalSeconds, { oracle, now })), readsBy),
+    ])
+    return { oracleId: oracle, asset: assetCodes(markets), view, ticks, rejectionEvents, keeper }
+  }
+  const [oracles, seeds, risk, pauses, indexer, signer] = await Promise.all([
+    Promise.all(manifestOracles(manifest).map(readOracle)),
+    by(guard(readSeeds(registry, manifest)), readsBy),
     by(afterClock((c) => fetchRiskView(reader, manifest, c.sequence)), readsBy),
     by(guard(fetchPauses(reader, manifest)), readsBy),
-    by(guard(readTicks(sql, network, oracleId, since)), readsBy),
-    by(guard(readRejectionEvents(sql, network, oracleId, since)), readsBy),
-    by(guard(keeperHealth(sql, network, intervalSeconds, { oracle: oracleId, now })), readsBy),
     by(guard(readCursors(sql, network)), readsBy),
     by(
       readSigner(manifest, deps.env, deps.fetchImpl ?? fetch).catch((error: unknown): SignerSeen => ({ account: null, error: nameOf(error) })),
       readsBy,
     ).then((r): SignerSeen | null => (r !== null && "error" in r && !("account" in r) ? { account: null, error: r.error } : r)),
   ])
-  return { network, now, intervalSeconds, oracleId, oracle, ticks, rejectionEvents, keeper, pauses, risk, signer, indexer }
+  return { network, now, intervalSeconds, oracles, seeds, pauses, risk, signer, indexer }
 }
 
 export type AlertCheckResult = SyncResult & {
   network: Network
-  /** Kinds kept as they were because their source was not read. */
-  held: AlertKind[]
+  /**
+   * What was kept as it was because its source was not read: a kind alone ("risk_warning") for all its
+   * alerts, `kind:subject` for one alert ("oracle_stale:C…"), `kind:<oracle>:` for one oracle's rejections.
+   */
+  held: string[]
   /** The sources that could not be read, by name. */
   unread: string[]
   /** A critical alert is open: the route answers 500. */
@@ -921,7 +1053,9 @@ export type AlertCheckResult = SyncResult & {
 export async function runAlertCheck(deps: AlertDeps & { post: PostAlert }): Promise<AlertCheckResult> {
   const startedAt = deps.startedAt ?? Date.now()
   const input = await collectAlertInput({ ...deps, startedAt })
-  const held = heldKinds(input)
+  const held = heldSubjects(input)
   const sync = await syncAlerts(deps.sql, input.network, evaluateAlerts(input), deps.post, input.now, { held, deadline: startedAt + POST_DEADLINE_MS })
-  return { network: input.network, ...sync, held, unread: unreadSources(input), critical: sync.open.some(countsAsCritical) }
+  // The answer is JSON for people and logs: a held alert reads `kind:subject`, not with its NUL separator.
+  const shown = held.map((h) => h.replace("\u0000", ":"))
+  return { network: input.network, ...sync, held: shown, unread: unreadSources(input), critical: sync.open.some(countsAsCritical) }
 }

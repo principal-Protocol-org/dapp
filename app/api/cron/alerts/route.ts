@@ -5,13 +5,14 @@ import "server-only"
  * Same callers and checks as the other cron routes (`cronAuthorized`); any other caller gets 401 and
  * nothing runs.
  *
- * Each run reads the oracle at the latest ledger time, RiskControl, every pause, the keeper's runs,
- * the indexed rejections, the index cursors and the keeper signer's XLM, then opens and closes the
- * alerts in the `alerts` table (each opens once and closes once) and posts every opening and close to
- * `ALERT_WEBHOOK_URL` (5 s per post; a failed post is sent again by the next run). It answers 500
- * while a critical alert is open (`oracle_stale`, `oracle_unavailable` once a run 120 s or more after it opened confirms it,
- * `keeper_unhealthy`, `risk_exhausted`, `indexer_gap`), so the scheduler's own failure alert fires
- * too; 200 otherwise.
+ * Each run reads every oracle of the manifest's markets at the latest ledger time, with its keeper's
+ * runs and its indexed rejections, the manifest markets' registry verdicts, RiskControl, every pause,
+ * the index cursors and the keeper signer's XLM, then opens and closes the alerts in the `alerts`
+ * table (each opens once and closes once) and posts every opening and close to `ALERT_WEBHOOK_URL`
+ * (5 s per post; a failed post is sent again by the next run). It answers 500 while a critical alert
+ * is open (`oracle_stale`, `oracle_unavailable` once a run 120 s or more after it opened confirms it,
+ * `keeper_unhealthy`, `seed_invalid`, `risk_exhausted`, `indexer_gap`), so the scheduler's own
+ * failure alert fires too; 200 otherwise.
  *
  * `?test=1` only sends a clearly marked test alert, stores it (`test = true`, resolved at once: the
  * alert-test evidence) and answers 200 when the webhook took it, 502 when it did not.
@@ -25,8 +26,9 @@ import { runAlertCheck, sendTestAlert, webhookPoster } from "@/lib/server/alerts
 import { cronAuthorized, cronJson as json } from "@/lib/server/cron-auth"
 import { DatabaseConfigError, sql } from "@/lib/server/db"
 
-// About 25 contract reads, a Horizon read and a few queries side by side (all done by 30 s), the
-// state written, then posts that all end by 50 s (alerts.ts READ_BUDGET_MS, POST_DEADLINE_MS).
+// About 15 contract reads per oracle plus the pauses and RiskControl, a Horizon read and a few queries
+// per oracle, side by side (all done by 30 s), the state written, then posts that all end by 50 s
+// (alerts.ts READ_BUDGET_MS, POST_DEADLINE_MS).
 export const maxDuration = 60
 
 /** The webhook URL when it is an http(s) URL; never logged. */

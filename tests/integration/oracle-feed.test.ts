@@ -19,11 +19,13 @@
  * - without the override, the manifest's own oracles (both local markets', no feed source):
  *   `skipped` (`no_feed`) each, 200;
  * - `indexEvents` (group `oracle`) stores the one `ref_set` and the one `ref_rej`;
- * - the alert check raises `oracle_rejection` (deviate) and `feed_broken` (bad_price).
+ * - the alert check, over a manifest whose market is on that oracle, raises `oracle_rejection`
+ *   (`<oracle>:deviate`) and `feed_broken` (bad_price) for it.
  *
  * Then three more standalone oracles: two (one throttled, `FEED_MIN_INTERVAL=300`) synced in one run
  * with consecutive sequence numbers; a second new price inside the throttle: `skipped` (`throttle`);
- * and an oracle on an uninitialized feed (`FEED_INITIALIZED=0`): `rejected` (`feed_err`), with no value.
+ * and an oracle on an uninitialized feed (`FEED_INITIALIZED=0`): `rejected` (`feed_err`), with no value,
+ * which opens `feed_broken` for that oracle alone.
  *
  * "Nothing sent" is checked on the chain: the keeper account's sequence number does not move.
  * Needs `scripts/dev-stack/up.sh` (and a deployed market), Rust with wasm32v1-none, the migrations
@@ -103,7 +105,7 @@ type FeedOracle = { oracle: string; feed: string }
 
 describe.skipIf(skip !== null)("the keeper's feed mode on the local stack (D-21, D-22, M-13)", () => {
   let manifest: Manifest
-  /** The manifest with the standalone oracle as its oracle, for the indexer and the alert check. */
+  /** The manifest with the standalone oracle as its oracle, for the indexer. */
   let standalone: Manifest
   /** The primary standalone oracle and its feed (the first steps). */
   let oracle: string
@@ -158,6 +160,17 @@ describe.skipIf(skip !== null)("the keeper's feed mode on the local stack (D-21,
     const sent = await sendAs({ manifest, signer: poster, contractId: on, method: "set_price", args: [ASSET, scI128(price), scU64(timestamp)] })
     log(`feed ${on}.set_price(${price}, ${timestamp}): ${sent.hash}`)
   }
+  /**
+   * The manifest for the alert check: one market per oracle given (the manifest's own markets, each
+   * moved onto that oracle). The check judges the markets' oracles (`manifestOracles`), not `shared.oracle`.
+   */
+  const marketsOn = (...oracles: string[]): Manifest => ({
+    ...standalone,
+    markets: oracles.map((o, i) => {
+      const m = manifest.markets[i % manifest.markets.length]
+      return { ...m, marketId: `${m.marketId}-feed-${i}`, contracts: { ...m.contracts, oracle: o } }
+    }),
+  })
   /** A ledger whose close time is after `t`: the oracle takes only a newer timestamp. */
   const ledgerAfter = (t: number) => eventually(() => ledgerClock(manifest), (c) => c.closeTime > t, `a ledger after ${t}`)
   /** The sequence number a landed transaction used. */
@@ -374,16 +387,19 @@ describe.skipIf(skip !== null)("the keeper's feed mode on the local stack (D-21,
     expect(rej).toMatchObject({ tx_hash: hashes.deviate, data: { value: "11500000", reason: "deviate" } })
   }, 5 * MINUTE)
 
-  it("the alert check raises oracle_rejection (deviate, with its hash) and feed_broken (bad_price)", async () => {
-    const input = await collectAlertInput({ sql, manifest: standalone, env: { ORACLE_KEEPER_MODE: "feed", ORACLE_KEEPER_SECRET: keeper.secret() } })
+  it("the alert check raises oracle_rejection (<oracle>:deviate, with its hash) and feed_broken (bad_price) for that oracle", async () => {
+    const alerting = marketsOn(oracle)
+    const input = await collectAlertInput({ sql, manifest: alerting, env: { ORACLE_KEEPER_MODE: "feed", ORACLE_KEEPER_SECRET: keeper.secret() } })
+    expect(input.oracles.map((o) => o.oracleId)).toEqual([oracle])
     const alerts = evaluateAlerts(input)
     log(`alerts: ${JSON.stringify(alerts.map((a) => ({ kind: a.kind, subject: a.subject, payload: a.payload })))}`)
     const rejection = alerts.find((a) => a.kind === "oracle_rejection")
-    expect(rejection).toMatchObject({ subject: "deviate", payload: { reason: "deviate", value: "11500000", txHash: hashes.deviate } })
+    const asset = alerting.markets[0].underlying.code
+    expect(rejection).toMatchObject({ subject: `${oracle}:deviate`, payload: { asset, reason: "deviate", value: "11500000", txHash: hashes.deviate } })
     expect((rejection?.payload.sources as string[]).sort()).toEqual(["event", "tick"])
     // Only the significant reason: routine and broken-feed reasons raise no oracle_rejection.
-    expect(alerts.filter((a) => a.kind === "oracle_rejection").map((a) => a.subject)).toEqual(["deviate"])
-    expect(alerts.find((a) => a.kind === "feed_broken")).toMatchObject({ subject: oracle, payload: { reasons: ["bad_price"] } })
+    expect(alerts.filter((a) => a.kind === "oracle_rejection").map((a) => a.subject)).toEqual([`${oracle}:deviate`])
+    expect(alerts.find((a) => a.kind === "feed_broken")).toMatchObject({ subject: oracle, payload: { asset, reasons: ["bad_price"] } })
   }, 2 * MINUTE)
 
   let throttledSync: { value: string; timestamp: number }
@@ -443,4 +459,20 @@ describe.skipIf(skip !== null)("the keeper's feed mode on the local stack (D-21,
     const [row] = await listTicks(sql, { network: "local", oracle: unfed.oracle, limit: 1 })
     expect(row).toMatchObject({ mode: "feed", decision: "rejected", reason: "feed_err", value: null, txHash: null })
   }, MINUTE)
+
+  it("the feed_err run opens feed_broken for that oracle alone; the synced pair raises none", async () => {
+    const alerting = marketsOn(pair.oracle, unfed.oracle)
+    const input = await collectAlertInput({ sql, manifest: alerting, env: { ORACLE_KEEPER_MODE: "feed", ORACLE_KEEPER_SECRET: keeper.secret() } })
+    expect(input.oracles.map((o) => o.oracleId)).toEqual([pair.oracle, unfed.oracle])
+    const alerts = evaluateAlerts(input)
+    log(`alerts: ${JSON.stringify(alerts.map((a) => ({ kind: a.kind, subject: a.subject, payload: a.payload })))}`)
+    expect(alerts.filter((a) => a.kind === "feed_broken")).toEqual([
+      {
+        kind: "feed_broken",
+        subject: unfed.oracle,
+        severity: "warning",
+        payload: { asset: alerting.markets[1].underlying.code, reasons: ["feed_err"], lastAt: expect.any(String), occurrences: 1 },
+      },
+    ])
+  }, 2 * MINUTE)
 })

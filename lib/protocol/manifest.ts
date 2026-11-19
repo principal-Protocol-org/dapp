@@ -149,6 +149,9 @@ export function manifestOracles(m: Pick<Manifest, "markets">): { oracle: string;
   return [...byOracle].map(([oracle, markets]) => ({ oracle, markets }))
 }
 
+/** The underlying codes of `markets`, distinct, in order, joined by ", " ("USDY", "USTRY, GILT"): what an oracle's alerts and health name. */
+export const assetCodes = (markets: Pick<Market, "underlying">[]): string => [...new Set(markets.map((m) => m.underlying.code))].join(", ")
+
 export const PASSPHRASES: Record<Network, string> = {
   local: "Standalone Network ; February 2017",
   testnet: "Test SDF Network ; September 2015",

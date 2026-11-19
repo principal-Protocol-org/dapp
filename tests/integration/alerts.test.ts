@@ -4,18 +4,20 @@
  * Task 9). A local HTTP listener stands in for the webhook (never a real external URL); it records
  * every payload it gets, and can hang to test the 5 s timeout.
  *
- * - `oracle_stale`: the local oracle's `max_stale_seconds` is shortened to 5 s with `set_safety_params`
- *   (the local oracle admin, `principal-localdev-admin`), so its value goes stale; the check opens the
- *   alert once and posts once, a second run changes nothing, and once `max_stale_seconds` is restored
- *   the check closes it once and posts once.
+ * - `oracle_stale`, per oracle: the second local market's oracle has its `max_stale_seconds` shortened
+ *   to 5 s with `set_safety_params` (the local oracle admin, `principal-localdev-admin`), so its value
+ *   goes stale; the check opens the alert for that oracle only (the first oracle stays fresh) once and
+ *   posts once, a second run changes nothing, and once `max_stale_seconds` is restored the check closes
+ *   it once and posts once.
  * - `risk_warning` then `risk_exhausted` (D-12): the local RiskControl's limit is set to the window's
  *   volume plus 1,000 USDY, a fresh holder deposits 950 then 50; the limit is then put back. These rows
  *   are the risk page's exhaustion history.
  * - `signer_low`: the local admin key as the keeper signer, against a floor above its balance on the
  *   local Horizon, then the default floor.
- * - `oracle_unavailable` (debounced): the local manifest pointed at a closed port, so this server's
- *   reads fail. One failed run that the next run clears is never posted; two failed runs in a row post
- *   it once (confirmed), and the run that reads again posts its close.
+ * - `oracle_unavailable` (debounced), followed on the first oracle (each oracle has its own): the local
+ *   manifest pointed at a closed port, so this server's reads fail. One failed run that the next run
+ *   clears is never posted; two failed runs in a row post it once (confirmed), and the run that reads
+ *   again posts its close.
  * - Fallback RPC (D-6): the same dead `rpcUrl` with the local RPC as `rpcFallbackUrls`; reads (and the
  *   check's ledger clock) answer from the fallback, and each read's source names it.
  * - The routes: `?test=1` with a webhook that hangs (502 after the 5 s timeout, the row kept), then one
@@ -40,6 +42,7 @@ vi.mock("next/server", () => ({ connection: async () => {} }))
 import { fetchAccountState } from "@/lib/protocol/account-state"
 import { createHorizon } from "@/lib/protocol/horizon"
 import { addTrustline, fundWithFriendbot } from "@/lib/protocol/onboarding"
+import { manifestOracles } from "@/lib/protocol/manifest"
 import { createRpcReader, readLive } from "@/lib/protocol/reader"
 import type { Manifest } from "@/lib/protocol/types"
 import { countsAsCritical } from "@/lib/app/alert-types"
@@ -107,7 +110,8 @@ async function cli(contract: string, fn: string, args: string[] = [], send = fal
 }
 
 const has = (refs: AlertRef[], kind: string, subject?: string) => refs.some((r) => r.kind === kind && (subject === undefined || r.subject === subject))
-const posted = (kind: string) => hits.filter((h) => h.answered && h.body.kind === kind)
+/** The webhook posts of `kind` (of one subject when given: each oracle has its own alerts). */
+const posted = (kind: string, subject?: string) => hits.filter((h) => h.answered && h.body.kind === kind && (subject === undefined || h.body.subject === subject))
 const brief = (r: AlertCheckResult) =>
   `opened [${r.opened.map((a) => a.kind).join(", ")}] resolved [${r.resolved.map((a) => a.kind).join(", ")}] open [${r.open.map((a) => a.kind).join(", ")}] posted ${r.posted} failures ${r.postFailures} held [${r.held.join(", ")}] critical ${r.critical}`
 
@@ -144,12 +148,17 @@ describe.skipIf(skip !== null)("the alert check on the local stack", () => {
 
   const check = (env: Record<string, string> = {}) => runAlertCheck({ sql, manifest, env, post: webhookPoster(HOOK) })
 
-  it("oracle_stale opens once and posts once on a shortened max_stale, then closes once and posts once", async () => {
-    const oracle = manifest.shared.oracle
+  it("oracle_stale opens for the one oracle whose max_stale is shortened, once and posted once, then closes once and posts once", async () => {
+    const oracles = manifestOracles(manifest)
+    expect(oracles.length).toBeGreaterThanOrEqual(2)
+    const first = oracles[0].oracle
+    // The second market's oracle: on Mainnet each market has its own, and each is judged on its own.
+    const oracle = oracles[1].oracle
+    const asset = oracles[1].markets.map((m) => m.underlying.code).join(", ")
     out.log(`oracle tick first, for a fresh baseline: ${await oracleTick()}`)
     const maxStale = BigInt(JSON.parse(await cli(oracle, "max_stale_seconds")))
     const deviation = BigInt(JSON.parse(await cli(oracle, "max_deviation_bps")))
-    out.log(`oracle ${oracle}: max_stale_seconds ${maxStale}, max_deviation_bps ${deviation}`)
+    out.log(`oracle ${oracle} (${asset}): max_stale_seconds ${maxStale}, max_deviation_bps ${deviation}; the first oracle ${first} is left as it is`)
 
     const baseline = await check()
     out.log(`baseline: ${brief(baseline)}`)
@@ -162,17 +171,22 @@ describe.skipIf(skip !== null)("the alert check on the local stack", () => {
       await eventually(() => ledgerClock(manifest), (c) => c.closeTime > ts + 5, "a ledger more than 5 s past the oracle's value")
       out.log(`max_stale_seconds set to 5; the value (timestamp ${ts}) is now stale`)
 
-      const first = await check()
-      out.log(`run 1: ${brief(first)}`)
-      expect(has(first.opened, "oracle_stale", oracle)).toBe(true)
-      expect(first.critical).toBe(true)
+      const run1 = await check()
+      out.log(`run 1: ${brief(run1)}`)
+      expect(has(run1.opened, "oracle_stale", oracle)).toBe(true)
+      // Only that oracle: the first one is still fresh, and no alert of its own opens.
+      expect(run1.opened.filter((a) => a.kind === "oracle_stale").map((a) => a.subject)).toEqual([oracle])
+      expect(run1.open.some((a) => a.kind === "oracle_stale" && a.subject === first)).toBe(false)
+      expect(run1.open.find((a) => a.kind === "oracle_stale")?.payload).toMatchObject({ asset, maxStaleSeconds: 5 })
+      expect(run1.critical).toBe(true)
       expect(posted("oracle_stale").length - before).toBe(1)
       expect(posted("oracle_stale").at(-1)?.body).toMatchObject({ status: "opened", kind: "oracle_stale", subject: oracle, severity: "critical", network: "local", test: false })
+      expect(posted("oracle_stale").at(-1)?.body.text).toContain(`(${oracle.slice(0, 4)}…${oracle.slice(-4)}, ${asset})`)
       out.log(`webhook got: ${posted("oracle_stale").at(-1)?.body.text}`)
 
-      const second = await check()
-      out.log(`run 2: ${brief(second)}`)
-      expect(has(second.opened, "oracle_stale")).toBe(false)
+      const run2 = await check()
+      out.log(`run 2: ${brief(run2)}`)
+      expect(has(run2.opened, "oracle_stale")).toBe(false)
       expect(posted("oracle_stale").length - before).toBe(1)
       const [{ n }] = await sql<{ n: string }>`select count(*)::text as n from alerts where network = 'local' and kind = 'oracle_stale' and resolved_at is null`
       expect(n).toBe("1")
@@ -192,10 +206,11 @@ describe.skipIf(skip !== null)("the alert check on the local stack", () => {
     expect(has(fourth.opened, "oracle_stale") || has(fourth.resolved, "oracle_stale")).toBe(false)
     expect(posted("oracle_stale").length - before).toBe(2)
 
-    const rows = await sql<{ id: string; opened_at: Date; resolved_at: Date | null; opened_posted: boolean; resolved_posted: boolean }>`
-      select id, opened_at, resolved_at, opened_posted, resolved_posted from alerts
+    const rows = await sql<{ id: string; subject: string; opened_at: Date; resolved_at: Date | null; opened_posted: boolean; resolved_posted: boolean }>`
+      select id, subject, opened_at, resolved_at, opened_posted, resolved_posted from alerts
       where network = 'local' and kind = 'oracle_stale' and id > ${firstId} order by id`
     expect(rows).toHaveLength(1)
+    expect(rows[0].subject).toBe(oracle)
     expect(rows[0]).toMatchObject({ opened_posted: true, resolved_posted: true })
     expect(rows[0].resolved_at && rows[0].resolved_at > rows[0].opened_at).toBe(true)
     out.log(`alerts row ${rows[0].id}: opened ${rows[0].opened_at.toISOString()}, resolved ${rows[0].resolved_at?.toISOString()}, both notices delivered`)
@@ -277,51 +292,56 @@ describe.skipIf(skip !== null)("the alert check on the local stack", () => {
     await new Promise<void>((resolve) => probe.close(() => resolve()))
     return `http://127.0.0.1:${port}/rpc`
   }
-  const unavailableRows = () =>
+  /** The first oracle's `oracle_unavailable` rows (a dead RPC opens one per oracle; each is debounced on its own). */
+  const unavailableRows = (oracle: string) =>
     sql<{ id: string; resolved_at: Date | null; opened_posted: boolean; resolved_posted: boolean; payload: Record<string, unknown> }>`
       select id, resolved_at, opened_posted, resolved_posted, payload from alerts
-      where network = 'local' and kind = 'oracle_unavailable' and id > ${firstId} order by id`
+      where network = 'local' and kind = 'oracle_unavailable' and subject = ${oracle} and id > ${firstId} order by id`
 
   it("oracle_unavailable is debounced: a one-run blip is never posted; two failed runs post it once, then its close", async () => {
     const dead = { ...manifest, rpcUrl: await deadRpcUrl(), rpcFallbackUrls: undefined }
+    const oracle = manifest.shared.oracle
+    const own = (r: AlertCheckResult) => r.open.find((a) => a.kind === "oracle_unavailable" && a.subject === oracle)
     // `now` stamps the run: a later one stands for a scheduled run DEBOUNCE_MIN_AGE_MS on (M-2).
     const blindCheck = (now?: number) => runAlertCheck({ sql, manifest: dead, env: {}, post: webhookPoster(HOOK), ...(now === undefined ? {} : { now }) })
-    const before = posted("oracle_unavailable").length
+    const before = posted("oracle_unavailable", oracle).length
+    const beforeAll = posted("oracle_unavailable").length
 
     const blip = await blindCheck()
     out.log(`blip, run 1 (dead RPC): ${brief(blip)}`)
-    expect(has(blip.opened, "oracle_unavailable", manifest.shared.oracle)).toBe(true)
-    expect(blip.open.find((a) => a.kind === "oracle_unavailable") && countsAsCritical(blip.open.find((a) => a.kind === "oracle_unavailable")!)).toBe(false)
-    expect(blip.unread).toEqual(expect.arrayContaining(["oracle", "risk"]))
+    // Without the ledger every oracle is unread: one alert per oracle.
+    expect(blip.opened.filter((a) => a.kind === "oracle_unavailable").map((a) => a.subject).sort()).toEqual(manifestOracles(manifest).map((o) => o.oracle).sort())
+    expect(countsAsCritical(own(blip)!)).toBe(false)
+    expect(blip.unread).toEqual(expect.arrayContaining([`oracle:${oracle}`, "risk"]))
     const cleared = await check()
     out.log(`blip, run 2 (RPC back): ${brief(cleared)}`)
-    expect(has(cleared.resolved, "oracle_unavailable")).toBe(true)
-    expect(posted("oracle_unavailable").length - before).toBe(0)
-    const [blipRow] = await unavailableRows()
+    expect(has(cleared.resolved, "oracle_unavailable", oracle)).toBe(true)
+    expect(posted("oracle_unavailable").length - beforeAll).toBe(0)
+    const [blipRow] = await unavailableRows(oracle)
     expect(blipRow).toMatchObject({ opened_posted: true, resolved_posted: true })
     expect(blipRow.payload.confirmedAt).toBeUndefined()
 
     const first = await blindCheck()
     // A retry seconds later (QStash's, on the 500) is no second look: still unconfirmed, nothing posted.
     const retry = await blindCheck()
-    const young = retry.open.find((a) => a.kind === "oracle_unavailable")
+    const young = own(retry)
     expect(young?.payload.confirmedAt).toBeUndefined()
     expect(countsAsCritical(young!)).toBe(false)
-    expect(posted("oracle_unavailable").length - before).toBe(0)
+    expect(posted("oracle_unavailable").length - beforeAll).toBe(0)
     const second = await blindCheck(Date.now() + DEBOUNCE_MIN_AGE_MS)
     out.log(`outage, run 2 (still dead): ${brief(second)}`)
-    const confirmed = second.open.find((a) => a.kind === "oracle_unavailable")
+    const confirmed = own(second)
     expect(typeof confirmed?.payload.confirmedAt).toBe("string")
     expect(countsAsCritical(confirmed!)).toBe(true)
     expect(second.critical).toBe(true)
-    expect(has(first.opened, "oracle_unavailable")).toBe(true)
-    expect(posted("oracle_unavailable").map((h) => h.body.status).slice(before)).toEqual(["opened"])
-    out.log(`webhook got: ${posted("oracle_unavailable").at(-1)?.body.text}`)
+    expect(has(first.opened, "oracle_unavailable", oracle)).toBe(true)
+    expect(posted("oracle_unavailable", oracle).map((h) => h.body.status).slice(before)).toEqual(["opened"])
+    out.log(`webhook got: ${posted("oracle_unavailable", oracle).at(-1)?.body.text}`)
     const back = await check()
-    expect(has(back.resolved, "oracle_unavailable")).toBe(true)
-    expect(posted("oracle_unavailable").map((h) => h.body.status).slice(before)).toEqual(["opened", "resolved"])
-    out.log(`webhook got: ${posted("oracle_unavailable").at(-1)?.body.text}`)
-    const rows = await unavailableRows()
+    expect(has(back.resolved, "oracle_unavailable", oracle)).toBe(true)
+    expect(posted("oracle_unavailable", oracle).map((h) => h.body.status).slice(before)).toEqual(["opened", "resolved"])
+    out.log(`webhook got: ${posted("oracle_unavailable", oracle).at(-1)?.body.text}`)
+    const rows = await unavailableRows(oracle)
     expect(rows).toHaveLength(2)
     expect(rows[1]).toMatchObject({ opened_posted: true, resolved_posted: true })
   }, 3 * MINUTE)
@@ -334,7 +354,7 @@ describe.skipIf(skip !== null)("the alert check on the local stack", () => {
     expect(read).toMatchObject({ status: "live", value: 3_600n, source: { rpcUrl: live, viaFallback: true } })
     const r = await runAlertCheck({ sql, manifest: viaFallback, env: {}, post: webhookPoster(HOOK) })
     out.log(`check with the dead rpcUrl and the fallback: ${brief(r)}`)
-    expect(r.unread).not.toContain("oracle")
+    expect(r.unread.filter((u) => u.startsWith("oracle:"))).toEqual([])
     expect(r.open.some((a) => a.kind === "oracle_unavailable")).toBe(false)
   }, 2 * MINUTE)
 
@@ -400,7 +420,10 @@ describe.skipIf(skip !== null)("the alert check on the local stack", () => {
       out.log(`GET /api/dashboard/alerts: ${answer.open.length} open [${answer.open.map((a) => a.kind).join(", ")}], ${answer.recent.length} recent, lastTest ${JSON.stringify(answer.lastTest)}`)
 
       const h = await health()
-      const healthBody = (await h.json()) as Record<string, { status: string; count?: number; sequence?: number }> & { network: string }
+      const healthBody = (await h.json()) as Record<string, { status: string; count?: number; sequence?: number }> & {
+        network: string
+        keepers: { oracle: string; asset: string }[] | null
+      }
       out.log(`GET /api/health: ${h.status} ${JSON.stringify(healthBody)}`)
       expect(h.status).toBe(200)
       expect(h.headers.get("cache-control")).toBe("public, s-maxage=15, stale-while-revalidate=15")
@@ -408,6 +431,8 @@ describe.skipIf(skip !== null)("the alert check on the local stack", () => {
       expect(healthBody.ledger.status).toBe("ok")
       expect(healthBody.indexer.status).toBe("ok")
       expect(healthBody.keeper.status).toBe("ok")
+      // One entry per oracle of the manifest's markets; `keeper` stays one object.
+      expect(healthBody.keepers?.map((k) => k.oracle)).toEqual(manifestOracles(manifest).map((o) => o.oracle))
       expect(healthBody.openAlerts).toMatchObject({ status: "ok", count: answer.open.length })
     } finally {
       delete process.env.CRON_SECRET

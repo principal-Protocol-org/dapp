@@ -192,28 +192,33 @@ function TickTable({ network, ticks }: { network: Network; ticks: RecordedTick[]
 }
 
 /**
- * Healthy now (D-19): the last success is younger than 2 × the interval, its age measured on the
- * ledger clock here. The API's own `healthy` was computed when its answer was, and that answer is
- * cached for minutes: it is used only until the ledger clock is read.
+ * Healthy now (D-19, M-15): the last run that did not fail (`lastOkAt`) is younger than 2 × the
+ * interval, its age measured on the ledger clock here (the browser's copy of `keeperHealth`'s rule).
+ * The API's own `healthy` was computed when its answer was, and that answer is cached for minutes: it
+ * is used only until the ledger clock is read.
  */
-export function keeperHealthyNow(health: Pick<KeeperHealth, "healthy" | "lastSuccessAt">, intervalSeconds: number, ledgerTime: number | null): boolean {
-  if (health.lastSuccessAt === null) return false
+export function keeperHealthyNow(health: Pick<KeeperHealth, "healthy" | "lastOkAt">, intervalSeconds: number, ledgerTime: number | null): boolean {
+  if (health.lastOkAt === null) return false
   if (ledgerTime === null) return health.healthy
-  return ledgerTime - Date.parse(health.lastSuccessAt) / 1000 < 2 * intervalSeconds
+  return ledgerTime - Date.parse(health.lastOkAt) / 1000 < 2 * intervalSeconds
 }
 
 /**
- * The keeper's health and recent runs (D-19), from its recorded ticks (`GET /api/dashboard/oracle-ticks`).
- * No run recorded is a neutral state: "No keeper run recorded yet", neither healthy nor unhealthy.
+ * The keeper's health and recent runs (D-19) for `oracle`, from its recorded ticks
+ * (`GET /api/dashboard/oracle-ticks?oracle=`). No run recorded is a neutral state: "No keeper run
+ * recorded yet", neither healthy nor unhealthy.
  */
-function KeeperPanel({ network, ledgerTime }: { network: Network; ledgerTime: number | null }) {
-  const q = useOracleTicks(20)
+function KeeperPanel({ network, oracle, ledgerTime }: { network: Network; oracle: string; ledgerTime: number | null }) {
+  const q = useOracleTicks(oracle, 20)
   const agoText = (iso: string) => (ledgerTime !== null ? ` · ${ago(ledgerTime - Date.parse(iso) / 1000)}` : "")
+  const entry = q.data?.oracles.find((o) => o.oracle === oracle)
   let body: ReactNode
   if (q.isError) body = <UnavailableTip label="Keeper health" reason={q.error?.message ?? "the keeper telemetry could not be read"} className="text-sm text-ink" />
   else if (!q.data) body = <Skeleton className="h-24 w-full" />
+  else if (!entry) body = <UnavailableTip label="Keeper health" reason="the keeper telemetry has no entry for this oracle" className="text-sm text-ink" />
   else {
-    const { health, ticks, intervalSeconds } = q.data
+    const { intervalSeconds } = q.data
+    const { health, ticks } = entry
     const none = health.lastTickAt === null
     const healthy = keeperHealthyNow(health, intervalSeconds, ledgerTime)
     body = (
@@ -237,8 +242,8 @@ function KeeperPanel({ network, ledgerTime }: { network: Network; ledgerTime: nu
           </Metric>
         </dl>
         <p className="text-xs/5 text-ink-muted">
-          Healthy while the last successful update is under {formatWindow(BigInt(2 * intervalSeconds))} old: twice the keeper&apos;s schedule, every{" "}
-          {formatWindow(BigInt(intervalSeconds))}. A skipped run changes nothing, so it is no success; a failed run includes one that could not start.
+          Healthy while the last run that did not fail is under {formatWindow(BigInt(2 * intervalSeconds))} old: twice the keeper&apos;s schedule, every{" "}
+          {formatWindow(BigInt(intervalSeconds))}. A skipped or rejected run counts, since the feed may have no new price; a failed run includes one that could not start.
         </p>
         {/* With no run recorded, the health line already says so. */}
         {ticks.length > 0 ? <TickTable network={network} ticks={ticks} /> : null}
@@ -493,7 +498,7 @@ export function OraclePanel() {
           <p className="max-w-[80ch] text-xs/5 text-ink-muted">{lastRejectionNote(m.wasmHashes.oracle ?? "")}</p>
         </Panel>
 
-        <KeeperPanel network={m.network} ledgerTime={ledgerTime} />
+        <KeeperPanel network={m.network} oracle={m.shared.oracle} ledgerTime={ledgerTime} />
 
         <Panel title="Rejection history" className="min-[900px]:col-span-2" meta={<p className="text-xs/5 text-ink-muted">Every indexed ref_rej, newest first: each refused update with its reason and transaction</p>}>
           <EventList label="Rejection history" group="oracle" topics={REJECTION_TOPICS} describe={describeRejection} empty="No rejection indexed yet" />

@@ -23,7 +23,7 @@ on a local network. It is Deliverable 2 of Tranche 2 of SCF #45.
 | `GET` or `POST /api/cron/record` | The rate recorder, called by a scheduler. Both methods run the same checks. Refuses any other caller. |
 | `GET` or `POST /api/cron/index` | The event indexer, called by a scheduler. Same checks as the recorder. See "Event indexer". |
 | `GET /api/dashboard/events` | The indexed protocol events, public and read-only. See "Event indexer". |
-| `GET /api/dashboard/oracle-ticks` | The oracle keeper's recorded runs and its health, public and read-only. See "Scheduler". |
+| `GET /api/dashboard/oracle-ticks` | The oracle keeper's recorded runs and its health, per oracle, public and read-only. See "Scheduler". |
 | `GET` or `POST /api/cron/alerts` | The alert check, called by a scheduler. Same checks as the recorder. See "Alerts". |
 | `GET /api/dashboard/alerts` | The open alerts, the last 7 days of alerts and the last webhook test, public and read-only. See "Alerts". |
 | `GET /api/health` | What the server sees (latest ledger, index, keeper, open alerts), public, for uptime monitors. See "Alerts". |
@@ -370,9 +370,14 @@ or `no_feed`), tx hash and signer (a public key). An error's reason is `not_conf
 `failed: <error name>`, never an error's text. A transaction the keeper sent that did not land keeps
 its hash, with `failed: <result code>` (e.g. `invokeHostFunctionTrapped`) or `failed: not confirmed`. A row that cannot be written (no `DATABASE_URL`, a
 database down) is logged by error name and never changes the answer.
-`GET /api/dashboard/oracle-ticks?limit=` (1 to 100, default 20) serves them, public and without a
-wallet, for this network's oracle: `{ ticks, health, intervalSeconds }`, newest first, cached 60 s
-at the edge, errors never cached (503 `not_configured` or `unavailable`). `health` is
+`GET /api/dashboard/oracle-ticks?oracle=&limit=` serves them, public and without a wallet, one entry
+per oracle of the manifest's markets, in the manifest's order:
+`{ intervalSeconds, oracles: [{ oracle, asset, health, ticks }] }`. `asset` names the underlying codes
+of the markets on that oracle (`USDY`, or `USTRY, GILT` for two markets on one oracle). `ticks` are
+that oracle's newest runs, newest first. `?oracle=C…` answers that oracle's entry alone; an id that is
+not one of the manifest's oracles is 400 `unknown_oracle`. `?limit=` (1 to 100, default 20) applies
+per oracle. The answer is cached 60 s at the edge; bad input and errors never are (400, or 503
+`not_configured` or `unavailable`). Each `health` is
 `{ healthy, lastSuccessAt, lastOkAt, lastTickAt, rejected24h, failures24h }`. Health is about the
 keeper (spec 0005 M-15): it is healthy while `lastOkAt`, the last run whose decision is not `error`,
 is younger than 2 × `intervalSeconds` (`ORACLE_KEEPER_INTERVAL_SECONDS`, 1,800 s by default). A
@@ -543,32 +548,45 @@ state, opens the alerts whose condition holds and closes those whose condition h
 lasts many runs keeps one open alert, and one that comes back after its close opens a new one. The
 table is also the evidence store: every alert's open and close times, and every webhook test.
 
-| Kind | Severity | Opens when | Source |
-|---|---|---|---|
-| `oracle_warning` | warning | The oracle value's age is at least 75% of `max_stale_seconds`. | The OracleAdapter's views at the latest ledger time (age in ledger time). |
-| `oracle_stale` | critical | The age is over `max_stale_seconds`, or the contract's own `is_available()` is false. It replaces the warning. | The same. |
-| `oracle_unavailable` | critical | The oracle, or the latest ledger, cannot be read by this server. It opens at once but is posted, and counts as critical, only once a check at least 120 s after it opened still cannot read it (`payload.confirmedAt`); one that clears before then closes without a post. A scheduler retry seconds later never confirms it. | The same. |
-| `oracle_rejection` | warning | A significant rejection (`oob`, `decrease`, `deviate`, `fb_value`) in the last 24 h, one alert per reason (the payload names the newest value). It closes, without a post, 24 h after its last occurrence. | The indexed `ref_rej` events, and the keeper's `rejected` runs in `oracle_ticks`. |
-| `feed_broken` | warning | A keeper run with reason `bad_price`, `rescale`, `future_ts` or `feed_err` in the last 2 × the keeper interval (3,600 s). It closes without a post. | `oracle_ticks` (feed mode). |
-| `keeper_unhealthy` | critical | Keeper runs are recorded and the last success (`pushed` or `synced`) is 2 × the interval (3,600 s) old or more. No run recorded is unknown: no alert. | `oracle_ticks`. |
-| `paused` | warning | A contract is paused. One alert per contract; the subject is its role and short id (`sy:CA62…7F2I`). | `is_paused` of RiskControl and of each market's SY wrapper, pool and manager. |
-| `risk_warning` | warning | The circuit breaker's window volume is at least 90% of its limit, protocol-wide or for one asset. | RiskControl `get_cb_limit`, `get_cb_volume`, `get_asset_limit`, `get_asset_volume`. |
-| `risk_exhausted` | critical | The volume is at or over the limit. It replaces the warning. A limit of 0 is off: neither opens. A per-asset limit and the protocol-wide one are two breakers, so the same deposits can open an alert on each. | The same. |
-| `signer_low` | warning | The keeper signer holds less than `ALERT_SIGNER_MIN_XLM` (default 20) XLM, or its account does not exist. | Horizon. The signer follows `ORACLE_KEEPER_MODE`: `ORACLE_ADMIN_SECRET`'s public key in push mode (the default), `ORACLE_KEEPER_SECRET`'s in feed mode. Without that key, there is no check. |
-| `indexer_lag` | warning | An index group's cursor is more than 3,600 s behind (the close time of its ledger). One alert per group. | `ingest_cursor`. |
-| `indexer_gap` | critical | An index group has a stored gap (`gap_from is not null`). One alert per group, with `{ from, to }`. | `ingest_cursor`. |
+Each oracle of the manifest's markets is judged on its own (one per market on Mainnet). Its alerts
+have the oracle's id as subject, and their payload names `asset`, the underlying codes of the markets
+on that oracle.
 
-- A source the check cannot read (the RPC, Horizon, the database) keeps its kinds' alerts as they
-  were: nothing of that kind closes, so a flaky read never closes an alert and opens it again. The
-  run's answer names those sources (`unread`) and kinds (`held`). Not being able to read the oracle
-  itself opens `oracle_unavailable`.
+| Kind | Severity | Opens when | Subject | Source |
+|---|---|---|---|---|
+| `oracle_warning` | warning | The oracle value's age is at least 75% of `max_stale_seconds`. | The oracle's id. | The OracleAdapter's views at the latest ledger time (age in ledger time). |
+| `oracle_stale` | critical | The age is over `max_stale_seconds`, or the contract's own `is_available()` is false. It replaces the warning. | The oracle's id. | The same. |
+| `oracle_unavailable` | critical | The oracle, or the latest ledger, cannot be read by this server. It opens at once but is posted, and counts as critical, only once a check at least 120 s after it opened still cannot read it (`payload.confirmedAt`); one that clears before then closes without a post. A scheduler retry seconds later never confirms it. Without the latest ledger, every oracle opens one. | The oracle's id. | The same. |
+| `oracle_rejection` | warning | A significant rejection (`oob`, `decrease`, `deviate`, `fb_value`) in the last 24 h, one alert per oracle and reason (the payload names the newest value). It closes, without a post, 24 h after its last occurrence. | `<oracle id>:<reason>`. | The oracle's indexed `ref_rej` events, and the keeper's `rejected` runs for it in `oracle_ticks`. |
+| `feed_broken` | warning | A keeper run with reason `bad_price`, `rescale`, `future_ts` or `feed_err` in the last 2 × the keeper interval (3,600 s by default). It closes without a post. | The oracle's id. | `oracle_ticks` (feed mode). |
+| `keeper_unhealthy` | critical | Keeper runs are recorded for the oracle and its last run without an error (`lastOkAt`) is 2 × the interval (3,600 s by default) old or more. No run recorded is unknown: no alert. | The oracle's id. | `oracle_ticks`. |
+| `seed_invalid` | critical | A manifest market's stored registry verdict is `valid = false`, so the app hides it until a check passes. It closes when the verdict is no longer false. A verdict not given yet, or one the chain could not answer, opens nothing. The payload has `marketId`, `pool`, `reason` and `asset`. | The market id. | `market_registry` (the seeds' rows). |
+| `paused` | warning | A contract is paused. One alert per contract. | Its role and short id (`sy:CA62…7F2I`). | `is_paused` of RiskControl and of each market's SY wrapper, pool and manager. |
+| `risk_warning` | warning | The circuit breaker's window volume is at least 90% of its limit, protocol-wide or for one asset. | RiskControl's id, or `asset:<asset id>`. | RiskControl `get_cb_limit`, `get_cb_volume`, `get_asset_limit`, `get_asset_volume`. |
+| `risk_exhausted` | critical | The volume is at or over the limit. It replaces the warning. A limit of 0 is off: neither opens. A per-asset limit and the protocol-wide one are two breakers, so the same deposits can open an alert on each. | The same. | The same. |
+| `signer_low` | warning | The keeper signer holds less than `ALERT_SIGNER_MIN_XLM` (default 20) XLM, or its account does not exist. | The signer's public key. | Horizon. The signer follows `ORACLE_KEEPER_MODE`: `ORACLE_ADMIN_SECRET`'s public key in push mode (the default), `ORACLE_KEEPER_SECRET`'s in feed mode. Without that key, there is no check. |
+| `indexer_lag` | warning | An index group's cursor is more than 3,600 s behind (the close time of its ledger). | The group. | `ingest_cursor`. |
+| `indexer_gap` | critical | An index group has a stored gap (`gap_from is not null`), with `{ from, to }`. | The group. | `ingest_cursor`. |
+
+- A source the check cannot read (the RPC, Horizon, the database) keeps the alerts it feeds as they
+  were: none of them closes, so a flaky read never closes an alert and opens it again. The hold is as
+  narrow as the source. An oracle that cannot be read holds only its own alerts, and the
+  other oracles are judged as usual. An unreadable registry holds `seed_invalid`. The run's answer
+  names the sources (`unread`, per oracle as `oracle:<id>`, `ticks:<id>`, `rejectionEvents:<id>`,
+  `keeper:<id>`) and what was held (`held`: a kind alone, or `kind:subject` for one alert). Not being
+  able to read the oracle itself opens `oracle_unavailable`.
+- An `ORACLE_KEEPER_INTERVAL_SECONDS` that is not valid does not stop the check. It logs the variable's
+  name, and only `keeper_unhealthy` and `feed_broken`, which are measured against the interval, are
+  held for every oracle (`unread` names `keeperInterval`). Every other kind is judged.
+- Before the per-oracle alerts, a rejection's subject was its reason alone (`deviate`). Such an open
+  alert closes, without a post, on the first run of this version, and the per-oracle one opens.
 - A circuit-breaker trip rolls its transaction back and leaves no event, so the risk page's
   exhaustion history is the open and close times of these `risk_*` alerts.
 
 **Webhook.** Every opening and every close is posted once to `ALERT_WEBHOOK_URL` as JSON:
 
 ```json
-{ "text": "[Principal testnet] Critical alert opened: Oracle stale (CDYG…YIPS). Value age 3,700 s, over the 3,600 s allowed: …",
+{ "text": "[Principal testnet] Critical alert opened: Oracle stale (CDYG…YIPS, USDY). Value age 3,700 s, over the 3,600 s allowed: …",
   "content": "(the same line)", "kind": "oracle_stale", "subject": "CDYG…", "severity": "critical",
   "network": "testnet", "at": "2026-11-14T12:00:00.000Z", "status": "opened", "test": false, "details": { … } }
 ```
@@ -576,6 +594,8 @@ table is also the evidence store: every alert's open and close times, and every 
 - `text` (Slack) and `content` (Discord) carry the same line, so either incoming webhook takes the
   payload as is. A close reads "Resolved: Oracle stale (…), open since …". Event kinds
   (`oracle_rejection`, `feed_broken`) have no close post.
+- The line shortens every contract id in the subject ("Oracle rejected an update (CDYG…YIPS:deviate,
+  USDY)") and names the asset of an oracle's alert and of `seed_invalid`. `subject` keeps it whole.
 - Each post waits at most 5 s. A post that fails or times out keeps the alert's state, and the notice
   stays undelivered (`opened_posted`, `resolved_posted`, migration 0007): the next run sends it again,
   an opening before its close. After an outage, the openings it missed are still sent, before their
@@ -595,7 +615,7 @@ The route answers:
 | Status | Body | When |
 |---|---|---|
 | 200 | `{ network, opened, resolved, open, posted, postFailures, held, unread, critical: false }` | No critical alert is open. |
-| 500 | The same body with `critical: true`, or `{ error: "failed" }` | A critical alert is open (`oracle_stale`, `oracle_unavailable` once confirmed, `keeper_unhealthy`, `risk_exhausted`, `indexer_gap`), so the scheduler's own failure alert fires too; or an unexpected error. |
+| 500 | The same body with `critical: true`, or `{ error: "failed" }` | A critical alert is open (`oracle_stale`, `oracle_unavailable` once confirmed, `keeper_unhealthy`, `seed_invalid`, `risk_exhausted`, `indexer_gap`), so the scheduler's own failure alert fires too; or an unexpected error. Five stale oracles are five critical alerts. |
 | 401 | | The caller sent neither a valid `Authorization: Bearer $CRON_SECRET` nor a valid QStash signature. |
 | 503 | `{ error: "not_configured" }` | `ALERT_WEBHOOK_URL` (an http or https URL) or `DATABASE_URL` is missing. |
 
@@ -633,7 +653,8 @@ page's exhaustion history (the last 7 days) read it.
 { "network": "testnet",
   "ledger": { "status": "ok", "sequence": 5720000, "closeTime": "2026-11-14T12:00:00.000Z" },
   "indexer": { "status": "ok", "indexedThrough": 5719940, "indexedThroughCloseTime": "…", "lagSeconds": 300, "gaps": [], "pendingGroups": [] },
-  "keeper": { "status": "ok", "healthy": true, "lastSuccessAt": "…", "lastTickAt": "…" },
+  "keeper": { "status": "ok", "healthy": true, "lastSuccessAt": "…", "lastOkAt": "…", "lastTickAt": "…" },
+  "keepers": [{ "oracle": "CDYG…", "asset": "USDY", "healthy": true, "lastOkAt": "…", "lastTickAt": "…" }],
   "openAlerts": { "status": "ok", "count": 1, "critical": 0 } }
 ```
 
@@ -642,8 +663,12 @@ Each part is read on its own, within 4 s. A part that fails or hangs reads
 group (no cursor yet, for example `market` and `escrow` before the first market) the indexer reads
 `{ "status": "pending", "reason": "no index run yet", …, "pendingGroups": ["escrow", "market"] }`,
 with `indexedThrough` 0 and `lagSeconds` null. Pending is not unavailable: it changes no status code.
-When every part is unavailable it answers 503 (not cached), with the same body. `keeper.healthy` is
-null while no keeper run is recorded. `openAlerts.critical` counts an `oracle_unavailable` only once
+When every part is unavailable it answers 503 (not cached), with the same body. The keeper is read per
+oracle of the manifest's markets. `keepers` lists each oracle, and is null while the keeper part is
+unavailable. `keeper` stays one object for monitors and describes the worst oracle: an unhealthy one
+first, then one with no run recorded, then a healthy one; among equals, the oldest `lastOkAt`.
+`healthy` is null while no keeper run is recorded for that oracle, so one oracle with no run makes
+`keeper.healthy` null, never true. `openAlerts.critical` counts an `oracle_unavailable` only once
 confirmed. An uptime monitor can watch the status code, `ledger.status`, `indexer.lagSeconds` or
 `openAlerts.critical`.
 
