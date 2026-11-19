@@ -345,13 +345,13 @@ describe("cron/oracle feed mode (D-21, M-13): ORACLE_KEEPER_MODE=feed, every ora
     ])
   })
 
-  it("the run's deadline is its start plus 50 s: the route's 60 s leave room for the rows", async () => {
+  it("the run's deadline is its start plus 45 s: the route's 60 s leave room for the rows, even on a cold database pool", async () => {
     const before = Date.now()
     await run()
     const after = Date.now()
     const { deadlineMs } = deps()
-    expect(deadlineMs).toBeGreaterThanOrEqual(before + 50_000)
-    expect(deadlineMs).toBeLessThanOrEqual(after + 50_000)
+    expect(deadlineMs).toBeGreaterThanOrEqual(before + 45_000)
+    expect(deadlineMs).toBeLessThanOrEqual(after + 45_000)
   })
 
   it("rejections go on-chain only with ORACLE_KEEPER_RECORD_REJECTIONS=1 (M-14); anything else, or unset, is off", async () => {

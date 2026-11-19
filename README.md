@@ -312,10 +312,11 @@ each retry would record the same rejection again (counted in `rejected24h` and i
   sent only while it still simulates `true`, or, for a rejection being put on-chain, the same reason
   and value. Otherwise nothing is sent, the sequence number goes to the next oracle, and the oracle is
   recorded from that fresh simulation (`skipped` for a routine reason, `rejected` with no hash else).
-- **Inside 50 s, whatever the network does.** Every network call is cut at 50 s from the start of the
-  call (the route may run 60 s, and must keep time to write its rows). An oracle whose reads and
+- **Inside 45 s, whatever the network does.** Every network call is cut at 45 s from the start of the
+  call. The route may run 60 s, and the last 15 s are kept to write its rows: a cold database pool can
+  take several seconds to connect. An oracle whose reads and
   simulation are not done 15 s in is `failed: not decided`, so the others keep time to send. A
-  transaction still not in a ledger at 50 s is `failed: not confirmed`, with its hash. An oracle whose
+  transaction still not in a ledger at 45 s is `failed: not confirmed`, with its hash. An oracle whose
   turn never came is `failed: not sent`, with no hash. A transaction that lands after the run keeps
   that record; its effect is on-chain and in the indexed events, and the next run starts from it.
 - **Two runs at once** (a manual call during a scheduled one) use the same account. The network then

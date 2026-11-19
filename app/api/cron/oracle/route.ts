@@ -13,7 +13,7 @@ import "server-only"
  *   not the oracle admin, mainnet); else 500 `failed`. One `oracle_ticks` row per run.
  * - `feed` (spec 0004 D-21, spec 0005 M-13): `tickFeedAll` signs with `ORACLE_KEEPER_SECRET`, a key
  *   with no role, and has every oracle of the manifest (`manifestOracles`) read its SEP-40 feed
- *   (`sync_from_feed`) in one run, inside 50 s; any network. On the local network only,
+ *   (`sync_from_feed`) in one run, inside 45 s; any network. On the local network only,
  *   `ORACLE_KEEPER_ORACLE_ID` replaces those oracles with one contract id or a comma-separated list (a
  *   test or local proof). New significant rejections go on-chain only with
  *   `ORACLE_KEEPER_RECORD_REJECTIONS=1` (M-14), and the keeper's memory of the last one it submitted
@@ -43,8 +43,12 @@ import { keeperIntervalSeconds, lastSubmittedRejection, recordsRejections, recor
 // ledger before the next), all inside FEED_BUDGET_MS, then the rows (the database's own timeouts
 // bound them: 5 s to connect, 5 s per query).
 export const maxDuration = 60
-/** The feed run's deadline after the route starts: no send and no confirmation look after it. */
-const FEED_BUDGET_MS = 50_000
+/**
+ * The feed run's deadline after the route starts: no send and no confirmation look after it. The
+ * rows are written after the run, and a cold database pool can take several seconds to connect, so
+ * 15 s of the route's 60 s are left for them.
+ */
+const FEED_BUDGET_MS = 45_000
 
 const errorName = (error: unknown) => (error instanceof Error ? error.name : "unknown")
 
