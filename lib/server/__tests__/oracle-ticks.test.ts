@@ -157,10 +157,11 @@ describe("keeperIntervalSeconds and recordsRejections: the keeper's schedule and
     }
   })
 
-  it("rejections go on-chain only with ORACLE_KEEPER_RECORD_REJECTIONS=1; anything else is off", () => {
+  it("rejections go on-chain only with ORACLE_KEEPER_RECORD_REJECTIONS exactly 1; anything else is off (a flag that spends fees)", () => {
     expect(recordsRejections({ ORACLE_KEEPER_RECORD_REJECTIONS: "1" })).toBe(true)
-    expect(recordsRejections({ ORACLE_KEEPER_RECORD_REJECTIONS: " 1\n" })).toBe(true)
-    for (const raw of [undefined, "", "0", "true", "yes", "on", "11"]) expect(recordsRejections({ ORACLE_KEEPER_RECORD_REJECTIONS: raw }), String(raw)).toBe(false)
+    for (const raw of [undefined, "", " 1", "1 ", " 1\n", "1\n", "0", "true", "yes", "on", "11", "01"]) {
+      expect(recordsRejections({ ORACLE_KEEPER_RECORD_REJECTIONS: raw }), JSON.stringify(raw)).toBe(false)
+    }
   })
 })
 

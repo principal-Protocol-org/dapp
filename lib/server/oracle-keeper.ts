@@ -312,6 +312,9 @@ export function createFeedChain(manifest: Manifest, oracle: string, deps: { serv
   }
 }
 
+/** A built `sync_from_feed` as RPC prepared it (footprint, resources, fee), with what that preparing simulation said. */
+export type PreparedSync = { transaction: Transaction } & FeedSimulation
+
 /**
  * The keeper account's side of a feed run: its sequence number (read once per run), RPC's
  * preparation, the send, and one look at a sent hash. `createKeeperAccount` backs it with RPC.
@@ -319,8 +322,11 @@ export function createFeedChain(manifest: Manifest, oracle: string, deps: { serv
 export type KeeperAccount = {
   /** The account's current sequence number. */
   sequence(address: string): Promise<string>
-  /** RPC's preparation of a built transaction: footprint, resources, fee. */
-  prepare(transaction: Transaction): Promise<Transaction>
+  /**
+   * RPC's preparation of a built transaction, and the verdict of the simulation it rests on: the
+   * keeper sends only while that fresh verdict still matches its decision. A simulation error throws its text.
+   */
+  prepare(transaction: Transaction): Promise<PreparedSync>
   /** Sends a signed transaction; the network's status (`PENDING`, `DUPLICATE`, `TRY_AGAIN_LATER`, `ERROR`) and, for a refusal, its result. */
   send(transaction: Transaction): Promise<{ status: string; errorResult?: xdr.TransactionResult }>
   /** One look at a sent hash: `NOT_FOUND` until it is in a ledger, then `SUCCESS` (return value, contract events) or `FAILED` (result). */
@@ -333,7 +339,18 @@ export function createKeeperAccount(manifest: Manifest, deps: { server?: OracleR
   const server: OracleRpcServer = deps.server ?? createRpcServer(rpcUrl)
   return {
     sequence: async (address) => (await server.getAccount(address)).sequenceNumber(),
-    prepare: (transaction) => server.prepareTransaction(transaction),
+    // What `prepareTransaction` does (simulate, then assemble), keeping the simulation's return value and events.
+    async prepare(transaction) {
+      const simulation = await server.simulateTransaction(transaction)
+      if (rpc.Api.isSimulationRestore(simulation)) throw new Error("the oracle needs archived ledger entries restored before it can sync")
+      if (rpc.Api.isSimulationError(simulation)) throw new Error(simulation.error)
+      if (!simulation.result) throw new Error("the simulation returned no result")
+      return {
+        transaction: rpc.assembleTransaction(transaction, simulation).build(),
+        retval: scValToNative(simulation.result.retval),
+        events: simulation.events ?? [],
+      }
+    },
     async send(transaction) {
       const answer = await server.sendTransaction(transaction)
       // SDK 17 parses the refusal into `errorResult`; a raw answer carries `errorResultXdr`.
@@ -408,6 +425,12 @@ type Run = { mode: "feed"; signer: string }
 type Simulated = { set?: DecodedEvent; rejection?: Rejection }
 /** Phase 1's verdict for one oracle: its outcome already, or a `sync_from_feed` to send. */
 type Decision = { outcome: FeedOutcome } | { submit: Simulated }
+/**
+ * What one simulation of `sync_from_feed` says by D-21's rules, before the keeper's memory is asked:
+ * `true` (a sync to send), a significant rejection (sent only on request, once per (reason, value);
+ * `notSent` is its outcome otherwise), or an outcome with nothing to send.
+ */
+type Verdict = { sync: Simulated } | { significant: Rejection; notSent: FeedOutcome } | { outcome: FeedOutcome }
 
 const errorName = (error: unknown) => (error instanceof Error ? error.name : "unknown")
 
@@ -418,6 +441,24 @@ function failureOf(run: Run, error: unknown): KeeperFailure {
 }
 
 const syncCall = (oracle: string): ContractInvocation => ({ contractId: oracle, functionName: "sync_from_feed", args: [] })
+
+/**
+ * A simulation's verdict: `true` is a sync; `false` is read from the oracle's `ref_rej` event: routine
+ * → `skipped`; broken feed or a reason this app does not know → `rejected`; significant → see
+ * `Verdict`; no `ref_rej` → `rejected` (`unknown`). Anything else throws.
+ */
+function verdictOf(run: Run, oracle: string, simulation: FeedSimulation): Verdict {
+  const events = oracleEvents(simulation.events.map((d) => d.event), oracle)
+  if (simulation.retval === true) return { sync: { set: events.find((e) => e.topic === "ref_set") } }
+  if (simulation.retval !== false) throw new Error("sync_from_feed simulated a return value that is neither true nor false")
+  const rejection = rejectionOf(events)
+  if (!rejection) return { outcome: { ...run, status: "rejected", ...NO_POINT, reason: "unknown" } }
+  const { reason, point } = rejection
+  if (isIn(ROUTINE, reason)) return { outcome: { ...run, status: "skipped", ...point, reason } }
+  const notSent: FeedOutcome = { ...run, status: "rejected", ...point, reason }
+  if (!isIn(SIGNIFICANT, reason)) return { outcome: notSent }
+  return { significant: rejection, notSent }
+}
 
 /**
  * Phase 1 for one oracle: its feed, its admin, one simulation of `sync_from_feed` as the keeper,
@@ -456,19 +497,32 @@ async function decide(
     if (error instanceof Error && ERROR_15.test(error.message)) throw new OracleKeeperConfigError(FEED_ERROR_15)
     throw error
   }
-  const events = oracleEvents(simulation.events.map((d) => d.event), oracle)
-  if (simulation.retval === true) return { submit: { set: events.find((e) => e.topic === "ref_set") } }
-  if (simulation.retval !== false) throw new Error("sync_from_feed simulated a return value that is neither true nor false")
-
-  const rejection = rejectionOf(events)
-  if (!rejection) return { outcome: { ...run, status: "rejected", ...NO_POINT, reason: "unknown" } }
-  const { reason, point } = rejection
-  const notSent: FeedOutcome = { ...run, status: "rejected", ...point, reason }
-  if (isIn(ROUTINE, reason)) return { outcome: { ...run, status: "skipped", ...point, reason } }
-  if (!isIn(SIGNIFICANT, reason) || !opts.recordRejections) return { outcome: notSent }
+  const verdict = verdictOf(run, oracle, simulation)
+  if ("sync" in verdict) return { submit: verdict.sync }
+  if ("outcome" in verdict) return verdict
+  if (!opts.recordRejections) return { outcome: verdict.notSent }
+  const { reason, point } = verdict.significant
   const last = await opts.lastSubmittedRejection(oracle)
-  if (last && last.reason === reason && last.value === point.value) return { outcome: notSent }
-  return { submit: { rejection } }
+  if (last && last.reason === reason && last.value === point.value) return { outcome: verdict.notSent }
+  return { submit: { rejection: verdict.significant } }
+}
+
+/**
+ * Phase 2's check, right before signing: the preparing simulation's verdict against phase 1's
+ * decision, which may be several ledgers old (the feed moved, someone else synced). The call is sent
+ * while that fresh verdict is `true` (a sync, which is what `decide` sends on `true`), or, for a
+ * rejection being put on-chain, the same significant (reason, value). Anything else sends nothing
+ * and is recorded from the fresh simulation by `decide`'s rules: routine → `skipped`, broken feed →
+ * `rejected`, and a significant rejection that is not the one decided → `rejected` with no hash (the
+ * next run decides it, with its memory).
+ */
+function recheck(run: Run, oracle: string, decided: Simulated, fresh: FeedSimulation): { send: Simulated } | { outcome: FeedOutcome } {
+  const verdict = verdictOf(run, oracle, fresh)
+  if ("sync" in verdict) return { send: verdict.sync }
+  if ("outcome" in verdict) return verdict
+  const { reason, point } = verdict.significant
+  const same = decided.rejection !== undefined && decided.rejection.reason === reason && decided.rejection.point.value === point.value
+  return same ? { send: { rejection: verdict.significant } } : { outcome: verdict.notSent }
 }
 
 /**
@@ -491,21 +545,52 @@ function landedOutcome(run: Run, oracle: string, simulated: Simulated, polled: P
 /** Between two looks at a sent hash. */
 const POLL_INTERVAL_MS = 1_000
 /**
- * How long a send that threw (an HTTP error: did it reach the network?) is looked for before its
- * sequence number is taken as unused: about two Mainnet ledgers.
+ * How long a send that threw (an HTTP error: did it reach the network?) is waited for before the
+ * next transaction takes its sequence number: about two Mainnet ledgers. It is still looked for at
+ * the end of the run.
  */
 const UNSURE_SEND_WAIT_MS = 10_000
+/**
+ * Phase 1's share of the run: an oracle not decided this long after the run starts (or by the
+ * deadline, whichever is first) is `not decided`, so a hanging read leaves the others time to send
+ * (about one Mainnet ledger per transaction).
+ */
+const DECIDE_BUDGET_MS = 15_000
+
+/** What a run reports for an oracle whose reads and simulation did not finish in phase 1's share of the run. */
+export const NOT_DECIDED = "not decided"
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
-/** Looks `hashes` up together, about once a second, until each is in a ledger or `until` (ms) passes; at least once. A look that throws counts as not found. */
+const PAST = Symbol("past the deadline")
+/**
+ * `work`, or `PAST` when `until` (ms) comes first. A rejection before then rejects. A call that loses
+ * the race is left to finish on its own; its answer is ignored.
+ */
+async function by<T>(work: Promise<T>, until: number): Promise<T | typeof PAST> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const past = new Promise<typeof PAST>((resolve) => {
+    timer = setTimeout(() => resolve(PAST), Math.max(0, until - Date.now()))
+  })
+  try {
+    return await Promise.race([work, past])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/**
+ * Looks `hashes` up together, about once a second, until each is in a ledger or `until` (ms) passes.
+ * No look starts at or after `until`, and each is cut there. A look that throws counts as not found.
+ */
 async function inLedgers(account: KeeperAccount, hashes: readonly string[], until: number): Promise<Map<string, PolledTransactionResult>> {
   const found = new Map<string, PolledTransactionResult>()
   for (;;) {
     const open = hashes.filter((hash) => !found.has(hash))
-    const looks = await Promise.all(open.map((hash) => account.lookup(hash).catch(() => null)))
+    if (open.length === 0 || Date.now() >= until) return found
+    const looks = await Promise.all(open.map((hash) => by(account.lookup(hash), until).catch(() => null)))
     looks.forEach((look, i) => {
-      if (look && look.status !== "NOT_FOUND") found.set(open[i], look)
+      if (look && look !== PAST && look.status !== "NOT_FOUND") found.set(open[i], look)
     })
     const left = until - Date.now()
     if (found.size === hashes.length || left <= 0) return found
@@ -517,7 +602,7 @@ async function inLedgers(account: KeeperAccount, hashes: readonly string[], unti
 type InFlight = {
   index: number
   hash: string
-  /** The network took it (PENDING, DUPLICATE); false when the send threw, so whether it got there is unknown. */
+  /** The network took it (PENDING, DUPLICATE); false when the send threw or outlasted the deadline, so whether it got there is unknown. */
   taken: boolean
   /** Its outcome if it is never seen in a ledger: `not confirmed`, or the thrown send's error name. */
   unseen: string
@@ -526,24 +611,37 @@ type InFlight = {
 /**
  * One feed-mode run over `oracles` (spec 0005 M-13), from one keeper account, inside `deadlineMs`:
  *
- * 1. In parallel, each oracle is decided (`decide`: its reads and one simulation, nothing signed).
+ * 1. In parallel, each oracle is decided (`decide`: its reads and one simulation, nothing signed),
+ *    by phase 1's cutoff (`DECIDE_BUDGET_MS` after the start, or the deadline): one not decided by
+ *    then is `failed: not decided`.
  * 2. One after another, each `sync_from_feed` to send is built on the next sequence number (the
- *    account is read once, before the first, and the number advanced here), prepared by RPC,
- *    checked (`assertPreparedMatches`: the same call, source and sequence number), signed, hashed
- *    (so a send that throws keeps its hash), and sent. The network keeps one transaction per
- *    account in its queue, so each waits until the previous one is in a ledger (or the deadline).
+ *    account is read once, before the first, and the number advanced here), prepared by RPC (a fresh
+ *    simulation), checked (`assertPreparedMatches`: the same call, source and sequence number; and
+ *    `recheck`: the fresh verdict still calls for this send, else nothing is sent and the number is
+ *    kept), signed, hashed (so a send that throws keeps its hash), and sent. The network keeps one
+ *    transaction per account in its queue, so each waits until the previous one is in a ledger.
  *    A number is used only by a transaction the network took (or one found in a ledger after its
  *    send threw); a refusal (`txBadSeq` when another run used the account, `TRY_AGAIN_LATER`) is
  *    that oracle's `failed` and the next transaction takes the same number. No re-read and no
  *    retry: the next scheduled run starts from the account again.
- * 3. Every hash still in flight is looked up together until each is in a ledger or the deadline
- *    passes (`not confirmed`, with the hash). An oracle the deadline leaves unsent is `not sent`.
+ * 3. Every hash still unseen (taken, or from a send that threw) is looked up together until each is
+ *    in a ledger or the deadline passes (`not confirmed`, or the thrown send's error name, with the
+ *    hash). An oracle the deadline leaves unsent is `not sent`.
  *
- * Every oracle gets exactly one outcome, in the order given; an error on one is its own outcome
- * (`failureOf`) and never stops the others. Without a usable key, every oracle is `not_configured`
- * and nothing is read. No network refusal: the key holds no role (push mode keeps its refusal of
- * mainnet). `sync_from_feed` needs no auth, so the admin's key would work, but it would put that key
- * in a server variable, which D-21 rules out: each oracle's admin is checked.
+ * Every network call (each oracle's decision, the sequence read, each preparation, send and look) is
+ * raced against the time left: the run resolves, with exactly one outcome per oracle in the order
+ * given, by `deadlineMs` plus the event loop's delay in firing a timer (milliseconds), whatever the
+ * network does. A send cut by the deadline is handled as a send that threw. A transaction that lands
+ * after the run (late on the network, or cut by the deadline) is recorded as it stood then (`failed`
+ * with its hash); its effect is on-chain and indexed, the next run simulates from the oracle's new
+ * state, and a rejection that landed late is not in the keeper's memory (no `rejected` row with its
+ * hash), so with `recordRejections` the next run may submit it once more.
+ *
+ * An error on one oracle is its own outcome (`failureOf`) and never stops the others. Without a
+ * usable key, every oracle is `not_configured` and nothing is read. No network refusal: the key holds
+ * no role (push mode keeps its refusal of mainnet). `sync_from_feed` needs no auth, so the admin's
+ * key would work, but it would put that key in a server variable, which D-21 rules out: each
+ * oracle's admin is checked.
  */
 export async function tickFeedAll(deps: {
   manifest: Manifest
@@ -552,7 +650,7 @@ export async function tickFeedAll(deps: {
   oracles: readonly string[]
   /** Whether a new significant rejection is put on-chain (M-14, `ORACLE_KEEPER_RECORD_REJECTIONS`). */
   recordRejections: boolean
-  /** No transaction is sent, and no hash looked for, after this time (ms). */
+  /** No network call runs past this time (ms): no transaction is sent, and no hash looked for, after it. */
   deadlineMs: number
   /** The last significant rejection this keeper submitted for an oracle (its `oracle_ticks` memory); read only when one is to be submitted. */
   lastSubmittedRejection(oracle: string): Promise<{ reason: string; value: string } | null>
@@ -568,24 +666,31 @@ export async function tickFeedAll(deps: {
     return oracles.map((oracle) => ({ oracle, outcome: { status: "not_configured", mode: "feed", signer: null, message } }))
   }
   const run: Run = { mode: "feed", signer: keeper.publicKey() }
+  const notSent: FeedOutcome = { ...run, status: "failed", name: NOT_SENT }
   let server: OracleRpcServer | undefined
   const rpcServer = () => (server ??= createRpcServer(manifest.rpcUrl))
   const chainFor = deps.chainFor ?? ((oracle: string) => createFeedChain(manifest, oracle, { server: rpcServer() }))
   const account = deps.account ?? createKeeperAccount(manifest, { server: rpcServer() })
 
-  // Phase 1: every oracle at once.
+  // Phase 1: every oracle at once, by its cutoff.
+  const decideBy = Math.min(deadlineMs, Date.now() + DECIDE_BUDGET_MS)
   const decisions = await Promise.all(
-    oracles.map((oracle): Promise<Decision> => {
+    oracles.map(async (oracle): Promise<Decision> => {
       try {
-        return decide(oracle, chainFor(oracle), keeper, run, deps).catch((error: unknown) => ({ outcome: failureOf(run, error) }))
+        const decision = await by(decide(oracle, chainFor(oracle), keeper, run, deps), decideBy)
+        return decision === PAST ? { outcome: { ...run, status: "failed", name: NOT_DECIDED } } : decision
       } catch (error) {
-        return Promise.resolve({ outcome: failureOf(run, error) })
+        return { outcome: failureOf(run, error) }
       }
     }),
   )
   const outcomes: (FeedOutcome | undefined)[] = decisions.map((d) => ("outcome" in d ? d.outcome : undefined))
+  /** What each sent call's fresh simulation said it would do: the fallback for its landed events. */
+  const simulatedFor = new Map<number, Simulated>()
   const landed = new Map<number, PolledTransactionResult>()
   const inFlight: InFlight[] = []
+  /** Sends that threw and were not seen in their window: their number went to the next transaction; phase 3 still looks for them. */
+  const unsure: InFlight[] = []
 
   // Phase 2: one transaction after another.
   let sequence: bigint | null = null
@@ -594,7 +699,7 @@ export async function tickFeedAll(deps: {
     if (!("submit" in decision)) continue
     if (Date.now() >= deadlineMs) {
       // Past the deadline nothing more is sent; phase 3 settles what is still in flight.
-      outcomes[index] = { ...run, status: "failed", name: NOT_SENT }
+      outcomes[index] = notSent
       continue
     }
     const previous = inFlight.at(-1)
@@ -608,19 +713,25 @@ export async function tickFeedAll(deps: {
         // A thrown send whose transaction is in a ledger did use its number.
         if (!previous.taken && sequence !== null) sequence += 1n
       } else if (!previous.taken) {
-        // Never seen: as far as the ledger shows, it did not reach the network, and its number is the next one's.
+        // Not seen in its window: as far as the ledger shows, it did not reach the network, so its
+        // number is the next one's. If it lands after all, the next one is refused (one effect per number).
         inFlight.pop()
-        outcomes[previous.index] = { ...run, status: "failed", name: previous.unseen, hash: previous.hash }
+        unsure.push(previous)
       }
-      // Taken and still unseen at the deadline: phase 3 looks once more.
+      // Taken and still unseen at the deadline: phase 3 settles it.
     }
     if (Date.now() >= deadlineMs) {
-      outcomes[index] = { ...run, status: "failed", name: NOT_SENT }
+      outcomes[index] = notSent
       continue
     }
     if (sequence === null && accountError === null) {
       try {
-        sequence = BigInt(await account.sequence(keeper.publicKey()))
+        const read = await by(account.sequence(keeper.publicKey()), deadlineMs)
+        if (read === PAST) {
+          outcomes[index] = notSent
+          continue
+        }
+        sequence = BigInt(read)
       } catch (error) {
         accountError = errorName(error)
       }
@@ -640,25 +751,43 @@ export async function tickFeedAll(deps: {
         invocation: syncCall(oracles[index]),
         timeoutSeconds: TX_TIMEOUT_SECONDS,
       })
-      const prepared = await account.prepare(built)
+      const prepared = await by(account.prepare(built), deadlineMs)
+      if (prepared === PAST) {
+        // Nothing reached the network: the number is unused.
+        outcomes[index] = notSent
+        continue
+      }
       // RPC may add footprint, resources and fee; it may not change the call, the source or the sequence number (R29).
-      assertPreparedMatches(built, prepared)
-      prepared.sign(keeper)
-      signed = prepared
-      hash = bytesToHex(prepared.hash())
+      assertPreparedMatches(built, prepared.transaction)
+      const check = recheck(run, oracles[index], decision.submit, prepared)
+      if ("outcome" in check) {
+        // The fresh simulation no longer calls for this send: nothing is sent, the number is the next one's.
+        outcomes[index] = check.outcome
+        continue
+      }
+      simulatedFor.set(index, check.send)
+      prepared.transaction.sign(keeper)
+      signed = prepared.transaction
+      hash = bytesToHex(prepared.transaction.hash())
     } catch (error) {
       // Nothing reached the network: the number is the next transaction's.
       outcomes[index] = failureOf(run, error)
       continue
     }
     if (Date.now() >= deadlineMs) {
-      // The preparation ran past the deadline: nothing is sent that the run could not confirm.
-      outcomes[index] = { ...run, status: "failed", name: NOT_SENT }
+      // The preparation ran up to the deadline: nothing is sent that the run could not confirm.
+      outcomes[index] = notSent
       continue
     }
     let answer: Awaited<ReturnType<KeeperAccount["send"]>>
     try {
-      answer = await account.send(signed)
+      const sent = await by(account.send(signed), deadlineMs)
+      if (sent === PAST) {
+        // Cut by the deadline: as a send that threw, it keeps its hash, and the run sends nothing more.
+        inFlight.push({ index, hash, taken: false, unseen: NOT_CONFIRMED })
+        continue
+      }
+      answer = sent
     } catch (error) {
       inFlight.push({ index, hash, taken: false, unseen: errorName(error) })
       continue
@@ -673,16 +802,17 @@ export async function tickFeedAll(deps: {
     }
   }
 
-  // Phase 3: whatever is still in flight, together, until the deadline.
-  const seen = await inLedgers(account, inFlight.map((f) => f.hash), deadlineMs)
-  for (const f of inFlight) {
+  // Phase 3: whatever is still unseen, together, until the deadline.
+  const open = [...unsure, ...inFlight]
+  const seen = await inLedgers(account, open.map((f) => f.hash), deadlineMs)
+  for (const f of open) {
     const look = seen.get(f.hash)
     if (look) landed.set(f.index, look)
     else outcomes[f.index] = { ...run, status: "failed", name: f.unseen, hash: f.hash }
   }
   for (const [index, look] of landed) {
     const decision = decisions[index]
-    if ("submit" in decision) outcomes[index] = landedOutcome(run, oracles[index], decision.submit, look)
+    if ("submit" in decision) outcomes[index] = landedOutcome(run, oracles[index], simulatedFor.get(index) ?? decision.submit, look)
   }
   return oracles.map((oracle, index) => ({ oracle, outcome: outcomes[index] ?? { ...run, status: "failed", name: "unknown" } }))
 }

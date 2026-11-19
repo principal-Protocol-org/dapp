@@ -46,7 +46,8 @@ export function keeperIntervalSeconds(env: Record<string, string | undefined>): 
  * transaction (on Mainnet each one would cost a fee every run while a price falls).
  */
 export function recordsRejections(env: Record<string, string | undefined>): boolean {
-  return env.ORACLE_KEEPER_RECORD_REJECTIONS?.trim() === "1"
+  // Exactly "1": a flag that spends fees is never turned on by a value that only looks like it.
+  return env.ORACLE_KEEPER_RECORD_REJECTIONS === "1"
 }
 
 export type TickDecision = "pushed" | "synced" | "skipped" | "rejected" | "error"

@@ -1,11 +1,12 @@
 // @vitest-environment node
-import { Address, Keypair, StrKey, Transaction, nativeToScVal, xdr } from "@stellar/stellar-sdk"
+import { Address, Keypair, SorobanDataBuilder, StrKey, Transaction, nativeToScVal, xdr } from "@stellar/stellar-sdk"
 import { describe, expect, it, vi } from "vitest"
 import localExample from "@/config/manifests/local.example.json"
 import { bytesToHex } from "@/lib/protocol/bytes"
 import * as classes from "@/lib/protocol/dashboard/rejections"
 import { isSignificantRejection } from "@/lib/protocol/dashboard/rejections"
 import { parseManifest } from "@/lib/protocol/manifest"
+import { assertPreparedMatches } from "@/lib/protocol/review"
 import { buildInvocationEnvelope, type ContractInvocation, type PolledTransactionResult } from "@/lib/protocol/stellar"
 import type { Manifest } from "@/lib/protocol/types"
 
@@ -17,6 +18,7 @@ import {
   NO_FEED_REASON,
   NO_PRICE_REASONS,
   NOT_CONFIRMED,
+  NOT_DECIDED,
   NOT_SENT,
   ORACLE_APY_PERCENT,
   OracleKeeperConfigError,
@@ -33,6 +35,7 @@ import {
   type FeedChain,
   type KeeperAccount,
   type OracleChain,
+  type PreparedSync,
   type OracleRpcServer,
 } from "../oracle-keeper"
 
@@ -326,9 +329,10 @@ const ORACLE_ADMIN = Keypair.random().publicKey()
 
 /**
  * One oracle on a fake network: `feed_source` answers `feedSource` (or throws `readError`),
- * `get_admin` answers `admin` (the oracle admin by default), the simulation answers `sim`; a sent
- * `sync_from_feed` lands returning `returned` (the simulated value by default) with the contract
- * events `landed` (none when absent).
+ * `get_admin` answers `admin` (the oracle admin by default), the simulation answers `sim`, and the
+ * preparing simulation right before the send answers `prepared` (`sim` by default: nothing moved);
+ * a sent `sync_from_feed` lands returning `returned` (the simulated value by default) with the
+ * contract events `landed` (none when absent).
  */
 type FeedState = {
   feedSource?: unknown
@@ -336,6 +340,7 @@ type FeedState = {
   admin?: string
   sim?: { retval: unknown; events: xdr.DiagnosticEvent[] }
   simError?: Error
+  prepared?: { retval: unknown; events: xdr.DiagnosticEvent[] }
   returned?: unknown
   landed?: xdr.DiagnosticEvent[]
 }
@@ -374,7 +379,7 @@ const txResult = (code: "txBadSeq" | "txInsufficientFee") =>
 
 /**
  * The keeper account on a fake network. `sequence` answers `start` (each read counted); `prepare`
- * hands back the transaction as built; `send` records what it is given and answers `answers[i]` for
+ * hands back the transaction as built, with its oracle's `prepared` simulation; `send` records what it is given and answers `answers[i]` for
  * the i-th send (PENDING by default; a function may throw); `lookup` finds the i-th sent transaction
  * as `seen(i, attempt)` says (null: not in a ledger yet), by default in a ledger at once, SUCCESS,
  * returning and emitting what its oracle's state says.
@@ -389,7 +394,10 @@ function fakeAccount(opts: {
   const attempts: number[] = []
   const account = {
     sequence: vi.fn<(address: string) => Promise<string>>(async () => opts.start ?? "100"),
-    prepare: vi.fn(async (tx: Transaction) => tx),
+    prepare: vi.fn(async (tx: Transaction): Promise<PreparedSync> => {
+      const state = opts.states?.[callOf(tx).contractId] ?? {}
+      return { transaction: tx, ...(state.prepared ?? state.sim ?? { retval: true, events: [] }) }
+    }),
     send: vi.fn(async (tx: Transaction): Promise<SendAnswer> => {
       sent.push(tx)
       const answer = opts.answers?.[sent.length - 1] ?? { status: "PENDING" }
@@ -662,11 +670,168 @@ describe("tickFeedAll (M-13): every oracle in one run, from one account", () => 
     const net = fakeNetwork({ [A]: synced(A, 1n, 1n) })
     net.account.prepare.mockImplementationOnce(async (tx) => {
       await new Promise((resolve) => setTimeout(resolve, 10_000))
-      return tx
+      return { transaction: tx, retval: true, events: [] }
     })
     const runs = await withFakeTimers(() => runFeed(net, { deadlineMs: Date.now() + 5_000 }))
     expect(runs.map((r) => r.outcome)).toEqual([{ ...run, status: "failed", name: NOT_SENT }])
     expect(net.account.send).not.toHaveBeenCalled()
+  })
+
+  /** Never settles: a network call that hangs. */
+  const never = <T,>() => new Promise<T>(() => {})
+  /** `body` under fake timers, with the fake clock's start and the time the run resolved. */
+  async function timed<T>(body: (t0: number) => Promise<T>): Promise<{ result: T; t0: number; doneAt: number }> {
+    let t0 = 0
+    let doneAt = 0
+    const result = await withFakeTimers(async () => {
+      t0 = Date.now()
+      const r = await body(t0)
+      doneAt = Date.now()
+      return r
+    })
+    return { result, t0, doneAt }
+  }
+
+  it("a decision that never comes is failed: not decided at phase 1's cutoff (15 s); the others still send", async () => {
+    const net = fakeNetwork({ [A]: synced(A, 1n, 1n), [B]: synced(B, 2n, 2n) })
+    vi.mocked(net.chains[A].chain.read).mockImplementation(() => never())
+    const { result: runs, t0, doneAt } = await timed((t) => runFeed(net, { deadlineMs: t + 50_000 }))
+    expect(runs.map((r) => r.outcome)).toEqual([
+      { ...run, status: "failed", name: NOT_DECIDED },
+      { ...run, status: "synced", value: "2", timestamp: 2, hash: hashOf(net.sent[0]) },
+    ])
+    expect(callsOf(net)).toEqual([sentCall(B)])
+    expect(doneAt - t0).toBe(15_000)
+    // A memory read that hangs is part of the decision: the same cutoff.
+    const slow = fakeNetwork({ [A]: { sim: { retval: false, events: [refRej(9n, 1n, "decrease", A)] } } })
+    const cut = await timed((t) => runFeed(slow, { deadlineMs: t + 50_000, lastSubmittedRejection: () => never() }))
+    expect(cut.result.map((r) => r.outcome)).toEqual([{ ...run, status: "failed", name: NOT_DECIDED }])
+  })
+
+  it("a network whose calls never settle: the run resolves by the deadline with one failed outcome per oracle, and nothing is sent after it", async () => {
+    const hang = ["reads", "sequence", "prepare", "send", "lookup"] as const
+    for (const step of hang) {
+      const net = fakeNetwork({ [A]: synced(A, 1n, 1n), [B]: synced(B, 2n, 2n), [C]: { feedSource: null } })
+      if (step === "reads") for (const o of [A, B, C]) vi.mocked(net.chains[o].chain.read).mockImplementation(() => never())
+      if (step === "sequence") net.account.sequence.mockImplementation(() => never())
+      if (step === "prepare") net.account.prepare.mockImplementation(() => never())
+      if (step === "send") net.account.send.mockImplementation(async (tx) => (net.sent.push(tx), never()))
+      if (step === "lookup") net.account.lookup.mockImplementation(() => never())
+      const sendTimes: number[] = []
+      const sending = net.account.send.getMockImplementation()
+      net.account.send.mockImplementation(async (tx) => {
+        sendTimes.push(Date.now())
+        return sending ? sending(tx) : { status: "PENDING" }
+      })
+      // A deadline shorter than phase 1's cutoff, so the run ends on the deadline itself.
+      const { result: runs, t0, doneAt } = await timed((t) => runFeed(net, { deadlineMs: t + 12_000 }))
+      expect(doneAt - t0, step).toBeLessThanOrEqual(12_000)
+      expect(runs.map((r) => r.oracle), step).toEqual([A, B, C])
+      expect(sendTimes.every((at) => at < t0 + 12_000), step).toBe(true)
+      const outcomes = runs.map((r) => r.outcome)
+      if (step === "reads") {
+        expect(outcomes).toEqual([0, 1, 2].map(() => ({ ...run, status: "failed", name: NOT_DECIDED })))
+        expect(net.account.sequence).not.toHaveBeenCalled()
+      } else if (step === "sequence" || step === "prepare") {
+        expect(outcomes, step).toEqual([
+          { ...run, status: "failed", name: NOT_SENT },
+          { ...run, status: "failed", name: NOT_SENT },
+          { ...run, status: "skipped", value: null, timestamp: null, reason: "no_feed" },
+        ])
+        expect(net.account.send, step).not.toHaveBeenCalled()
+      } else {
+        // The send (or every look at it) hangs: A keeps its hash, unconfirmed; B is never sent.
+        expect(outcomes, step).toEqual([
+          { ...run, status: "failed", name: NOT_CONFIRMED, hash: hashOf(net.sent[0]) },
+          { ...run, status: "failed", name: NOT_SENT },
+          { ...run, status: "skipped", value: null, timestamp: null, reason: "no_feed" },
+        ])
+        expect(sendTimes, step).toHaveLength(1)
+      }
+    }
+  })
+
+  it("a look that would start at or after the deadline is not made", async () => {
+    const net = fakeNetwork({ [A]: synced(A, 1n, 1n) }, { seen: () => null })
+    const { result: runs, t0 } = await timed((t) => runFeed(net, { deadlineMs: t + 3_000 }))
+    expect(runs.map((r) => r.outcome)).toEqual([{ ...run, status: "failed", name: NOT_CONFIRMED, hash: hashOf(net.sent[0]) }])
+    // Looks at 0, 1 and 2 s; none at 3 s, the deadline.
+    expect(net.account.lookup).toHaveBeenCalledTimes(3)
+    expect(t0).toBeGreaterThan(0)
+  })
+
+  it("re-checked right before the send: a sync whose fresh simulation now says stale_ts is skipped from it, nothing sent, its number kept for the next oracle", async () => {
+    const net = fakeNetwork({
+      // Someone else synced A between its decision and its turn: the preparing simulation says stale_ts.
+      [A]: { sim: { retval: true, events: [refSet(10_000_000n, 1_700_000_000n, A)] }, prepared: { retval: false, events: [refRej(10_000_000n, 1_700_000_000n, "stale_ts", A)] } },
+      [B]: synced(B, 2n, 2n),
+    })
+    const runs = await runFeed(net)
+    expect(runs.map((r) => r.outcome)).toEqual([
+      { ...run, status: "skipped", value: "10000000", timestamp: 1_700_000_000, reason: "stale_ts" },
+      { ...run, status: "synced", value: "2", timestamp: 2, hash: hashOf(net.sent[0]) },
+    ])
+    expect(net.account.prepare).toHaveBeenCalledTimes(2)
+    expect(net.sent.map(callOf).map((c) => [c.contractId, c.sequence])).toEqual([[B, "101"]])
+  })
+
+  it("re-checked: a sync whose fresh simulation now rejects is rejected from it and not sent, whatever recordRejections says", async () => {
+    for (const recordRejections of [false, true]) {
+      for (const [reason, value] of [
+        ["deviate", 11_500_000n],
+        ["decrease", 9_000_000n],
+        ["feed_err", 0n],
+      ] as const) {
+        const net = fakeNetwork({ [A]: { sim: { retval: true, events: [refSet(10_000_000n, 1n, A)] }, prepared: { retval: false, events: [refRej(value, 2n, reason, A)] } } })
+        const [{ outcome }] = await runFeed(net, { recordRejections })
+        const point = reason === "feed_err" ? { value: null, timestamp: null } : { value: String(value), timestamp: 2 }
+        expect(outcome, `${reason} ${recordRejections}`).toEqual({ ...run, status: "rejected", ...point, reason })
+        expect(net.sent).toEqual([])
+      }
+    }
+  })
+
+  it("re-checked: a rejection being put on-chain is sent only while the fresh simulation gives the same (reason, value); true is sent as a sync", async () => {
+    const decided = { retval: false, events: [refRej(11_500_000n, 1n, "deviate", A)] }
+    const fresh = async (prepared: FeedState["prepared"]) => {
+      const net = fakeNetwork({ [A]: { sim: decided, prepared, returned: prepared?.retval } })
+      const [{ outcome }] = await runFeed(net, { recordRejections: true })
+      return { outcome, sent: net.sent.length, hash: net.sent[0] ? hashOf(net.sent[0]) : undefined }
+    }
+    // The same (reason, value), a later timestamp: still the rejection decided, sent.
+    const same = await fresh({ retval: false, events: [refRej(11_500_000n, 2n, "deviate", A)] })
+    expect(same).toMatchObject({ outcome: { status: "rejected", reason: "deviate", value: "11500000", timestamp: 2, hash: same.hash }, sent: 1 })
+    // Another value, or another significant reason: not the one decided, so not sent (the next run decides it).
+    expect(await fresh({ retval: false, events: [refRej(11_600_000n, 2n, "deviate", A)] })).toEqual({
+      outcome: { ...run, status: "rejected", value: "11600000", timestamp: 2, reason: "deviate" },
+      sent: 0,
+      hash: undefined,
+    })
+    expect(await fresh({ retval: false, events: [refRej(9_000_000n, 2n, "decrease", A)] })).toMatchObject({ outcome: { status: "rejected", reason: "decrease" }, sent: 0 })
+    // The feed is back in bounds: true, sent as the sync decide would have sent.
+    const back = await fresh({ retval: true, events: [refSet(10_100_000n, 3n, A)] })
+    expect(back).toMatchObject({ outcome: { status: "synced", value: "10100000", timestamp: 3, hash: back.hash }, sent: 1 })
+  })
+
+  it("a send that throws and lands after its 10 s window is that oracle's landed result, from the run's last look; the next transaction, on the same number, was refused", async () => {
+    let t0 = 0
+    const net = fakeNetwork(
+      { [A]: synced(A, 1n, 1n), [B]: synced(B, 2n, 2n) },
+      {
+        answers: [() => Promise.reject(new TypeError("socket hang up")), { status: "ERROR", errorResult: txResult("txBadSeq") }],
+        // A's transaction reaches a ledger 15 s in, after the 10 s B waited for it.
+        seen: (i) => (i === 0 && Date.now() < t0 + 15_000 ? null : undefined),
+      },
+    )
+    const runs = await withFakeTimers(() => {
+      t0 = Date.now()
+      return runFeed(net)
+    })
+    expect(runs.map((r) => r.outcome)).toEqual([
+      { ...run, status: "synced", value: "1", timestamp: 1, hash: hashOf(net.sent[0]) },
+      { ...run, status: "failed", name: "txBadSeq", hash: hashOf(net.sent[1]) },
+    ])
+    expect(net.sent.map((tx) => tx.sequence)).toEqual(["101", "101"])
   })
 
   it("a deadline already passed sends nothing: every oracle to sync is failed: not sent", async () => {
@@ -686,9 +851,11 @@ describe("tickFeedAll (M-13): every oracle in one run, from one account", () => 
         throw new TypeError("simulation failed at https://rpc.example/key=abc")
       })
       // RPC hands back another call (B's transaction prepared as a call to A): refused before signing.
-      .mockImplementationOnce(async (tx) =>
-        buildInvocationEnvelope({ source: tx.source, sequence: "100", networkPassphrase: manifest.networkPassphrase, invocation: { contractId: A, functionName: "sync_from_feed", args: [] } }),
-      )
+      .mockImplementationOnce(async (tx) => ({
+        transaction: buildInvocationEnvelope({ source: tx.source, sequence: "100", networkPassphrase: manifest.networkPassphrase, invocation: { contractId: A, functionName: "sync_from_feed", args: [] } }),
+        retval: true,
+        events: [],
+      }))
     const runs = await runFeed(net)
     expect(runs.map((r) => r.outcome)).toEqual([
       { ...run, status: "failed", name: "TypeError" },
@@ -1002,10 +1169,21 @@ describe("the RPC feed chain", () => {
   })
 })
 
+/** A successful simulation as `rpc.Server` hands it back (parsed): `retval`, the events, an empty footprint, a resource fee of 100. */
+const simulationOf = (retval: xdr.ScVal, events: xdr.DiagnosticEvent[] = []) => ({
+  _parsed: true as const,
+  id: "1",
+  latestLedger: 1,
+  minResourceFee: "100",
+  transactionData: new SorobanDataBuilder().setResourceFee(100),
+  result: { retval, auth: [] },
+  events,
+})
+
 describe("the RPC keeper account", () => {
   function fakeRpc() {
     const server = {
-      simulateTransaction: vi.fn(async () => ({})),
+      simulateTransaction: vi.fn(async (): Promise<unknown> => simulationOf(xdr.ScVal.scvBool(true))),
       getLatestLedger: vi.fn(async () => ({ sequence: 9, closeTime: "1700000000" })),
       getAccount: vi.fn(async () => ({ sequenceNumber: () => "70" })),
       prepareTransaction: vi.fn(async (tx: Transaction) => tx),
@@ -1019,13 +1197,37 @@ describe("the RPC keeper account", () => {
   }
   const tx = () => buildInvocationEnvelope({ source: keeper.publicKey(), sequence: "70", networkPassphrase: manifest.networkPassphrase, invocation: SYNC })
 
-  it("reads the sequence number with getAccount and prepares with prepareTransaction", async () => {
+  it("reads the sequence number with getAccount", async () => {
     const server = fakeRpc()
     const account = createKeeperAccount(manifest, { server })
     expect(await account.sequence(keeper.publicKey())).toBe("70")
     expect(server.getAccount).toHaveBeenCalledWith(keeper.publicKey())
+  })
+
+  it("prepares as prepareTransaction does (simulate, then assemble) and keeps that simulation's verdict and events", async () => {
+    const server = fakeRpc()
+    const events = [refRej(11_500_000n, 2n, "deviate")]
+    server.simulateTransaction.mockResolvedValueOnce(simulationOf(xdr.ScVal.scvBool(false), events))
     const built = tx()
-    expect(await account.prepare(built)).toBe(built)
+    const prepared = await createKeeperAccount(manifest, { server }).prepare(built)
+    expect(server.simulateTransaction).toHaveBeenCalledWith(built)
+    expect(server.prepareTransaction).not.toHaveBeenCalled()
+    expect(prepared.retval).toBe(false)
+    expect(prepared.events).toBe(events)
+    // The assembled transaction: the same call, source and sequence, the resource fee added; it passes the R29 check.
+    expect(prepared.transaction).not.toBe(built)
+    expect(callOf(prepared.transaction)).toEqual(callOf(built))
+    expect(BigInt(prepared.transaction.fee)).toBe(BigInt(built.fee) + 100n)
+    expect(() => assertPreparedMatches(built, prepared.transaction)).not.toThrow()
+  })
+
+  it("a preparing simulation that errors, or needs a restore, throws its text: nothing to sign", async () => {
+    const server = fakeRpc()
+    const account = createKeeperAccount(manifest, { server })
+    server.simulateTransaction.mockResolvedValueOnce({ error: "HostError: Error(Contract, #8)", events: [], latestLedger: 1, _parsed: true })
+    await expect(account.prepare(tx())).rejects.toThrow("HostError: Error(Contract, #8)")
+    server.simulateTransaction.mockResolvedValueOnce({ ...simulationOf(xdr.ScVal.scvBool(true)), restorePreamble: { minResourceFee: "1", transactionData: new SorobanDataBuilder() } })
+    await expect(account.prepare(tx())).rejects.toThrow(/restored/)
   })
 
   it("sends with sendTransaction and hands back the network's status, and a refusal's result (parsed, or from its XDR)", async () => {

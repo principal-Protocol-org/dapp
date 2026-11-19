@@ -189,7 +189,7 @@ Copy `.env.example` to `.env.local`. Never commit real keys.
 | `ORACLE_KEEPER_SECRET` | Server only | Feed mode's key: funded, with no protocol role. It only pays the fee of `sync_from_feed`, which anyone may call, so feed mode may run on any network. The oracle admin's key is refused (503 `not_configured`). In feed mode the alert check watches its XLM. |
 | `ORACLE_KEEPER_ORACLE_ID` | Server only | Optional, feed mode only, for tests and the local proof. One contract id, or a comma-separated list, that `cron/oracle` syncs instead of the manifest's oracles (for example the standalone oracles of `scripts/dev-stack/feed-oracle.sh`). Their runs are recorded under those oracles, so the dashboard and the alert check, which follow the manifest, do not show them; each run logs a warning. Off the local network, any value other than the manifest's own single oracle answers 503 `not_configured`. |
 | `ORACLE_KEEPER_INTERVAL_SECONDS` | Server only | Optional. The keeper's schedule in seconds (default 1800; 300 on Mainnet). Keeper health and the alerts measure against it, so set it to the schedule you configure. A value that is not a whole number from 60 to 86400 makes `cron/oracle` answer 503 `not_configured` in feed mode, and the keeper's health unavailable. |
-| `ORACLE_KEEPER_RECORD_REJECTIONS` | Server only | Optional, feed mode only. `1` puts each new significant rejection on-chain with one transaction (one fee). Anything else, or unset, records it from the simulation with no transaction (the default; Mainnet). |
+| `ORACLE_KEEPER_RECORD_REJECTIONS` | Server only | Optional, feed mode only. Exactly `1` (no spaces) puts each new significant rejection on-chain with one transaction (one fee). Anything else, or unset, records it from the simulation with no transaction (the default; Mainnet). |
 | `ALERT_WEBHOOK_URL` | Server only | Where `cron/alerts` posts each alert it opens or closes (Slack or Discord incoming webhook, or any http(s) endpoint). Never logged or answered. Unset, the check answers 503 `not_configured`. |
 | `ALERT_SIGNER_MIN_XLM` | Server only | Optional. The keeper signer's XLM floor for `signer_low` (default 20). |
 
@@ -306,10 +306,18 @@ each retry would record the same rejection again (counted in `rejected24h` and i
   builds, prepares, checks, signs and sends each `sync_from_feed` one after another, each on the next
   number. The network keeps only one transaction per account in its queue, so each one is sent after
   the previous one is in a ledger. The hash is computed before the send, so a send that throws still
-  records its hash. The sends and the confirmation looks happen inside 50 s from the start of the call
-  (the route may run 60 s).
-  A transaction still not in a ledger then is `failed: not confirmed`, with its hash. An oracle whose
-  turn never came is `failed: not sent`, with no hash.
+  records its hash.
+- **Checked again right before the send.** A later oracle's turn can come several ledgers after its
+  first simulation, so the simulation RPC runs to prepare the transaction is checked too. The call is
+  sent only while it still simulates `true`, or, for a rejection being put on-chain, the same reason
+  and value. Otherwise nothing is sent, the sequence number goes to the next oracle, and the oracle is
+  recorded from that fresh simulation (`skipped` for a routine reason, `rejected` with no hash else).
+- **Inside 50 s, whatever the network does.** Every network call is cut at 50 s from the start of the
+  call (the route may run 60 s, and must keep time to write its rows). An oracle whose reads and
+  simulation are not done 15 s in is `failed: not decided`, so the others keep time to send. A
+  transaction still not in a ledger at 50 s is `failed: not confirmed`, with its hash. An oracle whose
+  turn never came is `failed: not sent`, with no hash. A transaction that lands after the run keeps
+  that record; its effect is on-chain and in the indexed events, and the next run starts from it.
 - **Two runs at once** (a manual call during a scheduled one) use the same account. The network then
   refuses the later transactions with `txBadSeq` (the other run used the number) or
   `TRY_AGAIN_LATER` (the other run's transaction is still queued). Each such oracle is `failed` with
