@@ -85,7 +85,7 @@ export type RouteState = {
    * the slippage setting (D-26 item 4). A warning only: the step can still be signed.
    */
   quoteWarning?: true
-  /** Interrupted: the single call back to USDY, or why there is none. */
+  /** Interrupted: the single call back to the market's asset, or why there is none. */
   unwind?: { available: true; amount: bigint } | { available: false; reason: string }
   /** Interrupted by an archived entry: the call to restore first (0001's restore flow). */
   restore?: { source: string; invocation: ContractInvocation }
@@ -137,7 +137,7 @@ export type RouteControls = {
   sign(): void
   /** Interrupted: prepares the first step not confirmed. Waiting: re-checks the unknown step by its hash. */
   continue(): void
-  /** Interrupted: replaces the remaining steps by the single call back to USDY, and prepares it. */
+  /** Interrupted: replaces the remaining steps by the single call back to the market's asset, and prepares it. */
   unwind(): void
   /**
    * Closes what is on screen: a review not signed yet, a finished or interrupted route, or a lost
@@ -165,7 +165,7 @@ type Prepared = { review: Review; draft: ActionInput; outcome: SimulationOutcome
 
 const HOLDINGS: readonly string[] = ["underlying", "sy", "pt", "yt", "lp"]
 
-/** The run's logged preview when it has the right shape; a run turned back into USDY is never compared. */
+/** The run's logged preview when it has the right shape; a run turned back into the market's asset is never compared. */
 function previewOf(run: RouteRun): StepPreview | undefined {
   const p = run.preview as Partial<StepPreview> | undefined
   if (run.unwound || !p || typeof p !== "object") return undefined
@@ -261,6 +261,15 @@ const holdingsOf = (run: RouteRun): Holdings | undefined =>
   routeHoldings(run.request, run.plans, run.outputs, firstOpen(run))
 
 /**
+ * The market's asset, which the holdings and the way back name. Read from the manifest, never from the
+ * run: runs logged before plan 0009 carry no code. Neutral words for a market no longer in the manifest.
+ */
+function assetOf(manifest: Manifest, marketId: string): { code: string; decimals: number } {
+  const u = getMarket(manifest, marketId)?.underlying
+  return u ? { code: u.code, decimals: u.decimals } : { code: "the underlying", decimals: 7 }
+}
+
+/**
  * Waiting on step `n`: what the confirmed steps left before it, said as such, since the unknown step
  * may have changed it (ruling R2-24: shown before a lost step can be closed).
  */
@@ -274,14 +283,14 @@ function waitingHoldings(run: RouteRun, n: number, underlying: { code: string; d
 }
 
 /**
- * What the confirmed steps left with the user, in words, and the single call back to USDY from it;
- * after maturity its reason names Redeem rather than a sale that has closed.
+ * What the confirmed steps left with the user, in words, and the single call back to the market's
+ * asset from it; after maturity its reason names Redeem rather than a sale that has closed.
  */
 function interruption(run: RouteRun, underlying: { code: string; decimals: number }, matured: boolean): { holdings: string; unwind: Unwind } {
-  if (firstOpen(run) === 0) return { holdings: NOTHING_MOVED, unwind: unwindFrom({}) }
+  if (firstOpen(run) === 0) return { holdings: NOTHING_MOVED, unwind: unwindFrom({}, underlying.code) }
   const h = holdingsOf(run)
-  if (!h) return { holdings: UNREADABLE_HOLDINGS, unwind: unwindFrom(undefined) }
-  return { holdings: describeHoldings(h, underlying) ?? NOTHING_LEFT, unwind: unwindFrom(h, { matured }) }
+  if (!h) return { holdings: UNREADABLE_HOLDINGS, unwind: unwindFrom(undefined, underlying.code) }
+  return { holdings: describeHoldings(h, underlying) ?? NOTHING_LEFT, unwind: unwindFrom(h, underlying.code, { matured }) }
 }
 
 /**
@@ -644,7 +653,7 @@ export function useRoute(opts: UseRouteOptions): RouteControls {
       const r = runRef.current
       if (!r || busy.current || viewRef.current.phase !== "interrupted") return
       const k = firstOpen(r)
-      const u = unwindFrom(holdingsOf(r))
+      const u = unwindFrom(holdingsOf(r), assetOf(latest.current.manifest, r.marketId).code)
       if (!u.available || r.steps[k]?.status === "unknown") return
       const g = gen.current
       const next: RouteRun = {
@@ -760,8 +769,7 @@ export function useRoute(opts: UseRouteOptions): RouteControls {
     return () => clearInterval(id)
   }, [view, engine])
 
-  const market = getMarket(manifest, marketId)
-  const underlying = market ? { code: market.underlying.code, decimals: market.underlying.decimals } : { code: "USDY", decimals: 7 }
+  const underlying = assetOf(manifest, marketId)
   const n = run?.steps.length ?? 0
   const idle = view.phase === "idle" || run === null
   const stop = view.phase === "interrupted" && run ? interruption(run, underlying, matured) : undefined

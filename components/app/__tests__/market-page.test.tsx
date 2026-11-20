@@ -35,7 +35,8 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@/components/app/manifest-provider", () => {
   // One object per network, as the provider gives: hooks depend on its identity.
   const byNetwork = new Map<string, unknown>()
-  const make = (network: string) => ({ network, markets: [MARKET] })
+  // On Mainnet the underlying is a mock asset that names the asset it follows (plan 0009).
+  const make = (network: string) => ({ network, markets: [network === "mainnet" ? { ...MARKET, underlying: { ...MARKET.underlying, tracks: "GILTS" } } : MARKET] })
   return {
     useManifest: () => {
       if (!byNetwork.has(mocks.network)) byNetwork.set(mocks.network, make(mocks.network))
@@ -211,6 +212,15 @@ describe("MarketHeader", () => {
     mocks.clock = { ledgerTime: null, isError: true }
     wrap(<MarketHeader marketId="m1" />)
     expect(badge()).toBe("Unavailable")
+  })
+  it("says a Mainnet mock asset is one, and names the asset it follows (plan 0009)", () => {
+    mocks.network = "mainnet"
+    wrap(<MarketHeader marketId="m1" />)
+    expect(screen.getByText("Mock asset issued by Principal for testing. It follows the price of GILTS and is not GILTS.")).toBeTruthy()
+  })
+  it("shows no note for an asset that is neither a mock nor the test asset", () => {
+    wrap(<MarketHeader marketId="m1" />)
+    expect(screen.queryByText(/Mock asset|Test token/)).toBeNull()
   })
 })
 

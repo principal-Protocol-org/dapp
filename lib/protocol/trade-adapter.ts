@@ -51,14 +51,14 @@ import { settlementOf } from "./position"
 import { previewAddLiquidity, previewAddLiquiditySingleSy, previewDeposit, previewMint, previewRecombine, previewRedeemPt, previewRemoveLiquidity, previewSellYt, previewWithdraw } from "./previews"
 import { priceImpactPpm, ptSpot, ytSpot, type Spot } from "./prices"
 import { apyAfterTrade, effectiveFixedApy, effectiveImpliedApy, fixedPayoffUsd, leverage } from "./rates"
-import { planRoute, singleStepFor, type RouteContext, type RouteDisabled, type RouteKind, type RouteRequest, type StepPlan, type StepPreview, type Token } from "./routes"
+import { keepYtNeedsUnderlying, planRoute, singleStepFor, type RouteContext, type RouteDisabled, type RouteKind, type RouteRequest, type StepPlan, type StepPreview, type Token } from "./routes"
 import type { Live } from "./types"
 import { solveBuyYt, type YtSolution } from "./yt-solver"
 
 /** The trades the PT, YT and LP tabs make (Quick actions' split and recombine are not trades). */
 export type TradeKind = Exclude<RouteKind, "split" | "recombine">
 
-/** A token a trade hands over or receives; `underlying` is the market's asset (USDY). */
+/** A token a trade hands over or receives; `underlying` is the market's asset (`PlanContext.underlying`). */
 export type TradeToken = "underlying" | "sy" | "pt" | "yt" | "lp"
 
 export type Exactness = "indicative" | "simulated"
@@ -83,6 +83,8 @@ export type TradeState = {
   firstStep?: { action: ActionId; output: ActionOutput }
   /** The connected account's LP balance, for the pool share; absent without an account. */
   heldLp?: bigint
+  /** The market's asset code, named in the quote's refusals (as `PlanContext.underlying`). */
+  underlying: string
 }
 
 export type TradeQuote = {
@@ -191,6 +193,8 @@ export type PlanContext = {
    * cost at this tolerance fits the budget, so the `sy_in` planned is the one quoted (R5-2).
    */
   slippageBps: bigint
+  /** The market's asset code ("USDY", "MOCKGILTS"): the route's steps and refusals name it (`RouteRequest.underlying`). */
+  underlying: string
 }
 
 export type TradeAdapter = {
@@ -200,7 +204,16 @@ export type TradeAdapter = {
 
 /** The route runner's request for a trade. */
 export function toRouteRequest(req: TradeRequest, ctx: PlanContext): RouteRequest {
-  return { kind: req.kind, marketId: ctx.marketId, source: ctx.source, amount: req.amount, pay: req.pay, receive: req.receive, matured: ctx.matured }
+  return {
+    kind: req.kind,
+    marketId: ctx.marketId,
+    source: ctx.source,
+    amount: req.amount,
+    pay: req.pay,
+    receive: req.receive,
+    matured: ctx.matured,
+    underlying: ctx.underlying,
+  }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -581,7 +594,6 @@ function quoteBuyYt(req: TradeRequest, r: Reads, state: TradeState): TradeQuote 
 const MATURED = "This market has matured: PT and YT can no longer be traded in the pool."
 const DEPOSITS_CLOSED = "Adding liquidity closed at maturity: the pool takes no new PT or SY. You can still withdraw your liquidity."
 const NOT_SEEDED = "Pool not seeded yet: adding liquidity opens once the pool has its first liquidity. This app does not offer that first deposit."
-const KEEP_YT_NEEDS_UNDERLYING = "Keeping YT while adding liquidity needs USDY: pay in USDY."
 
 const seeded = (s: CurveState) => s.totalLp > 0n && s.ptReserve > 0n && s.syReserve > 0n
 const reservesOf = (s: CurveState) => ({ pt: s.ptReserve, sy: s.syReserve })
@@ -620,9 +632,9 @@ type KeepYtSize = { mintUnderlying: bigint; depositUnderlying: bigint; feeBps: b
 
 const KEEP_YT_TOO_SMALL = "This amount is too small to add any liquidity: enter a larger amount."
 
-/** What both Keep YT sizings need: USDY paid, a market open and seeded, and the tokenization fee. */
-function keepYtFee(req: TradeRequest, s: CurveState, ms: MarketState): bigint {
-  if (req.pay !== "underlying") throw new Error(KEEP_YT_NEEDS_UNDERLYING)
+/** What both Keep YT sizings need: the market's asset (`code`) paid, a market open and seeded, and the tokenization fee. */
+function keepYtFee(req: TradeRequest, s: CurveState, ms: MarketState, code: string): bigint {
+  if (req.pay !== "underlying") throw new Error(keepYtNeedsUnderlying(code))
   if (s.secondsToMaturity <= 0n) throw new Error(DEPOSITS_CLOSED)
   if (!seeded(s)) throw new Error(NOT_SEEDED)
   const fee = need(ms.fees.tokenizationBps, "the tokenization fee")
@@ -640,9 +652,9 @@ function keepYtFee(req: TradeRequest, s: CurveState, ms: MarketState): bigint {
  * least behind, then the one minting less (less fee). Whatever the pool does not take stays in the
  * wallet; on a realistic pool it is a raw unit or two. Throws the plain-words reason when it cannot.
  */
-function sizeKeepYt(req: TradeRequest, r: MarketReads, ms: MarketState): KeepYtSize {
+function sizeKeepYt(req: TradeRequest, r: MarketReads, ms: MarketState, code: string): KeepYtSize {
   const { s } = r
-  const fee = keepYtFee(req, s, ms)
+  const fee = keepYtFee(req, s, ms, code)
   const paid = req.amount
   const tooSmall = KEEP_YT_TOO_SMALL
   if (paid < 2n) throw new Error(tooSmall)
@@ -728,8 +740,8 @@ export function sizeKeepYtShares(shares: bigint, reads: { s: CurveState; oracleR
 type KeepYtSharesSize = { shares: bigint; mint: bigint; feeBps: bigint }
 
 /** One-step Keep YT's sizes: the SY its deposit gives (the wrapper's own math), and the shares to mint. */
-function sizeKeepYtOneStep(req: TradeRequest, r: MarketReads, ms: MarketState): KeepYtSharesSize {
-  const feeBps = keepYtFee(req, r.s, ms)
+function sizeKeepYtOneStep(req: TradeRequest, r: MarketReads, ms: MarketState, code: string): KeepYtSharesSize {
+  const feeBps = keepYtFee(req, r.s, ms, code)
   const shares = previewDeposit(req.amount, r.exchangeRate)
   return { shares, mint: sizeKeepYtShares(shares, r, feeBps), feeBps }
 }
@@ -744,7 +756,7 @@ function sizeKeepYtOneStep(req: TradeRequest, r: MarketReads, ms: MarketState): 
 function quoteKeepYt(req: TradeRequest, r: Reads, state: TradeState): TradeQuote {
   if (state.plans[0]?.action === "add_liquidity_keep_yt") return quoteKeepYtOneStep(req, r, state)
   const { s, exchangeRate, slippageBps } = r
-  const { mintUnderlying, depositUnderlying, feeBps } = sizeKeepYt(req, r, state.ms)
+  const { mintUnderlying, depositUnderlying, feeBps } = sizeKeepYt(req, r, state.ms, state.underlying)
   const legs = keepYtLegs(mintUnderlying, depositUnderlying, r, feeBps)
   const sim = simulated(state, "mint", "mint")
   const pt = sim?.pt_minted ?? legs.mint.pt
@@ -787,7 +799,7 @@ function quoteKeepYt(req: TradeRequest, r: Reads, state: TradeState): TradeQuote
  */
 function quoteKeepYtOneStep(req: TradeRequest, r: Reads, state: TradeState): TradeQuote {
   const { s, exchangeRate, oracleRate, slippageBps } = r
-  const sized = sizeKeepYtOneStep(req, r, state.ms)
+  const sized = sizeKeepYtOneStep(req, r, state.ms, state.underlying)
   const { shares, feeBps } = sized
   const signed = state.plans[0]?.secondaryAmount
   const mint = signed?.from === "value" ? signed.value : sized.mint
@@ -1057,11 +1069,11 @@ function planKeepYt(req: TradeRequest, ctx: PlanContext, route: RouteRequest, ba
   try {
     if (oneStep) {
       // R5-7: the PT and SY offered to the pool are signed as literals: the PT the mint gives, and the rest of the shares.
-      const { shares, mint, feeBps } = sizeKeepYtOneStep(req, m, ctx.ms)
+      const { shares, mint, feeBps } = sizeKeepYtOneStep(req, m, ctx.ms, ctx.underlying)
       const desired = { pt: previewMint(mint, m.oracleRate, feeBps).pt, sy: shares - mint }
       return planRoute(route, { ...base, keepYtMintSy: mint, keepYtDesired: desired })
     }
-    const { mintUnderlying, depositUnderlying } = sizeKeepYt(req, m, ctx.ms)
+    const { mintUnderlying, depositUnderlying } = sizeKeepYt(req, m, ctx.ms, ctx.underlying)
     return planRoute(route, { ...base, keepYtSplit: { mintUnderlying, depositUnderlying } })
   } catch (error) {
     return { disabled: errorText(error) }

@@ -1,4 +1,6 @@
 // @vitest-environment node
+import { readdirSync, readFileSync } from "node:fs"
+import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import testnetJson from "@/lib/protocol/__tests__/fixtures/testnet-interim.json"
 import { parseManifest } from "../manifest"
@@ -15,6 +17,7 @@ import {
   SINGLE_STEP,
   unwindFrom,
   type RouteContext,
+  type RouteKind,
   type RouteRequest,
   type StepPlan,
 } from "../routes"
@@ -29,6 +32,7 @@ const base: RouteRequest = {
   pay: "underlying",
   receive: "underlying",
   matured: false,
+  underlying: "USDY",
 }
 const ctx: RouteContext = {
   routerFunctions: [],
@@ -321,7 +325,7 @@ describe("route holdings (spec §4 interruption)", () => {
     expect(h).toEqual({ sy: 1_000n * S })
     expect(describeHoldings(h!, usdy)).toBe("You hold 1,000 SY")
     expect(describeHoldings(h!, usdy, "held")).toBe("You held 1,000 SY")
-    expect(unwindFrom(h)).toEqual({
+    expect(unwindFrom(h, "USDY")).toEqual({
       available: true,
       amount: 1_000n * S,
       plan: { action: "withdraw", amount: { from: "value", value: 1_000n * S }, gives: "SY", takes: "USDY" },
@@ -344,7 +348,7 @@ describe("route holdings (spec §4 interruption)", () => {
     const h = routeHoldings(r, plan(r), outs, 2)
     expect(h).toEqual({ yt: 40n * S, sy: 87n * S })
     expect(describeHoldings(h!, usdy)).toBe("You hold 40 YT and 87 SY")
-    const u = unwindFrom(h)
+    const u = unwindFrom(h, "USDY")
     expect(u.available).toBe(false)
     if (!u.available) expect(u.reason).toMatch(/YT/)
   })
@@ -358,7 +362,7 @@ describe("route holdings (spec §4 interruption)", () => {
     const h = routeHoldings(r, plan(r), outs, 2)
     expect(h).toEqual({ sy: 5n * S, underlying: 1000n * S })
     expect(describeHoldings(h!, usdy)).toBe("You hold 5 SY and 1,000 USDY")
-    expect(unwindFrom(h)).toMatchObject({ available: true, amount: 5n * S })
+    expect(unwindFrom(h, "USDY")).toMatchObject({ available: true, amount: 5n * S })
   })
 
   it("PT and SY after removing liquidity cannot go back to USDY in one call", () => {
@@ -366,7 +370,7 @@ describe("route holdings (spec §4 interruption)", () => {
     const h = routeHoldings(r, plan(r), [{ kind: "remove_liquidity", pt: 10n * S, sy: 5n * S }], 1)
     expect(h).toEqual({ pt: 10n * S, sy: 5n * S })
     expect(describeHoldings(h!, usdy)).toBe("You hold 10 PT and 5 SY")
-    const u = unwindFrom(h)
+    const u = unwindFrom(h, "USDY")
     expect(u.available).toBe(false)
     if (!u.available) expect(u.reason).toMatch(/PT/)
   })
@@ -374,34 +378,34 @@ describe("route holdings (spec §4 interruption)", () => {
   it("after maturity the way out names Redeem in the PT tab, never a sale that has closed (with Continue and the SY withdraw)", () => {
     const r = { ...base, kind: "lp_withdraw" as const }
     const h = routeHoldings(r, plan(r), [{ kind: "remove_liquidity", pt: 10n * S, sy: 5n * S }], 1)
-    const before = unwindFrom(h)
+    const before = unwindFrom(h, "USDY")
     if (before.available) throw new Error("expected no single call")
     expect(before.reason).toMatch(/sell the PT from the Trade tab/)
-    const after = unwindFrom(h, { matured: true })
+    const after = unwindFrom(h, "USDY", { matured: true })
     expect(after).toEqual({
       available: false,
       reason:
         "Going back to USDY in one call works only from SY, and you also hold PT. Trading closed at maturity: continue the route, or redeem the PT with Redeem in the PT tab and withdraw the SY with Quick actions → Withdraw.",
     })
     // PT and YT together; LP stays a withdraw, which maturity does not close.
-    const both = unwindFrom({ pt: S, yt: S }, { matured: true })
+    const both = unwindFrom({ pt: S, yt: S }, "USDY", { matured: true })
     if (both.available) throw new Error("expected no single call")
     expect(both.reason).toBe(
       "Going back to USDY in one call works only from SY, and you also hold PT and YT. Trading closed at maturity: continue the route, or redeem the PT and YT with Redeem in the PT tab.",
     )
-    const lp = unwindFrom({ lp: S }, { matured: true })
+    const lp = unwindFrom({ lp: S }, "USDY", { matured: true })
     if (lp.available) throw new Error("expected no single call")
     expect(lp.reason).toBe("Going back to USDY in one call works only from SY, and you also hold LP. Continue the route, or withdraw the LP in the LP tab.")
     expect(lp.reason).not.toMatch(/sell/)
     // SY alone is still one withdraw after maturity.
-    expect(unwindFrom({ sy: 5n * S }, { matured: true })).toMatchObject({ available: true, amount: 5n * S })
+    expect(unwindFrom({ sy: 5n * S }, "USDY", { matured: true })).toMatchObject({ available: true, amount: 5n * S })
   })
 
   it("R5-4: the way back never depends on the SY the wallet holds: no reason mentions it", () => {
     const cases: Parameters<typeof unwindFrom>[0][] = [{ pt: S }, { yt: S, sy: S }, { lp: S }, { pt: S, sy: 2n * S }, { underlying: S }, {}, undefined]
     for (const h of cases)
       for (const matured of [false, true]) {
-        const u = unwindFrom(h, { matured })
+        const u = unwindFrom(h, "USDY", { matured })
         if (!u.available) expect(u.reason).not.toMatch(/holds? no SY|withdraw all your SY/)
       }
   })
@@ -504,7 +508,7 @@ describe("route holdings (spec §4 interruption)", () => {
     const h = routeHoldings(r, plan(r), [], 0)
     expect(h).toEqual({})
     expect(describeHoldings(h!, usdy)).toBeUndefined()
-    const u = unwindFrom(h)
+    const u = unwindFrom(h, "USDY")
     expect(u.available).toBe(false)
     if (!u.available) expect(u.reason).toMatch(/Nothing has moved/)
   })
@@ -512,7 +516,7 @@ describe("route holdings (spec §4 interruption)", () => {
   it("a confirmed step whose result could not be read makes the holdings unknown, never a guess", () => {
     const r = { ...base, kind: "buy_pt" as const }
     expect(routeHoldings(r, plan(r), [null], 1)).toBeUndefined()
-    const u = unwindFrom(undefined)
+    const u = unwindFrom(undefined, "USDY")
     expect(u.available).toBe(false)
     if (!u.available) expect(u.reason).toMatch(/could not read/)
   })
@@ -664,5 +668,119 @@ describe("protocolAbi 2 (principal 3af9388): the literal each changed Router cal
     expect(call(plan(buy, ONE)[0], buy).args).toHaveLength(6)
     const yt = { ...base, kind: "buy_yt" as const }
     expect(call(plan(yt, abi2)[1], yt).args).toHaveLength(7)
+  })
+})
+
+describe("the market's own asset name in every route string (plan 0009, Task 13)", () => {
+  const CODE = "MOCKGILTS"
+  const gilts: RouteRequest = { ...base, underlying: CODE }
+  const KINDS: RouteKind[] = ["buy_pt", "buy_yt", "sell_pt", "sell_yt", "split", "recombine", "lp_only", "lp_keep_yt", "lp_withdraw"]
+  const TOKENS = ["underlying", "sy"] as const
+  const XR = 10_200_000n
+  const multi: RouteContext = {
+    routerFunctions: [],
+    buyYt: { syIn: 90n, depositUnderlying: 95n, ptIn: 88n },
+    keepYtSplit: { mintUnderlying: 40n, depositUnderlying: 60n },
+    exchangeRate: XR,
+  }
+  const oneStep: RouteContext = {
+    ...multi,
+    routerFunctions: [...Object.values(SINGLE_STEP).map((s) => s!.fn), ...Object.values(FLASH_BUY_YT).map((s) => s.fn)],
+    keepYtMintSy: 62n,
+    keepYtDesired: { pt: 41n, sy: 38n },
+    buyYtFlash: { syIn: 4_216n },
+  }
+  /** Every route shape, and every refusal: sized or not, one step or not, version 1 or 2. */
+  const CONTEXTS: RouteContext[] = [
+    multi,
+    oneStep,
+    { ...multi, protocolAbi: 2 },
+    { ...oneStep, protocolAbi: 2 },
+    { routerFunctions: [] },
+    { routerFunctions: [], buyYt: { syIn: 90n } },
+    { ...multi, protocolAbi: 2, exchangeRate: undefined },
+  ]
+  const HOLDINGS: Parameters<typeof unwindFrom>[0][] = [undefined, {}, { underlying: 1n }, { sy: 5n }, { pt: 1n }, { yt: 1n, sy: 1n }, { lp: 1n }, { pt: 1n, yt: 1n, lp: 1n, sy: 1n }]
+
+  /** Every gives, takes and message the planner and the way back can produce for `req`'s market. */
+  function everyString(req: RouteRequest, code: string): string[] {
+    const out: string[] = []
+    for (const c of CONTEXTS)
+      for (const kind of KINDS)
+        for (const pay of TOKENS)
+          for (const receive of TOKENS)
+            for (const matured of [false, true]) {
+              const p = planRoute({ ...req, kind, pay, receive, matured }, c)
+              if ("disabled" in p) out.push(p.disabled)
+              else for (const s of p) out.push(s.gives, s.takes, ...(s.requires ?? []).map((r) => r.reason))
+            }
+    for (const h of HOLDINGS)
+      for (const matured of [false, true]) {
+        const u = unwindFrom(h, code, { matured })
+        out.push(...(u.available ? [u.plan.gives, u.plan.takes] : [u.reason]))
+      }
+    return out
+  }
+
+  it("on a MOCKGILTS market every route kind's plan and every unwind message names MOCKGILTS, never USDY", () => {
+    const text = everyString(gilts, CODE).join("\n")
+    expect(text).not.toContain("USDY")
+    expect(text).toContain("MOCKGILTS")
+  })
+
+  it("the deposit, the withdraw, the one steps and the refusals say MOCKGILTS", () => {
+    expect(planRoute({ ...gilts, kind: "buy_pt" }, multi)).toMatchObject([{ action: "deposit", gives: CODE, takes: "SY" }, { action: "buy_pt" }])
+    expect(planRoute({ ...gilts, kind: "sell_pt" }, multi)).toMatchObject([{ action: "sell_pt" }, { action: "withdraw", gives: "SY", takes: CODE }])
+    expect(planRoute({ ...gilts, kind: "buy_pt" }, oneStep)).toMatchObject([{ action: "buy_pt_underlying", gives: CODE, takes: "PT" }])
+    expect(planRoute({ ...gilts, kind: "sell_yt" }, oneStep)).toMatchObject([{ action: "sell_yt_underlying", gives: "YT", takes: CODE }])
+    expect(planRoute({ ...gilts, kind: "split" }, multi)).toMatchObject([{ action: "mint", gives: CODE, takes: "PT + YT" }])
+    expect(planRoute({ ...gilts, kind: "lp_withdraw", matured: true }, multi)).toMatchObject([
+      { action: "remove_liquidity" },
+      { action: "redeem", takes: "MOCKGILTS (paid out as MOCKGILTS even when you receive SY)" },
+      { action: "withdraw", takes: CODE },
+    ])
+    expect(planRoute({ ...gilts, kind: "split", pay: "sy" }, multi)).toEqual({ disabled: "Splitting needs MOCKGILTS: pay in MOCKGILTS." })
+    expect(planRoute({ ...gilts, kind: "lp_keep_yt", pay: "sy" }, multi)).toEqual({ disabled: "Keeping YT while adding liquidity needs MOCKGILTS: pay in MOCKGILTS." })
+    expect(planRoute({ ...gilts, kind: "lp_keep_yt" }, { routerFunctions: [] })).toEqual({ disabled: "Adding liquidity and keeping YT needs the MOCKGILTS split first." })
+    expect(planRoute({ ...gilts, kind: "buy_yt" }, { routerFunctions: [], buyYt: { syIn: 90n } })).toEqual({
+      disabled: "Buy YT with MOCKGILTS needs the amount of MOCKGILTS to deposit first.",
+    })
+  })
+
+  it("the way back names MOCKGILTS, and its withdraw takes MOCKGILTS", () => {
+    expect(unwindFrom({ sy: 5n }, CODE)).toEqual({ available: true, amount: 5n, plan: { action: "withdraw", amount: { from: "value", value: 5n }, gives: "SY", takes: CODE } })
+    expect(unwindFrom(undefined, CODE)).toEqual({
+      available: false,
+      reason: "This app could not read what the last step produced, so it cannot build the call back to MOCKGILTS. Check your balances in the Portfolio.",
+    })
+    expect(unwindFrom({ pt: 1n }, CODE)).toMatchObject({ reason: expect.stringMatching(/^Going back to MOCKGILTS in one call works only from SY, and you also hold PT\./) })
+    expect(unwindFrom({ underlying: 1n }, CODE)).toEqual({ available: false, reason: "You already hold MOCKGILTS from this route: there is nothing to turn back." })
+    expect(unwindFrom({}, CODE)).toEqual({ available: false, reason: "Nothing has moved, so there is nothing to turn back into MOCKGILTS." })
+  })
+
+  it("on Testnet (USDY) the strings read as before", () => {
+    const text = everyString(base, "USDY")
+    expect(text).toContain("Keeping YT while adding liquidity needs USDY: pay in USDY.")
+    expect(text).toContain("Splitting needs USDY: pay in USDY.")
+    expect(text).toContain("USDY (paid out as USDY even when you receive SY)")
+    expect(text).toContain("Nothing has moved, so there is nothing to turn back into USDY.")
+    expect(text.join("\n")).not.toContain("MOCKGILTS")
+  })
+
+  it("no USDY is left in the code of the route planner, the trade adapter, the gates, the route and History components (comments aside)", () => {
+    const root = join(__dirname, "..", "..", "..")
+    const dirFiles = (dir: string) => readdirSync(join(root, dir)).filter((f) => /\.tsx?$/.test(f)).map((f) => join(dir, f))
+    const files = ["lib/protocol/routes.ts", "lib/protocol/trade-adapter.ts", "lib/protocol/gates.ts", ...dirFiles("components/app/route"), ...dirFiles("components/app/history")]
+    expect(files).toContain("components/app/route/route-progress.tsx")
+    expect(files).toContain("components/app/history/history-table.tsx")
+    // Block and JSX comments, then line comments (a `//` after a colon is a URL, not a comment).
+    const code = (src: string) => src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1")
+    const offenders = files.flatMap((f) =>
+      code(readFileSync(join(root, f), "utf8"))
+        .split("\n")
+        .filter((line) => line.includes("USDY"))
+        .map((line) => `${f}: ${line.trim()}`),
+    )
+    expect(offenders).toEqual([])
   })
 })

@@ -54,7 +54,7 @@ function quoted(result: Live<TradeQuote>): TradeQuote {
 }
 /** The slippage tolerance every quote below uses; the plan sizes with the same one (R5-2). */
 const SLIPPAGE = 50n
-const CTX: PlanContext = { marketId: "m1", source: "GABC", matured: false, routerFunctions: [] as string[], slippageBps: SLIPPAGE }
+const CTX: PlanContext = { marketId: "m1", source: "GABC", matured: false, routerFunctions: [] as string[], slippageBps: SLIPPAGE, underlying: "USDY" }
 
 /** Today's route for `req` (adapter #1's plan), sized from `ms` (Buy YT's steps are). */
 function plansFor(req: TradeRequest, ms: MarketState = market()): StepPlan[] {
@@ -76,7 +76,7 @@ function oneStep(req: TradeRequest): StepPlan[] {
 }
 
 const quote = (req: TradeRequest, state: Partial<Parameters<typeof currentContractsAdapter.quote>[1]> = {}) =>
-  currentContractsAdapter.quote(req, { ms: market(), slippageBps: SLIPPAGE, ...state, plans: state.plans ?? plansFor(req, state.ms ?? market()) })
+  currentContractsAdapter.quote(req, { ms: market(), slippageBps: SLIPPAGE, underlying: "USDY", ...state, plans: state.plans ?? plansFor(req, state.ms ?? market()) })
 
 describe("trade adapter #1 — buy PT", () => {
   it("an SY payer gets the curve's PT for the curve's fee, and the fixed APY falls (R2-15)", () => {
@@ -297,6 +297,7 @@ describe("trade adapter #1 — plan", () => {
       pay: "underlying",
       receive: "underlying",
       matured: false,
+      underlying: "USDY",
     })
   })
 })
@@ -646,9 +647,16 @@ describe("trade adapter #1 — LP Keep YT: the split at the pool's ratio", () =>
       expect(() => (plans = currentContractsAdapter.plan(req, { ...CTX, ms }))).not.toThrow()
       expect(plans).toEqual({ disabled: expect.stringMatching(/too small to add any liquidity/) })
       let r: Live<TradeQuote> | undefined
-      expect(() => (r = currentContractsAdapter.quote(req, { ms, slippageBps: 50n, plans: [] }))).not.toThrow()
+      expect(() => (r = currentContractsAdapter.quote(req, { ms, slippageBps: 50n, plans: [], underlying: "USDY" }))).not.toThrow()
       expect(r).toEqual({ status: "unavailable", error: expect.stringMatching(/too small to add any liquidity/) })
     }
+  })
+
+  it("paid in SY, the refusal names the market's own asset: plan and quote alike (plan 0009, Task 13)", () => {
+    const gilts = "Keeping YT while adding liquidity needs MOCKGILTS: pay in MOCKGILTS."
+    expect(currentContractsAdapter.plan(keepYt("sy"), { ...CTX, ms: market(), underlying: "MOCKGILTS" })).toEqual({ disabled: gilts })
+    expect(quote(keepYt("sy"), { plans: [], underlying: "MOCKGILTS" })).toEqual({ status: "unavailable", error: gilts })
+    expect(quote(keepYt("sy"), { plans: [] })).toEqual({ status: "unavailable", error: "Keeping YT while adding liquidity needs USDY: pay in USDY." })
   })
 
   it("after maturity adding liquidity is closed, and says withdrawing still works", () => {
@@ -837,6 +845,18 @@ describe("trade adapter #1 — one-step Router functions (R4-4, R4-5, R5-2, R5-5
     if (!Array.isArray(plans)) throw new Error(plans.disabled)
     return plans
   }
+
+  it("on a MOCKGILTS market every step's gives and takes name MOCKGILTS, never USDY (plan 0009, Task 13)", () => {
+    const ctx: PlanContext = { ...CTX, underlying: "MOCKGILTS", ms: market() }
+    const reqs = [buy("underlying"), sell("underlying"), buyYt("underlying"), sellYt("underlying"), keepYt(), lpOnly(), withdrawLp("underlying"), keepYt("sy")]
+    const text = [ctx, { ...ctx, routerFunctions: [...FIVE, ...NEW] }]
+      .flatMap((c) => reqs.map((r) => currentContractsAdapter.plan(r, c)))
+      .flatMap((p) => (Array.isArray(p) ? p.flatMap((s) => [s.gives, s.takes]) : [p.disabled]))
+      .join("\n")
+    expect(text).toContain("MOCKGILTS")
+    expect(text).not.toContain("USDY")
+    expect(toRouteRequest(buy("underlying"), ctx).underlying).toBe("MOCKGILTS")
+  })
 
   it("each kind paid or received in USDY plans its one step; paid or received in SY, the old route", () => {
     expect(planned(buy("underlying")).map((p) => [p.action, p.amount])).toEqual([["buy_pt_underlying", { from: "input" }]])

@@ -295,6 +295,7 @@ describe("Suite A: the live journey on the official Testnet deployment (plan 000
       managerId: market.contracts.manager,
       network: manifest.network,
       protocolAbi: protocolAbi(manifest),
+      underlying: market.underlying.code,
       simulation,
     })
     return { blockers, simulation }
@@ -390,7 +391,7 @@ describe("Suite A: the live journey on the official Testnet deployment (plan 000
   })
 
   it("Mint PT + YT: Split USDY into PT and YT, one each (quick action)", async () => {
-    const req: RouteRequest = { kind: "split", marketId: market.marketId, source: trader.publicKey, amount: SPLIT, pay: "underlying", receive: "sy", matured: false }
+    const req: RouteRequest = { kind: "split", marketId: market.marketId, source: trader.publicKey, amount: SPLIT, pay: "underlying", receive: "sy", matured: false, underlying: market.underlying.code }
     const plans = planRoute(req, { routerFunctions: manifest.routerFunctions ?? [] })
     if (!Array.isArray(plans)) throw new Error(plans.disabled)
     expect(plans.map((p) => p.action)).toEqual(["mint"])

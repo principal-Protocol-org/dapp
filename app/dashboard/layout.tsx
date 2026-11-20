@@ -2,7 +2,7 @@ import type { Metadata } from "next"
 import { Suspense } from "react"
 import { ManifestProvider } from "@/components/app/manifest-provider"
 import { Providers } from "@/components/app/providers"
-import { TestnetBanner } from "@/components/app/shell/testnet-banner"
+import { NetworkBanner } from "@/components/app/shell/network-banner"
 import { DashboardFallback } from "@/components/dashboard/dashboard-fallback"
 import { DashboardHeader } from "@/components/dashboard/dashboard-header"
 import { Container } from "@/components/landing/layout"
@@ -36,7 +36,7 @@ async function ResolvedDashboard({ children }: { children: React.ReactNode }) {
 export default function DashboardLayout({ children }: LayoutProps<"/dashboard">) {
   return (
     <>
-      <TestnetBanner />
+      <NetworkBanner />
       <DashboardHeader />
       <main id="main" className="min-h-[60vh] bg-ground py-8 text-ink">
         <Container>

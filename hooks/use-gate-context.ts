@@ -49,7 +49,8 @@ export function useGateContext(marketId: string): GateInputs {
   const market = useMarketState(marketId)
   const accountQuery = useAccountState(marketId)
   const compliance = useMarketCompliance(marketId)
-  const contracts = getMarket(manifest, marketId)?.contracts
+  const entry = getMarket(manifest, marketId)
+  const contracts = entry?.contracts
   const managerId = contracts?.manager
 
   const ms = market.stale ? undefined : market.data
@@ -88,7 +89,7 @@ export function useGateContext(marketId: string): GateInputs {
   }
 
   let base: GateInputs["base"] = null
-  if (unavailable.length === 0 && ms && ledgerTime !== null && managerId !== undefined) {
+  if (unavailable.length === 0 && ms && ledgerTime !== null && entry !== undefined && managerId !== undefined) {
     const model = compliance.data
     const kind = !compliance.isError && model?.status === "live" ? model.value.kind : null
     const kindError =
@@ -103,6 +104,7 @@ export function useGateContext(marketId: string): GateInputs {
       managerId,
       network: manifest.network,
       protocolAbi: protocolAbi(manifest),
+      underlying: entry.underlying.code,
     }
   }
 

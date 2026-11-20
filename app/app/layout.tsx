@@ -4,7 +4,7 @@ import { ManifestProvider } from "@/components/app/manifest-provider"
 import { Providers } from "@/components/app/providers"
 import { AppHeader } from "@/components/app/shell/app-header"
 import { AppShellFallback } from "@/components/app/shell/app-shell-fallback"
-import { TestnetBanner } from "@/components/app/shell/testnet-banner"
+import { NetworkBanner } from "@/components/app/shell/network-banner"
 import { Container } from "@/components/landing/layout"
 import { activeManifest } from "@/lib/protocol/manifest-source"
 import { resolvedManifest } from "@/lib/server/manifest"
@@ -37,7 +37,7 @@ async function ResolvedApp({ children }: { children: React.ReactNode }) {
 export default function AppLayout({ children }: { children: React.ReactNode }) {
   return (
     <>
-      <TestnetBanner />
+      <NetworkBanner />
       <Suspense fallback={<AppShellFallback />}>
         <ResolvedApp>{children}</ResolvedApp>
       </Suspense>

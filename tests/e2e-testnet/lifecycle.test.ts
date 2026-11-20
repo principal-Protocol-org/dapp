@@ -461,6 +461,7 @@ describe("Suite B: the ephemeral lifecycle on a throwaway Testnet market (plan 0
       managerId: market.contracts.manager,
       network: manifest.network,
       protocolAbi: protocolAbi(manifest),
+      underlying: market.underlying.code,
       simulation,
     })
     return { what: draft.action, account, ledger: clock.sequence, ledgerTime: Math.floor(clock.now()), simulatedLedger, blockers, simulation }
@@ -631,7 +632,7 @@ describe("Suite B: the ephemeral lifecycle on a throwaway Testnet market (plan 0
       expect(dep.b1.sy - dep.b0.sy).toBe(shares.value)
       for (const k of ["pt", "yt", "lp"] as const) expect(dep.b1[k] - dep.b0[k], `${who} deposit: ${k} moved`).toBe(0n)
 
-      const req: RouteRequest = { kind: "split", marketId: market.marketId, source: accountOf(who), amount: split, pay: "underlying", receive: "sy", matured: false }
+      const req: RouteRequest = { kind: "split", marketId: market.marketId, source: accountOf(who), amount: split, pay: "underlying", receive: "sy", matured: false, underlying: market.underlying.code }
       // A version-2 split signs the SY its deposit gives (`sy_in`), from the exchange rate the panel reads.
       const xr = live((await fetchMarketState(reader(), manifest, market.marketId)).exchangeRate, "SY exchange rate")
       const plans = planRoute(req, { routerFunctions: manifest.routerFunctions ?? [], protocolAbi: protocolAbi(manifest), exchangeRate: xr })

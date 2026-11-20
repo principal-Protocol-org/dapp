@@ -101,7 +101,8 @@ export function RecombineAction({
   const [receive, setReceive] = useState<PayToken>("underlying")
   const [last, setLast] = useState<{ owner: string; notice: TxNotice } | null>(null)
 
-  const code = market?.underlying.code ?? "USDY"
+  // Empty only without the market, when nothing renders (below).
+  const code = market?.underlying.code ?? ""
   const underlyingDecimals = market?.underlying.decimals ?? TOKEN_DECIMALS
   const amountText = (raw: bigint, unit: string, decimals = TOKEN_DECIMALS) => `${formatTokenAmount(raw, decimals, true)} ${unit}`
 
@@ -114,7 +115,7 @@ export function RecombineAction({
   const amount = check.ok ? check.raw : 0n
 
   const source = gate.wallet.status === "connected" ? gate.wallet.publicKey : null
-  const request: RouteRequest = { kind: "recombine", marketId, source: source ?? "", amount, pay: "underlying", receive, matured }
+  const request: RouteRequest = { kind: "recombine", marketId, source: source ?? "", amount, pay: "underlying", receive, matured, underlying: code }
   const planned = planRoute(request, { routerFunctions: manifest.routerFunctions ?? [] })
   const plans = Array.isArray(planned) ? planned : []
   const route = useRouteStart({ gate, request, plans, ...(Array.isArray(planned) ? {} : { disabled: planned.disabled }), check })

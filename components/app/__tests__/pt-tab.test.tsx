@@ -368,7 +368,7 @@ describe("PT tab — a quote it cannot work out", () => {
 
 /** A Buy PT paid in USDY whose deposit confirmed: the user holds its SY between the steps. */
 function buyPtRun(id: string, startedAt: number, sy: bigint): RouteRun {
-  const request: RouteRequest = { kind: "buy_pt", marketId: "m1", source: A, amount: 100n * 10_000_000n, pay: "underlying", receive: "underlying", matured: false }
+  const request: RouteRequest = { kind: "buy_pt", marketId: "m1", source: A, amount: 100n * 10_000_000n, pay: "underlying", receive: "underlying", matured: false, underlying: "USDY" }
   return {
     id,
     account: A,

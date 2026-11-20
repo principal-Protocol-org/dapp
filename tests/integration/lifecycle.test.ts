@@ -233,6 +233,7 @@ describe.skipIf(skip !== null)("protocol layer on the local network", () => {
       managerId: market.contracts.manager,
       network: manifest.network,
       protocolAbi: protocolAbi(manifest),
+      underlying: market.underlying.code,
     }
   }
 

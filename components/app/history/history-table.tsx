@@ -271,9 +271,10 @@ function toRouteRow(
   const market = ctx.m.markets.find((x) => x.marketId === r.marketId)
   // What the confirmed steps left; an older run closed with funds (before R2-76) still says so.
   const held = !done && market && firstOpen(r) > 0 ? routeHoldings(r.request, r.plans, r.outputs, firstOpen(r)) : undefined
+  // A run of a market no longer in the manifest still reads plainly.
   const status = done
     ? r.unwound
-      ? "Returned to USDY"
+      ? `Returned to ${market?.underlying.code ?? "the underlying"}`
       : "Completed"
     : funded
       ? waiting

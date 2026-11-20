@@ -231,6 +231,7 @@ export function createRunner(p: {
       managerId: market.contracts.manager,
       network: manifest.network,
       protocolAbi: protocolAbi(manifest),
+      underlying: market.underlying.code,
     }
   }
 
@@ -391,6 +392,7 @@ export function planContext(manifest: Manifest, market: Market, runner: Runner, 
     routerFunctions: manifest.routerFunctions ?? [],
     protocolAbi: protocolAbi(manifest),
     slippageBps: SLIPPAGE_BPS,
+    underlying: market.underlying.code,
     ms: s.ms,
   }
 }
@@ -436,7 +438,7 @@ export async function runTrade(p: {
   expect(pre.blockers, `${req.kind}: refusals before the start`).toEqual([])
   const lp = s0.acc.lp.status === "live" ? { heldLp: s0.acc.lp.value } : {}
   const firstStep = pre.firstOutput ? { firstStep: { action: planned[0].action, output: pre.firstOutput } } : {}
-  const quoted = currentContractsAdapter.quote(req, { ms: s0.ms, slippageBps: SLIPPAGE_BPS, plans: planned, ...lp, ...firstStep })
+  const quoted = currentContractsAdapter.quote(req, { ms: s0.ms, slippageBps: SLIPPAGE_BPS, underlying: ctx.underlying, plans: planned, ...lp, ...firstStep })
   if (quoted.status !== "live") throw new Error(`${req.kind}: quote unavailable: ${quoted.error}`)
   const quote = quoted.value
   const pool0 = live(s0.ms.poolState, "pool state")

@@ -228,7 +228,7 @@ describe("Side toggle", () => {
 describe("TokenPicker", () => {
   it("offers USDY and USDY SY, with an SY badge", () => {
     const onChange = vi.fn()
-    render(<TokenPicker value="underlying" onChange={onChange} options={["underlying", "sy"]} />)
+    render(<TokenPicker value="underlying" onChange={onChange} options={["underlying", "sy"]} code="USDY" />)
     const radios = screen.getAllByRole("radio")
     expect(radios.map((r) => r.textContent)).toEqual(["USDY", "USDYSY"])
     expect(within(radios[1]).getByText("SY")).toBeTruthy()
@@ -237,13 +237,13 @@ describe("TokenPicker", () => {
 
   it("reports the pick", async () => {
     const onChange = vi.fn()
-    render(<TokenPicker value="underlying" onChange={onChange} options={["underlying", "sy"]} />)
+    render(<TokenPicker value="underlying" onChange={onChange} options={["underlying", "sy"]} code="USDY" />)
     await userEvent.click(screen.getByRole("radio", { name: /SY/ }))
     expect(onChange).toHaveBeenCalledWith("sy")
   })
 
   it("is one tab stop: only the checked option is focusable (roving tabindex, M11)", () => {
-    render(<TokenPicker value="sy" onChange={vi.fn()} options={["underlying", "sy"]} />)
+    render(<TokenPicker value="sy" onChange={vi.fn()} options={["underlying", "sy"]} code="USDY" />)
     const [usdy, sy] = screen.getAllByRole("radio")
     expect(usdy.getAttribute("tabindex")).toBe("-1")
     expect(sy.getAttribute("tabindex")).toBe("0")
@@ -252,7 +252,7 @@ describe("TokenPicker", () => {
   it("arrow keys move the choice and the focus, wrapping around, as a radio group does (M11)", async () => {
     function Host() {
       const [value, setValue] = useState<"underlying" | "sy">("underlying")
-      return <TokenPicker value={value} onChange={setValue} options={["underlying", "sy"]} />
+      return <TokenPicker value={value} onChange={setValue} options={["underlying", "sy"]} code="USDY" />
     }
     render(<Host />)
     const radio = (i: number) => screen.getAllByRole("radio")[i]

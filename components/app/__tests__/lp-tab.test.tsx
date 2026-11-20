@@ -641,6 +641,7 @@ describe("LP tab — History's Continue resumes an interrupted route", () => {
     pay: "underlying",
     receive: "underlying",
     matured,
+    underlying: "USDY",
   })
   const plansOf = (r: RouteRequest): StepPlan[] => {
     const p = planRoute(r, { routerFunctions: [], keepYtSplit: { mintUnderlying: MINT_USDY, depositUnderlying: DEPOSIT_USDY } })

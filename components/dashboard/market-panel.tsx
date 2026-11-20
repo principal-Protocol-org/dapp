@@ -15,6 +15,7 @@ import type { VerifiableFigure } from "@/lib/protocol/dashboard/verify"
 import { explorerUrl } from "@/lib/protocol/explorer"
 import { formatAmountFixed, formatBps, formatRate } from "@/lib/protocol/format"
 import { getMarket } from "@/lib/protocol/manifest"
+import { assetNote } from "@/lib/protocol/onboarding"
 import { unavailable } from "@/lib/protocol/reader"
 import type { Live, Network } from "@/lib/protocol/types"
 import { AsOf, readsOf } from "./as-of"
@@ -64,6 +65,7 @@ export function MarketPanel({ marketId }: { marketId: string }) {
   if (!market) return null
 
   const { decimals, code } = market.underlying
+  const note = assetNote(m, market)
   const read = readOf(q, DASHBOARD_LIVE_MS)
   const pick = <T,>(f: (x: MarketDashboard) => Live<T>) => current(q, f)
   const amount = (unit: string) => amountIn(decimals, unit)
@@ -153,6 +155,7 @@ export function MarketPanel({ marketId }: { marketId: string }) {
               </h1>
               <StatusBadge status={status} />
             </div>
+            {note ? <p className="max-w-[68ch] text-sm text-ink-muted">{note}</p> : null}
             <p className="font-mono text-xs text-ink-muted wrap-anywhere">{market.marketId}</p>
             <p className="max-w-[68ch] text-ink-muted">
               This market&apos;s state, read from its contracts. No wallet is needed. Each figure&apos;s info button shows the contract call behind it

@@ -161,6 +161,7 @@ function healthyCtx(action: ActionId): GateContext {
     managerId: MANAGER,
     network: "testnet",
     protocolAbi: 1,
+    underlying: "USDY",
   }
 }
 
@@ -1693,5 +1694,28 @@ describe("the circuit-breaker message by contract version (plan 0009)", () => {
   it("the version decides it, never the network (the local stack is version 2)", () => {
     expect(breaker({ network: "local", protocolAbi: 2 })).toBe(breaker({ network: "mainnet", protocolAbi: 2 }))
     expect(breaker({ network: "mainnet", protocolAbi: 1 })).toBe(breaker({ network: "testnet", protocolAbi: 1 }))
+  })
+})
+
+describe("the risk-control pause names the market's asset (plan 0009, Task 13)", () => {
+  const paused = (underlying: string) => {
+    const found = gates("deposit", (c) => {
+      c.underlying = underlying
+      c.market.riskPaused = live(true)
+    }).filter((b) => b.code === "pause")
+    expect(found).toHaveLength(1)
+    return found[0].message
+  }
+
+  it("on Testnet (USDY) it reads as before, word for word", () => {
+    expect(paused("USDY")).toBe(
+      "Risk control is paused: anything that deposits or mints is stopped (deposits, minting, buying YT, buying PT in USDY, and adding liquidity in USDY) until it is unpaused.",
+    )
+  })
+
+  it("on a Mainnet mock asset it names that asset, never USDY", () => {
+    expect(paused("MOCKGILTS")).toBe(
+      "Risk control is paused: anything that deposits or mints is stopped (deposits, minting, buying YT, buying PT in MOCKGILTS, and adding liquidity in MOCKGILTS) until it is unpaused.",
+    )
   })
 })

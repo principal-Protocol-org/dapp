@@ -72,6 +72,8 @@ export type GateContext = {
   network: Network
   /** The contract-interface version (`protocolAbi(manifest)`): 2 has RiskControl's sliding window. */
   protocolAbi: 1 | 2
+  /** The market's asset code ("USDY" on Testnet, "MOCKGILTS" on Mainnet): the texts name it. */
+  underlying: string
 }
 
 /** Token decimals: every Principal token, and the release's underlying, use 7. */
@@ -507,7 +509,11 @@ function pauseGate(input: ActionInput, ctx: GateContext, g: Gates): void {
   }
 
   if (RISK_CHECKED.has(a) && g.need(m.riskPaused, "risk control's pause state") === true) {
-    g.block("pause", "Risk control is paused: anything that deposits or mints is stopped (deposits, minting, buying YT, buying PT in USDY, and adding liquidity in USDY) until it is unpaused.")
+    const code = ctx.underlying
+    g.block(
+      "pause",
+      `Risk control is paused: anything that deposits or mints is stopped (deposits, minting, buying YT, buying PT in ${code}, and adding liquidity in ${code}) until it is unpaused.`,
+    )
   }
 
   // R5-8: `is_paused()` is read up front; the simulation's own `#9` stays as the fallback. One refusal either way.

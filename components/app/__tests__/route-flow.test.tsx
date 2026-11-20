@@ -18,8 +18,8 @@ vi.mock("@/hooks/use-route", () => ({
 }))
 vi.mock("@/hooks/use-ledger-clock", () => ({ useLedgerClock: () => ({ ledgerTime: 1_800_000_000, sequence: 1, isError: false }) }))
 vi.mock("@/components/app/manifest-provider", () => {
-  // One object, as the provider gives: hooks depend on its identity.
-  const manifest = { network: "local" }
+  // One object, as the provider gives: hooks depend on its identity. A Mainnet mock asset (plan 0009).
+  const manifest = { network: "local", markets: [{ marketId: "m1", underlying: { code: "MOCKGILTS", decimals: 7 } }] }
   return { useManifest: () => manifest }
 })
 vi.mock("@/hooks/use-execute", () => ({ useExecute: () => exec }))
@@ -28,9 +28,9 @@ vi.mock("@/components/app/actions/tx-feedback", () => ({ showTxToast: toast, TxN
 
 import { RouteFlow } from "../route/route-flow"
 
-const REQUEST: RouteRequest = { kind: "buy_yt", marketId: "m1", source: "G", amount: 100n, pay: "underlying", receive: "underlying", matured: false }
+const REQUEST: RouteRequest = { kind: "buy_yt", marketId: "m1", source: "G", amount: 100n, pay: "underlying", receive: "underlying", matured: false, underlying: "MOCKGILTS" }
 const PLANS: StepPlan[] = [
-  { action: "deposit", amount: { from: "input" }, gives: "100 USDY", takes: "SY" },
+  { action: "deposit", amount: { from: "input" }, gives: "100 MOCKGILTS", takes: "SY" },
   { action: "mint", amount: { from: "input" }, gives: "SY from step 1", takes: "PT and YT" },
   { action: "sell_pt", amount: { from: "input" }, gives: "PT from step 2", takes: "SY" },
 ]
@@ -46,7 +46,7 @@ function review(): Review {
     fee: "100",
     preparedAtMs: 0,
     expiresAtMs: 60_000,
-    summary: { give: ["100 USDY"], getAtLeast: ["99 SY"], fees: ["Network fee"], validUntil: 1_800_000_300 },
+    summary: { give: ["100 MOCKGILTS"], getAtLeast: ["99 SY"], fees: ["Network fee"], validUntil: 1_800_000_300 },
     callTree: [],
   }
 }
@@ -96,7 +96,7 @@ describe("RouteFlow", () => {
     setup({ phase: "reviewing", step: 1, of: 3, run: run(["pending", "pending", "pending"]), review: review() })
     render(<RouteFlow {...base} />)
     const list = screen.getByRole("list", { name: "Route steps" })
-    for (const text of ["100 USDY", "PT from step 2", "PT and YT", "At least: 99 SY"]) expect(list.textContent).toContain(text)
+    for (const text of ["100 MOCKGILTS", "PT from step 2", "PT and YT", "At least: 99 SY"]) expect(list.textContent).toContain(text)
     expect(list.textContent).toContain("Its minimum is set from a fresh quote once step 1 is confirmed")
     expect(list.textContent).toContain("once step 2 is confirmed")
     expect(controls.sign).not.toHaveBeenCalled()
@@ -177,7 +177,7 @@ describe("RouteFlow", () => {
     expect(screen.queryByRole("button", { name: "Dismiss" })).toBeNull()
   })
 
-  it("interrupted panel offers Continue and Back to USDY", () => {
+  it("interrupted panel offers Continue and Back to the market's asset (MOCKGILTS)", () => {
     setup({
       phase: "interrupted",
       step: 2,
@@ -191,14 +191,15 @@ describe("RouteFlow", () => {
     render(<RouteFlow {...base} />)
     fireEvent.click(screen.getByRole("button", { name: "Continue" }))
     expect(controls.continue).toHaveBeenCalled()
-    fireEvent.click(screen.getByRole("button", { name: "Back to USDY" }))
+    fireEvent.click(screen.getByRole("button", { name: "Back to MOCKGILTS" }))
     expect(controls.unwind).toHaveBeenCalled()
+    expect(document.body.textContent).not.toContain("USDY")
   })
 
   it("interrupted without an unwind says why", () => {
     setup({ phase: "interrupted", step: 1, of: 3, run: run(["pending", "pending", "pending"]), unwind: { available: false, reason: "Nothing to return." } })
     render(<RouteFlow {...base} />)
-    expect(screen.queryByRole("button", { name: "Back to USDY" })).toBeNull()
+    expect(screen.queryByRole("button", { name: /^Back to / })).toBeNull()
     expect(screen.getByText("Nothing to return.")).toBeTruthy()
   })
 
@@ -270,13 +271,21 @@ describe("RouteFlow", () => {
     expect(lastOpts.kinds).toEqual(["buy_yt", "sell_yt"])
   })
 
-  it("a route turned back into USDY is announced as stopped, not as done (M1)", () => {
+  it("a route turned back into the market's asset (MOCKGILTS) is announced as stopped, not as done (M1)", () => {
     const back = { ...run(["confirmed", "confirmed"]), unwound: true }
     setup({ phase: "done", step: 2, of: 2, run: back, canDismiss: true })
     render(<RouteFlow {...base} />)
-    expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: "Buy YT stopped and turned back into USDY." }))
-    expect(base.onNotice).toHaveBeenCalledWith(expect.objectContaining({ title: "Buy YT stopped and turned back into USDY." }))
-    expect(screen.getByRole("heading", { name: "Turned back into USDY: 2 of 2 steps confirmed" })).toBeTruthy()
+    expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: "Buy YT stopped and turned back into MOCKGILTS." }))
+    expect(base.onNotice).toHaveBeenCalledWith(expect.objectContaining({ title: "Buy YT stopped and turned back into MOCKGILTS." }))
+    expect(screen.getByRole("heading", { name: "Turned back into MOCKGILTS: 2 of 2 steps confirmed" })).toBeTruthy()
+  })
+
+  it("a run logged before plan 0009 keeps the strings its plans stored; only the progress names the market's asset", () => {
+    const stored = [{ ...PLANS[0], gives: "100 USDY" }, ...PLANS.slice(1)]
+    setup({ phase: "interrupted", step: 2, of: 3, run: { ...run(["confirmed", "pending", "pending"]), plans: stored }, unwind: { available: true, amount: 100n }, canDismiss: true })
+    render(<RouteFlow {...base} />)
+    expect(screen.getByRole("list", { name: "Route steps" }).textContent).toContain("100 USDY")
+    expect(screen.getByRole("button", { name: "Back to MOCKGILTS" })).toBeTruthy()
   })
 
   it("a finished route is announced as done", () => {

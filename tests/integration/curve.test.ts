@@ -124,12 +124,13 @@ function adapterQuote(manifest: Manifest, ms: MarketState, req: TradeRequest, ex
     routerFunctions: manifest.routerFunctions ?? [],
     protocolAbi: protocolAbi(manifest),
     slippageBps: SLIPPAGE_BPS,
+    underlying: manifest.markets[0].underlying.code,
     ms,
   }
   const plans = currentContractsAdapter.plan(req, ctx)
   if (!Array.isArray(plans)) throw new Error(`${req.kind}: not offered: ${plans.disabled}`)
   expect(plans.map((p) => p.action)).toEqual([expectAction])
-  const quoted = currentContractsAdapter.quote(req, { ms, slippageBps: SLIPPAGE_BPS, plans })
+  const quoted = currentContractsAdapter.quote(req, { ms, slippageBps: SLIPPAGE_BPS, underlying: ctx.underlying, plans })
   if (quoted.status !== "live") throw new Error(`${req.kind}: quote unavailable: ${quoted.error}`)
   return quoted.value
 }
@@ -302,6 +303,7 @@ describe.skipIf(skip !== null)("curve port vs the live pool's quote views", () =
         routerFunctions: manifest!.routerFunctions ?? [],
         protocolAbi: protocolAbi(manifest!),
         slippageBps: SLIPPAGE_BPS,
+        underlying: manifest!.markets[0].underlying.code,
         ms,
       }
       const plans = currentContractsAdapter.plan(req, ctx)
@@ -312,7 +314,7 @@ describe.skipIf(skip !== null)("curve port vs the live pool's quote views", () =
       const syIn = signed.value
       const at = await sameLedger(reader(), pool, "quote_sy_for_yt", () => quoteSyForYt(reader(), pool, syIn), sy)
       const xr = rateOf(at)
-      const quoted = currentContractsAdapter.quote(req, { ms: atLedger(ms, at.state, xr, at.ledger), slippageBps: SLIPPAGE_BPS, plans })
+      const quoted = currentContractsAdapter.quote(req, { ms: atLedger(ms, at.state, xr, at.ledger), slippageBps: SLIPPAGE_BPS, underlying: ctx.underlying, plans })
       if (quoted.status !== "live") throw new Error(`buy_yt (${pay}): quote unavailable: ${quoted.error}`)
       const q = quoted.value
       const cost = syIn - at.quote.syBack

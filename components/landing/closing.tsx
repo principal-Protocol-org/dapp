@@ -20,7 +20,7 @@ export function CallToAction() {
         <div>
           <div className="grid gap-4">
             <span className="label inline-flex items-center gap-2.5 text-band-muted before:h-3.5 before:w-[7px] before:flex-none before:rounded-l-[14px] before:bg-band-par before:content-['']">
-              Coming soon on Stellar mainnet
+              Live on Stellar Mainnet and Testnet
             </span>
             <h2 id="cta-title" className="display-l text-band-ink">
               Unlock yield markets on Stellar.

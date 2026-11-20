@@ -21,7 +21,14 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@/components/app/manifest-provider", () => {
   // One object per network, as the provider gives: hooks depend on its identity.
   const byNetwork = new Map<string, unknown>()
-  const make = (network: string) => ({ network, markets: [{ marketId: "m1", displayName: "STA", underlying: { code: "STA", decimals: 7 } }] })
+  const make = (network: string) => ({
+    network,
+    markets: [
+      { marketId: "m1", displayName: "STA", underlying: { code: "STA", decimals: 7 } },
+      // A Mainnet mock asset (plan 0009).
+      { marketId: "m2", displayName: "MOCKGILTS (90-day)", underlying: { code: "MOCKGILTS", decimals: 7 } },
+    ],
+  })
   return {
     useManifest: () => {
       if (!byNetwork.has(mocks.network)) byNetwork.set(mocks.network, make(mocks.network))
@@ -315,17 +322,24 @@ describe("history table", () => {
     expect(within(row).getByRole("link", { name: /continue/i }).getAttribute("href")).toBe("/app/markets/m1?tab=pt&side=buy&route=r1")
   })
 
-  it("a route turned back into USDY reads Returned to USDY, not Completed (M1)", () => {
-    writeRoute(
-      route({ unwound: true, plans: [route().plans[0], { action: "withdraw", amount: { from: "step", index: 0, field: "value" }, gives: "SY", takes: "STA" }] }, [
+  it("a route turned back into the market's asset reads Returned to it, not Completed (M1)", () => {
+    const unwound = (marketId: string) =>
+      route({ marketId, unwound: true, plans: [route().plans[0], { action: "withdraw", amount: { from: "step", index: 0, field: "value" }, gives: "SY", takes: "STA" }] }, [
         { action: "deposit", status: "confirmed", hash: H1 },
         { action: "withdraw", status: "confirmed", hash: H2 },
-      ]),
-    )
-    render(<HistoryTable />)
+      ])
+    writeRoute(unwound("m1"))
+    const { unmount } = render(<HistoryTable />)
     const row = screen.getByText("Buy PT · 2 steps").closest("tr") as HTMLElement
-    expect(within(row).getByText("Returned to USDY")).toBeTruthy()
+    expect(within(row).getByText("Returned to STA")).toBeTruthy()
     expect(within(row).queryByText("Completed")).toBeNull()
+    unmount()
+    // On a Mainnet mock asset (plan 0009): its own code, never USDY.
+    writeRoute(unwound("m2"))
+    render(<HistoryTable />)
+    const gilts = screen.getByText("Buy PT · 2 steps").closest("tr") as HTMLElement
+    expect(within(gilts).getByText("Returned to MOCKGILTS")).toBeTruthy()
+    expect(gilts.textContent).not.toContain("USDY")
   })
 
   it("an older route closed with funds before closing became continuable still says what it left, without Continue", () => {

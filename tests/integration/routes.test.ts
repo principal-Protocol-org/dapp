@@ -448,7 +448,16 @@ describe.skipIf(skip !== null)("every route on the local USDY market (Task 24; 0
       const action = pay === "sy" ? "buy_yt_flash" : "buy_yt_flash_underlying"
       const name = `buy_yt exact budget (${pay})`
       const plans: StepPlan[] = [{ action, amount: { from: "input" }, secondaryAmount: { from: "value", value: syIn }, gives: pay === "sy" ? "SY" : "USDY", takes: "YT" }]
-      const request = (amount: bigint): RouteRequest => ({ kind: "buy_yt", marketId: market.marketId, source: r.account, amount, pay, receive: "underlying", matured: false })
+      const request = (amount: bigint): RouteRequest => ({
+        kind: "buy_yt",
+        marketId: market.marketId,
+        source: r.account,
+        amount,
+        pay,
+        receive: "underlying",
+        matured: false,
+        underlying: market.underlying.code,
+      })
       // A budget of sy_in itself always covers the cost while the PT is below par.
       const probe = await r.preStart(request(syIn), plans)
       expect(probe.blockers, `${name}: refusals before the start`).toEqual([])
@@ -636,7 +645,7 @@ describe.skipIf(skip !== null)("every route on the local USDY market (Task 24; 0
     // The manifest's contract version decides the argument lists (plan 0009): a version-2 split signs
     // the SY its deposit gives (`sy_in`), sized from the exchange rate the panel reads.
     const routeFor = (kind: "split" | "recombine", amount: bigint, receive: "sy" | "underlying", s: Snapshot): { req: RouteRequest; plans: StepPlan[] } => {
-      const req: RouteRequest = { kind, marketId: market.marketId, source: r.account, amount, pay: "underlying", receive, matured: false }
+      const req: RouteRequest = { kind, marketId: market.marketId, source: r.account, amount, pay: "underlying", receive, matured: false, underlying: market.underlying.code }
       const plans = planRoute(req, { routerFunctions: manifest.routerFunctions ?? [], protocolAbi: protocolAbi(manifest), exchangeRate: live(s.ms.exchangeRate, "SY exchange rate") })
       if (!Array.isArray(plans)) throw new Error(plans.disabled)
       return { req, plans }
@@ -731,7 +740,7 @@ describe.skipIf(skip !== null)("every route on the local USDY market (Task 24; 0
     // The route's holdings are what its deposit gave, not the SY the wallet already held.
     expect(holdings).toEqual({ sy: deposited })
     log(`interrupted lp_only after step 1: "${describeHoldings(holdings!, market.underlying)}" (the wallet holds ${units(b0.sy + deposited)} SY)`)
-    const u = unwindFrom(holdings)
+    const u = unwindFrom(holdings, market.underlying.code)
     if (!u.available) throw new Error(u.reason)
     expect(u.amount).toBe(deposited)
     // As useRoute.unwind: the confirmed steps stay, the rest is replaced by the single call back.

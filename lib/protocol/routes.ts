@@ -35,6 +35,11 @@ export type RouteRequest = {
   pay: Token
   receive: Token
   matured: boolean
+  /**
+   * The market's asset code ("USDY" on Testnet, "MOCKGILTS" on Mainnet): every step's gives and takes,
+   * and every refusal, names it. Runs logged before it existed lack it; nothing reads it after planning.
+   */
+  underlying: string
 }
 
 type DistributeKeys<T> = T extends unknown ? Exclude<keyof T, "kind"> : never
@@ -132,18 +137,22 @@ export type RouteContext = {
 const input: AmountSource = { from: "input" }
 const step = (index: number, field: OutputField): AmountSource => ({ from: "step", index, field })
 
-const DEPOSIT = (amount: AmountSource, takes = "SY"): StepPlan => ({
+/** `code` is the market's asset code, what the deposit hands over and the withdraw pays out. */
+const DEPOSIT = (code: string, amount: AmountSource, takes = "SY"): StepPlan => ({
   action: "deposit",
   amount,
-  gives: "USDY",
+  gives: code,
   takes,
 })
-const WITHDRAW = (amount: AmountSource, gives = "SY"): StepPlan => ({
+const WITHDRAW = (code: string, amount: AmountSource, gives = "SY"): StepPlan => ({
   action: "withdraw",
   amount,
   gives,
-  takes: "USDY",
+  takes: code,
 })
+
+/** Keep YT is paid in the market's asset only (R2-22); the trade adapter refuses the same way. */
+export const keepYtNeedsUnderlying = (code: string) => `Keeping YT while adding liquidity needs ${code}: pay in ${code}.`
 
 function disabledIf(reason: string): RouteDisabled {
   return { disabled: reason }
@@ -168,27 +177,28 @@ function syInOf(ctx: RouteContext, underlying: bigint, what: string): Literal | 
 
 /** Kinds paid for with `pay`; `receive` is ignored for them. The others ignore `pay`. */
 const BUY_KINDS: RouteKind[] = ["buy_pt", "buy_yt", "split", "lp_keep_yt", "lp_only"]
-const GIVES: Record<RouteKind, string> = {
-  buy_pt: "USDY",
-  buy_yt: "USDY",
-  split: "USDY",
-  lp_keep_yt: "USDY",
-  lp_only: "USDY",
+/** What each kind hands over and receives in one step; `null` is the market's asset (`RouteRequest.underlying`). */
+const GIVES: Record<RouteKind, string | null> = {
+  buy_pt: null,
+  buy_yt: null,
+  split: null,
+  lp_keep_yt: null,
+  lp_only: null,
   sell_pt: "PT",
   sell_yt: "YT",
   lp_withdraw: "LP",
   recombine: "PT + YT",
 }
-const TAKES: Record<RouteKind, string> = {
+const TAKES: Record<RouteKind, string | null> = {
   buy_pt: "PT",
   buy_yt: "YT",
   split: "PT + YT",
   lp_keep_yt: "LP + YT",
   lp_only: "LP",
-  sell_pt: "USDY",
-  sell_yt: "USDY",
-  lp_withdraw: "USDY",
-  recombine: "USDY",
+  sell_pt: null,
+  sell_yt: null,
+  lp_withdraw: null,
+  recombine: null,
 }
 
 /**
@@ -219,8 +229,9 @@ export function singleStepFor(
  */
 function oneStep(req: RouteRequest, ctx: RouteContext, single: SingleStep): StepPlan[] | RouteDisabled {
   const isBuy = BUY_KINDS.includes(req.kind)
-  const paid = req.pay === "sy" ? "SY" : "USDY"
-  const shape = { action: single.action, gives: isBuy ? paid : GIVES[req.kind], takes: isBuy ? TAKES[req.kind] : "USDY" }
+  const code = req.underlying
+  const paid = req.pay === "sy" ? "SY" : code
+  const shape = { action: single.action, gives: isBuy ? paid : (GIVES[req.kind] ?? code), takes: isBuy ? (TAKES[req.kind] ?? code) : code }
   const value = (v: bigint): AmountSource => ({ from: "value", value: v })
   switch (req.kind) {
     case "lp_keep_yt": {
@@ -259,19 +270,20 @@ export function planRoute(req: RouteRequest, ctx: RouteContext): StepPlan[] | Ro
 function multiStep(req: RouteRequest, ctx: RouteContext): StepPlan[] | RouteDisabled {
   const payUnderlying = req.pay === "underlying"
   const recvUnderlying = req.receive === "underlying"
+  const code = req.underlying
 
   switch (req.kind) {
     case "buy_pt": {
       if (!payUnderlying) return [{ action: "buy_pt", amount: input, gives: "SY", takes: "PT" }]
-      return [DEPOSIT(input), { action: "buy_pt", amount: step(0, "value"), gives: "SY", takes: "PT" }]
+      return [DEPOSIT(code, input), { action: "buy_pt", amount: step(0, "value"), gives: "SY", takes: "PT" }]
     }
     case "sell_pt": {
       const sell: StepPlan = { action: "sell_pt", amount: input, gives: "PT", takes: "SY" }
-      return recvUnderlying ? [sell, WITHDRAW(step(0, "value"))] : [sell]
+      return recvUnderlying ? [sell, WITHDRAW(code, step(0, "value"))] : [sell]
     }
     case "sell_yt": {
       const sell: StepPlan = { action: "sell_yt", amount: input, gives: "YT", takes: "SY" }
-      return recvUnderlying ? [sell, WITHDRAW(step(0, "value"))] : [sell]
+      return recvUnderlying ? [sell, WITHDRAW(code, step(0, "value"))] : [sell]
     }
     case "buy_yt": {
       const syIn = ctx.buyYt?.syIn
@@ -298,21 +310,21 @@ function multiStep(req: RouteRequest, ctx: RouteContext): StepPlan[] | RouteDisa
             }
           : {}),
       })
-      const tail = (idx: number): StepPlan[] => (payUnderlying ? [WITHDRAW(step(idx, "sy_back"))] : [])
+      const tail = (idx: number): StepPlan[] => (payUnderlying ? [WITHDRAW(code, step(idx, "sy_back"))] : [])
       if (!payUnderlying) return [buy(0), ...tail(0)]
       const dep = ctx.buyYt?.depositUnderlying
-      if (dep === undefined) return disabledIf("Buy YT with USDY needs the amount of USDY to deposit first.")
-      return [DEPOSIT({ from: "value", value: dep }), buy(1), ...tail(1)]
+      if (dep === undefined) return disabledIf(`Buy YT with ${code} needs the amount of ${code} to deposit first.`)
+      return [DEPOSIT(code, { from: "value", value: dep }), buy(1), ...tail(1)]
     }
     case "lp_keep_yt": {
       const split = ctx.keepYtSplit
-      if (!payUnderlying) return disabledIf("Keeping YT while adding liquidity needs USDY: pay in USDY.")
-      if (!split) return disabledIf("Adding liquidity and keeping YT needs the USDY split first.")
+      if (!payUnderlying) return disabledIf(keepYtNeedsUnderlying(code))
+      if (!split) return disabledIf(`Adding liquidity and keeping YT needs the ${code} split first.`)
       const literal = syInOf(ctx, split.mintUnderlying, "Adding liquidity and keeping YT")
       if ("disabled" in literal) return literal
       return [
-        { action: "mint", amount: { from: "value", value: split.mintUnderlying }, ...literal, gives: "USDY", takes: "PT + YT" },
-        DEPOSIT({ from: "value", value: split.depositUnderlying }),
+        { action: "mint", amount: { from: "value", value: split.mintUnderlying }, ...literal, gives: code, takes: "PT + YT" },
+        DEPOSIT(code, { from: "value", value: split.depositUnderlying }),
         {
           action: "add_liquidity",
           amount: step(0, "pt_minted"),
@@ -331,7 +343,7 @@ function multiStep(req: RouteRequest, ctx: RouteContext): StepPlan[] | RouteDisa
         gives: "SY",
         takes: "LP",
       }
-      return payUnderlying ? [DEPOSIT(input), add] : [add]
+      return payUnderlying ? [DEPOSIT(code, input), add] : [add]
     }
     case "lp_withdraw": {
       const remove: StepPlan = { action: "remove_liquidity", amount: input, gives: "LP", takes: "PT + SY" }
@@ -342,24 +354,24 @@ function multiStep(req: RouteRequest, ctx: RouteContext): StepPlan[] | RouteDisa
           amount: step(0, "pt"),
           secondaryAmount: { from: "value", value: 0n },
           gives: "PT",
-          takes: "USDY (paid out as USDY even when you receive SY)",
+          takes: `${code} (paid out as ${code} even when you receive SY)`,
         }
         // redeem_at_maturity pays underlying directly; only the SY removed from the pool is unwrapped.
-        return recvUnderlying ? [remove, redeem, WITHDRAW(step(0, "sy"))] : [remove, redeem]
+        return recvUnderlying ? [remove, redeem, WITHDRAW(code, step(0, "sy"))] : [remove, redeem]
       }
       const sell: StepPlan = { action: "sell_pt", amount: step(0, "pt"), gives: "PT", takes: "SY" }
       const out: AmountSource = { from: "sum", parts: [step(0, "sy"), step(1, "value")] }
-      return recvUnderlying ? [remove, sell, WITHDRAW(out)] : [remove, sell]
+      return recvUnderlying ? [remove, sell, WITHDRAW(code, out)] : [remove, sell]
     }
     case "split": {
-      if (!payUnderlying) return disabledIf("Splitting needs USDY: pay in USDY.")
+      if (!payUnderlying) return disabledIf(`Splitting needs ${code}: pay in ${code}.`)
       const literal = syInOf(ctx, req.amount, "Splitting")
       if ("disabled" in literal) return literal
-      return [{ action: "mint", amount: input, ...literal, gives: "USDY", takes: "PT + YT" }]
+      return [{ action: "mint", amount: input, ...literal, gives: code, takes: "PT + YT" }]
     }
     case "recombine": {
       const rec: StepPlan = { action: "recombine", amount: input, gives: "PT + YT", takes: "SY" }
-      return recvUnderlying ? [rec, WITHDRAW(step(0, "value"))] : [rec]
+      return recvUnderlying ? [rec, WITHDRAW(code, step(0, "value"))] : [rec]
     }
   }
 }
@@ -459,7 +471,7 @@ export function quoteWorseThanPreview(p: {
 
 // --- What an interrupted route leaves with the user (spec §4 "Interruption") ---
 
-/** A token a route step hands over or receives. `underlying` is the market's USDY. */
+/** A token a route step hands over or receives. `underlying` is the market's asset. */
 export type Holding = "underlying" | "sy" | "pt" | "yt" | "lp"
 /** Net amounts the route's confirmed steps left with the user, positive only. */
 export type Holdings = Partial<Record<Holding, bigint>>
@@ -610,25 +622,25 @@ export function describeHoldings(
 export type Unwind = { available: true; amount: bigint; plan: StepPlan } | { available: false; reason: string }
 
 /**
- * The single call back to USDY from what an interrupted route left, where one exists: SY is
- * unwrapped by `withdraw` (Router.unwrap). Only SY gets this plan. PT or YT go back from the Trade
+ * The single call back to the market's asset (`underlying`, its code) from what an interrupted route
+ * left, where one exists: SY is unwrapped by `withdraw` (Router.unwrap). Only SY gets this plan. PT or YT go back from the Trade
  * tab, which the reason names: in one Router call (`swap_pt_for_underlying`, `swap_yt_for_underlying`)
  * when the manifest lists it, else a sale then a withdraw. LP goes back from the LP tab. After
  * maturity (`matured`) PT and YT can no longer be sold: it names Redeem in the PT tab instead, the
  * LP's withdraw (open at maturity), and the SY's withdraw.
  */
-export function unwindFrom(h: Holdings | undefined, opts: { matured?: boolean } = {}): Unwind {
+export function unwindFrom(h: Holdings | undefined, underlying: string, opts: { matured?: boolean } = {}): Unwind {
   if (h === undefined) {
     return {
       available: false,
-      reason: "This app could not read what the last step produced, so it cannot build the call back to USDY. Check your balances in the Portfolio.",
+      reason: `This app could not read what the last step produced, so it cannot build the call back to ${underlying}. Check your balances in the Portfolio.`,
     }
   }
   const held = (t: Holding) => (h[t] ?? 0n) > 0n
   const others = (["pt", "yt", "lp"] as const).filter(held).map((t) => HOLDING_LABEL[t])
   if (others.length > 0) {
     const what = listWords(others)
-    const head = `Going back to USDY in one call works only from SY, and you also hold ${what}.`
+    const head = `Going back to ${underlying} in one call works only from SY, and you also hold ${what}.`
     if (!opts.matured) return { available: false, reason: `${head} Continue the route, or sell the ${what} from the Trade tab.` }
     const redeemable = (["pt", "yt"] as const).filter(held).map((t) => HOLDING_LABEL[t])
     const ways = [
@@ -645,8 +657,8 @@ export function unwindFrom(h: Holdings | undefined, opts: { matured?: boolean } 
   const sy = h.sy ?? 0n
   if (sy <= 0n) {
     return h.underlying !== undefined
-      ? { available: false, reason: "You already hold USDY from this route: there is nothing to turn back." }
-      : { available: false, reason: "Nothing has moved, so there is nothing to turn back into USDY." }
+      ? { available: false, reason: `You already hold ${underlying} from this route: there is nothing to turn back.` }
+      : { available: false, reason: `Nothing has moved, so there is nothing to turn back into ${underlying}.` }
   }
-  return { available: true, amount: sy, plan: WITHDRAW({ from: "value", value: sy }) }
+  return { available: true, amount: sy, plan: WITHDRAW(underlying, { from: "value", value: sy }) }
 }

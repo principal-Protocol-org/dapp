@@ -121,6 +121,7 @@ const buyPt: RouteRequest = {
   pay: "underlying",
   receive: "underlying",
   matured: false,
+  underlying: "USDY",
 }
 const plansFor = (req: RouteRequest): StepPlan[] => {
   const p = planRoute(req, { routerFunctions: [] })

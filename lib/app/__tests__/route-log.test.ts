@@ -39,7 +39,7 @@ const run = (over: Partial<RouteRun> = {}): RouteRun => ({
   account: A,
   marketId: "m1",
   kind: "buy_pt",
-  request: { kind: "buy_pt", marketId: "m1", source: A, amount: 1_000_0000000n, pay: "underlying", receive: "underlying", matured: false },
+  request: { kind: "buy_pt", marketId: "m1", source: A, amount: 1_000_0000000n, pay: "underlying", receive: "underlying", matured: false, underlying: "USDY" },
   plans: [
     { action: "deposit", amount: { from: "input" }, gives: "USDY", takes: "SY" },
     { action: "buy_pt", amount: { from: "step", index: 0, field: "value" }, gives: "SY", takes: "PT" },
@@ -67,6 +67,18 @@ describe("route log", () => {
     const back = readRoutes(A, s)[0]
     expect(back.request.amount).toBe(1_000_0000000n)
     expect(back.outputs[0]).toEqual({ kind: "amount", value: 999_0000000n })
+  })
+
+  it("a run logged before plan 0009, without the asset code, still loads with the strings it stored", () => {
+    const s = memoryStorage()
+    const before: Record<string, unknown> = { ...run().request }
+    delete before.underlying
+    const old = { ...run(), request: before } as unknown as RouteRun
+    writeRoute(old, s)
+    const back = readRoutes(A, s)
+    expect(back.map((r) => r.id)).toEqual(["r1"])
+    expect(back[0].request).not.toHaveProperty("underlying")
+    expect(back[0].plans[0]).toMatchObject({ gives: "USDY", takes: "SY" })
   })
 
   it("replaces a run by id and keeps the newest first", () => {

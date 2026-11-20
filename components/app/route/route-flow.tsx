@@ -13,6 +13,7 @@ import { useRoute, type UseRouteOptions } from "@/hooks/use-route"
 import { noticeForError, noticeForResult, type TxNotice } from "@/lib/app/tx-notice"
 import type { Blocker } from "@/lib/protocol/gates"
 import type { RestoreReview } from "@/lib/protocol/review"
+import { getMarket } from "@/lib/protocol/manifest"
 import type { RouteKind, RouteRequest, StepPlan, StepPreview } from "@/lib/protocol/routes"
 import { useManifest } from "@/components/app/manifest-provider"
 
@@ -86,7 +87,10 @@ const LABELS: Record<RouteKind, string> = {
 }
 
 export function RouteFlow(props: RouteFlowProps) {
-  const network = useManifest().network
+  const manifest = useManifest()
+  const network = manifest.network
+  // The market's asset code, which the way back goes to; neutral words for a market not in the manifest.
+  const code = getMarket(manifest, props.marketId)?.underlying.code ?? "the underlying"
   const { ledgerTime } = useLedgerClock()
   const route = useRoute({
     account: props.account,
@@ -101,22 +105,22 @@ export function RouteFlow(props: RouteFlowProps) {
   const { state } = route
   const kind = state.run?.kind ?? props.request?.kind ?? props.kind
   const label = kind ? LABELS[kind] : "route"
-  const latest = useRef({ ...props, label })
+  const latest = useRef({ ...props, label, code })
   useEffect(() => {
-    latest.current = { ...props, label }
+    latest.current = { ...props, label, code }
   })
 
   const [restore, setRestore] = useState<RestoreStep>({ step: "idle" })
   const restoreRef = useRef<RestoreReview | null>(null)
 
-  // A done route is announced once; one turned back into USDY says so (M1), never "all steps".
+  // A done route is announced once; one turned back into the market's asset says so (M1), never "all steps".
   const announced = useRef<string | null>(null)
   const doneId = state.phase === "done" ? (state.run?.id ?? null) : null
   const unwound = state.run?.unwound === true
   useEffect(() => {
     if (!doneId || announced.current === doneId) return
     announced.current = doneId
-    const title = unwound ? `${latest.current.label} stopped and turned back into USDY.` : `${latest.current.label}: all steps confirmed.`
+    const title = unwound ? `${latest.current.label} stopped and turned back into ${latest.current.code}.` : `${latest.current.label}: all steps confirmed.`
     const notice: TxNotice = { tone: "success", title }
     showTxToast(notice)
     latest.current.onNotice(notice)
@@ -191,7 +195,7 @@ export function RouteFlow(props: RouteFlowProps) {
           }}
         />
       ) : null}
-      <RouteProgress route={route} />
+      <RouteProgress route={route} code={code} />
       {reviewing && state.run ? (
         <RouteReviewDialog
           title={label}
