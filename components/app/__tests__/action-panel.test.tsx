@@ -71,7 +71,7 @@ const mocks = vi.hoisted(() => ({
   prepareRestore: vi.fn(),
   executeRestore: vi.fn(),
   getTransaction: vi.fn(),
-  toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn(), message: vi.fn() },
+  toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn(), message: vi.fn(), dismiss: vi.fn() },
 }))
 
 vi.mock("sonner", () => ({ toast: mocks.toast, Toaster: () => null }))
@@ -965,6 +965,34 @@ describe("ActionPanel — a late confirmation cannot double an action (M-21)", (
     await enter("SY to spend", "5")
     expect(notice()).toBeTruthy()
     expect(reviewButton().disabled).toBe(true)
+    // Still pending: its toast was never closed.
+    expect(mocks.toast.dismiss).not.toHaveBeenCalled()
+  })
+
+  it("the result-not-known toast closes when the send settles, and the settle toast shows on its own", async () => {
+    await sendNotKnown()
+    const [title, options] = mocks.toast.warning.mock.calls[0]
+    expect(title).toBe("Buy PT: result not known yet.")
+    expect(options).toMatchObject({ id: `pending-${HASH}`, duration: Infinity })
+    expect(mocks.toast.dismiss).not.toHaveBeenCalled()
+    // Still pending after a look: it stays up.
+    await settle(PENDING_RECHECK_MS)
+    expect(mocks.toast.dismiss).not.toHaveBeenCalled()
+    mocks.getTransaction.mockResolvedValue({ status: "SUCCESS" })
+    await settle(PENDING_RECHECK_MS)
+    await settle()
+    expect(mocks.toast.dismiss).toHaveBeenCalledWith(`pending-${HASH}`)
+    expect(mocks.toast.success.mock.calls[0][0]).toBe("Buy PT confirmed.")
+    // The settle toast is a toast of its own, not an update of the closed one.
+    expect(mocks.toast.success.mock.calls[0][1]).not.toHaveProperty("id")
+  })
+
+  it("a direct result's toast carries no id: only a result not known yet is closed later", async () => {
+    await renderPanel()
+    await openReview()
+    await user().click(signButton())
+    await settle()
+    expect(mocks.toast.success.mock.calls[0][1]).not.toHaveProperty("id")
   })
 
   it("settled in another tab, the guard lifts here and the old result line does not come back", async () => {
@@ -978,6 +1006,8 @@ describe("ActionPanel — a late confirmation cannot double an action (M-21)", (
     expect(notice()).toBeNull()
     expect(screen.queryByText("Buy PT: result not known yet.")).toBeNull()
     expect(reviewButton().disabled).toBe(false)
+    // Settled elsewhere, its result-not-known toast here closes too.
+    expect(mocks.toast.dismiss).toHaveBeenCalledWith(`pending-${HASH}`)
   })
 
   it("an action left pending in an earlier visit is checked on load and settles", async () => {

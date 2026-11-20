@@ -75,6 +75,7 @@ vi.mock("@/lib/protocol/rpc-limiter", async (orig) => ({ ...(await orig<object>(
 
 import { down, live, marketState } from "@/components/app/__tests__/fixtures"
 import { useRoute, type RouteGate } from "@/hooks/use-route"
+import { addPending, readPending } from "@/lib/app/pending-tx"
 import { readRoutes, writeRoute, type RouteRun } from "@/lib/app/route-log"
 import { planRoute, type RouteKind, type RouteRequest, type StepPlan } from "@/lib/protocol/routes"
 
@@ -366,6 +367,57 @@ describe("useRoute", () => {
     expect(result.current.state.error).toMatch(/time limit/)
     expect(loggedRun()?.steps[0].status).toBe("failed")
     expect(mocks.exec.execute).toHaveBeenCalledTimes(1)
+  })
+
+  describe("a step's pending entry (M-21): the single-action panel's guard for the same send", () => {
+    const OTHER = "f".repeat(64)
+    /** Signs step 1 with an unknown result, and keeps it pending as the real useExecute does (a fake here). */
+    async function unknownStep(result: { current: ReturnType<typeof useRoute> }): Promise<string> {
+      act(() => result.current.start(buyPt, plansFor(buyPt)))
+      await untilReview(result, 1)
+      act(() => result.current.sign())
+      await waitFor(() => expect(result.current.state.phase).toBe("waiting"))
+      const hash = hashOf(mocks.exec.execute.mock.calls[0][0])
+      addPending({ hash, action: "deposit", marketId: "m1", account: A, validUntil: LEDGER + 300, sentAt: LEDGER })
+      addPending({ hash: OTHER, action: "buy_pt", marketId: "m1", account: A, validUntil: LEDGER + 300, sentAt: LEDGER })
+      return hash
+    }
+    const pendingHashes = () => readPending(A).map((e) => e.hash)
+
+    it("stays while the step is unknown, and goes when the route's re-check finds it confirmed", async () => {
+      mocks.exec.execute.mockImplementation(async (review: Review): Promise<TxResult> => ({ hash: hashOf(review), status: "NOT_FOUND" }))
+      const { result } = setup()
+      const hash = await unknownStep(result)
+      mocks.getTransaction.mockResolvedValueOnce({ status: "NOT_FOUND", latestLedgerCloseTime: LEDGER + 20, oldestLedgerCloseTime: LEDGER - 3600 })
+      act(() => result.current.continue())
+      await waitFor(() => expect(mocks.getTransaction).toHaveBeenCalledTimes(1))
+      await waitFor(() => expect(result.current.state.checking).toBeUndefined())
+      expect(pendingHashes()).toEqual([OTHER, hash])
+
+      mocks.getTransaction.mockResolvedValueOnce({ status: "SUCCESS", returnValue: nativeToScVal(996n * S, { type: "i128" }) })
+      act(() => result.current.continue())
+      await untilReview(result, 2)
+      // Only this step's entry: another send's guard stays.
+      expect(pendingHashes()).toEqual([OTHER])
+    })
+
+    for (const [name, answer] of [
+      ["failed on-chain", { status: "FAILED" }],
+      ["final: it never landed", { status: "NOT_FOUND", latestLedgerCloseTime: LEDGER + 400, oldestLedgerCloseTime: LEDGER - 3600 }],
+      ["lost: the network can no longer tell", { status: "NOT_FOUND", latestLedgerCloseTime: LEDGER + 400, oldestLedgerCloseTime: LEDGER + 100 }],
+    ] as const) {
+      it(`goes when the route's re-check settles the step as ${name}`, async () => {
+        mocks.exec.execute.mockImplementation(async (review: Review): Promise<TxResult> => ({ hash: hashOf(review), status: "NOT_FOUND" }))
+        const { result } = setup()
+        const hash = await unknownStep(result)
+        expect(pendingHashes()).toContain(hash)
+        mocks.getTransaction.mockResolvedValueOnce(answer)
+        act(() => result.current.continue())
+        await waitFor(() => expect(mocks.getTransaction).toHaveBeenCalledTimes(1))
+        await waitFor(() => expect(result.current.state.checking).toBeUndefined())
+        expect(pendingHashes()).toEqual([OTHER])
+      })
+    }
   })
 
   it("reads ledger close times passed through as strings (fix round 1, Important)", async () => {

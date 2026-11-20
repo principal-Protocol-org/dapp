@@ -8,6 +8,7 @@ import { useMarketState } from "@/hooks/use-market-state"
 import { useMatured } from "@/hooks/use-matured"
 import { useSettings } from "@/hooks/use-settings"
 import { derive, ratesFrom, simulate } from "@/hooks/use-simulation"
+import { removePending } from "@/lib/app/pending-tx"
 import {
   closedCopy,
   firstOpen,
@@ -555,6 +556,9 @@ export function useRoute(opts: UseRouteOptions): RouteControls {
       }
       release(g)
       const hash = step.hash
+      // Settled (landed, failed, or past its time bound): useExecute kept this send pending for the
+      // single-action panel's guard (M-21), and that entry goes now, whatever the log says below.
+      if (hash && (found.status !== "NOT_FOUND" || found.final || found.lost)) removePending(r.account, hash)
       // Written only over the copy this look started from: another window may have moved on since.
       if (found.status === "SUCCESS") {
         const cur = withStep(r, i, { action: step.action, status: "confirmed", hash }, found.output)

@@ -1,6 +1,6 @@
 "use client"
 
-import { useId, useState } from "react"
+import { useEffect, useId, useRef, useState } from "react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Skeleton } from "@/components/ui/skeleton"
 import { AmountField } from "@/components/app/actions/amount-field"
@@ -9,12 +9,13 @@ import type { FieldKey, FloorSpec, PanelConfig, PanelInputs, PreviewLine } from 
 import { PendingNotice } from "@/components/app/actions/pending-notice"
 import { PreviewList, safeLines, useQuoteLines } from "@/components/app/actions/preview-lines"
 import { SignFlow } from "@/components/app/actions/sign-flow"
-import { showTxToast, TxNoticeView } from "@/components/app/actions/tx-feedback"
+import { dismissPendingToast, showTxToast, TxNoticeView } from "@/components/app/actions/tx-feedback"
 import { STALE, useGateContext } from "@/hooks/use-gate-context"
 import { usePendingTx } from "@/hooks/use-pending-tx"
 import { useSettings } from "@/hooks/use-settings"
 import { useSimulation } from "@/hooks/use-simulation"
 import { amountsComplete, checkAmount, spendBalance } from "@/lib/app/amounts"
+import { readPending, type PendingTx } from "@/lib/app/pending-tx"
 import type { AccountState } from "@/lib/protocol/account-state"
 import { noticeForSettled, type TxNotice } from "@/lib/app/tx-notice"
 import { ACTION_META, invocationFor, type ActionId, type ActionInput, type GuardValues } from "@/lib/protocol/actions"
@@ -101,6 +102,14 @@ export function ActionPanel({ config, marketId }: { config: PanelConfig; marketI
     showTxToast(notice)
     setLast({ owner, notice })
   })
+  // Once the send shown here has settled (here, in another panel or tab, or by its route), its
+  // result-not-known toast closes. One only hidden by an account or market change is still pending.
+  const shownPending = useRef<PendingTx | null>(null)
+  useEffect(() => {
+    const was = shownPending.current
+    shownPending.current = pending
+    if (was && was.hash !== pending?.hash && !readPending(was.account).some((e) => e.hash === was.hash)) dismissPendingToast(was.hash)
+  }, [pending])
 
   // --- Amounts (Review Focus 3): parsed without rounding, checked against the balance spent (R24).
   const fields = config.fields.map((spec) => {
