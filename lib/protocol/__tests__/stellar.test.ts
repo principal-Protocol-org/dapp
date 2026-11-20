@@ -917,6 +917,24 @@ describe("simulateInvocation", () => {
     expect(load.requests).toBe(6);
   });
 
+  it("never throws or rejects, even on an argument its sharing key cannot hold", async () => {
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+    const { server } = countingServer();
+    let outcome: Promise<unknown> | undefined;
+    expect(() => {
+      outcome = simulateInvocation({
+        rpcUrl: testnetMarket.rpcUrl,
+        networkPassphrase: testnetMarket.networkPassphrase,
+        source,
+        invocation: { ...invocation, args: [{ type: "struct", value: circular } as unknown as ScArg] },
+        server,
+      });
+    }).not.toThrow();
+    // Simulated on its own, unshared: an outcome, whatever the simulation made of the argument.
+    await expect(outcome).resolves.toMatchObject({ ok: expect.any(Boolean) });
+  });
+
   it("never has more than six requests in flight with the contract reads, and answers every one", async () => {
     const { server, load } = countingServer();
     const writes = Array.from({ length: 10 }, (_, i) =>

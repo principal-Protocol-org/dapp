@@ -62,6 +62,16 @@ export function shareInFlight<T>(key: string, run: () => Promise<T>): Promise<T>
 }
 
 /**
+ * A write boundary: call it once a transaction has landed, before refreshing reads. A read sent
+ * before the write may answer with the state from before it, so no later read joins one: those
+ * still in flight keep answering the callers that already joined them, and the next identical read
+ * makes its own request.
+ */
+export function forgetInFlight(): void {
+  inFlight.clear()
+}
+
+/**
  * A request's identity as text, for `shareInFlight`: the RPC URL, then what makes the call (contract,
  * function, arguments, a simulation's source). Bigints at any depth (a struct argument's fields) are
  * tagged, so they neither throw nor equal the same digits as a string.

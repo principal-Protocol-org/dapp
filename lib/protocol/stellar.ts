@@ -572,10 +572,17 @@ type SimulateInvocationParams = {
 // Simulates a write as the user (never prepareTransaction). The contractId on a contract_error is the
 // contract that raised it (see contractErrorSource), or the invoked contract if no event names one.
 // An identical simulation in flight (same RPC, source and call) is shared, and each of its two
-// requests takes a slot of the read cap (spec 0005 M-20).
-export function simulateInvocation(params: SimulateInvocationParams): Promise<SimulationOutcome> {
+// requests takes a slot of the read cap (spec 0005 M-20). It never throws or rejects: a call its
+// sharing key cannot hold is simulated on its own, and fails there as any other would.
+export async function simulateInvocation(params: SimulateInvocationParams): Promise<SimulationOutcome> {
   const { contractId, functionName, args } = params.invocation;
-  return shareInFlight(requestKey(params.rpcUrl, params.source, contractId, functionName, args), () => simulateInvocationOnce(params));
+  let key: string;
+  try {
+    key = requestKey(params.rpcUrl, params.source, contractId, functionName, args);
+  } catch {
+    return simulateInvocationOnce(params);
+  }
+  return shareInFlight(key, () => simulateInvocationOnce(params));
 }
 
 async function simulateInvocationOnce(params: SimulateInvocationParams): Promise<SimulationOutcome> {

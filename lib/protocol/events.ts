@@ -2,6 +2,7 @@ import { scValToNative, type xdr } from "@stellar/stellar-sdk"
 import { errorMessage } from "./errors"
 import { formatAmount, shorten } from "./format"
 import { getMarket } from "./manifest"
+import { limitRpc } from "./rpc-limiter"
 import { createRpcServer } from "./stellar"
 import type { Manifest, Market } from "./types"
 
@@ -269,12 +270,11 @@ async function fetchGroup(
       if (calls >= scan.maxPages) return { events, truncated: true }
       calls++
       let res: Awaited<ReturnType<EventsRpcServer["getEvents"]>>
+      const request: EventsRequest =
+        cursor === undefined ? { startLedger: start, endLedger: end, filters, limit: EVENTS_LIMIT } : { cursor, filters, limit: EVENTS_LIMIT }
       try {
-        res = await server.getEvents(
-          cursor === undefined
-            ? { startLedger: start, endLedger: end, filters, limit: EVENTS_LIMIT }
-            : { cursor, filters, limit: EVENTS_LIMIT },
-        )
+        // Each page takes a slot of the read cap (spec 0005 M-20): five markets walk ten groups at once.
+        res = await limitRpc(() => server.getEvents(request))
       } catch (error) {
         const oldest = cursor === undefined && !readAgain ? prunedOldest(error) : undefined
         if (oldest === undefined || oldest <= start) throw error

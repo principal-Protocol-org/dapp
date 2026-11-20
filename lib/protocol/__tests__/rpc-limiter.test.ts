@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest"
-import { limitRpc, RPC_CONCURRENCY, requestKey, shareInFlight } from "../rpc-limiter"
+import { forgetInFlight, limitRpc, RPC_CONCURRENCY, requestKey, shareInFlight } from "../rpc-limiter"
 
 /** A promise the test settles by hand. */
 function deferred<T>() {
@@ -117,6 +117,26 @@ describe("shareInFlight", () => {
     expect(settled.map((s) => s.status)).toEqual(["rejected", "rejected"])
     expect(requests).toBe(1)
     await expect(shareInFlight(key, async () => "fresh")).resolves.toBe("fresh")
+  })
+
+  it("after a write lands (forgetInFlight), an identical read makes its own request; the earlier one still answers its callers", async () => {
+    const before = deferred<string>()
+    const after = deferred<string>()
+    const gates = [before, after]
+    let requests = 0
+    const run = () => gates[requests++].promise
+    const key = requestKey("https://rpc.test", "C1", "balance", [{ type: "address", value: "GA" }])
+    const old = shareInFlight(key, run)
+    forgetInFlight()
+    const fresh = shareInFlight(key, run)
+    expect(requests).toBe(2)
+    before.resolve("before the write")
+    expect(await old).toBe("before the write")
+    // The earlier request settling does not forget the fresh one: a third read joins it.
+    const joined = shareInFlight(key, run)
+    expect(requests).toBe(2)
+    after.resolve("after the write")
+    expect(await Promise.all([fresh, joined])).toEqual(["after the write", "after the write"])
   })
 
   it("keys bigints at any depth without throwing, apart from the same digits as text", () => {

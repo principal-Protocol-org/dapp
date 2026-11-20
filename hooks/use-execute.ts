@@ -20,6 +20,7 @@ import {
   type SignTransaction,
   type TxResult,
 } from "@/lib/protocol/review"
+import { forgetInFlight } from "@/lib/protocol/rpc-limiter"
 import type { ContractInvocation } from "@/lib/protocol/stellar"
 
 export type Execute = {
@@ -56,6 +57,8 @@ export function useExecute(): Execute {
 
   const refresh = useCallback(() => {
     const { network } = manifest
+    // The transaction landed: no refetch may join a read sent before it.
+    forgetInFlight()
     void queryClient.invalidateQueries({ queryKey: ["market", network] })
     void queryClient.invalidateQueries({ queryKey: ["account", network] })
     // The manager view's roles, fees and paused flags (the paused flags are in the market reads).

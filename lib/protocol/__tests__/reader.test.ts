@@ -322,6 +322,48 @@ describe("createRpcReader with fallback endpoints (D-6)", () => {
     expect(s.asked).toEqual([SECOND, PRIMARY])
   })
 
+  it("a contract's own error leaves the endpoint in good standing: the next read asks it first", async () => {
+    const table: Record<string, unknown> = { [PRIMARY]: new Error("HostError: Error(Contract, #3)"), [SECOND]: 200 }
+    const s = servers(table)
+    const read = createRpcReader(manifestWith([SECOND]), { serverFor: s.serverFor })
+    await expect(read(call)).rejects.toThrow("HostError: Error(Contract, #3)")
+    table[PRIMARY] = 100
+    expect(await read(call)).toMatchObject({ rpcUrl: PRIMARY })
+    expect(s.asked).toEqual([PRIMARY, PRIMARY])
+  })
+
+  it("a success before the skip expires clears the mark: here a read sent before the failure answers after it", async () => {
+    vi.useFakeTimers()
+    let release!: () => void
+    const held = new Promise<void>((resolve) => (release = resolve))
+    const asked: string[] = []
+    // The primary answers its first request late, refuses its second with a 503; the fallback answers.
+    let primaryRequests = 0
+    const serverFor = (url: string) => ({
+      async simulateTransaction() {
+        asked.push(url)
+        if (url === SECOND) return answer(200)
+        primaryRequests++
+        if (primaryRequests === 1) {
+          await held
+          return answer(100)
+        }
+        if (primaryRequests === 2) throw httpError(503)
+        return answer(101)
+      },
+    })
+    const read = createRpcReader(manifestWith([SECOND]), { serverFor })
+    const slow = read({ ...call, functionName: "slow_view" })
+    expect((await read(call)).rpcUrl).toBe(SECOND)
+    // The primary is marked; then its late answer arrives, inside the 30 s.
+    release()
+    expect((await slow).rpcUrl).toBe(PRIMARY)
+    vi.advanceTimersByTime(1_000)
+    asked.length = 0
+    expect(await read({ ...call, functionName: "next_view" })).toMatchObject({ rpcUrl: PRIMARY, latestLedger: 101 })
+    expect(asked).toEqual([PRIMARY])
+  })
+
   it("with no fallback, a primary that just failed is still asked: there is nothing to skip to", async () => {
     vi.useFakeTimers()
     const table: Record<string, unknown> = { [PRIMARY]: httpError(429) }

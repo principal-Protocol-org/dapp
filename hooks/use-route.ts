@@ -40,6 +40,7 @@ import {
   type Unwind,
 } from "@/lib/protocol/routes"
 import { errorReason, userErrorMessage } from "@/lib/protocol/errors"
+import { forgetInFlight } from "@/lib/protocol/rpc-limiter"
 import {
   createRpcServer,
   failedTransactionReason,
@@ -423,6 +424,8 @@ export function useRoute(opts: UseRouteOptions): RouteControls {
     /** Refetches the account and market reads, then lets the panel render them so `gate` sees them. */
     async function refreshReads() {
       const { network } = latest.current.manifest
+      // A step landed: no refetch may join a read sent before it (the gate would see pre-step figures).
+      forgetInFlight()
       try {
         await Promise.all([
           queryClient.refetchQueries({ queryKey: ["account", network] }),

@@ -1040,9 +1040,12 @@ place; the others are still open.
 - **Browser read concurrency.** Done, in the commit "at most six browser requests at a time;
   shared in-flight reads; fallback rules". The dashboard's markets page fires about 28 reads per
   market at once every 60 s (853 for 30 markets, with shared reads de-duplicated). Every contract
-  read (`simulateContractRead`, behind `createRpcReader`) and every request of `simulateInvocation`
-  now waits for one of 6 slots (`RPC_CONCURRENCY`, `lib/protocol/rpc-limiter.ts`), per tab in the
-  browser and per process on the server, and identical reads in flight share one request. The `/app` market list and the manage list refresh every 30 s; a market page keeps 6 s.
+  read (`simulateContractRead`, behind `createRpcReader`), every request of `simulateInvocation`,
+  every code read (`contractWasmHashesSettled`) and every history page (`getEvents` in
+  `lib/protocol/events.ts`) now waits for one of 6 slots (`RPC_CONCURRENCY`,
+  `lib/protocol/rpc-limiter.ts`), per tab in the browser and per process on the server. Identical
+  reads in flight share one request, until a transaction lands (`forgetInFlight`). The `/app`
+  market list and the manage list refresh every 30 s; a market page keeps 6 s.
 - **An events index for the alert check and the reconciliation.** Done, in migration 0008
   (`events_network_contract_topic` on `(network, contract_id, topic, ledger desc)`). The
   RecoveryEscrow reconciliation and the alert check's rejection read filter by contract and topic,
@@ -1055,6 +1058,10 @@ place; the others are still open.
     the client code no longer falls over to the next endpoint;
   - an endpoint that just failed transiently is asked last for 30 s, so a read stops waiting about
     20 s for a primary that is down. With no fallback, the primary is still asked.
+
+  One exception: the alert check's ledger clock (`ledgerClockOf` in `lib/server/alerts.ts`) keeps
+  its own primary-then-fallback loop. It has the narrowed transient rule, but not the primary's
+  error or the 30 s memory.
 - **"Unavailable" with its reason in every `/app` figure.** Open. Spec 0004 D-27 says the reason is
   shown everywhere. The `/app` Safety and Details rows show it (`showLiveReason`), but 26 other
   `showLive` sites in `/app` still show "Unavailable" alone. Move them to `showLiveReason` with

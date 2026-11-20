@@ -33,6 +33,7 @@ const mocks = vi.hoisted(() => ({
   simulateInvocation: vi.fn(),
   getTransaction: vi.fn(),
   fetchMarketState: vi.fn(),
+  forgetInFlight: vi.fn(),
 }))
 
 vi.mock("@/hooks/use-execute", () => ({ useExecute: () => mocks.exec }))
@@ -70,6 +71,7 @@ vi.mock("@/lib/protocol/stellar", async (orig) => ({
 }))
 
 vi.mock("@/lib/protocol/market-state", async (orig) => ({ ...(await orig<object>()), fetchMarketState: mocks.fetchMarketState }))
+vi.mock("@/lib/protocol/rpc-limiter", async (orig) => ({ ...(await orig<object>()), forgetInFlight: mocks.forgetInFlight }))
 
 import { down, live, marketState } from "@/components/app/__tests__/fixtures"
 import { useRoute, type RouteGate } from "@/hooks/use-route"
@@ -741,6 +743,8 @@ describe("useRoute", () => {
     const refetch = vi.spyOn(client, "refetchQueries").mockImplementation(async (filters) => {
       order.push(`refetch:${String((filters as { queryKey?: unknown[] })?.queryKey?.[0])}`)
     })
+    // The refresh first ends read sharing, so no read sent before step 1 landed answers it.
+    mocks.forgetInFlight.mockReset().mockImplementation(() => order.push("forget"))
     mocks.exec.execute.mockImplementation(async (review: Review) => success(review, amountOut(998n * S)))
     const { result } = setup((input) => {
       order.push(`gate:${input.action}`)
@@ -751,7 +755,7 @@ describe("useRoute", () => {
     act(() => result.current.sign())
     await untilReview(result, 2)
     // gate:deposit twice: when prepared, and again at the click.
-    expect(order).toEqual(["gate:deposit", "gate:deposit", "refetch:account", "refetch:market", "gate:buy_pt"])
+    expect(order).toEqual(["gate:deposit", "gate:deposit", "forget", "refetch:account", "refetch:market", "gate:buy_pt"])
     expect(refetch).toHaveBeenCalledWith({ queryKey: ["account", "testnet"] })
   })
 
