@@ -26,11 +26,12 @@
 // only the local database: the registry's tables and the index.
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs"
 import { lookup } from "node:dns/promises"
-import { createRequire, registerHooks } from "node:module"
+import { createRequire } from "node:module"
 import { dirname, join, relative, resolve } from "node:path"
-import { fileURLToPath, pathToFileURL } from "node:url"
+import { fileURLToPath } from "node:url"
 import { parseEnv } from "node:util"
 import pg from "pg"
+import { loadAppTypeScript, TypeScriptTransformRequired } from "./lib/load-app-ts.mjs"
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 
@@ -502,34 +503,6 @@ export async function importRows(pool, { path, network }) {
 
 // ---------------------------------------------------------------- capture
 
-/**
- * Lets Node load the app's TypeScript as Next and Vitest do: the `@/` alias, extensionless relative
- * imports, and `server-only` under the `react-server` condition (an empty module there).
- */
-function loadAppTypeScript() {
-  if (process.features?.typescript !== "transform") {
-    throw new UsageError("capture loads the app's TypeScript: run it with `pnpm indexer:capture` (node --experimental-transform-types)")
-  }
-  const EXTENSIONS = [".ts", ".tsx", "/index.ts"]
-  registerHooks({
-    resolve(specifier, context, next) {
-      if (specifier === "server-only") return next(specifier, { ...context, conditions: [...(context.conditions ?? []), "react-server"] })
-      let spec = specifier
-      if (spec.startsWith("@/")) spec = pathToFileURL(join(root, spec.slice(2))).href
-      const parent = context.parentURL?.startsWith("file:") ? fileURLToPath(context.parentURL) : null
-      const appRelative = (spec.startsWith("./") || spec.startsWith("../")) && parent !== null && !parent.includes("/node_modules/")
-      if (spec.startsWith("file:") || appRelative) {
-        const base = spec.startsWith("file:") ? fileURLToPath(spec) : join(dirname(parent), spec)
-        if (!(existsSync(base) && statSync(base).isFile())) {
-          for (const ext of EXTENSIONS) if (existsSync(base + ext)) return next(pathToFileURL(base + ext).href, context)
-        }
-      }
-      return next(spec, context)
-    },
-  })
-  return (path) => import(pathToFileURL(join(root, path)).href)
-}
-
 const today = () => new Date().toISOString().slice(0, 10).replaceAll("-", "")
 
 /**
@@ -539,7 +512,7 @@ const today = () => new Date().toISOString().slice(0, 10).replaceAll("-", "")
  * ledger, then exports that network's rows and cursors (with any stored gap) to `out`.
  */
 async function capture(pool, { network, out }) {
-  const load = loadAppTypeScript()
+  const load = loadAppTypeScript(root)
   const { parseManifest } = await load("lib/protocol/manifest.ts")
   const { indexEvents, INDEX_GROUPS } = await load("lib/server/indexer.ts")
   const { discover, resolvedMarkets, sqlRegistryStore } = await load("lib/server/registry.ts")
@@ -660,7 +633,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   try {
     await main(process.argv.slice(2))
   } catch (error) {
-    if (error instanceof UsageError) fail(error.message)
+    if (error instanceof UsageError || error instanceof TypeScriptTransformRequired) fail(error.message)
     // A database error is reported by its code only; anything else by its name and scrubbed text.
     if (error && typeof error === "object" && "code" in error && /^[0-9A-Z]{5}$|^E[A-Z]+$/.test(String(error.code))) {
       fail(`the database refused (error code ${dbCode(error)}). Check it is reachable, the credentials, and that pnpm db:migrate ran.`)

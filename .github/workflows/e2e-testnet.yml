@@ -8,10 +8,10 @@ name: E2E Testnet
 #   Mainnet manifest's sourceCommit (config/manifests/mainnet.json).
 # No repository secret is used and no key is set in any environment: both suites make their keys in the run.
 on:
-  # Pull requests to `testnet` only. `main` is the production landing site and holds no app code until
-  # Mainnet; add it back when the app lands there.
+  # Pull requests to `testnet`, and to `main`, which holds the app from the Mainnet go-live on (README "Mainnet
+  # go-live"). Both suites run on Stellar Testnet whichever branch the pull request is for.
   pull_request:
-    branches: [testnet]
+    branches: [testnet, main]
   workflow_dispatch:
   schedule:
     # Nightly. Schedules run the default branch's copy of this file (main). Off the hour, as GitHub advises.
@@ -37,7 +37,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # The nightly and a run started from `main` test branch `testnet`, where the app lives.
+          # The nightly and a run started from `main` test branch `testnet`: `main` takes the app from there.
           ref: ${{ (github.event_name == 'schedule' || github.ref_name == 'main') && 'testnet' || '' }}
           persist-credentials: false
       - uses: pnpm/action-setup@v4

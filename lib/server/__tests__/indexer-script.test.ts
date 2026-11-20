@@ -1,5 +1,5 @@
 // @vitest-environment node
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it, vi } from "vitest"
@@ -8,6 +8,15 @@ import { clearGap, clearGapRefusal, isLocalDatabase, mergeCursor, parseArgs, rea
 const POOL = "CB3JI6H2HZ3PMWKLEKDPQUURFSKJSFTLNFNBU4CFEHAZXMWL5SNNS6OJ"
 const ESCROW = "CAMOWBMTMDLFJLFOSTULXQO7MUK2PT3XAQ62CA4L5DGPQKZFJWEKN24Q"
 const OTHER = "CA62ACRTFADKNOP37CS7DPQ5DNJML4TFHIX6LZG5IBEHJM3PED2V7F2I"
+
+describe("capture's TypeScript loader", () => {
+  it("is the shared one (scripts/lib/load-app-ts.mjs), not a copy of its own", () => {
+    const source = readFileSync(join(__dirname, "..", "..", "..", "scripts", "indexer.mjs"), "utf8")
+    expect(source).toMatch(/^import \{ loadAppTypeScript\b[^}]*\} from "\.\/lib\/load-app-ts\.mjs"$/m)
+    expect(source).toContain("loadAppTypeScript(root)")
+    expect(source).not.toContain("registerHooks")
+  })
+})
 
 describe("isLocalDatabase (capture writes only to this machine)", () => {
   it.each([

@@ -3,7 +3,8 @@
 The browser app for the Principal PT/YT yield-tokenization protocol on Stellar. With a Varial
 wallet (formerly Freighter) you can split a yield-bearing asset into a principal token (PT) and a yield token (YT),
 trade them, provide liquidity, claim yield and redeem at maturity. It runs on Stellar Testnet and
-on a local network. It is Deliverable 2 of Tranche 2 of SCF #45.
+on a local network, and builds for Stellar Mainnet (see "Mainnet go-live"). It is Deliverable 2 of
+Tranche 2 of SCF #45.
 
 ## Routes
 
@@ -59,6 +60,24 @@ manager view does not show it either. `POST /api/markets` answers 403 `not_avail
 are created by the protocol team. CI also builds the app for Mainnet, so a Mainnet manifest that
 does not parse fails the pull request.
 
+One build serves one network: Production (`main`) is built with `mainnet`, the `testnet` branch with
+`testnet`. The contract interface follows the manifest's `protocolAbi` (see Manifest), never the
+network's name. What the network itself changes:
+
+- **Test tokens.** "Get test tokens" is offered on `testnet` and `local` only; on `mainnet`
+  `POST /api/faucet` answers 403 ("Get test tokens runs only on Testnet or a local network.").
+- **Access.** On `mainnet`, the compliance card and the gates use network-neutral texts ("Access to
+  this market is granted by the protocol team."), and an access block lists what is still missing and
+  names the manifest's `accessContact`. A missing trustline has an **Add trustline** button on every
+  network.
+- **The wizard** (`/app/manage/new`) is not offered on `mainnet`: every `create_*` call is signed by
+  the asset's issuer, whose Mainnet keys are the protocol team's.
+- **The banner** on `/app` and `/dashboard` says the network, and on `mainnet` that the markets use
+  mock assets issued by Principal for testing.
+- **The oracle keeper's push mode** refuses `mainnet`; feed mode runs anywhere (see "Keeper modes").
+
+`pnpm smoke:mainnet` checks the Mainnet deployment against `mainnet.json`, read-only (see Scripts).
+
 ## Manifest
 
 Every contract address comes from a manifest, never from code. Each network has one file in
@@ -68,10 +87,25 @@ runtime. Its format is `manifestSchema` in
 `shared` contracts, and a `markets[]` list with the underlying, maturity and nine contract IDs per
 market.
 
-- The app targets the contracts at `principal` `665bb67`: OracleAdapter v2, the one-transaction
-  Router functions (flash Buy YT, LP only and LP withdraw in USDY, the sales, Keep YT), the gain-based
-  sweeps and `PrincipalManager.is_paused`. They are used when the manifest's `routerFunctions` lists them.
-  `deploy.sh` leaves the Router's `quote_*` views out of that list.
+- The app speaks two contract versions, and the manifest's `protocolAbi` says which: 1 (or absent)
+  is `principal` `665bb67`, the official Testnet deployment's; 2 is `3af9388`, Mainnet's and the local
+  stack's (`deploy.sh` writes it from the Router it built). Version 2's Router takes extra arguments,
+  which the app computes from the same reads as the preview. `validateManifest` refuses a
+  `protocolAbi` that contradicts a Router code hash it knows (`ROUTER_ABI_BY_WASM`). Both versions
+  have OracleAdapter v2, the one-transaction Router functions (flash Buy YT, LP only and LP withdraw
+  in the underlying, the sales, Keep YT), the gain-based sweeps and `PrincipalManager.is_paused`. They
+  are used when the manifest's `routerFunctions` lists them. `deploy.sh` leaves the Router's
+  `quote_*` views out of that list.
+- Plan 0009 added four optional fields:
+  - `protocolAbi` (1 or 2, above);
+  - `accessContact` (`{ label, url }`, an `https:` or `mailto:` URL): where a person without access
+    can ask for it, named in a market's access block. Without it the block says "Ask the protocol
+    team." `mainnet.json` has none until the contracts team names one;
+  - `markets[].underlying.tracks` (1 to 12 characters): the asset a mock follows. It adds the note
+    "Mock asset issued by Principal for testing. It follows the price of USDY and is not USDY." to the
+    asset's rows, the market page and the dashboard's market detail;
+  - `createdLedgers` (contract id to ledger): where the indexer starts a contract the manifest adds
+    later (see Event indexer).
 - `testnet.json` is committed. It holds the official Testnet deployment, the app team's, made with
   `PRINCIPAL_NETWORK=testnet scripts/dev-stack/deploy.sh` from `principal` at `665bb67`: one market,
   `testnet-usdy-1802336344` (USDY test asset), with `wasmHashes` pinned, a v2 oracle and the
@@ -232,7 +266,7 @@ QStash account, because Vercel Cron runs only on Production deployments.
 | Branch | Vercel environment | Domain | QStash | Network |
 |---|---|---|---|---|
 | `testnet` | Preview, branch `testnet` | `testnet.principalmarket.fi`, public through a Deployment Protection exception | `principalmarket-testnet` | Testnet |
-| `main` | Production | `principalmarket.fi` | `principalmarket-mainnet` | Mainnet, once supported (Tranche 3) |
+| `main` | Production | `principalmarket.fi` | `principalmarket-mainnet` | Mainnet, from the go-live on (see "Mainnet go-live") |
 
 For each environment:
 
@@ -577,7 +611,8 @@ on that oracle.
   able to read the oracle itself opens `oracle_unavailable`.
 - An `ORACLE_KEEPER_INTERVAL_SECONDS` that is not valid does not stop the check. It logs the variable's
   name, and only `keeper_unhealthy` and `feed_broken`, which are measured against the interval, are
-  held for every oracle (`unread` names `keeperInterval`). Every other kind is judged.
+  held for every oracle (`unread` names `keeperInterval`). Every other kind is judged. The check no
+  longer answers 500 for it: only the keeper (`cron/oracle`, in feed mode) answers 503 `not_configured`.
 - Before the per-oracle alerts, a rejection's subject was its reason alone (`deviate`). Such an open
   alert closes, without a post, on the first run of this version, and the per-oracle one opens.
 - A circuit-breaker trip rolls its transaction back and leaves no event, so the risk page's
@@ -670,7 +705,9 @@ first, then one with no run recorded, then a healthy one; among equals, the olde
 `healthy` is null while no keeper run is recorded for that oracle, so one oracle with no run makes
 `keeper.healthy` null, never true. `openAlerts.critical` counts an `oracle_unavailable` only once
 confirmed. An uptime monitor can watch the status code, `ledger.status`, `indexer.lagSeconds` or
-`openAlerts.critical`.
+`openAlerts.critical`. For the keeper, monitors read `GET /api/health` and test
+`keeper.healthy !== false`: `null` (no run recorded yet) is unknown, not a failure, and a bad
+`ORACLE_KEEPER_INTERVAL_SECONDS` makes the keeper part `unavailable`.
 
 ## Operations for Tranche 3 go-live
 
@@ -820,6 +857,75 @@ PRINCIPAL_NETWORK=testnet scripts/dev-stack/drill.sh
   works on the local stack only: run the drill there with `DRILL_MANIFEST` on a short-maturity market. On
   Testnet the official market matures on 2027-02-11, so finalize its record after that date.
 
+## Mainnet go-live
+
+The developer's checklist for putting the app live on Stellar Mainnet at `principalmarket.fi` (Vercel
+Production, branch `main`), in order. Each step waits for the developer's go. No step needs a secret
+in this repository, and nothing is signed on Mainnet by an agent, a test or CI.
+
+1. **The Mainnet database.** Its own Neon branch (`mainnet`), with its connection strings in
+   `.env.mainnet` (git-ignored). `pnpm db:migrate --env-file .env.mainnet` applies 0001 to 0008.
+2. **Load the history, before any `cron/index` run.** `pnpm indexer:capture --network mainnet`
+   (Mainnet is only read; the rows go to this machine's database), then
+   `pnpm indexer:import --network mainnet --in var/indexer-capture/mainnet-<YYYYMMDD>.jsonl --env-file .env.mainnet`.
+   A capture is on the developer's machine already: `var/indexer-capture/mainnet-20261120.jsonl`,
+   through ledger 65577228, with no gap. The Mainnet RPC keeps about 7 days (120,960 ledgers), so
+   that file's cursors leave its window around 2026-11-27, and a file whose cursors have left it
+   makes the first scheduled run record a gap. Run the capture again just before the import in any
+   case: it resumes from the local cursors and rewrites the day's file.
+3. **Production variables** in Vercel, scoped to Production only:
+   - `NEXT_PUBLIC_PRINCIPAL_NETWORK=mainnet`;
+   - `DATABASE_URL` (pooled) and `DATABASE_URL_UNPOOLED` of the Mainnet branch;
+   - `QSTASH_CURRENT_SIGNING_KEY` and `QSTASH_NEXT_SIGNING_KEY` of the `principalmarket-mainnet`
+     QStash account;
+   - `ALERT_WEBHOOK_URL`, the alert channel's incoming webhook;
+   - `ORACLE_KEEPER_MODE=feed`, `ORACLE_KEEPER_SECRET` (a new key with no protocol role, funded with
+     XLM by the developer) and `ORACLE_KEEPER_INTERVAL_SECONDS=300`.
+
+   Never a faucet or admin secret: `FAUCET_ISSUER_SECRET`, `FAUCET_PERMISSIONING_ADMIN_SECRET` and
+   `ORACLE_ADMIN_SECRET` stay unset there, as do `ORACLE_KEEPER_ORACLE_ID` and
+   `ORACLE_KEEPER_RECORD_REJECTIONS` (a rejection is then recorded from the simulation, at no fee). A
+   variable applies only to deployments made after it is set, so this comes before step 4.
+4. **Move `main` to the app.** `main` has three commits the app line (`testnet`) lacks: `0d2754c`
+   (a period in the landing's compliance title), `f280f7d` (the `/docs` rewrite, which the app line
+   has too) and `f6bf73c` (the E2E workflow, which the app line has in a newer form). So `main`
+   cannot simply fast-forward. A merge either way stops on two files: keep the app line's
+   `.github/workflows/e2e-testnet.yml` and `lib/content.ts` (its `dashboard` link); the title's
+   period merges by itself. Pick one:
+   - **Bring the three commits onto the app line, then move `main` to it.** Merge `main` into
+     `testnet` (by pull request, like any change there), then `git push origin testnet:main`, a
+     fast-forward. `main` and `testnet` are then the same commit.
+   - **One merge commit on `main`.** `git switch main`, `git merge testnet`, resolve, push `main`.
+     `testnet` stays as it is, and `main` is that merge commit ahead of it.
+
+   The push deploys Production. Check that `/app` and `/dashboard` load with the Mainnet banner, and
+   that `GET /api/health` answers 200.
+5. **Check the deployment against the manifest:** `pnpm smoke:mainnet` (see Scripts). It must end
+   with `PASS`: five topologies and 44 code hashes (12 pinned hashes) match. A stale oracle is only a
+   warning there. On 2026-11-20 all five oracles were stale. Three of them (MOCKGILTS, MOCKCETES,
+   MOCKXAUM) name no feed (`feed_source()` is `None`), so the keeper skips them (`no_feed`) until the
+   contracts team sets one. MOCKUSTRY's stored value is ten times its feed's price, a move far past
+   the oracle's 1,000 bps deviation cap, so the oracle would refuse that price (a significant
+   rejection, which opens `oracle_rejection`) until the contracts team resets the value. Only
+   MOCKUSDY's stored value is near its feed's price (0.03 % apart).
+6. **The schedules**, on the `principalmarket-mainnet` QStash account, each to the exact
+   `https://principalmarket.fi/api/cron/<job>` URL: `record` (`*/15 * * * *`) and `index`
+   (`*/5 * * * *`); once the first `index` run has completed (`GET /api/health` shows
+   `indexer.status` `ok`), `alerts` (`*/5 * * * *`, retries 0); then `oracle` (`*/5 * * * *`).
+   While an oracle is stale, `cron/alerts` answers 500 (a critical alert is open), so with retries
+   every run would be repeated seconds later.
+7. **A test alert.** One QStash message to `https://principalmarket.fi/api/cron/alerts?test=1`, with
+   retries 0, as in the Testnet steps. It answers 200 with `delivered: true`, and
+   `GET /api/dashboard/alerts` then shows it as `lastTest`.
+8. **The signed smoke test**, by the developer: with a wallet the contracts team has granted, deposit
+   a small amount of MOCKUSDY in the app, then mint PT and YT from it (Quick actions: Deposit, then
+   Split), and note the two transaction hashes for the reviewer files. The mint needs MOCKUSDY's
+   oracle fresh: wait for a keeper run that `synced` it (the oracle page, or
+   `GET /api/dashboard/oracle-ticks`).
+9. **The first keeper runs.** Note the fee of one `sync_from_feed` (its transaction on
+   stellar.expert), then set `ALERT_SIGNER_MIN_XLM` so that `signer_low` warns while the keeper key
+   still holds several days of runs, and redeploy so the variable applies.
+
 ## Local network
 
 `scripts/dev-stack/` runs a local Stellar network with a real, seeded market, so every flow works
@@ -847,6 +953,29 @@ Use `pnpm`.
 | `pnpm lint` | ESLint. |
 | `pnpm typecheck` | `tsc --noEmit`. |
 | `pnpm indexer:reindex`, `indexer:export`, `indexer:import`, `indexer:capture` | The event indexer's operator commands (see "Event indexer"). |
+| `pnpm smoke:mainnet` | The read-only Mainnet check: the deployment against `mainnet.json` (below). |
+
+`pnpm smoke:mainnet` (spec 0005 M-22) reads the Mainnet deployment through the app's own read
+functions and compares it with `config/manifests/mainnet.json`. It reads, in this order: the ledger
+clock; the code hash of every contract the manifest names against its pin in `wasmHashes` (44
+contracts, 12 pinned hashes); each market's topology (`Router.market(pool)` and the manager's
+maturity); each oracle's state on the ledger clock, with its feed's price when it names a feed; each
+market's state, RiskControl and the pauses. Only simulations and ledger-entry reads, on the
+manifest's RPC and passphrase: no key, no database, nothing signed.
+
+- It prints one table (market, topology, oracle state, feed, value against feed, paused), what it
+  found, and a summary line, `PASS` or `FAIL`.
+- It exits 1 when a topology differs, a pinned code hash differs, or a contract the manifest names
+  cannot be read; 2 for a usage error. A stale oracle, a paused contract, a contract with no pin and
+  a feed it cannot read are warnings: reported, never a failure.
+- `--json` prints the same as JSON. `node --experimental-transform-types scripts/smoke.mjs --network testnet`
+  checks another network (`testnet` or `local`).
+- Its reads take the app's read cap (6 in flight). The Mainnet gateway still refuses a burst as busy
+  (about 100 reads at once on 2026-11-20), so a read refused as busy, or not answered, is asked again
+  after a pause; stderr says how many were. A contract's own answer is never asked again. The run's
+  budget is 4 minutes: no read is asked after it (a read not asked fails the check), and a run still
+  going a minute later stops with exit 1.
+- It is not part of CI, since it depends on a public RPC. Run it by hand, and before the go-live.
 
 `pnpm test:integration` needs the local stack running and a deployed `config/manifests/local.json`
 (`scripts/dev-stack/README.md`). If the network is not reachable, the suite skips and says why.
@@ -889,25 +1018,26 @@ Two workflows run on pull requests:
   server-secret bundle check. It then builds again with `NEXT_PUBLIC_PRINCIPAL_NETWORK=mainnet` and
   runs the same check on that bundle.
 - `.github/workflows/e2e-testnet.yml` runs the live end-to-end suites on Stellar Testnet on every
-  pull request to `testnet`, and also nightly and by hand (see below). They sign real Testnet transactions with keypairs made in the run. The workflow uses no
+  pull request to `testnet` or `main`, and also nightly and by hand (see below). They sign real Testnet transactions with keypairs made in the run. The workflow uses no
   repository secret, and no key is set in its environment.
 
 | Job | Suite | What it covers | Time |
 |---|---|---|---|
 | Suite A: live journey | `tests/e2e-testnet/journey.test.ts` | The user journey on the official deployment (`config/manifests/testnet.json`). Two fresh accounts are onboarded through the public faucet, then: deposit, split, Buy and Sell PT and YT in USDY, liquidity in and out, a PT and a YT transfer, the History page's reads, and the refusal of an account that was not onboarded. | about 5 min |
-| Suite B: ephemeral lifecycle | `tests/e2e-testnet/lifecycle.test.ts` | A throwaway market with a 20-minute maturity, deployed by `scripts/dev-stack/deploy.sh` (`EPHEMERAL=1`) with four keys generated in the run, from `principal` at the manifest's `sourceCommit`. It covers an oracle tick, a yield claim, compliance recovery (deauthorize, seize, settle the record), the stale-oracle and post-maturity refusals, and redemption at maturity. The keys are removed at the end. | about 22 min |
+| Suite B: ephemeral lifecycle | `tests/e2e-testnet/lifecycle.test.ts` | A throwaway market with a 20-minute maturity, deployed on Testnet by `scripts/dev-stack/deploy.sh` (`EPHEMERAL=1`) with four keys generated in the run, from `principal` at the Mainnet manifest's `sourceCommit` (`3af9388`, read from `config/manifests/mainnet.json`), so each run proves Mainnet's contracts on a deployment it controls. It covers an oracle tick, a yield claim, compliance recovery (deauthorize, seize, settle the record), the stale-oracle and post-maturity refusals, and redemption at maturity. The keys are removed at the end. | about 22 min |
 
 - Suite A runs on the official market, so it needs at least 6 hours (`MIN_RUNWAY_SECONDS` in
   `journey.test.ts`) before that market's maturity. Near maturity (February 2027),
   `config/manifests/testnet.json` must move to a new market.
 - The two jobs run in parallel, so a run takes about 25 minutes. Suite A stops at 20 minutes and
   Suite B at 55 (room for a cold build and a failed deploy, with the record still uploaded).
-- Suite B builds the contracts with cargo and Rust 1.95.0, the toolchain that built the official
-  deployment, and deploys them with the Stellar CLI 28.1.0. On the developer's machine that toolchain
-  reproduces the deployment's `wasmHashes` byte for byte; each run's job summary compares the Linux
-  build with them. That build is not byte-identical (0 of 12 on the first run): ten of the twelve
-  wasm files embed the builder's home directory, through the path of the cargo registry, so the bytes
-  depend on the machine that builds them.
+- Suite B builds the contracts with cargo and Rust 1.95.0 (pinned, so every run builds the same
+  wasm) and deploys them with the Stellar CLI 28.1.0. On the developer's machine Rust 1.95.0
+  reproduced the official Testnet deployment (`665bb67`) byte for byte; Mainnet's wasm was built with
+  rustc 1.94.1. Each run's job summary compares the Linux build with `mainnet.json`'s `wasmHashes`,
+  for information only: a difference is expected with another toolchain, and the wasm files embed the
+  builder's home directory (through the cargo registry's path; ten of twelve at `665bb67`), so the
+  bytes also depend on the machine that builds them.
 - The build (a few minutes) is cached by `sourceCommit` and Rust version. It runs again when either
   changes, when the cache has not been used for 7 days, and on a pull request's first run until the
   nightly run on `main` has warmed the cache (a pull request's cache is its own).
@@ -915,12 +1045,12 @@ Two workflows run on pull requests:
   transaction hashes, the refusals) as an artifact, kept 30 days, also when the run fails.
 - A newer push to a pull request cancels its older run.
 
-The nightly run and manual runs need the workflow file on the default branch, `main`, so `main`
-carries a copy of this one file. `main` is the production landing site (see Deployments) and holds
-no app code until Mainnet, so pull requests to `main` do not run these suites. The nightly run, and
-any run started from `main`, check out branch `testnet` and test it with its own `testnet.json`. Keep
-the two copies of the workflow identical. Run it by hand from the Actions tab ("E2E Testnet", then
-"Run workflow"), or:
+The nightly run and manual runs use the workflow file on the default branch, `main`. Until the
+Mainnet go-live, `main` is the landing site alone and carries a copy of this one file: keep the two
+copies identical. From the go-live on, `main` holds the app (this file included), and pull requests
+to it run the suites too. The nightly run, and any run started from `main`, check out branch
+`testnet` and test it with its own `testnet.json`. Run it by hand from the Actions tab ("E2E
+Testnet", then "Run workflow"), or:
 
 ```bash
 gh workflow run e2e-testnet.yml --ref testnet
@@ -1037,7 +1167,7 @@ place; the others are still open.
   fee". Every review declares the simulated Soroban resource fee plus 30% (rounded up), and the
   total fee with it, under the existing fee cap (`MAX_TX_FEE_STROOPS`). The unused refundable part
   is refunded, so it costs nothing (R2-80).
-- **Browser read concurrency.** Done, in the commit "at most six browser requests at a time;
+- **Read concurrency.** Done, in the commit "at most six browser requests at a time;
   shared in-flight reads; fallback rules". The dashboard's markets page fires about 28 reads per
   market at once every 60 s (853 for 30 markets, with shared reads de-duplicated). Every contract
   read (`simulateContractRead`, behind `createRpcReader`), every request of `simulateInvocation`,
@@ -1046,6 +1176,30 @@ place; the others are still open.
   `lib/protocol/rpc-limiter.ts`), per tab in the browser and per process on the server. Identical
   reads in flight share one request, until a transaction lands (`forgetInFlight`). The `/app`
   market list and the manage list refresh every 30 s; a market page keeps 6 s.
+  - **On the server** the cap of 6 applies per process too (R9-4): the recorder, the indexer, the
+    alert check and the keeper share it on one instance. A job that gives up at its deadline leaves
+    its reads still queued; they run later, on the same instance while it stays warm, and their
+    answers are dropped.
+  - **History** in the browser takes a slot for each `getEvents` page, so a tab with a wallet and
+    Mainnet's five markets has at most 6 in flight, not 10.
+  - **The Mainnet gateway** still refused reads as busy (HTTP 429) after about 100 sent 6 at a time
+    (2026-11-20). A figure refused that way reads "Unavailable" until its next refresh;
+    `rpcFallbackUrls` stays empty until the developer names a second provider.
+  - **Paths still outside the cap**, with the most requests each can have in flight on Mainnet (five
+    markets, five oracles), on top of the 6 capped ones in the same tab or process:
+
+    | Path | Where | RPC calls | At most in flight |
+    |---|---|---|---|
+    | Keeper, phase 1 | `lib/server/oracle-keeper.ts` `FeedChain.simulate`, every oracle at once | `simulateTransaction` | 5, one per oracle (its two view reads are capped) |
+    | Keeper, prepare and send | `KeeperAccount` `sequence`, `prepare`, `send`, one oracle after another | `getAccount`, `simulateTransaction`, `sendTransaction` | 1 |
+    | Keeper, confirmations | the sent hashes, looked up about once a second | `getTransaction` | 5, one per sent hash |
+    | Indexer (`cron/index`) | `lib/server/indexer.ts`, the five groups at once; pages in sequence inside a group | `getEvents`, at times `getLedgers` or `getHealth` | 5, one per group (its reconciliation reads are capped) |
+    | Registry discovery (`cron/record`) | `lib/server/registry.ts` `discover`, pages in sequence | `getEvents` | 1 |
+    | Recorder close time (`cron/record`) | `app/api/cron/record/route.ts`, cached per ledger, markets in sequence | `getLedgers` | 1 |
+    | Ledger clocks | `hooks/use-ledger-clock.ts` (one per tab), `app/api/health/route.ts`, the wizard's seed step (not on Mainnet) | `getLatestLedger` | 1 each |
+    | Alert check's ledger clock | `lib/server/alerts.ts` `ledgerClockOf`, the primary then each fallback | `getLatestLedger` | 1 |
+    | Faucet (not on Mainnet) | `lib/server/faucet.ts` | `getLedgerEntries`, `getAccount`, `sendTransaction` | 1 per run |
+    | Review, onboarding, route and pending-action lookups | `lib/protocol/review.ts`, `lib/protocol/onboarding.ts`, `lib/protocol/tx-lookup.ts`, one user action at a time | `getAccount`, `prepareTransaction` (or a restore's `simulateTransaction`), `sendTransaction`, `getTransaction` | 1 per action |
 - **An events index for the alert check and the reconciliation.** Done, in migration 0008
   (`events_network_contract_topic` on `(network, contract_id, topic, ledger desc)`). The
   RecoveryEscrow reconciliation and the alert check's rejection read filter by contract and topic,
@@ -1062,7 +1216,12 @@ place; the others are still open.
   One exception: the alert check's ledger clock (`ledgerClockOf` in `lib/server/alerts.ts`) keeps
   its own primary-then-fallback loop. It has the narrowed transient rule, but not the primary's
   error or the 30 s memory.
+- **Keeper capacity.** Done for Mainnet's five oracles. One feed-mode run covers about five to
+  seven oracles: the network takes one transaction per account per ledger, so the sends go one after
+  another, each after the previous one is in a ledger. Phase 1 (the reads and simulations) holds
+  every send for up to 15 s, and the run's deadline is its start plus 45 s. More oracles need more
+  keeper accounts or more schedules.
 - **"Unavailable" with its reason in every `/app` figure.** Open. Spec 0004 D-27 says the reason is
   shown everywhere. The `/app` Safety and Details rows show it (`showLiveReason`), but 26 other
-  `showLive` sites in `/app` still show "Unavailable" alone. Move them to `showLiveReason` with
-  `UnavailableTip`.
+  `showLive` sites in `/app` (the mint and redeem tabs, the portfolio's position card) still show
+  "Unavailable" alone. Move them to `showLiveReason` with `UnavailableTip`.
