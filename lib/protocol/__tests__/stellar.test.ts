@@ -875,6 +875,71 @@ describe("simulateInvocation", () => {
     expect(seen?.source).toBe(source);
     expect(seen?.sequence).toBe("6");
   });
+
+  // The read cap and shared reads (spec 0005 M-20): a write simulation is a read of the RPC too.
+  const success = () =>
+    ({ id: "1", _parsed: true, latestLedger: 90, events: [], minResourceFee: "1", transactionData: {}, result: { auth: [], retval: nativeToScVal(7n, { type: "i128" }) } }) as unknown as rpc.Api.SimulateTransactionResponse;
+
+  /** A server that counts requests and those in flight; each stays open across a timer tick. */
+  function countingServer() {
+    const load = { requests: 0, inFlight: 0, peak: 0 };
+    const hold = async <T,>(answer: T): Promise<T> => {
+      load.requests++;
+      load.inFlight++;
+      load.peak = Math.max(load.peak, load.inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      load.inFlight--;
+      return answer;
+    };
+    const server = { getAccount: () => hold(account), simulateTransaction: () => hold(success()) };
+    return { server, load };
+  }
+
+  it("shares an identical simulation in flight; another source or another amount is its own", async () => {
+    const { server, load } = countingServer();
+    const other = Keypair.random().publicKey();
+    const params = (who: string, amount: bigint) => ({
+      rpcUrl: testnetMarket.rpcUrl,
+      networkPassphrase: testnetMarket.networkPassphrase,
+      source: who,
+      invocation: { ...invocation, args: [{ type: "i128", value: amount }] as ScArg[] },
+      server,
+    });
+    const [a, b, c, d] = await Promise.all([
+      simulateInvocation(params(source, 5n)),
+      simulateInvocation(params(source, 5n)),
+      simulateInvocation(params(other, 5n)),
+      simulateInvocation(params(source, 6n)),
+    ]);
+    expect(a).toBe(b);
+    expect([c.ok, d.ok]).toEqual([true, true]);
+    // Three simulations, each an account read then the simulation.
+    expect(load.requests).toBe(6);
+  });
+
+  it("never has more than six requests in flight with the contract reads, and answers every one", async () => {
+    const { server, load } = countingServer();
+    const writes = Array.from({ length: 10 }, (_, i) =>
+      simulateInvocation({
+        rpcUrl: testnetMarket.rpcUrl,
+        networkPassphrase: testnetMarket.networkPassphrase,
+        source,
+        invocation: { ...invocation, args: [{ type: "i128", value: BigInt(i) }] },
+        server,
+      }),
+    );
+    const reads = Array.from({ length: 10 }, (_, i) =>
+      simulateContractRead({
+        rpcUrl: testnetMarket.rpcUrl,
+        networkPassphrase: testnetMarket.networkPassphrase,
+        invocation: { contractId: testnetMarket.contracts.router, functionName: `view_${i}`, args: [] },
+        server,
+      }),
+    );
+    expect((await Promise.all(writes)).every((w) => w.ok)).toBe(true);
+    expect((await Promise.all(reads)).map((r) => r.value)).toEqual(Array(10).fill(7n));
+    expect(load.peak).toBe(6);
+  });
 });
 
 describe("pollTransactionStatus return value", () => {

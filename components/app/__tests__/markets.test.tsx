@@ -21,6 +21,8 @@ const mocks = vi.hoisted(() => ({
   tracks: undefined as string | undefined,
   history: {} as Record<string, unknown>,
   sparks: undefined as unknown,
+  /** The refresh interval the list asked `useMarketStates` for. */
+  refetchMs: undefined as number | undefined,
 }))
 
 vi.mock("@/components/app/manifest-provider", () => {
@@ -51,7 +53,11 @@ vi.mock("@/components/app/manifest-provider", () => {
   }
 })
 vi.mock("@/hooks/use-market-state", () => ({
-  useMarketStates: (ids: string[]) => ids.map((id) => mocks.states[id] ?? { data: undefined, isPending: true, stale: false }),
+  MARKET_LIST_REFETCH_MS: 30_000,
+  useMarketStates: (ids: string[], refetchMs?: number) => {
+    mocks.refetchMs = refetchMs
+    return ids.map((id) => mocks.states[id] ?? { data: undefined, isPending: true, stale: false })
+  },
 }))
 vi.mock("@/hooks/use-market-history", () => ({
   useMarketHistory: (pool: string): Query<MarketHistory> => {
@@ -162,6 +168,11 @@ describe("MarketGroups", () => {
     )
   const assetRow = () => screen.getByRole("button", { name: /USDY \(test\)/ })
   const marketCard = (id: string) => screen.getByRole("listitem", { name: new RegExp(`USDY · ${id}`) })
+
+  it("refreshes every market's figures every 30 s, not the market page's 6 s", () => {
+    renderList()
+    expect(mocks.refetchMs).toBe(30_000)
+  })
 
   it("groups markets by underlying with a count badge", () => {
     mocks.extraAsset = true

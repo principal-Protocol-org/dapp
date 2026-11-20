@@ -27,7 +27,7 @@ vi.mock("@/lib/protocol/compliance", () => ({ fetchMarketCompliance: mocks.fetch
 vi.mock("@/hooks/use-wallet", () => ({ useWallet: () => ({ state: mocks.wallet }) }))
 
 import { useAccountState } from "@/hooks/use-account-state"
-import { useMarketState } from "@/hooks/use-market-state"
+import { MARKET_LIST_REFETCH_MS, MARKET_REFETCH_MS, useMarketState, useMarketStates } from "@/hooks/use-market-state"
 
 let client: QueryClient
 const wrapper = ({ children }: { children: React.ReactNode }) => (
@@ -68,6 +68,27 @@ describe("useMarketState", () => {
     await new Promise((resolve) => setTimeout(resolve, 20))
     expect(mocks.fetchMarketState).not.toHaveBeenCalled()
     expect(result.current.data).toBeUndefined()
+  })
+})
+
+describe("useMarketStates", () => {
+  const refetchOf = (marketId: string) => {
+    const query = client.getQueryCache().find({ queryKey: ["market", "testnet", marketId] })
+    return (query!.observers[0].options as { refetchInterval?: number }).refetchInterval
+  }
+
+  it("polls the market list every 30 s; the market page keeps 6 s", async () => {
+    expect(MARKET_LIST_REFETCH_MS).toBe(30_000)
+    expect(MARKET_REFETCH_MS).toBe(6000)
+    const { result } = renderHook(() => useMarketStates(["m1"], MARKET_LIST_REFETCH_MS), { wrapper })
+    await waitFor(() => expect(result.current[0].data).toBeDefined())
+    expect(refetchOf("m1")).toBe(30_000)
+  })
+
+  it("polls every 6 s when no interval is given, under the same key as the market page", async () => {
+    const { result } = renderHook(() => useMarketStates(["m1"]), { wrapper })
+    await waitFor(() => expect(result.current[0].data).toBeDefined())
+    expect(refetchOf("m1")).toBe(6000)
   })
 })
 

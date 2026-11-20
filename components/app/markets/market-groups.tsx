@@ -5,7 +5,7 @@ import Link from "next/link"
 import { ChevronDownIcon } from "lucide-react"
 import { useLedgerClock } from "@/hooks/use-ledger-clock"
 import { useMarketHistory, useSparks, type Spark } from "@/hooks/use-market-history"
-import { useMarketStates } from "@/hooks/use-market-state"
+import { MARKET_LIST_REFETCH_MS, useMarketStates } from "@/hooks/use-market-state"
 import { useManifest } from "@/components/app/manifest-provider"
 import { aprToApy } from "@/lib/protocol/math"
 import { formatAmount, formatPercent } from "@/lib/protocol/format"
@@ -462,7 +462,7 @@ export function MarketGroups() {
   const manifest = useManifest()
   const { ledgerTime, isError: clockFailed } = useLedgerClock()
   const clockLoading = ledgerTime === null && !clockFailed
-  const slots = useMarketStates(manifest.markets.map((m) => m.marketId))
+  const slots = useMarketStates(manifest.markets.map((m) => m.marketId), MARKET_LIST_REFETCH_MS)
   const sparks = useSparks(manifest.markets.map((m) => m.contracts.pool))
   const groups = groupMarkets(manifest)
   const slotOf = new Map(manifest.markets.map((m, i) => [m.marketId, slots[i]]))

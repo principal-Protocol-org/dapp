@@ -1,9 +1,9 @@
 // @vitest-environment node
 import { nativeToScVal, type rpc } from "@stellar/stellar-sdk"
-import { describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import testnetJson from "@/config/manifests/testnet.json"
 import { parseManifest } from "../manifest"
-import { createRpcReader, dedupeReads, isContractError, isTransientRpcError, readLive, unavailable, type ContractReader } from "../reader"
+import { createRpcReader, dedupeReads, isContractError, isTransientRpcError, readLive, resetRpcSkipsForTests, unavailable, type ContractReader } from "../reader"
 import type { ScArg } from "../stellar"
 import type { Manifest } from "../types"
 
@@ -193,6 +193,9 @@ const httpError = (status: number) => Object.assign(new Error(`Request failed wi
 describe("isTransientRpcError", () => {
   it.each([
     ["a fetch network failure", new TypeError("fetch failed")],
+    ["Chrome's fetch network failure", new TypeError("Failed to fetch")],
+    ["Safari's fetch network failure", new TypeError("Load failed")],
+    ["Firefox's fetch network failure", new TypeError("NetworkError when attempting to fetch resource.")],
     ["a socket error code", Object.assign(new Error("connect"), { code: "ECONNREFUSED" })],
     ["a socket error in the cause", Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNRESET" } })],
     ["the SDK's timeout", new Error("timeout of 20000ms exceeded")],
@@ -216,6 +219,9 @@ describe("isTransientRpcError", () => {
     ["the SDK's wrapped 404", Object.assign(new Error("Request failed with status code 404"), { isAxiosError: true, response: { status: 404 }, status: 404 })],
     ["another JSON-RPC error", { code: -32602, message: "invalid params" }],
     ["a string", "boom"],
+    // A TypeError is a network failure only when fetch says so; anything else is a bug in the code.
+    ["a TypeError from the code", new TypeError("x is not a function")],
+    ["a TypeError reading a missing field", new TypeError("Cannot read properties of undefined (reading 'retval')")],
   ])("%s is final", (_name, error) => {
     expect(isTransientRpcError(error)).toBe(false)
   })
@@ -223,6 +229,10 @@ describe("isTransientRpcError", () => {
 
 describe("createRpcReader with fallback endpoints (D-6)", () => {
   const call = { contractId: "CDYGBFGO7KD446CDTGJ7M4OWUXC7UPBGPVM5CUWP2NSNX2CKK2TYYIPS", functionName: "max_stale_seconds" }
+
+  // The skip memory is the module's: each test starts with every endpoint in good standing.
+  beforeEach(() => resetRpcSkipsForTests())
+  afterEach(() => vi.useRealTimers())
 
   it("reads the manifest's rpcUrl first and stops there when it answers", async () => {
     const s = servers({ [PRIMARY]: 100, [SECOND]: 200 })
@@ -246,12 +256,82 @@ describe("createRpcReader with fallback endpoints (D-6)", () => {
     expect(live).toMatchObject({ status: "unavailable", error: "HostError: Error(Contract, #3)" })
   })
 
-  it("a fallback's contract error is final too, and every endpoint failing gives the last error", async () => {
-    const s = servers({ [PRIMARY]: { code: -32004, message: "busy" }, [SECOND]: httpError(502) })
-    const live = await readLive(createRpcReader(manifestWith([SECOND]), { serverFor: s.serverFor }), call)
+  it("a fallback's contract error is final too", async () => {
+    const s = servers({ [PRIMARY]: httpError(503), [SECOND]: new Error("HostError: Error(Contract, #3)"), [THIRD]: 300 })
+    const live = await readLive(createRpcReader(manifestWith([SECOND, THIRD]), { serverFor: s.serverFor }), call)
     expect(s.asked).toEqual([PRIMARY, SECOND])
-    expect(live.status).toBe("unavailable")
-    expect(live.status === "unavailable" && live.error).toBe("Request failed with status code 502")
+    expect(live).toMatchObject({ status: "unavailable", error: "HostError: Error(Contract, #3)" })
+  })
+
+  it("every endpoint failing gives the primary's error, not the last fallback's", async () => {
+    const primary = httpError(503)
+    const s = servers({ [PRIMARY]: primary, [SECOND]: httpError(503) })
+    await expect(createRpcReader(manifestWith([SECOND]), { serverFor: s.serverFor })(call)).rejects.toBe(primary)
+    expect(s.asked).toEqual([PRIMARY, SECOND])
+    // As a figure shows it: the primary's busy answer, not the fallback's 502.
+    resetRpcSkipsForTests()
+    const u = servers({ [PRIMARY]: { code: -32004, message: "busy" }, [SECOND]: httpError(502) })
+    const live = await readLive(createRpcReader(manifestWith([SECOND]), { serverFor: u.serverFor }), call)
+    expect(u.asked).toEqual([PRIMARY, SECOND])
+    expect(live).toMatchObject({ status: "unavailable", error: "The Stellar network is busy. Try again in a moment." })
+  })
+
+  it("a TypeError from the code is final: never retried on the fallback", async () => {
+    const s = servers({ [PRIMARY]: new TypeError("x is not a function"), [SECOND]: 200 })
+    const live = await readLive(createRpcReader(manifestWith([SECOND]), { serverFor: s.serverFor }), call)
+    expect(s.asked).toEqual([PRIMARY])
+    expect(live).toMatchObject({ status: "unavailable", error: "x is not a function" })
+  })
+
+  it("after a transient failure the primary is skipped for 30 s: reads go straight to the fallback, then the primary is asked again", async () => {
+    vi.useFakeTimers()
+    const table: Record<string, unknown> = { [PRIMARY]: httpError(503), [SECOND]: 200 }
+    const s = servers(table)
+    const read = createRpcReader(manifestWith([SECOND]), { serverFor: s.serverFor })
+    expect((await read(call)).rpcUrl).toBe(SECOND)
+    expect(s.asked).toEqual([PRIMARY, SECOND])
+
+    // The primary is back, but it failed under 30 s ago: not asked, from this reader or a new one.
+    table[PRIMARY] = 100
+    vi.advanceTimersByTime(29_999)
+    s.asked.length = 0
+    expect(await read(call)).toMatchObject({ rpcUrl: SECOND, viaFallback: true })
+    expect(await createRpcReader(manifestWith([SECOND]), { serverFor: s.serverFor })(call)).toMatchObject({ rpcUrl: SECOND })
+    expect(s.asked).toEqual([SECOND, SECOND])
+
+    vi.advanceTimersByTime(1)
+    s.asked.length = 0
+    const back = await read(call)
+    expect(s.asked).toEqual([PRIMARY])
+    expect(back).toMatchObject({ rpcUrl: PRIMARY, latestLedger: 100 })
+    expect("viaFallback" in back).toBe(false)
+  })
+
+  it("a skipped primary is still asked last when the fallback fails too, and its error is the one reported", async () => {
+    vi.useFakeTimers()
+    const table: Record<string, unknown> = { [PRIMARY]: httpError(503), [SECOND]: 200 }
+    const s = servers(table)
+    const read = createRpcReader(manifestWith([SECOND]), { serverFor: s.serverFor })
+    await read(call)
+    const busy = { code: -32004, message: "busy" }
+    table[PRIMARY] = busy
+    table[SECOND] = httpError(502)
+    vi.advanceTimersByTime(10_000)
+    s.asked.length = 0
+    await expect(read(call)).rejects.toBe(busy)
+    expect(s.asked).toEqual([SECOND, PRIMARY])
+  })
+
+  it("with no fallback, a primary that just failed is still asked: there is nothing to skip to", async () => {
+    vi.useFakeTimers()
+    const table: Record<string, unknown> = { [PRIMARY]: httpError(429) }
+    const s = servers(table)
+    const read = createRpcReader(manifestWith(undefined), { serverFor: s.serverFor })
+    await expect(read(call)).rejects.toMatchObject({ response: { status: 429 } })
+    table[PRIMARY] = 100
+    vi.advanceTimersByTime(1_000)
+    expect(await read(call)).toMatchObject({ rpcUrl: PRIMARY, latestLedger: 100 })
+    expect(s.asked).toEqual([PRIMARY, PRIMARY])
   })
 
   it("no fallback configured: a transient failure is the read's answer", async () => {
@@ -259,5 +339,53 @@ describe("createRpcReader with fallback endpoints (D-6)", () => {
     const live = await readLive(createRpcReader(manifestWith(undefined), { serverFor: s.serverFor }), call)
     expect(s.asked).toEqual([PRIMARY])
     expect(live).toMatchObject({ status: "unavailable", source: { rpcUrl: PRIMARY } })
+  })
+})
+
+describe("createRpcReader's shared and limited reads", () => {
+  const contractId = "CDYGBFGO7KD446CDTGJ7M4OWUXC7UPBGPVM5CUWP2NSNX2CKK2TYYIPS"
+  beforeEach(() => resetRpcSkipsForTests())
+
+  it("two identical reads in flight share one request; two different arguments do not", async () => {
+    let release!: () => void
+    const held = new Promise<void>((resolve) => (release = resolve))
+    const asked: string[] = []
+    const serverFor = () => ({
+      async simulateTransaction() {
+        asked.push("simulate")
+        await held
+        return answer(100)
+      },
+    })
+    const read = createRpcReader(manifestWith(undefined), { serverFor })
+    const balance = (holder: string) => ({ contractId, functionName: "balance", args: [{ type: "address", value: holder } as ScArg] })
+    const holderA = "GDDKLGGW5HG76QBESUX4JHFVYA3765HJGVUDXFGQLAJYJ4CQDPHW7ZHQ"
+    const holderB = "GBRPYHIL2CI3FNQ4BXLFMNDLFJUNPU2HY3ZMFSHONUCEOASW7QC7OX2H"
+    // Two readers, as two panels of one page each make their own.
+    const pending = [read(balance(holderA)), createRpcReader(manifestWith(undefined), { serverFor })(balance(holderA)), read(balance(holderB))]
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(asked).toHaveLength(2)
+    release()
+    const [a, b, c] = await Promise.all(pending)
+    expect(a).toBe(b)
+    expect(c).not.toBe(a)
+  })
+
+  it("never has more than six simulations in flight, and every read is answered", async () => {
+    let inFlight = 0
+    let peak = 0
+    const serverFor = () => ({
+      async simulateTransaction() {
+        inFlight++
+        peak = Math.max(peak, inFlight)
+        await new Promise((resolve) => setTimeout(resolve, 1))
+        inFlight--
+        return answer(100)
+      },
+    })
+    const read = createRpcReader(manifestWith(undefined), { serverFor })
+    const reads = Array.from({ length: 20 }, (_, i) => read({ contractId, functionName: `view_${i}` }))
+    expect((await Promise.all(reads)).map((r) => r.value)).toEqual(Array(20).fill(42n))
+    expect(peak).toBe(6)
   })
 })

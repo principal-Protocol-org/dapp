@@ -15,6 +15,7 @@ import { NULL_ACCOUNT } from "@stellar/stellar-sdk/contract";
 import { bytesToHex } from "./bytes";
 import { userErrorMessage } from "./errors";
 import { hashLike } from "./hash";
+import { limitRpc, requestKey, shareInFlight } from "./rpc-limiter";
 
 export type ScArg =
   | { type: "address"; value: string }
@@ -233,6 +234,7 @@ export function assertSignedTransactionMatchesReview(params: {
   }
 }
 
+/** A read-only simulation of a contract view. The request takes a slot of the read cap (`limitRpc`). */
 export async function simulateContractRead<T = unknown>(params: {
   rpcUrl: string;
   networkPassphrase: string;
@@ -246,7 +248,7 @@ export async function simulateContractRead<T = unknown>(params: {
     networkPassphrase: params.networkPassphrase,
     invocation: params.invocation,
   });
-  const simulation = await server.simulateTransaction(transaction);
+  const simulation = await limitRpc(() => server.simulateTransaction(transaction));
 
   if (rpc.Api.isSimulationRestore(simulation)) {
     throw new Error("Contract read requires restoring archived ledger entries before it can be queried.");
@@ -559,25 +561,34 @@ function contractErrorSource(events: readonly xdr.DiagnosticEvent[] | undefined,
   return undefined;
 }
 
-// Simulates a write as the user (never prepareTransaction). The contractId on a contract_error is the
-// contract that raised it (see contractErrorSource), or the invoked contract if no event names one.
-export async function simulateInvocation(params: {
+type SimulateInvocationParams = {
   rpcUrl: string;
   networkPassphrase: string;
   source: string;
   invocation: ContractInvocation;
   server?: SimulateWriteRpcServer;
-}): Promise<SimulationOutcome> {
+};
+
+// Simulates a write as the user (never prepareTransaction). The contractId on a contract_error is the
+// contract that raised it (see contractErrorSource), or the invoked contract if no event names one.
+// An identical simulation in flight (same RPC, source and call) is shared, and each of its two
+// requests takes a slot of the read cap (spec 0005 M-20).
+export function simulateInvocation(params: SimulateInvocationParams): Promise<SimulationOutcome> {
+  const { contractId, functionName, args } = params.invocation;
+  return shareInFlight(requestKey(params.rpcUrl, params.source, contractId, functionName, args), () => simulateInvocationOnce(params));
+}
+
+async function simulateInvocationOnce(params: SimulateInvocationParams): Promise<SimulationOutcome> {
   try {
     const server = params.server ?? createRpcServer(params.rpcUrl);
-    const account = await server.getAccount(params.source);
+    const account = await limitRpc(() => server.getAccount(params.source));
     const transaction = buildInvocationEnvelope({
       source: params.source,
       sequence: account.sequenceNumber(),
       networkPassphrase: params.networkPassphrase,
       invocation: params.invocation,
     });
-    const simulation = await server.simulateTransaction(transaction);
+    const simulation = await limitRpc(() => server.simulateTransaction(transaction));
 
     if (rpc.Api.isSimulationRestore(simulation)) return { ok: false, kind: "restore_required" };
 

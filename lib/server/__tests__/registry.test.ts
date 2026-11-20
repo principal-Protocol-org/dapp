@@ -1,8 +1,9 @@
 // @vitest-environment node
-import { Address, Asset, Contract, Keypair, StrKey, nativeToScVal, xdr } from "@stellar/stellar-sdk"
+import { Address, Asset, Contract, Keypair, StrKey, nativeToScVal, scValToNative, xdr, type Transaction } from "@stellar/stellar-sdk"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { PASSPHRASES, V1_ROUTER_FUNCTIONS } from "@/lib/protocol/manifest"
 import type { ContractReader } from "@/lib/protocol/reader"
+import { RPC_CONCURRENCY } from "@/lib/protocol/rpc-limiter"
 import type { Manifest, Market, MarketContractName } from "@/lib/protocol/types"
 
 vi.mock("server-only", () => ({}))
@@ -524,6 +525,71 @@ describe("validateMarket", () => {
     const v = await validateMarket(chain.reader, chain.rpc, manifestWith([market]), market)
     expect(v).toMatchObject({ valid: false, unreadable: true })
     expect(v.reason).toMatch(/could not be checked/i)
+  })
+})
+
+// ---------------------------------------------------------------- the read cap on a server job (R9-4)
+
+/** A view's answer as the host encodes it: an address as an address, an integer as u32 or u64, a struct as a symbol-keyed map. */
+function toScVal(v: unknown): xdr.ScVal {
+  if (v === null || v === undefined) return xdr.ScVal.scvVoid()
+  if (typeof v === "boolean") return xdr.ScVal.scvBool(v)
+  if (typeof v === "number") return nativeToScVal(v, { type: "u32" })
+  if (typeof v === "bigint") return nativeToScVal(v, { type: "u64" })
+  if (typeof v === "string") return StrKey.isValidContract(v) || StrKey.isValidEd25519PublicKey(v) ? nativeToScVal(v, { type: "address" }) : nativeToScVal(v)
+  const fields = v as Record<string, unknown>
+  return xdr.ScVal.scvMap(Object.keys(fields).sort().map((k) => new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol(k), val: toScVal(fields[k]) })))
+}
+
+/**
+ * The fake chain as an RPC simulation endpoint, for the app's own reader (`createRpcReader`): it
+ * decodes each simulated call, answers it from the chain's views, and counts the simulations in
+ * flight. Each one stays open across a timer tick, so reads started together overlap.
+ */
+function simulationEndpoint(chain: Chain) {
+  const load = { inFlight: 0, peak: 0, simulations: 0 }
+  const server = {
+    async simulateTransaction(tx: Transaction) {
+      load.inFlight++
+      load.simulations++
+      load.peak = Math.max(load.peak, load.inFlight)
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 1))
+        const [op] = tx.operations
+        if (op?.type !== "invokeHostFunction" || op.func.type !== "hostFunctionTypeInvokeContract") throw new Error("not a contract call")
+        const invoke = op.func.invokeContract
+        const call = {
+          contractId: Address.fromScAddress(invoke.contractAddress).toString(),
+          functionName: invoke.functionName.toString(),
+          // The chain's views take addresses only (the Router's `is_registered` and `market`).
+          args: invoke.args.map((a) => ({ type: "address" as const, value: String(scValToNative(a)) })),
+        }
+        const { value } = await chain.reader(call)
+        return { id: "1", _parsed: true, latestLedger: 900, events: [], minResourceFee: "0", transactionData: {}, result: { auth: [], retval: toScVal(value) } } as never
+      } finally {
+        load.inFlight--
+      }
+    },
+  }
+  return { serverFor: () => server, load }
+}
+
+describe("the read cap on a server job (R9-4)", () => {
+  it("re-validating five markets through the app's reader never has more than six reads in flight", async () => {
+    const markets = [10, 20, 30, 40, 50].map((n, i) => ({ ...seedMarket(chain.deploy(n)), marketId: `local-usdy-${i}` }))
+    const manifest = manifestWith(markets)
+    const endpoint = simulationEndpoint(chain)
+    // The real reader: this file's route tests mock `createRpcReader`.
+    const { createRpcReader } = await vi.importActual<typeof import("@/lib/protocol/reader")>("@/lib/protocol/reader")
+    const reader = createRpcReader(manifest, { serverFor: endpoint.serverFor })
+    const { checked } = await revalidate({ store, reader, rpc: chain.rpc, manifest })
+    expect(checked).toEqual(markets.map((m) => m.contracts.pool))
+    // Every read was answered: all five are valid, read through the fake endpoint, not around it.
+    for (const m of markets) expect(store.rowsMap.get(m.contracts.pool)).toMatchObject({ valid: true })
+    expect(endpoint.load.simulations).toBeGreaterThan(5 * 20)
+    // Reached, never passed: one market alone starts about 20 reads at once.
+    expect(endpoint.load.peak).toBeLessThanOrEqual(RPC_CONCURRENCY)
+    expect(endpoint.load.peak).toBe(RPC_CONCURRENCY)
   })
 })
 

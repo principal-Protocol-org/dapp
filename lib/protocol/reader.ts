@@ -1,5 +1,6 @@
 import { StrKey } from "@stellar/stellar-sdk"
 import { userErrorMessage } from "./errors"
+import { requestKey, shareInFlight } from "./rpc-limiter"
 import { createRpcServer, simulateContractRead, type ContractReadResult, type ScArg } from "./stellar"
 import type { Live, Manifest, ReadSource } from "./types"
 
@@ -14,11 +15,15 @@ export type ContractReader = (<T>(call: {
 
 const TRANSIENT_CODES = new Set(["ECONNREFUSED", "ECONNRESET", "ECONNABORTED", "ENOTFOUND", "ETIMEDOUT", "EAI_AGAIN", "EPIPE", "UND_ERR_SOCKET", "UND_ERR_CONNECT_TIMEOUT"])
 
+/** How fetch names a network failure: Chrome, Node, Safari, Firefox. Any other `TypeError` is a bug in the code. */
+const FETCH_FAILURE = /Failed to fetch|fetch failed|Load failed|NetworkError/
+
 /**
  * Whether a failed read says nothing about the contract, only about the endpoint (spec 0004 D-6): a
- * network failure (fetch's `TypeError`, a socket error code, or the SDK's HTTP-client error with no
- * HTTP answer), a timeout, an HTTP 5xx or 429, or the RPC's busy answer (`-32004`). Another endpoint may answer it. A simulation's own error (a contract
- * error, an archived entry, a read that needs auth) is the contract's answer: final everywhere.
+ * network failure (fetch's `TypeError` naming one, a socket error code, or the SDK's HTTP-client
+ * error with no HTTP answer), a timeout, an HTTP 5xx or 429, or the RPC's busy answer (`-32004`).
+ * Another endpoint may answer it. A simulation's own error (a contract error, an archived entry, a
+ * read that needs auth) is the contract's answer, and any other `TypeError` is the code's: final everywhere.
  */
 export function isTransientRpcError(error: unknown): boolean {
   if (typeof error !== "object" || error === null) return false
@@ -32,16 +37,38 @@ export function isTransientRpcError(error: unknown): boolean {
   if (typeof e.message === "string" && /^timeout of \d+ms exceeded$/.test(e.message)) return true
   if (typeof e.code === "string" && TRANSIENT_CODES.has(e.code)) return true
   if (typeof e.cause?.code === "string" && TRANSIENT_CODES.has(e.cause.code)) return true
-  return error instanceof TypeError
+  return error instanceof TypeError && FETCH_FAILURE.test(error.message)
 }
 
 type ReadServer = NonNullable<Parameters<typeof simulateContractRead>[0]["server"]>
+
+/** How long an endpoint that just failed transiently is asked last (spec 0005 M-20). */
+const RPC_SKIP_MS = 30_000
+
+/** When each endpoint last failed transiently, by URL: this module's own, so per tab and per server process. */
+const failedAt = new Map<string, number>()
+
+const recentlyFailed = (url: string, now: number) => {
+  const at = failedAt.get(url)
+  return at !== undefined && now - at < RPC_SKIP_MS
+}
+
+/** Every endpoint in good standing again. */
+export function resetRpcSkipsForTests(): void {
+  failedAt.clear()
+}
 
 /**
  * The app's contract reader: a simulation on the manifest's `rpcUrl`, then, on a transient failure
  * only (`isTransientRpcError`), on each of `rpcFallbackUrls` in order (D-6). The answer's `rpcUrl`
  * names the endpoint that answered, and `viaFallback` marks one that was not the first. A contract's
  * own error is never asked again elsewhere. `serverFor` is a test hook.
+ *
+ * The load rules (spec 0005 M-20): an identical read already in flight on an endpoint is shared
+ * (`shareInFlight`), and every simulation takes a slot of the read cap (`limitRpc`, in
+ * `simulateContractRead`). An endpoint that failed transiently under `RPC_SKIP_MS` ago is asked
+ * last, only when every other one failed too; so with no fallback the primary is always asked. When
+ * every endpoint fails, the primary's error is thrown, not the last fallback's.
  */
 export function createRpcReader(m: Manifest, opts: { serverFor?: (rpcUrl: string) => ReadServer } = {}): ContractReader {
   const urls = [m.rpcUrl, ...(m.rpcFallbackUrls ?? [])]
@@ -56,14 +83,23 @@ export function createRpcReader(m: Manifest, opts: { serverFor?: (rpcUrl: string
   }
   const read = async <T>(call: { contractId: string; functionName: string; args?: ScArg[] }): Promise<ContractReadResult<T>> => {
     const invocation = { contractId: call.contractId, functionName: call.functionName, args: call.args ?? [] }
-    for (let i = 0; ; i++) {
+    const now = Date.now()
+    const order = [...urls.filter((url) => !recentlyFailed(url, now)), ...urls.filter((url) => recentlyFailed(url, now))]
+    let primaryError: unknown
+    for (const url of order) {
       try {
-        const result = await simulateContractRead<T>({ rpcUrl: urls[i], networkPassphrase: m.networkPassphrase, server: serverFor(urls[i]), invocation })
-        return i === 0 ? result : { ...result, viaFallback: true }
+        const key = requestKey(url, invocation.contractId, invocation.functionName, invocation.args)
+        const result = await shareInFlight(key, () => simulateContractRead<T>({ rpcUrl: url, networkPassphrase: m.networkPassphrase, server: serverFor(url), invocation }))
+        failedAt.delete(url)
+        return url === m.rpcUrl ? result : { ...result, viaFallback: true }
       } catch (error) {
-        if (i === urls.length - 1 || !isTransientRpcError(error)) throw error
+        if (!isTransientRpcError(error)) throw error
+        failedAt.set(url, Date.now())
+        if (url === m.rpcUrl) primaryError = error
       }
     }
+    // Every endpoint was asked (the skipped ones last) and failed transiently.
+    throw primaryError
   }
   return Object.assign(read, { rpcUrl: m.rpcUrl })
 }
@@ -91,7 +127,7 @@ export function dedupeReads(reader: ContractReader): ContractReader {
   const answers = new Map<string, Promise<ContractReadResult<unknown>>>()
   const read = <T>(call: { contractId: string; functionName: string; args?: ScArg[] }) => {
     // Bigints at any depth (a struct argument's fields) as tagged text: plain JSON would throw on them.
-    const key = JSON.stringify([call.contractId, call.functionName, call.args ?? []], (_k, v: unknown) => (typeof v === "bigint" ? `${v}n` : v))
+    const key = requestKey(call.contractId, call.functionName, call.args ?? [])
     let answer = answers.get(key)
     if (!answer) {
       answer = reader<unknown>(call)

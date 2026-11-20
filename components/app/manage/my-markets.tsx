@@ -11,7 +11,7 @@ import { StatusBadge } from "@/components/app/markets/status-badge"
 import { useManifest } from "@/components/app/manifest-provider"
 import { useLedgerClock } from "@/hooks/use-ledger-clock"
 import { useManifestFindings } from "@/hooks/use-manifest-findings"
-import { useMarketStates } from "@/hooks/use-market-state"
+import { MARKET_LIST_REFETCH_MS, useMarketStates } from "@/hooks/use-market-state"
 import { useAccruedFees, useMyRoles } from "@/hooks/use-manage"
 import { useMarketsInProgress, type RegistrySalt } from "@/hooks/use-wizard"
 import { useWallet } from "@/hooks/use-wallet"
@@ -295,7 +295,7 @@ export function MyMarkets({ invalid, salts }: { invalid: InvalidMarkets; salts: 
   const { account, roles, pending } = useMyRoles()
   const { ledgerTime } = useLedgerClock()
   const [view, setView] = useState<View>("mine")
-  const states = useMarketStates(manifest.markets.map((m) => m.marketId))
+  const states = useMarketStates(manifest.markets.map((m) => m.marketId), MARKET_LIST_REFETCH_MS)
   // Where the wizard is not offered (Mainnet), no link leads to it: no New market, no Resume.
   const wizard = wizardAvailable(manifest)
   const inProgress = useMarketsInProgress(wizard && salts.status === "ok" ? salts.salts : NO_SALTS, account)

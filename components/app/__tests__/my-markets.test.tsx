@@ -29,6 +29,8 @@ const mocks = vi.hoisted(() => ({
   rolesPending: false,
   fees: {} as Record<string, Live<AccruedFees>>,
   ms: {} as Record<string, unknown>,
+  /** The refresh interval the list asked `useMarketStates` for. */
+  refetchMs: undefined as number | undefined,
   prepareManager: vi.fn(),
   execute: vi.fn(),
   toast: vi.fn(),
@@ -45,7 +47,11 @@ vi.mock("@/hooks/use-manage", () => ({
   useAccruedFees: (id: string) => ({ data: mocks.fees[id] }),
 }))
 vi.mock("@/hooks/use-market-state", () => ({
-  useMarketStates: (ids: string[]) => ids.map((id) => ({ data: mocks.ms[id], isPending: false, stale: false })),
+  MARKET_LIST_REFETCH_MS: 30_000,
+  useMarketStates: (ids: string[], refetchMs?: number) => {
+    mocks.refetchMs = refetchMs
+    return ids.map((id) => ({ data: mocks.ms[id], isPending: false, stale: false }))
+  },
 }))
 vi.mock("@/hooks/use-ledger-clock", () => ({ useLedgerClock: () => ({ ledgerTime: LEDGER_TIME, sequence: 1, isError: false }) }))
 vi.mock("@/hooks/use-manifest-findings", () => ({ useManifestFindings: () => [] }))
@@ -133,6 +139,11 @@ describe("My markets / All", () => {
     expect(within(other).queryByRole("button")).toBeNull()
     // The market where I am admin keeps its actions in the All view too.
     expect(screen.getByRole("button", { name: "Pause pool" })).toBeTruthy()
+  })
+
+  it("refreshes every market's figures every 30 s, not the market page's 6 s", () => {
+    show()
+    expect(mocks.refetchMs).toBe(30_000)
   })
 
   it("asks to connect a wallet when none is", () => {

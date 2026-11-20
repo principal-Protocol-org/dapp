@@ -1037,20 +1037,24 @@ place; the others are still open.
   fee". Every review declares the simulated Soroban resource fee plus 30% (rounded up), and the
   total fee with it, under the existing fee cap (`MAX_TX_FEE_STROOPS`). The unused refundable part
   is refunded, so it costs nothing (R2-80).
-- **Browser read concurrency.** The dashboard's markets page fires about 28 reads per market at
-  once every 60 s (853 for 30 markets, with shared reads de-duplicated). Add a concurrency cap
-  (e.g. 8 at a time) before many markets or a rate-limited RPC.
-- **An events index for the alert check and the reconciliation.** Open. The `events` table has no
-  index on `(network, contract_id, topic)`. The RecoveryEscrow reconciliation and the alert check's
-  rejection read filter by contract and topic, and `GET /api/dashboard/events?counts=1` counts by
-  topic. Fine at Testnet's few hundred rows; add the index (a new migration) before Mainnet volume.
-- **RPC fallbacks.** Open, and inert while no manifest sets `rpcFallbackUrls`. Before one does:
-  - when every endpoint fails, report the primary's error, not the last fallback's;
-  - narrow the transient rule (`isTransientRpcError` in `lib/protocol/reader.ts`): today any
-    `TypeError` counts as transient, so a bug in the client code would also fall over to the next
-    endpoint;
-  - remember a primary that is down for a short while, so each read stops waiting about 20 s for it
-    first. Pair it with the browser read concurrency cap above.
+- **Browser read concurrency.** Done, in the commit "at most six browser requests at a time;
+  shared in-flight reads; fallback rules". The dashboard's markets page fires about 28 reads per
+  market at once every 60 s (853 for 30 markets, with shared reads de-duplicated). Every contract
+  read (`simulateContractRead`, behind `createRpcReader`) and every request of `simulateInvocation`
+  now waits for one of 6 slots (`RPC_CONCURRENCY`, `lib/protocol/rpc-limiter.ts`), per tab in the
+  browser and per process on the server, and identical reads in flight share one request. The `/app` market list and the manage list refresh every 30 s; a market page keeps 6 s.
+- **An events index for the alert check and the reconciliation.** Done, in migration 0008
+  (`events_network_contract_topic` on `(network, contract_id, topic, ledger desc)`). The
+  RecoveryEscrow reconciliation and the alert check's rejection read filter by contract and topic,
+  and `GET /api/dashboard/events?counts=1` counts by topic.
+- **RPC fallbacks.** Done, in the same commit as the read cap; still inert while no manifest sets
+  `rpcFallbackUrls`:
+  - when every endpoint fails, the primary's error is reported, not the last fallback's;
+  - a `TypeError` is transient (`isTransientRpcError` in `lib/protocol/reader.ts`) only when it is
+    a fetch failure ("Failed to fetch", "fetch failed", "Load failed", "NetworkError"), so a bug in
+    the client code no longer falls over to the next endpoint;
+  - an endpoint that just failed transiently is asked last for 30 s, so a read stops waiting about
+    20 s for a primary that is down. With no fallback, the primary is still asked.
 - **"Unavailable" with its reason in every `/app` figure.** Open. Spec 0004 D-27 says the reason is
   shown everywhere. The `/app` Safety and Details rows show it (`showLiveReason`), but 26 other
   `showLive` sites in `/app` still show "Unavailable" alone. Move them to `showLiveReason` with
