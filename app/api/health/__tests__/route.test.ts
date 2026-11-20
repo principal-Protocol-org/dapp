@@ -27,14 +27,14 @@ import { GET, HEALTH_PART_TIMEOUT_MS } from "../route"
 const MANIFEST = parseManifest(testnetJson)
 const ORACLE = MANIFEST.shared.oracle
 /** Two more markets on a second oracle, as on Mainnet (one oracle per market). */
-const ORACLE_B = "CBHAWS6B4YCNRLYRP2HUP77P4IRP3PZYPSYVPV4OMZNU2ZNKSAQQ2GXU"
+const ORACLE_B = "CBTW7CU46PMCPKZQ3VX6OBELOEC7HHQXJSAX535VW3EK34MVS7UWPFR7"
 const [M1] = MANIFEST.markets
 const TWO = {
   ...MANIFEST,
   markets: [
     M1,
-    { ...M1, marketId: "m2", underlying: { ...M1.underlying, code: "USTRY" }, contracts: { ...M1.contracts, oracle: ORACLE_B, pool: "CBJGWQ7BJ7AND2MNG4RCA626PPX4RTDKLJGNG6UVXFTOYF6GGQ7T5GZ6" } },
-    { ...M1, marketId: "m3", underlying: { ...M1.underlying, code: "GILT" }, contracts: { ...M1.contracts, oracle: ORACLE_B, pool: "CDWVSTG3UZXZOEF2FGKJXFZFGEYEO3HUH7IFZNHOEFSQYZ575GAUYQH4" } },
+    { ...M1, marketId: "m2", underlying: { ...M1.underlying, code: "USTRY" }, contracts: { ...M1.contracts, oracle: ORACLE_B, pool: "CABAS76ZTOAKMQEBNC6TJNF4XINX7H7AH4EFVXTR4ACZNJR7NHT27A5S" } },
+    { ...M1, marketId: "m3", underlying: { ...M1.underlying, code: "GILT" }, contracts: { ...M1.contracts, oracle: ORACLE_B, pool: "CD5ADNE76FY2D722LMQJFD7AG74UU3OYQVXSNQNI33EYPSEEUZY4QILK" } },
   ],
 }
 const CLOSE = 1_794_657_600 // 2026-11-14T12:00:00Z

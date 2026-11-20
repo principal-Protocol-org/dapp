@@ -147,7 +147,7 @@ describe("evidenceRows", () => {
   })
 
   it("an unread input adds its contract, its attempted call and why, after the reads the figure has", () => {
-    const OTHER = "CBHAWS6B4YCNRLYRP2HUP77P4IRP3PZYPSYVPV4OMZNU2ZNKSAQQ2GXU"
+    const OTHER = "CBTW7CU46PMCPKZQ3VX6OBELOEC7HHQXJSAX535VW3EK34MVS7UWPFR7"
     const f = {
       label: "Oracle freshness",
       display: "Unavailable · 1 of 2 fresh",
@@ -156,7 +156,7 @@ describe("evidenceRows", () => {
     }
     const e = figureEvidence(f, { manifest: testnet })
     expect(e.contract).toBe(`${ORACLE}, ${OTHER}`)
-    expect(e.call).toBe(`is_available(); CBHAWS….is_available() (not read)`)
+    expect(e.call).toBe(`is_available(); CBTW7C….is_available() (not read)`)
     expect(e.status).toBe("Live · Not read: USTRY: rpc down")
     // Without a call recorded, it is still named.
     expect(figureEvidence({ ...f, unread: [{ name: "USTRY", error: "rpc down" }] }).status).toBe("Live · Not read: USTRY: rpc down")

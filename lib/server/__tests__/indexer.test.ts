@@ -287,7 +287,13 @@ describe("contractsOf", () => {
     const mainnet = parseManifest(mainnetJson)
     const groups = contractsOf(mainnet, mainnet.markets)
     expect(groups.oracle).toHaveLength(5)
-    expect(groups.oracle).toEqual(manifestOracles(mainnet).map((o) => ({ id: o.oracle, role: "oracle" })))
+    // The four v2 oracles carry their creation ledger (`createdLedgers`); MOCKUSDY's, the one that was not redeployed, none.
+    expect(groups.oracle).toEqual(
+      manifestOracles(mainnet).map((o) => {
+        const createdLedger = mainnet.createdLedgers?.[o.oracle]
+        return createdLedger === undefined ? { id: o.oracle, role: "oracle" } : { id: o.oracle, role: "oracle", createdLedger }
+      }),
+    )
     expect(groups.escrow).toHaveLength(5)
     expect(groups.market).toHaveLength(15)
     // The registry may list fewer markets (or none, on the seeds-only fallback): the oracle group is the manifest's.
@@ -725,7 +731,8 @@ describe("indexEvents", () => {
   })
 
   it("five oracles, one created later: a request of four from deployLedger, one of its own from its creation ledger", async () => {
-    const mainnet = parseManifest(mainnetJson)
+    // The committed manifest's own `createdLedgers` (the v2 oracles) are set aside: this case sets its own.
+    const mainnet: Manifest = { ...parseManifest(mainnetJson), createdLedgers: undefined }
     const start = mainnet.deployLedger as number
     const oracles = manifestOracles(mainnet).map((o) => o.oracle)
     const late = oracles[3]

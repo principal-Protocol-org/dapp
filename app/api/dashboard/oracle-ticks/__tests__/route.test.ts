@@ -13,7 +13,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@/lib/server/db", () => ({ sql: "the-sql", DatabaseConfigError: mocks.DatabaseConfigError }))
 vi.mock("@/lib/server/oracle-ticks", () => ({ listTicks: mocks.listTicks, keeperHealth: mocks.keeperHealth, keeperIntervalSeconds: mocks.keeperIntervalSeconds }))
 /** A second market on its own oracle, as on Mainnet (one oracle per market). */
-const ORACLE_B = "CBHAWS6B4YCNRLYRP2HUP77P4IRP3PZYPSYVPV4OMZNU2ZNKSAQQ2GXU"
+const ORACLE_B = "CBTW7CU46PMCPKZQ3VX6OBELOEC7HHQXJSAX535VW3EK34MVS7UWPFR7"
 vi.mock("@/lib/protocol/manifest-source", async () => {
   const { parseManifest } = await import("@/lib/protocol/manifest")
   const json = (await import("@/config/manifests/local.example.json")).default
@@ -26,7 +26,7 @@ vi.mock("@/lib/protocol/manifest-source", async () => {
         ...first,
         marketId: "local-gilt",
         underlying: { ...first.underlying, code: "GILT" },
-        contracts: { ...first.contracts, oracle: "CBHAWS6B4YCNRLYRP2HUP77P4IRP3PZYPSYVPV4OMZNU2ZNKSAQQ2GXU", pool: "CBJGWQ7BJ7AND2MNG4RCA626PPX4RTDKLJGNG6UVXFTOYF6GGQ7T5GZ6" },
+        contracts: { ...first.contracts, oracle: "CBTW7CU46PMCPKZQ3VX6OBELOEC7HHQXJSAX535VW3EK34MVS7UWPFR7", pool: "CABAS76ZTOAKMQEBNC6TJNF4XINX7H7AH4EFVXTR4ACZNJR7NHT27A5S" },
       },
     ],
   })

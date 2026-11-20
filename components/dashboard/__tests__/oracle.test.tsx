@@ -89,10 +89,10 @@ function oracleView(over: Record<string, unknown> = {}) {
 /** The five Mainnet oracles (`config/manifests/mainnet.json`), one per market. */
 const MAINNET_ORACLES = [
   ["CCKXG4HSVH57AQTYJDNNXHQBCGNH6KRFNMCMATTMYFUX2TDQ7GD5K7IT", "MOCKUSDY"],
-  ["CBHAWS6B4YCNRLYRP2HUP77P4IRP3PZYPSYVPV4OMZNU2ZNKSAQQ2GXU", "MOCKUSTRY"],
-  ["CDZS34JFW7D24MONUKQDVJZKGBPOMIEVEWQQAHTEG3LYR2VFI4XNFNSZ", "MOCKGILTS"],
-  ["CBJK32UY5UYP764MWWOVQ37NGZNVU5CKPGKN24RW4PV64MG3VGDBPBWC", "MOCKCETES"],
-  ["CCLB6RTJOG24TMIZ74IMVEMBLKYCD6ERDPBNL5IB4L6AGQCKOKGR6IS7", "MOCKXAUM"],
+  ["CBTW7CU46PMCPKZQ3VX6OBELOEC7HHQXJSAX535VW3EK34MVS7UWPFR7", "MOCKUSTRY"],
+  ["CD22HNREJHKTATZMFKALCTHJVKC35MHO2SAUSTG4M6PWLJZPS724J6X7", "MOCKGILTS"],
+  ["CBK2GO7UPMES2B7LZYZXNO3JP5JPNIIE74E4PUUJGSZZKD4FZ47QMUZK", "MOCKCETES"],
+  ["CDFI7IXUTGLV2EQE3VCHPCYOEBX2LSLXDKNU7ELJFZH726VDF73SOPFD", "MOCKXAUM"],
 ] as const
 const [O1, O2, O3, O4, O5] = MAINNET_ORACLES.map(([id]) => id)
 const WASM_3AF = "8581bbba82bb57f5c5c9c00adf98b1691ad20821840e55a67ad8d7ecace0c1b0"
@@ -156,8 +156,13 @@ function noFeedOracle(id: string, stored: bigint) {
   })
 }
 
-/** Mainnet today: four oracles hold ten times their feed's price (Review Focus 5), one has no feed. */
-const mainnetViews = (): Record<string, unknown> => ({
+/**
+ * A synthetic spread over the five Mainnet oracle ids, to cover each state the panel can show: one
+ * oracle ten times its feed's price (Review Focus 5), one a little off it, one with no feed. It is
+ * not the state of any real market: on the v2 deployment all five oracles name a feed and store
+ * values at its price.
+ */
+const spreadViews = (): Record<string, unknown> => ({
   [O1]: feedOracle(O1, 108_065_700n, 10_807_670n),
   [O2]: feedOracle(O2, 11_534_743n, 11_535_907n),
   [O3]: feedOracle(O3, 13_370_000n, 13_370_000n),
@@ -610,7 +615,7 @@ describe("the keeper's health on the oracle page (D-19)", () => {
   })
 
   it("an answer without this oracle's entry is Unavailable, never read as healthy", async () => {
-    answers.ticks = () => Response.json({ intervalSeconds: 1_800, oracles: [{ oracle: "CBHAWS6B4YCNRLYRP2HUP77P4IRP3PZYPSYVPV4OMZNU2ZNKSAQQ2GXU", asset: "USTRY", health: HEALTHY, ticks: [] }] })
+    answers.ticks = () => Response.json({ intervalSeconds: 1_800, oracles: [{ oracle: "CBTW7CU46PMCPKZQ3VX6OBELOEC7HHQXJSAX535VW3EK34MVS7UWPFR7", asset: "USTRY", health: HEALTHY, ticks: [] }] })
     render(wrap(<OraclePanel />))
     const keeper = region("Keeper")
     expect(await keeper.findByRole("button", { name: /Keeper health/ })).toBeTruthy()
@@ -642,7 +647,7 @@ function expectNoFixedWidth(el: HTMLElement) {
 describe("every oracle of the manifest (plan 0009: five on Mainnet)", () => {
   beforeEach(() => {
     mocks.manifest = mainnetManifest()
-    mocks.fetchOracleView.mockImplementation(viewsBy(mainnetViews()))
+    mocks.fetchOracleView.mockImplementation(viewsBy(spreadViews()))
   })
 
   it("says its cadence: 15 s on Testnet, 1 min on Mainnet (the public RPC's read allowance)", async () => {
@@ -695,7 +700,7 @@ describe("every oracle of the manifest (plan 0009: five on Mainnet)", () => {
   it("a stale oracle reads Stale in the list, and one that cannot be read Unavailable with its reason", async () => {
     mocks.fetchOracleView.mockImplementation(
       viewsBy({
-        ...mainnetViews(),
+        ...spreadViews(),
         [O2]: feedOracle(O2, 11_534_743n, 11_535_907n, { available: liveOn(O2, false, "is_available"), freshness: "stale", timeToBlock: { status: "live", value: -40, ledger: 1, sources: [srcOn(O2, "get_reference_timestamp")] } }),
         [O4]: feedOracle(O4, 5_000_000n, 500_000n, { timestamp: down("HostError: boom"), freshness: "unavailable", timeToBlock: down("HostError: boom") }),
       }),
@@ -759,7 +764,7 @@ describe("every oracle of the manifest (plan 0009: five on Mainnet)", () => {
 
   it("a stored value of zero or below: the comparison is Unavailable with the get_reference_value call and a plain reason", async () => {
     const user = userEvent.setup()
-    mocks.fetchOracleView.mockImplementation(viewsBy({ ...mainnetViews(), [O1]: feedOracle(O1, 0n, 10_807_670n) }))
+    mocks.fetchOracleView.mockImplementation(viewsBy({ ...spreadViews(), [O1]: feedOracle(O1, 0n, 10_807_670n) }))
     render(wrap(<OraclePanel />))
     const feed = region("Feed")
     await user.click(await feed.findByRole("button", { name: "Why Stored value against feed is unavailable, and how to verify it" }))
@@ -772,7 +777,7 @@ describe("every oracle of the manifest (plan 0009: five on Mainnet)", () => {
     const SAC = "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
     mocks.fetchOracleView.mockImplementation(
       viewsBy({
-        ...mainnetViews(),
+        ...spreadViews(),
         [O1]: feedOracle(O1, 10_000_000n, 10_000_000n, {
           feedMinInterval: liveOn(O1, 0n, "feed_min_interval_seconds"),
           feed: liveOn(O1, { contract: FEED, asset: { kind: "Stellar", address: SAC } }, "feed_source"),
@@ -877,7 +882,7 @@ describe("every oracle of the manifest (plan 0009: five on Mainnet)", () => {
   })
 
   it.each([
-    // Review Focus 5: four Mainnet oracles hold ten times their feed's price.
+    // Review Focus 5: a stored value ten times the feed's price (a synthetic case).
     [108_065_700n, 10_807_670n, "Differs by a factor of 10.0"],
     [11_534_743n, 11_535_907n, "Differs by 0.01 %"],
     [11_535_907n, 11_535_907n, "Equal"],
@@ -887,7 +892,7 @@ describe("every oracle of the manifest (plan 0009: five on Mainnet)", () => {
     [19_999_999n, 10_000_000n, "Differs by 99.99 %"],
     [10_000_001n, 10_000_000n, "Differs by less than 0.01 %"],
   ])("Review Focus 5: stored %s against the feed's %s reads %s, both values shown", async (stored, feedValue, text) => {
-    mocks.fetchOracleView.mockImplementation(viewsBy({ ...mainnetViews(), [O1]: feedOracle(O1, stored, feedValue) }))
+    mocks.fetchOracleView.mockImplementation(viewsBy({ ...spreadViews(), [O1]: feedOracle(O1, stored, feedValue) }))
     render(wrap(<OraclePanel />))
     const feed = region("Feed")
     await feed.findByText(text)
@@ -910,7 +915,7 @@ describe("every oracle of the manifest (plan 0009: five on Mainnet)", () => {
   })
 
   it("a feed price of zero or below is shown, and in place of a comparison: the oracle would refuse it", async () => {
-    mocks.fetchOracleView.mockImplementation(viewsBy({ ...mainnetViews(), [O1]: feedOracle(O1, 10_000_000n, 0n) }))
+    mocks.fetchOracleView.mockImplementation(viewsBy({ ...spreadViews(), [O1]: feedOracle(O1, 10_000_000n, 0n) }))
     render(wrap(<OraclePanel />))
     const feed = region("Feed")
     expect(await feed.findByText("The feed's price is not positive: the oracle would refuse it.")).toBeTruthy()
@@ -921,7 +926,7 @@ describe("every oracle of the manifest (plan 0009: five on Mainnet)", () => {
     const user = userEvent.setup()
     const call = { contractId: FEED, fn: "lastprice", args: [ASSET_ARG], rpcUrl: RPC }
     mocks.fetchOracleView.mockImplementation(
-      viewsBy({ ...mainnetViews(), [O1]: feedOracle(O1, 10_000_000n, 0n, { feedPrice: { status: "unavailable", error: "The feed has no price for this asset.", source: call } }) }),
+      viewsBy({ ...spreadViews(), [O1]: feedOracle(O1, 10_000_000n, 0n, { feedPrice: { status: "unavailable", error: "The feed has no price for this asset.", source: call } }) }),
     )
     render(wrap(<OraclePanel />))
     const feed = region("Feed")
