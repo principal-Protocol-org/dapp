@@ -542,19 +542,35 @@ function toScVal(v: unknown): xdr.ScVal {
 }
 
 /**
- * The fake chain as an RPC simulation endpoint, for the app's own reader (`createRpcReader`): it
- * decodes each simulated call, answers it from the chain's views, and counts the simulations in
- * flight. Each one stays open across a timer tick, so reads started together overlap.
+ * The fake chain as one RPC endpoint: simulations for the app's own reader (`createRpcReader`), each
+ * call decoded and answered from the chain's views, and the code reads (`getLedgerEntries`) answered
+ * by the chain. It counts every request in flight, of both kinds together. Each one stays open
+ * across a timer tick, so requests started together overlap.
  */
-function simulationEndpoint(chain: Chain) {
-  const load = { inFlight: 0, peak: 0, simulations: 0 }
+function countingEndpoint(chain: Chain) {
+  const load = { inFlight: 0, peak: 0, simulations: 0, codeReads: 0 }
+  const open = () => {
+    load.inFlight++
+    load.peak = Math.max(load.peak, load.inFlight)
+    return new Promise((resolve) => setTimeout(resolve, 1))
+  }
+  const rpc = {
+    ...chain.rpc,
+    async getLedgerEntries(...keys: xdr.LedgerKey[]) {
+      load.codeReads++
+      try {
+        await open()
+        return await chain.rpc.getLedgerEntries(...keys)
+      } finally {
+        load.inFlight--
+      }
+    },
+  }
   const server = {
     async simulateTransaction(tx: Transaction) {
-      load.inFlight++
       load.simulations++
-      load.peak = Math.max(load.peak, load.inFlight)
       try {
-        await new Promise((resolve) => setTimeout(resolve, 1))
+        await open()
         const [op] = tx.operations
         if (op?.type !== "invokeHostFunction" || op.func.type !== "hostFunctionTypeInvokeContract") throw new Error("not a contract call")
         const invoke = op.func.invokeContract
@@ -571,23 +587,25 @@ function simulationEndpoint(chain: Chain) {
       }
     },
   }
-  return { serverFor: () => server, load }
+  return { serverFor: () => server, rpc, load }
 }
 
 describe("the read cap on a server job (R9-4)", () => {
-  it("re-validating five markets through the app's reader never has more than six reads in flight", async () => {
+  it("re-validating five markets through the app's reader never has more than six reads in flight, code reads included", async () => {
     const markets = [10, 20, 30, 40, 50].map((n, i) => ({ ...seedMarket(chain.deploy(n)), marketId: `local-usdy-${i}` }))
     const manifest = manifestWith(markets)
-    const endpoint = simulationEndpoint(chain)
+    const endpoint = countingEndpoint(chain)
     // The real reader: this file's route tests mock `createRpcReader`.
     const { createRpcReader } = await vi.importActual<typeof import("@/lib/protocol/reader")>("@/lib/protocol/reader")
     const reader = createRpcReader(manifest, { serverFor: endpoint.serverFor })
-    const { checked } = await revalidate({ store, reader, rpc: chain.rpc, manifest })
+    const { checked } = await revalidate({ store, reader, rpc: endpoint.rpc, manifest })
     expect(checked).toEqual(markets.map((m) => m.contracts.pool))
     // Every read was answered: all five are valid, read through the fake endpoint, not around it.
     for (const m of markets) expect(store.rowsMap.get(m.contracts.pool)).toMatchObject({ valid: true })
     expect(endpoint.load.simulations).toBeGreaterThan(5 * 20)
-    // Reached, never passed: one market alone starts about 20 reads at once.
+    // One code read per market contract (seven kinds), started beside the wire reads.
+    expect(endpoint.load.codeReads).toBe(5 * 7)
+    // Reached, never passed: one market alone starts about 20 simulations and 7 code reads at once.
     expect(endpoint.load.peak).toBeLessThanOrEqual(RPC_CONCURRENCY)
     expect(endpoint.load.peak).toBe(RPC_CONCURRENCY)
   })
