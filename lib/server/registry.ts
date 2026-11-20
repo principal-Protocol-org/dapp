@@ -34,6 +34,7 @@ import { fetchTopology } from "@/lib/protocol/market-state"
 import { isContractError, readLive, toBool, type ContractReader } from "@/lib/protocol/reader"
 import type { Manifest, Market, MarketContractName } from "@/lib/protocol/types"
 import { contractWasmHash, contractWasmHashesSettled, WasmReadError, type LedgerEntriesRpc } from "@/lib/protocol/wasm"
+import { readRpcWindow } from "@/lib/protocol/rpc-window"
 import { DatabaseConfigError, type Sql } from "./db"
 import { createRollingLimiter, redact } from "./request"
 
@@ -60,6 +61,8 @@ type EventsRequest =
 /** The RPC calls the registry makes; the SDK's `rpc.Server` satisfies it, tests inject a fake. */
 export type RegistryRpc = LedgerEntriesRpc & {
   getHealth(): Promise<{ oldestLedger: number; latestLedger: number }>
+  getLatestLedger?(): Promise<{ sequence: number }>
+  getLedgers?(req: { startLedger: number; pagination: { limit: number } }): Promise<{ oldestLedger: number; latestLedger: number }>
   getEvents(req: EventsRequest): Promise<{ events: RawEvent[]; cursor: string; latestLedger: number }>
 }
 
@@ -758,7 +761,7 @@ export async function discover(deps: RegistryDeps, opts: { deadline?: number } =
   const factory = manifest.shared.factory
   const filters = [{ type: "contract" as const, contractIds: factory ? [router, factory] : [router] }]
   const name = cursorName(manifest)
-  const [saved, health] = await Promise.all([store.cursor(name), rpc.getHealth()])
+  const [saved, health] = await Promise.all([store.cursor(name), readRpcWindow(rpc)])
 
   let gap = false
   let request: EventsRequest
@@ -791,7 +794,7 @@ export async function discover(deps: RegistryDeps, opts: { deadline?: number } =
     } catch (error) {
       // The oldest ledger moves on a busy node: a start just behind it is refused once; start after it.
       if (request.startLedger === undefined || page > 0) throw error
-      const now = await rpc.getHealth()
+      const now = await readRpcWindow(rpc)
       request = { startLedger: now.oldestLedger + 1, filters, limit: EVENTS_PAGE }
       res = await rpc.getEvents(request)
     }

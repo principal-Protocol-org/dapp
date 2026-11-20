@@ -3,6 +3,7 @@ import { errorMessage } from "./errors"
 import { formatAmount, shorten } from "./format"
 import { getMarket } from "./manifest"
 import { limitRpc } from "./rpc-limiter"
+import { readRpcWindow } from "./rpc-window"
 import { createRpcServer } from "./stellar"
 import type { Manifest, Market } from "./types"
 
@@ -214,6 +215,8 @@ type EventsRequest =
 /** The RPC calls used here; `createRpcServer` satisfies it, tests inject a fake. */
 export type EventsRpcServer = {
   getHealth(): Promise<{ oldestLedger: number; latestLedger: number }>
+  getLatestLedger?(): Promise<{ sequence: number }>
+  getLedgers?(req: { startLedger: number; pagination: { limit: number } }): Promise<{ oldestLedger: number; latestLedger: number }>
   getEvents(req: EventsRequest): Promise<{ events: RawEvent[]; cursor: string }>
 }
 
@@ -492,7 +495,7 @@ export async function fetchAccountHistory(p: {
     [k.oracle, "oracle"],
   ])
 
-  const health = p.window ?? (await server.getHealth())
+  const health = p.window ?? (await readRpcWindow(server))
   const window = { oldestLedger: health.oldestLedger, latestLedger: health.latestLedger }
   const scan = { maxPages: p.maxPages ?? MAX_PAGES, windowLedgers: p.windowLedgers ?? WINDOW_LEDGERS }
   // The RPC accepts at most 5 contract IDs per request (checked 2026-10-27): two requests.

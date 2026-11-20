@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it, vi } from "vitest"
-import { clearGap, clearGapRefusal, isLocalDatabase, mergeCursor, parseArgs, readExport, reindexRefusal } from "../../../scripts/indexer.mjs"
+import { clearGap, clearGapRefusal, isLocalDatabase, mergeCursor, oldestLedgerAt, parseArgs, readExport, reindexRefusal } from "../../../scripts/indexer.mjs"
 
 const POOL = "CB3JI6H2HZ3PMWKLEKDPQUURFSKJSFTLNFNBU4CFEHAZXMWL5SNNS6OJ"
 const ESCROW = "CAMOWBMTMDLFJLFOSTULXQO7MUK2PT3XAQ62CA4L5DGPQKZFJWEKN24Q"
@@ -230,5 +230,44 @@ describe("mergeCursor (import)", () => {
     expect(mergeCursor(db, { ...line, gap_from: 150, gap_to: 300 })).toMatchObject({ cleared: false, row: { gap_from: 100, gap_to: 300 } })
     // A database row without members cannot be checked.
     expect(mergeCursor({ ...db, members: null }, line)).toMatchObject({ cleared: false })
+  })
+})
+
+describe("oldestLedgerAt (the capture's RPC window)", () => {
+  const reply = (status: number, body: unknown) => ({ status, json: async () => body }) as Response
+  const server = (handlers: Record<string, (params: unknown) => Response>) => {
+    const calls: { method: string; params: unknown }[] = []
+    const fetchImpl = (async (_url: string, init: { body: string }) => {
+      const { method, params } = JSON.parse(init.body)
+      calls.push({ method, params })
+      return (handlers[method] ?? (() => reply(200, { error: { code: -32601, message: "no" } })))(params)
+    }) as unknown as typeof fetch
+    return { calls, fetchImpl }
+  }
+
+  it("reads getHealth first, and every body carries params", async () => {
+    const { calls, fetchImpl } = server({ getHealth: () => reply(200, { result: { oldestLedger: 100, latestLedger: 900 } }) })
+    expect(await oldestLedgerAt("https://rpc.example", fetchImpl)).toBe(100)
+    expect(calls).toEqual([{ method: "getHealth", params: {} }])
+  })
+
+  it.each([
+    ["HTTP 400", () => reply(400, {})],
+    ["JSON-RPC -32601", () => reply(200, { error: { code: -32601, message: "the method getHealth does not exist/is not available" } })],
+  ])("falls back to getLedgers when getHealth answers %s", async (_, health) => {
+    const { calls, fetchImpl } = server({
+      getHealth: health,
+      getLatestLedger: () => reply(200, { result: { sequence: 900 } }),
+      getLedgers: () => reply(200, { result: { oldestLedger: 120, latestLedger: 900, ledgers: [] } }),
+    })
+    expect(await oldestLedgerAt("https://rpc.example", fetchImpl)).toBe(120)
+    expect(calls.map((c) => c.method)).toEqual(["getHealth", "getLatestLedger", "getLedgers"])
+    expect(calls[2].params).toEqual({ startLedger: 900, pagination: { limit: 1 } })
+  })
+
+  it("does not fall back when getHealth fails for another reason", async () => {
+    const { calls, fetchImpl } = server({ getHealth: () => reply(500, {}) })
+    expect(await oldestLedgerAt("https://rpc.example", fetchImpl)).toBeNull()
+    expect(calls).toHaveLength(1)
   })
 })

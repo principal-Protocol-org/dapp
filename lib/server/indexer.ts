@@ -46,6 +46,7 @@ import { cursorLedger, decodeEvent, idOf, type RawEvent, type Role } from "@/lib
 import { manifestOracles } from "@/lib/protocol/manifest"
 import { createRpcReader, type ContractReader } from "@/lib/protocol/reader"
 import type { Manifest, Market, Network } from "@/lib/protocol/types"
+import { readRpcWindow, type RpcWindowSource } from "@/lib/protocol/rpc-window"
 import { DatabaseConfigError, type Sql } from "./db"
 
 // ---------------------------------------------------------------- groups
@@ -127,8 +128,9 @@ export type IndexerEventsRequest =
  */
 export type IndexerRpc = {
   getHealth(): Promise<{ oldestLedger: number; latestLedger: number }>
+  getLatestLedger?(): Promise<{ sequence: number }>
   getEvents(req: IndexerEventsRequest): Promise<{ events: RawEvent[]; cursor: string; latestLedger?: number; latestLedgerCloseTime?: string }>
-  getLedgers?(req: { startLedger: number; pagination: { limit: number } }): Promise<{ ledgers: { sequence: number; ledgerCloseTime: string | number }[] }>
+  getLedgers?(req: { startLedger: number; pagination: { limit: number } }): Promise<{ ledgers: { sequence: number; ledgerCloseTime: string | number }[]; oldestLedger?: number; latestLedger?: number }>
 }
 
 export type IndexDeps = {
@@ -368,7 +370,7 @@ async function indexGroup(
         // ago may be refused. Every chunk not yet started starts again at the new oldest ledger,
         // which widens the gap.
         if (attempt === START_ATTEMPTS) throw error
-        const now = await rpc.getHealth()
+        const now = await readRpcWindow(rpc as RpcWindowSource)
         if (now.oldestLedger <= from) throw error
         oldest = now.oldestLedger
         for (const c of chunks) {
@@ -517,7 +519,7 @@ export async function indexEvents(
 
   // The cursors first: a missing database is reported as such, whatever the RPC does.
   const saved = await Promise.all(groups.map((g) => readCursor(sql, indexCursorName(g, network))))
-  const health = await rpc.getHealth()
+  const health = await readRpcWindow(rpc as RpcWindowSource)
 
   const progress: Progress[] = groups.map(() => ({ inserted: 0, saved: null, gap: null }))
   const results = await Promise.all(

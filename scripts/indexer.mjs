@@ -182,24 +182,50 @@ function readManifestJson(network) {
   return JSON.parse(readFileSync(path, "utf8"))
 }
 
-/** The RPC's oldest ledger for `network` (its manifest's `rpcUrl`), or null when it cannot be read. */
-async function rpcOldestLedger(network) {
+/**
+ * One JSON-RPC call; the body always carries `params` (dRPC refuses a request without them).
+ * Returns the parsed body, or null when the answer is not JSON.
+ */
+async function rpcCall(rpcUrl, method, params, fetchImpl) {
+  const res = await fetchImpl(rpcUrl, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+    signal: AbortSignal.timeout(20_000),
+  })
+  const body = await res.json().catch(() => null)
+  return { status: res.status, body }
+}
+
+/**
+ * The RPC's oldest ledger at `rpcUrl`, or null when it cannot be read. `getHealth` first; only when the
+ * method is unsupported (HTTP 400 or JSON-RPC -32601, as on dRPC) the window comes from `getLedgers`.
+ * Any other failure is null, as before. `fetchImpl` is a test hook.
+ */
+export async function oldestLedgerAt(rpcUrl, fetchImpl = fetch) {
   try {
-    const { rpcUrl } = readManifestJson(network)
-    const res = await fetch(rpcUrl, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getHealth" }),
-      signal: AbortSignal.timeout(20_000),
-    })
-    const oldest = (await res.json())?.result?.oldestLedger
-    return Number.isInteger(oldest) ? oldest : null
+    const health = await rpcCall(rpcUrl, "getHealth", {}, fetchImpl)
+    const oldest = health.body?.result?.oldestLedger
+    if (Number.isInteger(oldest)) return oldest
+    if (health.status !== 400 && health.body?.error?.code !== -32601) return null
+    const latest = (await rpcCall(rpcUrl, "getLatestLedger", {}, fetchImpl)).body?.result?.sequence
+    if (!Number.isInteger(latest)) return null
+    const page = await rpcCall(rpcUrl, "getLedgers", { startLedger: latest, pagination: { limit: 1 } }, fetchImpl)
+    const fromLedgers = page.body?.result?.oldestLedger
+    return Number.isInteger(fromLedgers) ? fromLedgers : null
   } catch {
     return null
   }
 }
 
-// ---------------------------------------------------------------- reindex
+/** The RPC's oldest ledger for `network` (its manifest's `rpcUrl`), or null when it cannot be read. */
+async function rpcOldestLedger(network) {
+  try {
+    return await oldestLedgerAt(readManifestJson(network).rpcUrl)
+  } catch {
+    return null
+  }
+}
 
 /**
  * Why a reindex must not run, or null. It never moves a cursor forward (that would skip events
