@@ -123,10 +123,16 @@ market.
   when one of its reads came from a fallback.
 - `mainnet.json` is the contracts team's file `deployments/mainnet-dapp-manifest.json`, taken from
   the `mainnet` branch of the contracts repository (`principal`). Its contracts were built from
-  `principal` at `3af9388`, the manifest's `sourceCommit`. We add `deployLedger` (65525735, the
+  `principal` at `3af9388`, the manifest's `sourceCommit`. It is the file after the contracts team's
+  v2 redeploy of 2026-11-20/21 (branch `mainnet` at `94050d0`): MOCKUSTRY, MOCKGILTS, MOCKCETES and
+  MOCKXAUM have new oracles and markets (their v1 contracts are abandoned: the v1 oracles' stored
+  values could not be corrected, since an oracle never lowers its value); MOCKUSDY and the shared
+  contracts are unchanged. We add `deployLedger` (65525735, the
   ledger before the first contract was created), `protocolAbi` 2 (the contract interface its Router
   speaks; absent means 1, as on Testnet) and each market's `underlying.tracks` (the asset its mock
-  stands for, such as `USDY`). A test checks that removing these additions gives back the contracts
+  stands for, such as `USDY`) and `createdLedgers` (the ledger of the transaction that created each
+  v2 oracle and market contract, from Horizon, so the indexer starts them there and not at
+  `deployLedger`). A test checks that removing these additions gives back the contracts
   team's file unchanged (`lib/protocol/__tests__/fixtures/mainnet-handover.json`).
 - Each market names its own oracle. The registry accepts a market only when its oracle is one the
   manifest names (a market's oracle or `shared.oracle`), and its manager and YT read that same
@@ -879,11 +885,18 @@ deploys with that pull request on `testnet.principalmarket.fi`, while Mainnet is
 2. **Load the history, before any `cron/index` run.** `pnpm indexer:capture --network mainnet`
    (Mainnet is only read; the rows go to this machine's database), then
    `pnpm indexer:import --network mainnet --in var/indexer-capture/mainnet-<YYYYMMDD>.jsonl --env-file .env.mainnet`.
-   A capture is on the developer's machine already: `var/indexer-capture/mainnet-20261120.jsonl`,
-   through ledger 65577228, with no gap. The Mainnet RPC keeps about 7 days (120,960 ledgers), so
-   that file's cursors leave its window around 2026-11-27, and a file whose cursors have left it
-   makes the first scheduled run record a gap. Run the capture again just before the import in any
-   case: it resumes from the local cursors and rewrites the day's file.
+   `var/indexer-capture/mainnet-20261120.jsonl` is on the developer's machine, through ledger
+   65577228, but it predates the v2 redeploy of 2026-11-20/21: it holds the events of the abandoned
+   v1 contracts of MOCKUSTRY, MOCKGILTS, MOCKCETES and MOCKXAUM, and none of the v2 ones. Do not
+   import it as the history: capture again against the current manifest. The public gateway refused
+   that capture on 2026-11-20 (HTTP 429 from the market checks on, right after the smoke check), so
+   it needs the keyed or second RPC of step 4, or a quiet gateway. A fresh capture reads MOCKUSDY and
+   the shared contracts from `deployLedger`, and each v2 contract from its `createdLedgers` entry.
+   The RPC keeps about 7 days (120,960 ledgers): the v2 markets' history (created 2026-11-20/21)
+   leaves the window around 2026-11-27/28, MOCKUSDY's and the shared contracts' (from 2026-11-17)
+   around 2026-11-24. A file whose cursors have left it makes the first scheduled run record a gap.
+   Run the capture again just before the import in any case: it resumes from the local cursors and
+   rewrites the day's file.
 3. **Production variables** in Vercel, scoped to Production only:
    - `NEXT_PUBLIC_PRINCIPAL_NETWORK=mainnet`;
    - `DATABASE_URL` (pooled) and `DATABASE_URL_UNPOOLED` of the Mainnet branch;
@@ -943,12 +956,13 @@ deploys with that pull request on `testnet.principalmarket.fi`, while Mainnet is
    schedules of step 7 run, since they read through the same RPC.
 6. **Check the deployment against the manifest:** `pnpm smoke:mainnet` (see Scripts). It must end
    with `PASS`: five topologies and 44 code hashes (12 pinned hashes) match. A stale oracle is only a
-   warning there. On 2026-11-20 all five oracles were stale. Three of them (MOCKGILTS, MOCKCETES,
-   MOCKXAUM) name no feed (`feed_source()` is `None`), so the keeper skips them (`no_feed`) until the
-   contracts team sets one. MOCKUSTRY's stored value is ten times its feed's price, a move far past
-   the oracle's 1,000 bps deviation cap, so the oracle would refuse that price (a significant
-   rejection, which opens `oracle_rejection`) until the contracts team resets the value. Only
-   MOCKUSDY's stored value is near its feed's price (0.03 % apart).
+   warning there. On 2026-11-20 all five oracles were stale (no relay was running), and the run
+   says so: it ends `PASS` with five warnings, never with a fresh oracle it did not read. All five
+   oracles of the v2 manifest name a feed (`feed_source()` is set), so the keeper has something to
+   sync on each; the stored values were at the feed's price (equal for MOCKUSDY, MOCKUSTRY and
+   MOCKGILTS, under 0.01 % and 0.41 % apart for MOCKCETES and MOCKXAUM). The keeper refreshes all
+   five. A feed value that moved past an oracle's deviation cap is refused (a significant rejection,
+   which opens `oracle_rejection`), so read the table's "Value against feed" column again at go-live.
 7. **The schedules**, on the `principalmarket-mainnet` QStash account, each to the exact
    `https://principalmarket.fi/api/cron/<job>` URL: `record` (`*/15 * * * *`) and `index`
    (`*/5 * * * *`). Then wait until the index has caught up: `GET /api/health` shows
