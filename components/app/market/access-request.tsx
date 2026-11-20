@@ -29,12 +29,15 @@ export function needsAccessRequest(items: readonly ComplianceItem[]): boolean {
  * Where nothing can be granted from the app (Mainnet): the issuer's authorization and the
  * Permissioning grants are done by the protocol team on request. Shows what to send them (the
  * connected address), what is still missing for this market, and how to reach them (the manifest's
- * `accessContact`). It reads nothing from the chain: the items are the compliance card's.
+ * `accessContact`). It reads nothing from the chain: the items are the compliance card's. An item
+ * that could not be read is not called missing (the account may already hold it): it is listed
+ * apart, with its own reason.
  */
 export function AccessRequest({ address, items }: { address: string; items: readonly ComplianceItem[] }) {
   const contact = useManifest().accessContact
   if (!needsAccessRequest(items)) return null
-  const missing = items.filter((i) => i.status !== "ok")
+  const missing = items.filter((i) => i.status === "missing" || i.status === "blocked")
+  const unread = items.filter((i) => i.status === "unavailable")
   const trustlineMissing = items.some((i) => i.id === "trustline" && i.status === "missing")
   const newTab = contact ? /^https:/i.test(contact.url) : false
 
@@ -51,14 +54,28 @@ export function AccessRequest({ address, items }: { address: string; items: read
           </Button>
         </div>
       </div>
-      <div className="grid gap-1">
-        <p>Still missing for this market:</p>
-        <ul className="grid list-disc gap-0.5 pl-5">
-          {missing.map((i) => (
-            <li key={i.id}>{capitalize(COMPLIANCE_ITEM_LABEL[i.id])}</li>
-          ))}
-        </ul>
-      </div>
+      {missing.length > 0 ? (
+        <div className="grid gap-1">
+          <p>Still missing for this market:</p>
+          <ul className="grid list-disc gap-0.5 pl-5">
+            {missing.map((i) => (
+              <li key={i.id}>{capitalize(COMPLIANCE_ITEM_LABEL[i.id])}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+      {unread.length > 0 ? (
+        <div className="grid gap-1">
+          <p>Could not be checked:</p>
+          <ul className="grid list-disc gap-0.5 pl-5">
+            {unread.map((i) => (
+              <li key={i.id} className="wrap-anywhere">
+                {i.message}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
       {trustlineMissing ? <p>Add the trustline first: the issuer cannot authorize an account without one.</p> : null}
       {contact ? (
         <p className="wrap-anywhere">

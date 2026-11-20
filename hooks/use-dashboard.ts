@@ -15,12 +15,22 @@ import { fetchMarketDashboard, fetchProtocolState, pendingClaim, type MarketDash
 import { getMarket } from "@/lib/protocol/manifest"
 import { fetchRiskView } from "@/lib/protocol/dashboard/risk"
 import { createRpcReader } from "@/lib/protocol/reader"
-import type { Manifest } from "@/lib/protocol/types"
+import type { Manifest, Network } from "@/lib/protocol/types"
 import type { IndexedEvent, IndexedEvents, IndexGroup } from "@/lib/server/indexer"
 import type { KeeperHealth, RecordedTick } from "@/lib/server/oracle-ticks"
 
-/** Live widgets (oracle, RiskControl, pauses) refresh every 15 s (D-6, TRANCHE_2_3 l.1077). */
+/** Live widgets (oracle, RiskControl, pauses) refresh every 15 s on Testnet and a local network (D-6, TRANCHE_2_3 l.1077). */
 export const DASHBOARD_LIVE_MS = 15_000
+/**
+ * On Mainnet they refresh every 60 s (plan 0009 final review, I-2): the public RPC refused reads after
+ * about 96 in one measurement, and one `/dashboard` tab reads about 70 oracle values per refresh.
+ */
+export const MAINNET_DASHBOARD_LIVE_MS = 60_000
+
+/** The live widgets' cadence on `network`. */
+export function dashboardLiveMs(network: Network): number {
+  return network === "mainnet" ? MAINNET_DASHBOARD_LIVE_MS : DASHBOARD_LIVE_MS
+}
 /** Aggregates (the every-market sweep and its totals) and history (the index) refresh every 60 s. */
 export const DASHBOARD_AGGREGATE_MS = 60_000
 
@@ -55,9 +65,10 @@ export function useProtocolState(marketIds?: readonly string[]) {
 }
 
 /**
- * One market's dashboard figures (`fetchMarketDashboard`), for its detail page: one batch of reads every
- * 15 s, the live cadence, since the page watches that one market. An id the manifest does not list is an
- * error, never a read (the route shows the not-found page before this runs).
+ * One market's dashboard figures (`fetchMarketDashboard`), for its detail page: one batch of reads at
+ * the live cadence (`dashboardLiveMs`: 15 s, 60 s on Mainnet), since the page watches that one market.
+ * An id the manifest does not list is an error, never a read (the route shows the not-found page
+ * before this runs).
  */
 export function useMarketDashboard(marketId: string) {
   const m = useManifest()
@@ -69,14 +80,14 @@ export function useMarketDashboard(marketId: string) {
         if (!market) throw new Error(`Unknown market "${marketId}"`)
         return fetchMarketDashboard(createRpcReader(m), m, market)
       },
-      refetchInterval: DASHBOARD_LIVE_MS,
+      refetchInterval: dashboardLiveMs(m.network),
     }),
   )
 }
 
 /**
  * What `account` would be paid by claiming its YT yield now, net of the YT fee (`pendingClaim`, D-9),
- * every 15 s. It reads nothing until an address has been looked up (`account`, already validated) and
+ * at the live cadence. It reads nothing until an address has been looked up (`account`, already validated) and
  * the market's state (`ms`) is in: the net needs its fee, exchange rate and oracle value. No wallet.
  */
 export function usePendingClaim(marketId: string, account: string | null, ms: MarketDashboard | undefined) {
@@ -90,7 +101,7 @@ export function usePendingClaim(marketId: string, account: string | null, ms: Ma
         return pendingClaim(createRpcReader(m), market, account as string, ms as MarketDashboard)
       },
       enabled: account !== null && ms !== undefined,
-      refetchInterval: DASHBOARD_LIVE_MS,
+      refetchInterval: dashboardLiveMs(m.network),
     }),
   )
 }
@@ -104,12 +115,12 @@ function oracleViewQuery(m: Manifest, oracle: string, ledgerTime: number | null)
       return { view: await fetchOracleView(createRpcReader(m), m, oracle, at), ledgerTime: at }
     },
     enabled: ledgerTime !== null,
-    refetchInterval: DASHBOARD_LIVE_MS,
+    refetchInterval: dashboardLiveMs(m.network),
   }
 }
 
 /**
- * The oracle `oracle` (an OracleAdapter id; `fetchOracleView`) every 15 s, with the ledger time its
+ * The oracle `oracle` (an OracleAdapter id; `fetchOracleView`) at the live cadence, with the ledger time its
  * freshness and time to block were computed at, so a countdown can follow the ledger clock between
  * reads (`secondsToBlockNow`). It waits for the first ledger time: a view read without one would
  * have no time to block. Each oracle has its own query.
@@ -132,7 +143,7 @@ export function useOracleViews(oracles: readonly string[]) {
 }
 
 /**
- * RiskControl (`fetchRiskView`) every 15 s. It is given the ledger clock's sequence, for the lapsed
+ * RiskControl (`fetchRiskView`) at the live cadence. It is given the ledger clock's sequence, for the lapsed
  * window, which is deliberately not in the key (it would refetch on every ledger).
  */
 export function useRiskView() {
@@ -143,19 +154,19 @@ export function useRiskView() {
       queryKey: ["dashboard", "risk", m.network],
       queryFn: () => fetchRiskView(createRpcReader(m), m, sequence as number),
       enabled: sequence !== null,
-      refetchInterval: DASHBOARD_LIVE_MS,
+      refetchInterval: dashboardLiveMs(m.network),
     }),
   )
 }
 
-/** Every pausable contract's `is_paused` (`fetchPauses`), every 15 s. */
+/** Every pausable contract's `is_paused` (`fetchPauses`), at the live cadence. */
 export function usePauses() {
   const m = useManifest()
   return withStale(
     useQuery({
       queryKey: ["dashboard", "pauses", m.network, idsOf(m.markets.map((market) => market.marketId))],
       queryFn: () => fetchPauses(createRpcReader(m), m),
-      refetchInterval: DASHBOARD_LIVE_MS,
+      refetchInterval: dashboardLiveMs(m.network),
     }),
   )
 }
@@ -460,7 +471,7 @@ const PAUSER_TOPICS = ["add_psr", "rm_psr"] as const
 
 /**
  * RiskControl's pausers: `indexed`, from every indexed `add_psr`/`rm_psr` (60 s), and `live`, each
- * of them confirmed with `is_pauser`, plus the admin (`fetchPausers`, 15 s). `events` is the index query.
+ * of them confirmed with `is_pauser`, plus the admin (`fetchPausers`, the live cadence). `events` is the index query.
  */
 export function usePausers() {
   const m = useManifest()
@@ -473,7 +484,7 @@ export function usePausers() {
       queryFn: () => fetchPausers(createRpcReader(m), m, accounts),
       // The admin is read whatever the index says; the accounts wait for it.
       enabled: events.data !== undefined || events.isError,
-      refetchInterval: DASHBOARD_LIVE_MS,
+      refetchInterval: dashboardLiveMs(m.network),
     }),
   )
   return { events, indexed, live }

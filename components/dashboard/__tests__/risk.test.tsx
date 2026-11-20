@@ -180,6 +180,18 @@ function expectValidLists(name: string) {
 }
 
 describe("the risk page (/dashboard/risk)", () => {
+  it.each([
+    ["testnet", "15 s"],
+    ["mainnet", "1 min"],
+  ] as const)("%s: the live panels say they refresh every %s", async (network, every) => {
+    mocks.manifest = { ...baseManifest(), network }
+    render(wrap(<RiskPanel />))
+    await region("Circuit breaker").findByText("10,000,000.00 USDY")
+    expect(screen.getByText(/protocol-wide · refreshes every/).textContent).toMatch(new RegExp(`, protocol-wide · refreshes every ${every}$`))
+    expect(screen.getByText(/manager and pool · refreshes every/).textContent).toBe(`RiskControl, and each market's SY wrapper, manager and pool · refreshes every ${every}`)
+    expect(screen.getAllByTestId("as-of")[0].textContent).toContain(`Refreshes every ${every}`)
+  })
+
   it("shows the limit, the volume, the raw remaining capacity and the wrap-and-mint capacity with its explanation (D-10)", async () => {
     const user = userEvent.setup()
     render(wrap(<RiskPanel />))

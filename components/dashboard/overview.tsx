@@ -9,7 +9,7 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import {
   DASHBOARD_AGGREGATE_MS,
-  DASHBOARD_LIVE_MS,
+  dashboardLiveMs,
   useComplianceEvents,
   useIndexStatus,
   useOpenAlerts,
@@ -286,7 +286,8 @@ export function Overview() {
 
   // D-10: the raw room left (null when the limit is off) and, when a market double-reports, what one wrap-and-mint can use.
   const riskData = risk.stale ? undefined : risk.data
-  const riskRead = readOf(risk, DASHBOARD_LIVE_MS)
+  const liveMs = dashboardLiveMs(m.network)
+  const riskRead = readOf(risk, liveMs)
   const limit = riskData?.limit.status === "live" ? riskData.limit.value : null
   const riskRemaining: FigureSpec<Remaining> = {
     label: "RiskControl capacity",
@@ -302,7 +303,7 @@ export function Overview() {
     label: "Contract pauses",
     live: current(pauses, (p) => p.paused),
     format: (names) => (names.length === 0 ? "None paused" : `Paused: ${names.join(", ")}`),
-    read: readOf(pauses, DASHBOARD_LIVE_MS),
+    read: readOf(pauses, liveMs),
   }
   // As the oracle page counts them: is_available() can turn an oracle Stale (or, unread, Unavailable), so its read is listed too.
   const nowSeconds = ledgerTime === null ? null : Math.floor(ledgerTime)
@@ -315,7 +316,7 @@ export function Overview() {
     scale: "Each oracle of the manifest: fresh while ledger time − its timestamp ≤ max_stale_seconds and is_available() is true; Warning from 75%, not counted fresh; an oracle that could not be read is named apart",
     unread,
     // The oldest of the oracles' reads: the figure is as old as that.
-    read: oracleReads.length === oracleQueries.length && oracleReads.length > 0 ? { at: Math.min(...oracleReads.map((q) => q.dataUpdatedAt)), cadenceMs: DASHBOARD_LIVE_MS } : undefined,
+    read: oracleReads.length === oracleQueries.length && oracleReads.length > 0 ? { at: Math.min(...oracleReads.map((q) => q.dataUpdatedAt)), cadenceMs: liveMs } : undefined,
   }
 
   const contractFigures = [tvl, tvlUsd, liquidity, riskRemaining, ...(effective ? [effective] : []), contractPauses, oracleFreshness] as FigureSpec<unknown>[]
@@ -339,7 +340,7 @@ export function Overview() {
           </div>
           <CopyEvidence figures={figures} />
         </div>
-        <AsOf sources={readsOf(lives)} updatedAt={newestUpdate || null} cadenceMs={DASHBOARD_LIVE_MS} />
+        <AsOf sources={readsOf(lives)} updatedAt={newestUpdate || null} cadenceMs={liveMs} />
         <p className="flex flex-wrap gap-x-2 font-mono text-xs/5 text-ink-muted">
           <span className="wrap-anywhere">RPC {m.rpcUrl}</span>
           <span aria-hidden="true">·</span>
@@ -386,7 +387,7 @@ export function Overview() {
             <AsOf
               sources={readsOf([riskRemaining.live, effective?.live, contractPauses.live, oracleFreshness.live])}
               updatedAt={Math.max(0, ...[...oracleQueries, risk, pauses].map((q) => (q.stale ? 0 : q.dataUpdatedAt))) || null}
-              cadenceMs={DASHBOARD_LIVE_MS}
+              cadenceMs={liveMs}
             />
           }
         >

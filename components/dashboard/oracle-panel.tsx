@@ -9,7 +9,7 @@ import { Metric } from "@/components/app/market/metric"
 import { Badge } from "@/components/ui/badge"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { DASHBOARD_LIVE_MS, useOracleTicks, useOracleViews, type IndexedEvent, type KeeperHealth, type RecordedTick } from "@/hooks/use-dashboard"
+import { dashboardLiveMs, useOracleTicks, useOracleViews, type IndexedEvent, type KeeperHealth, type RecordedTick } from "@/hooks/use-dashboard"
 import { LEDGER_CLOCK_REFETCH_MS, useLedgerClock } from "@/hooks/use-ledger-clock"
 import type { Freshness, OracleSourceView, OracleView } from "@/lib/protocol/dashboard/oracle"
 import { FRESHNESS_BADGE, FRESHNESS_WORD, freshnessNow, oracleEntries, secondsToBlockNow, type OracleEntry } from "@/lib/protocol/dashboard/oracle-state"
@@ -19,7 +19,7 @@ import { formatBps, formatWindow } from "@/lib/protocol/format"
 import type { OracleRejection } from "@/lib/protocol/market-state"
 import { allLive, unavailable } from "@/lib/protocol/reader"
 import type { Live, Network } from "@/lib/protocol/types"
-import { AsOf, readsOf } from "./as-of"
+import { AsOf, cadenceText, readsOf } from "./as-of"
 import { CopyEvidence } from "./copy-evidence"
 import { EventList, TxLink, type EventRowText } from "./event-list"
 import { accountShort, ago, closeTimeText } from "./event-words"
@@ -345,8 +345,9 @@ function OraclesView() {
   const clockLag = sinceReadSeconds != null && sinceReadSeconds > (2 * LEDGER_CLOCK_REFETCH_MS) / 1000 ? Math.floor(sinceReadSeconds) : null
 
   const noClock = clockFailed && ledgerTime === null ? "the ledger time could not be read" : undefined
-  const tableRows = oracles.map((o, i) => oracleRow(o, views[i], nowSeconds, noClock))
-  const read = readOf(oracle, DASHBOARD_LIVE_MS)
+  const liveMs = dashboardLiveMs(m.network)
+  const tableRows = oracles.map((o, i) => oracleRow(o, views[i], nowSeconds, liveMs, noClock))
+  const read = readOf(oracle, liveMs)
   const view = oracle.stale ? undefined : oracle.data
   const pick = <T,>(f: (v: OracleView) => Live<T>) => current(oracle, (d) => f(d.view), noClock)
 
@@ -463,10 +464,10 @@ function OraclesView() {
           <Heading />
           <CopyEvidence figures={figures} />
         </div>
-        <AsOf sources={readsOf(specs.map((f) => f.live))} updatedAt={oracle.stale ? null : oracle.dataUpdatedAt || null} cadenceMs={DASHBOARD_LIVE_MS} />
+        <AsOf sources={readsOf(specs.map((f) => f.live))} updatedAt={oracle.stale ? null : oracle.dataUpdatedAt || null} cadenceMs={liveMs} />
       </div>
 
-      <Panel title="Oracles" meta={<p className="text-xs/5 text-ink-muted">One per market, each read live every 15 s. Pick one to see it in detail below.</p>}>
+      <Panel title="Oracles" meta={<p className="text-xs/5 text-ink-muted">One per market, each read live every {cadenceText(liveMs)}. Pick one to see it in detail below.</p>}>
         <OraclesTable rows={tableRows} selected={selected} onChoose={choose} />
       </Panel>
 
@@ -475,7 +476,7 @@ function OraclesView() {
           title="Reference value"
           meta={
             <p className="text-xs/5 text-ink-muted">
-              <span title={selected}>OracleAdapter {accountShort(selected)}</span> ({entry.asset}) · refreshes every 15 s; the countdown follows the ledger clock
+              <span title={selected}>OracleAdapter {accountShort(selected)}</span> ({entry.asset}) · refreshes every {cadenceText(liveMs)}; the countdown follows the ledger clock
             </p>
           }
         >

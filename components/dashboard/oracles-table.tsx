@@ -4,7 +4,6 @@ import type { MouseEvent } from "react"
 import { formatDuration } from "@/components/app/live"
 import { Badge } from "@/components/ui/badge"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { DASHBOARD_LIVE_MS } from "@/hooks/use-dashboard"
 import { FRESHNESS_BADGE, FRESHNESS_WORD, oracleNow, type OracleEntry, type OracleNow, type OracleViewAt } from "@/lib/protocol/dashboard/oracle-state"
 import type { VerifiableFigure } from "@/lib/protocol/dashboard/verify"
 import { unavailable } from "@/lib/protocol/reader"
@@ -27,10 +26,13 @@ export type OracleRow = {
 const STATE_SCALE = "Fresh while age ≤ max_stale_seconds (the contract's is_fresh) and is_available(); Warning from 75%; age is ledger time − the oracle timestamp"
 const COUNTDOWN_SCALE = "Seconds: the oracle timestamp + max_stale_seconds − ledger time; counts down on the ledger clock"
 
-/** One oracle's row, from its query: the state and the countdown from its timestamp, max_stale and is_available reads; the path from last_update_was_feed. */
-export function oracleRow(entry: OracleEntry, q: QueryLike<OracleViewAt>, nowSeconds: number | null, blocked?: string): OracleRow {
+/**
+ * One oracle's row, from its query: the state and the countdown from its timestamp, max_stale and is_available reads; the path from last_update_was_feed.
+ * `cadenceMs` is the query's refresh (`dashboardLiveMs`), for the read's age.
+ */
+export function oracleRow(entry: OracleEntry, q: QueryLike<OracleViewAt>, nowSeconds: number | null, cadenceMs: number, blocked?: string): OracleRow {
   const now = oracleNow(q, nowSeconds, blocked)
-  const read = readOf(q, DASHBOARD_LIVE_MS)
+  const read = readOf(q, cadenceMs)
   const named = (name: string) => `${name} · ${entry.asset}`
   const path = !q.stale ? q.data?.view.path : undefined
   return {

@@ -6,7 +6,7 @@ import type { AccountState } from "@/lib/protocol/account-state"
 import { SubmissionRejectedError } from "@/lib/protocol/stellar"
 import type { Network, WalletState } from "@/lib/protocol/types"
 import { TooltipProvider } from "@/components/ui/tooltip"
-import { accountState as fixtureAccount, live } from "./fixtures"
+import { accountState as fixtureAccount, down, live } from "./fixtures"
 
 const ADDRESS = "GBZXN7PIRZGNMHGA7MUUUF4GWPY5AYPV6LY4UV2GL6VJGIQRXFDNMADI"
 const ISSUER = "GCWFJKLE45TMVZS42TMIYKAORKGBWE74753YPOSCC5ESJR2G2UMBXBDB"
@@ -203,6 +203,26 @@ describe("Mainnet: no faucet, access on request", () => {
     expect(within(account()).getByRole("button", { name: "Add trustline" })).toBeTruthy()
   })
 
+  it("an unread item is not listed as missing: it sits apart, under Could not be checked, with its own reason", () => {
+    mocks.account = accountState({ sacAuthorized: down("timeout"), permAllowed: live(false), permPt: down("HTTP 429") })
+    show()
+    const block = within(accessBlock() as HTMLElement)
+    const list = (heading: string) => within(block.getByText(heading).nextElementSibling as HTMLElement).getAllByRole("listitem").map((li) => li.textContent)
+    expect(list("Still missing for this market:")).toEqual(["Principal permissioning"])
+    expect(list("Could not be checked:")).toEqual([
+      "The issuer's authorization could not be checked right now (timeout).",
+      "PT permissioning could not be checked right now (HTTP 429).",
+    ])
+  })
+
+  it("a blocked item is still missing; nothing unread means no Could not be checked list", () => {
+    mocks.account = accountState({ trustline: live("unauthorized"), sacAuthorized: live(false), permYt: live(false) })
+    show()
+    const block = within(accessBlock() as HTMLElement)
+    expect(block.getAllByRole("listitem").map((li) => li.textContent)).toEqual(["Issuer authorization", "YT permissioning"])
+    expect(block.queryByText("Could not be checked:")).toBeNull()
+  })
+
   it("with an https contact: Send your address to, a link that opens in a new tab", () => {
     mocks.manifest = manifest("mainnet", { accessContact: { label: "the Principal access desk", url: "https://principal.example/access" } })
     mocks.account = accountState({ permPt: live(false) })
@@ -246,9 +266,13 @@ describe("Mainnet: no faucet, access on request", () => {
   })
 })
 
-describe("Add trustline", () => {
-  it.each(["testnet", "local", "mainnet"] as const)("%s: offered on the trustline item while the trustline is missing", (network) => {
-    mocks.manifest = manifest(network)
+describe("Add trustline (Mainnet only, spec 0005)", () => {
+  beforeEach(() => {
+    mocks.manifest = manifest("mainnet")
+    mocks.wallet = { status: "connected", publicKey: ADDRESS, networkPassphrase: "Public Global Stellar Network ; September 2015" }
+  })
+
+  it("mainnet: offered on the trustline item while the trustline is missing", () => {
     mocks.account = noTrustline()
     show()
     const buttons = within(account()).getAllByRole("button", { name: "Add trustline" })
@@ -256,6 +280,16 @@ describe("Add trustline", () => {
     // On the trustline item, beside its fix line.
     expect(buttons[0].closest("li")?.textContent).toMatch(/You have no trustline to the underlying asset/)
     expect(buttons[0].closest("li")?.textContent).toMatch(/Fix: Add a trustline to the underlying asset in your wallet\./)
+  })
+
+  it.each(["testnet", "local"] as const)("%s: never offered, where Get test tokens adds the trustline; the item keeps its fix line", (network) => {
+    mocks.manifest = manifest(network)
+    mocks.wallet = { status: "connected", publicKey: ADDRESS, networkPassphrase: "Test SDF Network ; September 2015" }
+    mocks.account = noTrustline()
+    show()
+    expect(screen.queryByRole("button", { name: "Add trustline" })).toBeNull()
+    const item = within(account()).getByText(/You have no trustline to the underlying asset/).closest("li")
+    expect(item?.textContent).toBe("Action needed. You have no trustline to the underlying asset. Add one before you can hold it.Fix: Add a trustline to the underlying asset in your wallet.")
   })
 
   it("not offered once the trustline exists", () => {
@@ -313,7 +347,7 @@ describe("Add trustline", () => {
     const again = screen.getByRole("button", { name: "Add trustline" })
     expect((again as HTMLButtonElement).disabled).toBe(false)
     // It may have landed: the reads are refreshed either way.
-    await waitFor(() => expect(client.invalidateQueries).toHaveBeenCalledWith({ queryKey: ["account", "testnet"] }))
+    await waitFor(() => expect(client.invalidateQueries).toHaveBeenCalledWith({ queryKey: ["account", "mainnet"] }))
     // Pressed again, it tries again.
     mocks.addTrustline.mockResolvedValue({ hash: HASH })
     await userEvent.click(again)

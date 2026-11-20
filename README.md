@@ -193,10 +193,13 @@ app header's "Dashboard" link and the landing footer open it.
   Unavailable when any market's figure is, never a partial sum. A refresh that fails never leaves the
   old value showing as current.
 - **Cadence.** Live widgets (the oracle, RiskControl, pauses and pausers, one market's page) refresh
-  every 15 s; aggregates (the totals and the markets list) and history (the event index, keeper runs,
-  alerts, RecoveryEscrow records) every 60 s. `/app` keeps its 6 s. Each panel says when it was read
-  ("Ledger N · read 4s ago · Refreshes every 15 s"), and "Stale: no new read for over 30 s" past
-  twice the cadence.
+  every 15 s on Testnet and the local network, and every 60 s on Mainnet (`dashboardLiveMs`): the
+  public Mainnet RPC refused reads after about 96 in one measurement, and one `/dashboard` tab reads
+  about 70 oracle values per refresh (see "Mainnet go-live", step 4). Aggregates (the totals and the
+  markets list) and history (the event index, keeper runs, alerts, RecoveryEscrow records) refresh
+  every 60 s on every network. `/app` keeps its 6 s. Each panel says when it was read ("Ledger N ·
+  read 4s ago · Refreshes every 15 s", "every 1 min" on Mainnet), and "Stale: no new read for over
+  30 s" (2 min on Mainnet) past twice the cadence.
 - **History** comes from the event index (`GET /api/dashboard/events`, see "Event indexer"). Each list
   says how far it goes ("Indexed through ledger N"), its lag and any stored gap. The keeper's runs come
   from `GET /api/dashboard/oracle-ticks` and the alerts from `GET /api/dashboard/alerts`. Without
@@ -386,7 +389,10 @@ each retry would record the same rejection again (counted in `rejected24h` and i
   contract id or a comma-separated list (tests and the local proof only; see Environment variables).
   An override logs a warning on every run, and off the local network it answers 503 `not_configured`.
 - **Its schedule.** Every 30 minutes by default. On Mainnet it runs every 5 minutes (cron
-  `*/5 * * * *` and `ORACLE_KEEPER_INTERVAL_SECONDS=300`): a run with nothing to submit costs nothing.
+  `2-57/5 * * * *`, with retries 0, and `ORACLE_KEEPER_INTERVAL_SECONDS=300`): a run with nothing to
+  submit costs nothing. The cron runs 2 minutes after `index` and `alerts`, which can share its
+  per-process read cap, and it has no retries because it answers 500 when any oracle fails: the next
+  scheduled run is the retry (see "Mainnet go-live", step 7).
 
 `scripts/dev-stack/feed-oracle.sh` proves it on the local stack: it deploys a SEP-40 mock feed and a
 standalone OracleAdapter of 3af9388 wired to it (`FEED_MIN_INTERVAL` sets its throttle, 0 by default;
@@ -471,7 +477,9 @@ Contracts are indexed in five groups, each with its own cursor in `ingest_cursor
 - A contract's creation ledger is the manifest's `createdLedgers` entry for it (contract id to
   ledger), else its market's `createdLedger` (below). Add an entry when a manifest names a contract
   that is not a market, such as a new oracle, after `deployLedger` has left the RPC's window. Without
-  one, the contract would start at `deployLedger` and record a gap for ledgers before it existed.
+  one, the contract would start at `deployLedger` and record a gap for ledgers before it existed. An
+  entry must be at or before the contract's creation ledger; earlier is safe. A later value silently
+  loses the contract's first events, and no gap is recorded for them.
 - A market's creation ledger (`createdLedger` in its registry row) is the earliest ledger at which
   discovery saw the factory build it: its salt's `mkt_tok`, `mkt_eng` or `mkt_new`, in the page of
   events that named the pool, or else the salt index's ledger for it (its `mkt_new`). A market the
@@ -861,7 +869,9 @@ PRINCIPAL_NETWORK=testnet scripts/dev-stack/drill.sh
 
 The developer's checklist for putting the app live on Stellar Mainnet at `principalmarket.fi` (Vercel
 Production, branch `main`), in order. Each step waits for the developer's go. No step needs a secret
-in this repository, and nothing is signed on Mainnet by an agent, a test or CI.
+in this repository, and nothing is signed on Mainnet by an agent, a test or CI. Merge the `testnet`
+pull request and go live the same day: the landing's "Live on Stellar Mainnet and Testnet" line
+deploys with that pull request on `testnet.principalmarket.fi`, while Mainnet is not live until step 5.
 
 1. **The Mainnet database.** Its own Neon branch (`mainnet`), with its connection strings in
    `.env.mainnet` (git-ignored). `pnpm db:migrate --env-file .env.mainnet` applies 0001 to 0008.
@@ -880,13 +890,36 @@ in this repository, and nothing is signed on Mainnet by an agent, a test or CI.
      QStash account;
    - `ALERT_WEBHOOK_URL`, the alert channel's incoming webhook;
    - `ORACLE_KEEPER_MODE=feed`, `ORACLE_KEEPER_SECRET` (a new key with no protocol role, funded with
-     XLM by the developer) and `ORACLE_KEEPER_INTERVAL_SECONDS=300`.
+     XLM by the developer) and `ORACLE_KEEPER_INTERVAL_SECONDS=300`. A keeper key funded with less
+     than 20 XLM raises `signer_low` (the default floor) from the first alert run: fund it with more
+     than 20 XLM, or set `ALERT_SIGNER_MIN_XLM` here, below its balance.
 
    Never a faucet or admin secret: `FAUCET_ISSUER_SECRET`, `FAUCET_PERMISSIONING_ADMIN_SECRET` and
    `ORACLE_ADMIN_SECRET` stay unset there, as do `ORACLE_KEEPER_ORACLE_ID` and
    `ORACLE_KEEPER_RECORD_REJECTIONS` (a rejection is then recorded from the simulation, at no fee). A
-   variable applies only to deployments made after it is set, so this comes before step 4.
-4. **Move `main` to the app.** `main` has three commits the app line (`testnet`) lacks: `0d2754c`
+   variable applies only to deployments made after it is set, so this comes before step 5.
+4. **Choose the read path.** The public gateway that `mainnet.json` names as `rpcUrl`
+   (`https://soroban-rpc.mainnet.stellar.gateway.fm`) answered HTTP 429 after about 96 reads in one
+   measurement (2026-11-20, 6 at a time), and one `/dashboard` tab reads about 70 oracle values per
+   refresh, so the public pages alone can use up its allowance. The developer picks a keyed or second
+   RPC provider and sets it in `config/manifests/mainnet.json`, by a commit on the app line before
+   step 5:
+   - **in `rpcFallbackUrls`** (the smaller change): the gateway is still asked first. A read it
+     refuses (HTTP 429 or 5xx, a timeout, a network error) is asked again of the fallback, and the
+     gateway is then asked last for 30 s (see the manifest's `rpcFallbackUrls` above). The manifest
+     test removes this field before it compares the file with the contracts team's, as it removes our
+     other additions;
+   - **or as `rpcUrl`**: every read goes to the new provider first. Keep the gateway in
+     `rpcFallbackUrls`. `rpcUrl` is a field of the contracts team's file, so the comparison in
+     `lib/protocol/__tests__/mainnet-manifest.test.ts` must then put the gateway's URL back before it
+     compares.
+
+   The manifest is public (this repository, and every browser that loads the app), so a key in its
+   URL is public too, and it is not a server secret. Pick a key that may be public, with a usage cap
+   you accept. The server jobs (keeper, alert check, indexer) read through the same URLs, so a key
+   that only answers requests from the site's origin can refuse them. On Mainnet the dashboard's live
+   widgets already refresh every 60 s instead of 15 s (see "Cadence" under "Dashboard").
+5. **Move `main` to the app.** `main` has three commits the app line (`testnet`) lacks: `0d2754c`
    (a period in the landing's compliance title), `f280f7d` (the `/docs` rewrite, which the app line
    has too) and `f6bf73c` (the E2E workflow, which the app line has in a newer form). So `main`
    cannot simply fast-forward. A merge either way stops on two files: keep the app line's
@@ -899,8 +932,12 @@ in this repository, and nothing is signed on Mainnet by an agent, a test or CI.
      `testnet` stays as it is, and `main` is that merge commit ahead of it.
 
    The push deploys Production. Check that `/app` and `/dashboard` load with the Mainnet banner, and
-   that `GET /api/health` answers 200.
-5. **Check the deployment against the manifest:** `pnpm smoke:mainnet` (see Scripts). It must end
+   that `GET /api/health` answers 200. Then check the read path of step 4: open a fresh `/dashboard`
+   and a fresh `/app` (a private window each, with the browser's network panel open) and leave them
+   for several minutes, at least five refreshes of the dashboard's live widgets. The figures must stay
+   readable, and no RPC request may answer 429. If some do, go back to step 4. Look again once the
+   schedules of step 7 run, since they read through the same RPC.
+6. **Check the deployment against the manifest:** `pnpm smoke:mainnet` (see Scripts). It must end
    with `PASS`: five topologies and 44 code hashes (12 pinned hashes) match. A stale oracle is only a
    warning there. On 2026-11-20 all five oracles were stale. Three of them (MOCKGILTS, MOCKCETES,
    MOCKXAUM) name no feed (`feed_source()` is `None`), so the keeper skips them (`no_feed`) until the
@@ -908,27 +945,38 @@ in this repository, and nothing is signed on Mainnet by an agent, a test or CI.
    the oracle's 1,000 bps deviation cap, so the oracle would refuse that price (a significant
    rejection, which opens `oracle_rejection`) until the contracts team resets the value. Only
    MOCKUSDY's stored value is near its feed's price (0.03 % apart).
-6. **The schedules**, on the `principalmarket-mainnet` QStash account, each to the exact
+7. **The schedules**, on the `principalmarket-mainnet` QStash account, each to the exact
    `https://principalmarket.fi/api/cron/<job>` URL: `record` (`*/15 * * * *`) and `index`
    (`*/5 * * * *`). Then wait until the index has caught up: `GET /api/health` shows
    `indexer.lagSeconds` under 3,600 and `indexer.gaps` empty (`[]`). `indexer.status` `ok` alone
    does not show it: it reads `ok` right after step 2's import, whose cursors are hours or days old.
    A gap there means the capture's cursors had left the RPC's window (see "Event indexer"). Only
    then `alerts` (`*/5 * * * *`, retries 0): started earlier, its first run would open (and post)
-   `indexer_lag` for every group. Then `oracle` (`*/5 * * * *`). While an oracle is stale,
-   `cron/alerts` answers 500 (a critical alert is open), so with retries every run would be
-   repeated seconds later.
-7. **A test alert.** One QStash message to `https://principalmarket.fi/api/cron/alerts?test=1`, with
+   `indexer_lag` for every group. While an oracle is stale, `cron/alerts` answers 500 (a critical
+   alert is open), so with retries every run would be repeated seconds later. Then `oracle`
+   (`2-57/5 * * * *`, retries 0): every 5 minutes too, but 2 minutes after `index` and `alerts`.
+   These jobs can share one instance and its cap of 6 reads in flight (see "Read concurrency" under
+   "Before mainnet"); started together, the keeper's reads would wait behind the alert check's (about
+   90), and its oracles would end `failed: not decided` at 15 s. The keeper answers 500 when any
+   oracle fails, so with retries QStash would run it again within seconds, with more reads on a
+   rate-limited RPC and a send that can meet the previous run's transaction still queued. The next
+   scheduled run is its retry.
+8. **A test alert.** One QStash message to `https://principalmarket.fi/api/cron/alerts?test=1`, with
    retries 0, as in the Testnet steps. It answers 200 with `delivered: true`, and
    `GET /api/dashboard/alerts` then shows it as `lastTest`.
-8. **The signed smoke test**, by the developer: with a wallet the contracts team has granted, deposit
-   a small amount of MOCKUSDY in the app, then mint PT and YT from it (Quick actions: Deposit, then
-   Split), and note the two transaction hashes for the reviewer files. The mint needs MOCKUSDY's
-   oracle fresh: wait for a keeper run that `synced` it (the oracle page, or
-   `GET /api/dashboard/oracle-ticks`).
-9. **The first keeper runs.** Note the fee of one `sync_from_feed` (its transaction on
-   stellar.expert), then set `ALERT_SIGNER_MIN_XLM` so that `signer_low` warns while the keeper key
-   still holds several days of runs, and redeploy so the variable applies.
+9. **The signed smoke test**, by the developer: with a wallet the contracts team has granted, deposit
+   a small amount of MOCKUSDY in the app (Quick actions: Deposit), then split a separate amount of
+   MOCKUSDY into PT and YT (Quick actions: Split), and note the two transaction hashes for the
+   reviewer files. Split (`wrap_and_mint`) starts from MOCKUSDY, not from the deposit's SY, which
+   stays in the wallet. Keep both amounts small: on 2026-11-18 the protocol-wide circuit breaker had
+   about 699 units of room left for all five assets together (requests-arthur-0004 §10), and a split
+   counts twice against it (its wrap into SY and its mint). The split needs MOCKUSDY's oracle fresh:
+   wait for a keeper run that `synced` it (the oracle page, or `GET /api/dashboard/oracle-ticks`).
+10. **The first keeper runs.** Note the fee of one `sync_from_feed` (its transaction on
+    stellar.expert), then set `ALERT_SIGNER_MIN_XLM` so that `signer_low` warns while the keeper key
+    still holds several days of runs, and redeploy so the variable applies. Until then the floor is 20
+    XLM, or the value step 3 set: a keeper key holding less raises `signer_low` from the first alert
+    run, which is why step 3 funds it above that.
 
 ## Local network
 
@@ -1189,7 +1237,8 @@ place; the others are still open.
     Mainnet's five markets has at most 6 in flight, not 10.
   - **The Mainnet gateway** still refused reads as busy (HTTP 429) after about 100 sent 6 at a time
     (2026-11-20). A figure refused that way reads "Unavailable" until its next refresh;
-    `rpcFallbackUrls` stays empty until the developer names a second provider.
+    `rpcFallbackUrls` stays empty until the developer names a second provider ("Mainnet go-live",
+    step 4).
   - **Paths still outside the cap**, with the most requests each can have in flight on Mainnet (five
     markets, five oracles), on top of the 6 capped ones in the same tab or process:
 

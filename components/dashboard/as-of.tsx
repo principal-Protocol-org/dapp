@@ -19,7 +19,8 @@ const hostOf = (url: string) => {
   }
 }
 
-const cadenceText = (ms: number) => (ms % 60_000 === 0 && ms >= 60_000 ? `${ms / 60_000} min` : `${Math.round(ms / 1000)} s`)
+/** A cadence in words: "15 s", "1 min". */
+export const cadenceText = (ms: number) => (ms % 60_000 === 0 && ms >= 60_000 ? `${ms / 60_000} min` : `${Math.round(ms / 1000)} s`)
 
 /**
  * "Ledger N · read Xs ago · Refreshes every 15 s" (D-6), for a page or a panel:

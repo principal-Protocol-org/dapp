@@ -8,7 +8,8 @@
  *
  * Our additions: `deployLedger` (the ledger before the first contract creation, Permissioning at
  * 65525736), `protocolAbi` (the Router at 3af9388 speaks version 2) and each market's
- * `underlying.tracks`. `createdLedgers` is ours too when present.
+ * `underlying.tracks`. `createdLedgers`, `accessContact` (spec 0005 M-17) and `rpcFallbackUrls`
+ * (spec 0004) are ours too when present.
  */
 import { describe, expect, it } from "vitest"
 import mainnetJson from "@/config/manifests/mainnet.json"
@@ -16,6 +17,16 @@ import handover from "@/lib/protocol/__tests__/fixtures/mainnet-handover.json"
 import { manifestOracles, parseManifest, protocolAbi, validateManifest } from "../manifest"
 
 const TRACKS: Record<string, string> = { MOCKUSDY: "USDY", MOCKUSTRY: "USTRY", MOCKGILTS: "GILTS", MOCKCETES: "CETES", MOCKXAUM: "XAUM" }
+
+type RawManifest = Record<string, unknown> & { markets: { underlying: Record<string, unknown> }[] }
+
+/** A copy of `json` without the fields we add to the contracts team's file. */
+function withoutOurAdditions(json: RawManifest): RawManifest {
+  const raw = structuredClone(json)
+  for (const key of ["deployLedger", "protocolAbi", "createdLedgers", "accessContact", "rpcFallbackUrls"]) delete raw[key]
+  for (const market of raw.markets) delete market.underlying.tracks
+  return raw
+}
 
 describe("config/manifests/mainnet.json", () => {
   it("parses and validates with no finding", () => {
@@ -25,12 +36,17 @@ describe("config/manifests/mainnet.json", () => {
   })
 
   it("is the handover file once our additions are removed", () => {
-    const raw = structuredClone(mainnetJson) as Record<string, unknown> & { markets: { underlying: Record<string, unknown> }[] }
-    delete raw.deployLedger
-    delete raw.protocolAbi
-    delete raw.createdLedgers
-    for (const market of raw.markets) delete market.underlying.tracks
-    expect(raw).toEqual(handover)
+    expect(withoutOurAdditions(mainnetJson as RawManifest)).toEqual(handover)
+  })
+
+  it.each([
+    ["an access contact", { accessContact: { label: "the Principal access desk", url: "https://principal.example/access" } }],
+    ["RPC fallbacks", { rpcFallbackUrls: ["https://rpc.second.example"] }],
+    ["both", { accessContact: { label: "access@principal.example", url: "mailto:access@principal.example" }, rpcFallbackUrls: ["https://rpc.second.example"] }],
+  ])("stays the handover file with %s added (ours too)", (_, added) => {
+    const raw = { ...(structuredClone(mainnetJson) as RawManifest), ...added }
+    expect(validateManifest(parseManifest(raw))).toEqual([])
+    expect(withoutOurAdditions(raw)).toEqual(handover)
   })
 
   it("names five oracles, starts at 65525735 and speaks protocol version 2", () => {

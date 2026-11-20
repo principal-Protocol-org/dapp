@@ -5,7 +5,7 @@ import { LabelWithTip, UnavailableTip } from "@/components/app/info-tip"
 import { useManifest } from "@/components/app/manifest-provider"
 import { Metric } from "@/components/app/market/metric"
 import { Skeleton } from "@/components/ui/skeleton"
-import { ALERTS_NOT_AVAILABLE, DASHBOARD_LIVE_MS, useOpenAlerts, usePausers, usePauses, useRiskView, type IndexedEvent } from "@/hooks/use-dashboard"
+import { ALERTS_NOT_AVAILABLE, dashboardLiveMs, useOpenAlerts, usePausers, usePauses, useRiskView, type IndexedEvent } from "@/hooks/use-dashboard"
 import { useLedgerClock } from "@/hooks/use-ledger-clock"
 import type { RecentAlert } from "@/lib/app/alert-types"
 import { EFFECTIVE_WRAP_AND_MINT_LABEL, riskWindowKind, type Remaining, type RiskView } from "@/lib/protocol/dashboard/risk"
@@ -14,7 +14,7 @@ import { explorerUrl } from "@/lib/protocol/explorer"
 import { formatAmountFixed } from "@/lib/protocol/format"
 import { unavailable } from "@/lib/protocol/reader"
 import type { Live, Manifest, Network } from "@/lib/protocol/types"
-import { AsOf, readsOf } from "./as-of"
+import { AsOf, cadenceText, readsOf } from "./as-of"
 import { CopyEvidence } from "./copy-evidence"
 import { EventList, TxLink, type EventRowText } from "./event-list"
 import { accountShort, closeTimeText, pausedWords } from "./event-words"
@@ -197,7 +197,8 @@ export function RiskPanel() {
   const refused = "refused" in units ? units.refused : null
   const amount = (v: bigint) => ("refused" in units ? String(v) : `${formatAmountFixed(v, units.decimals)} ${units.code ?? "(underlying units)"}`)
   const scale = "refused" in units ? undefined : decimalsScale(units.decimals, units.code ?? "underlying unit")
-  const read = readOf(risk, DASHBOARD_LIVE_MS)
+  const liveMs = dashboardLiveMs(m.network)
+  const read = readOf(risk, liveMs)
   const remainingText = (left: Remaining) => (left === null ? "No limit (disabled)" : amount(left))
   const pick = <T,>(f: (r: RiskView) => Live<T>) => current(risk, f, noClock)
   // The contract version decides the window; the manifest says it before the first read.
@@ -242,7 +243,7 @@ export function RiskPanel() {
     }
   })
 
-  const pauseRead = readOf(pauses, DASHBOARD_LIVE_MS)
+  const pauseRead = readOf(pauses, liveMs)
   const pauseFigures: FigureSpec<boolean>[] = (pauses.data?.contracts ?? []).map((c) => ({
     label: `${c.label} pause`,
     live: pauses.stale ? unavailable(`the last refresh failed: ${pauses.error?.message ?? "unknown error"}`) : c.paused,
@@ -251,7 +252,7 @@ export function RiskPanel() {
   }))
 
   const pauserLive = pausers.live.stale ? undefined : pausers.live.data
-  const pauserRead = readOf(pausers.live, DASHBOARD_LIVE_MS)
+  const pauserRead = readOf(pausers.live, liveMs)
   const pauserFailed = pausers.live.stale ? unavailable(`the last refresh failed: ${pausers.live.error?.message ?? "unknown error"}`) : undefined
   const admin: FigureSpec<string> = { label: "RiskControl admin", live: pauserFailed ?? pauserLive?.admin, format: (v) => v, read: pauserRead }
   const adminIsPauser: FigureSpec<boolean> = {
@@ -338,11 +339,11 @@ export function RiskPanel() {
           </div>
           <CopyEvidence figures={figures} />
         </div>
-        <AsOf sources={readsOf(all.map((f) => f.live))} updatedAt={newestUpdate || null} cadenceMs={DASHBOARD_LIVE_MS} />
+        <AsOf sources={readsOf(all.map((f) => f.live))} updatedAt={newestUpdate || null} cadenceMs={liveMs} />
       </div>
 
       <div className="grid grid-cols-[minmax(0,1fr)] gap-6 min-[900px]:grid-cols-2">
-        <Panel title="Circuit breaker" meta={<p className="text-xs/5 text-ink-muted">RiskControl {accountShort(m.shared.riskControl)}, protocol-wide · refreshes every 15 s</p>}>
+        <Panel title="Circuit breaker" meta={<p className="text-xs/5 text-ink-muted">RiskControl {accountShort(m.shared.riskControl)}, protocol-wide · refreshes every {cadenceText(liveMs)}</p>}>
           <dl className="grid gap-3">
             <Row label="Limit">
               <Shown {...limit} />
@@ -402,7 +403,7 @@ export function RiskPanel() {
           )}
         </Panel>
 
-        <Panel title="Pauses" meta={<p className="text-xs/5 text-ink-muted">RiskControl, and each market&apos;s SY wrapper, manager and pool · refreshes every 15 s</p>}>
+        <Panel title="Pauses" meta={<p className="text-xs/5 text-ink-muted">RiskControl, and each market&apos;s SY wrapper, manager and pool · refreshes every {cadenceText(liveMs)}</p>}>
           {pauses.data === undefined ? (
             pauses.isError ? (
               <UnavailableTip label="Pauses" reason={pauses.error?.message ?? "the pauses could not be read"} className="text-sm text-ink" />

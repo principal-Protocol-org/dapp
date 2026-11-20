@@ -15,12 +15,9 @@ const mocks = vi.hoisted(() => ({
   fetchPausers: vi.fn(),
   fetchEscrowRecords: vi.fn(),
   fetchAssetCompliance: vi.fn(),
-}))
-
-vi.mock("@/components/app/manifest-provider", () => {
-  // One object, as the provider gives: hooks depend on its identity.
-  const manifest = {
-    network: "testnet",
+  // One object, as the provider gives: hooks depend on its identity. Its network is set per test.
+  manifest: {
+    network: "testnet" as "local" | "testnet" | "mainnet",
     rpcUrl: "https://rpc.test",
     horizonUrl: "https://horizon.test",
     markets: [
@@ -28,9 +25,10 @@ vi.mock("@/components/app/manifest-provider", () => {
       { marketId: "m2", contracts: { recoveryEscrow: "CESCROW" } },
     ],
     shared: { riskControl: "CRISK" },
-  }
-  return { useManifest: () => manifest }
-})
+  },
+}))
+
+vi.mock("@/components/app/manifest-provider", () => ({ useManifest: () => mocks.manifest }))
 vi.mock("@/lib/protocol/reader", () => ({ createRpcReader: () => ({}) }))
 vi.mock("@/hooks/use-ledger-clock", () => ({ useLedgerClock: () => mocks.clock }))
 vi.mock("@/lib/protocol/dashboard/protocol-state", () => ({
@@ -52,6 +50,8 @@ import {
   ALERTS_NOT_AVAILABLE,
   DASHBOARD_AGGREGATE_MS,
   DASHBOARD_LIVE_MS,
+  dashboardLiveMs,
+  MAINNET_DASHBOARD_LIVE_MS,
   MAX_EVENT_PAGES,
   parseOracleTicks,
   secondsToBlockNow,
@@ -107,6 +107,7 @@ const row = (id: string, ledger: number, group: string, topic: string) => ({
 
 beforeEach(() => {
   client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  mocks.manifest.network = "testnet"
   mocks.clock = { ledgerTime: 1_000_000, sequence: 5_720_000, isError: false }
   mocks.fetchProtocolState.mockReset().mockResolvedValue({ markets: {}, totals: {} })
   mocks.fetchMarketDashboard.mockReset().mockResolvedValue({ marketId: "m1" })
@@ -124,6 +125,52 @@ describe("refresh cadence (D-6)", () => {
     expect(DASHBOARD_AGGREGATE_MS).toBe(60_000)
     const { MARKET_REFETCH_MS } = await vi.importActual<typeof import("@/hooks/use-market-state")>("@/hooks/use-market-state")
     expect(MARKET_REFETCH_MS).toBe(6000)
+  })
+
+  it("is 60 s for live widgets on Mainnet; Testnet and a local network keep 15 s (plan 0009 final review, I-2)", () => {
+    expect(MAINNET_DASHBOARD_LIVE_MS).toBe(60_000)
+    expect(dashboardLiveMs("mainnet")).toBe(60_000)
+    expect(dashboardLiveMs("testnet")).toBe(15_000)
+    expect(dashboardLiveMs("local")).toBe(15_000)
+  })
+})
+
+describe("refresh cadence on Mainnet (plan 0009 final review, I-2)", () => {
+  const ACCOUNT = "GBLPAJ2GVSFUWCUIFMEV4EOV2XIOEWMJRIQ3LOM2Z42TNIY3J6ACB7UA"
+  const A = "GBZXN7PIRZGNMHGA7MUUUF4GWPY5AYPV6LY4UV2GL6VJGIQRXFDNMADI"
+
+  it.each([
+    ["mainnet", 60_000],
+    ["testnet", 15_000],
+    ["local", 15_000],
+  ] as const)("%s: every live query refetches every %i ms; aggregates keep 60 s", async (network, liveMs) => {
+    mocks.manifest.network = network
+    const added = { ...row("0000000000000000009-0000000000", 9, "risk", "add_psr"), contractId: "CRISK", data: { caller: "GADMIN", pauser: A } }
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json(indexAnswer({ rows: [added] }))))
+    mocks.fetchPausers.mockResolvedValue({ admin: { status: "live", value: "GADMIN", ledger: 1 }, adminIsPauser: { status: "live", value: true, ledger: 1 }, pausers: [] })
+    const ms = { ytFrozen: { status: "live", value: false, ledger: 1 } } as never
+    const { result } = renderHook(
+      () => ({
+        market: useMarketDashboard("m1"),
+        pending: usePendingClaim("m1", ACCOUNT, ms),
+        oracle: useOracleView("CORACLE1"),
+        oracles: useOracleViews(["CORACLE2"]),
+        risk: useRiskView(),
+        pauses: usePauses(),
+        pausers: usePausers(),
+        protocol: useProtocolState(),
+      }),
+      { wrapper },
+    )
+    await waitFor(() => expect(result.current.pausers.live.data).toBeDefined())
+    expect(interval(["dashboard", "market", network, "m1"])).toBe(liveMs)
+    expect(interval(["dashboard", "pending", network, "m1", ACCOUNT])).toBe(liveMs)
+    expect(interval(["dashboard", "oracle", network, "CORACLE1"])).toBe(liveMs)
+    expect(interval(["dashboard", "oracle", network, "CORACLE2"])).toBe(liveMs)
+    expect(interval(["dashboard", "risk", network])).toBe(liveMs)
+    expect(interval(["dashboard", "pauses", network, "m1,m2"])).toBe(liveMs)
+    expect(interval(["dashboard", "pausers", network, A])).toBe(liveMs)
+    expect(interval(["dashboard", "protocol", network, "m1,m2"])).toBe(60_000)
   })
 })
 

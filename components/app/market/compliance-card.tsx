@@ -170,8 +170,9 @@ function AddTrustline({ marketId, address }: { marketId: string; address: string
 
 /**
  * The compliance body: the underlying asset's model and the account's items, with the fix for each
- * ("onboarding" opens the Get test tokens dialog; a missing trustline has its Add trustline button).
- * Where Get test tokens does not exist (Mainnet), the access request sits under the items.
+ * ("onboarding" opens the Get test tokens dialog). Where Get test tokens does not exist (Mainnet), a
+ * missing trustline has its Add trustline button and the access request sits under the items
+ * (spec 0005: the trustline button is Mainnet-only; on Testnet, Get test tokens adds the trustline).
  */
 export function ComplianceContent({
   marketId,
@@ -212,7 +213,7 @@ export function ComplianceContent({
                       <p className="text-ink-muted">Fix: {FIX_TEXT[item.fix]}</p>
                     )
                   ) : null}
-                  {item.id === "trustline" && item.status === "missing" && address ? (
+                  {!testTokens && item.id === "trustline" && item.status === "missing" && address ? (
                     // A new account starts with a new button.
                     <AddTrustline key={address} marketId={marketId} address={address} />
                   ) : null}

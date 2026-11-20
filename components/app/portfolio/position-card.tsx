@@ -314,7 +314,8 @@ function FixedReturn({
       <div className="min-[600px]:col-span-2">
         <p className="label">Fixed return if held to maturity</p>
       </div>
-      <Metric label="Face value at maturity (USD)">{face}</Metric>
+      {/* A tracked asset's PT pays $1 at the oracle's price at maturity, which never goes down. */}
+      <Metric label={market.underlying.tracks ? "Face value at maturity (USD, at the oracle's price)" : "Face value at maturity (USD)"}>{face}</Metric>
       <Metric label="Current value (USD, at the pool price)">
         {matured ? "Matured" : fixed.status === "live" ? usd(fixed.value.valueNow) : ms.ptPrice.status === "unavailable" ? noPrice : UNAVAILABLE}
       </Metric>

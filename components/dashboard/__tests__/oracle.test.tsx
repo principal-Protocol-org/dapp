@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
-import { act, render, screen, waitFor, within } from "@testing-library/react"
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import type { ReactNode } from "react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -643,6 +643,32 @@ describe("every oracle of the manifest (plan 0009: five on Mainnet)", () => {
   beforeEach(() => {
     mocks.manifest = mainnetManifest()
     mocks.fetchOracleView.mockImplementation(viewsBy(mainnetViews()))
+  })
+
+  it("says its cadence: 15 s on Testnet, 1 min on Mainnet (the public RPC's read allowance)", async () => {
+    const cadence = async () => {
+      await oracleRows()
+      return {
+        table: screen.getByText(/^One per market, each read live every/).textContent,
+        detail: screen.getByText(/· refreshes every/).textContent?.replace(/^.*· refreshes every/, "refreshes every"),
+        asOf: (await screen.findAllByTestId("as-of")).map((p) => p.textContent?.match(/Refreshes every [^·]*/)?.[0]),
+      }
+    }
+    render(wrap(<OraclePanel />))
+    expect(await cadence()).toEqual({
+      table: "One per market, each read live every 1 min. Pick one to see it in detail below.",
+      detail: "refreshes every 1 min; the countdown follows the ledger clock",
+      asOf: ["Refreshes every 1 min"],
+    })
+    cleanup()
+    mocks.manifest = { ...mainnetManifest(), network: "testnet" }
+    client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(wrap(<OraclePanel />))
+    expect(await cadence()).toEqual({
+      table: "One per market, each read live every 15 s. Pick one to see it in detail below.",
+      detail: "refreshes every 15 s; the countdown follows the ledger clock",
+      asOf: ["Refreshes every 15 s"],
+    })
   })
 
   it("an Oracles table lists the five, one row each linking to ?oracle=<id>, with its state, countdown and path; the first is shown below", async () => {
