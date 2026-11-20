@@ -3,12 +3,15 @@
  * The committed Mainnet manifest is the contracts team's handover file plus our additions.
  *
  * The fixture `fixtures/mainnet-handover.json` is `deployments/mainnet-dapp-manifest.json` from the
- * principal repository, unchanged: branch `mainnet` at ad012a06676c7d9656d182526e8eeddd38b4dd3c,
- * the file last changed in d348c551dc8289508358c156022ed56bd1e7217b.
+ * principal repository, unchanged: branch `mainnet` at 94050d03d3bce806e1df73c20b5f753c555270af,
+ * the file last changed in ae8c0e8382cb3aa652924e3e4742094bfea1ed6b (the v2 redeploy of MOCKUSTRY,
+ * MOCKGILTS, MOCKCETES and MOCKXAUM, 2026-11-20/21; the v1 contracts of those four are abandoned).
  *
  * Our additions: `deployLedger` (the ledger before the first contract creation, Permissioning at
  * 65525736), `protocolAbi` (the Router at 3af9388 speaks version 2) and each market's
- * `underlying.tracks`. `createdLedgers`, `accessContact` (spec 0005 M-17) and `rpcFallbackUrls`
+ * `underlying.tracks`. `createdLedgers` (the v2 oracles and market contracts, from the ledgers of
+ * their creating transactions: Horizon, by the hashes in each asset's `transactions[]`),
+ * `accessContact` (spec 0005 M-17) and `rpcFallbackUrls`
  * (spec 0004) are ours too when present.
  */
 import { describe, expect, it } from "vitest"
@@ -64,11 +67,20 @@ describe("config/manifests/mainnet.json", () => {
     )
     expect(m.markets.map((x) => x.marketId)).toEqual([
       "mainnet-CDQYZU-CCY5P6CC",
-      "mainnet-CDHQ4B-CA4EMPWQ",
-      "mainnet-CBBF4H-CDXXRJJS",
-      "mainnet-CBVSL3-CCSETNMX",
-      "mainnet-CBAJVV-CB7KQ4O6",
+      "mainnet-CDHQ4B-CAFCV4KB",
+      "mainnet-CBBF4H-CBYNXSR3",
+      "mainnet-CBVSL3-CBAUFMQH",
+      "mainnet-CBAJVV-CDG77CSN",
     ])
+  })
+
+  it("gives each v2 oracle and market contract a creation ledger after the deploy ledger, none to the shared ones", () => {
+    const m = parseManifest(mainnetJson)
+    const v2 = m.markets.filter((x) => x.underlying.code !== "MOCKUSDY")
+    const ids = v2.flatMap((x) => [x.contracts.oracle, x.contracts.sy, x.contracts.manager, x.contracts.pool, x.contracts.recoveryEscrow])
+    expect(Object.keys(m.createdLedgers ?? {}).sort()).toEqual([...ids].sort())
+    for (const id of ids) expect(m.createdLedgers?.[id]).toBeGreaterThan(m.deployLedger as number)
+    for (const x of v2) expect(m.createdLedgers?.[x.contracts.oracle]).toBeLessThanOrEqual(m.createdLedgers?.[x.contracts.sy] as number)
   })
 
   it("has no access contact yet", () => {
