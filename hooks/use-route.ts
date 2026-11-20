@@ -41,14 +41,8 @@ import {
 } from "@/lib/protocol/routes"
 import { errorReason, userErrorMessage } from "@/lib/protocol/errors"
 import { forgetInFlight } from "@/lib/protocol/rpc-limiter"
-import {
-  createRpcServer,
-  failedTransactionReason,
-  pollTransactionStatus,
-  transactionEnvelopeHash,
-  type ContractInvocation,
-  type SimulationOutcome,
-} from "@/lib/protocol/stellar"
+import { transactionEnvelopeHash, type ContractInvocation, type SimulationOutcome } from "@/lib/protocol/stellar"
+import { lookupTransaction } from "@/lib/protocol/tx-lookup"
 import type { Manifest } from "@/lib/protocol/types"
 
 /**
@@ -173,17 +167,13 @@ function previewOf(run: RouteRun): StepPreview | undefined {
   return typeof p.step === "number" && typeof p.amount === "bigint" && typeof p.token === "string" && HOLDINGS.includes(p.token) ? (p as StepPreview) : undefined
 }
 
-type Lookup =
+/** A look at a step by its hash, with a confirmed step's output read for its action. */
+type StepLookup =
   | { status: "SUCCESS"; output: ActionOutput | null; decodeError?: string }
   | { status: "FAILED"; reason: string }
   | { status: "NOT_FOUND"; final: boolean; lost: boolean }
 
-type PollServer = NonNullable<Parameters<typeof pollTransactionStatus>[0]["server"]>
-
 const IDLE: View = { phase: "idle", index: 0 }
-
-/** Slack for the interpolated ledger clock when deciding a step cannot have landed before `sentAt`. */
-const CLOCK_SLACK_S = 60
 
 const text = (error: unknown) => userErrorMessage(error)
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0))
@@ -210,16 +200,6 @@ const neverLanded = (n: number) =>
 const MOVED_ON = "This route moved on in another window."
 const unreadable = (n: number, why?: string) =>
   `Step ${n} went through, but its result could not be read${why ? ` (${why})` : ""}, so this app does not know the amount step ${n + 1} should use. Check your balances in the Portfolio.`
-
-/**
- * A ledger close time as RPC passes it through from its JSON: a number or a decimal string (as
- * `getLedgerClock` reads `closeTime`). Anything else is unknown, so it can never prove a step lost.
- */
-function closeTimeOf(value: unknown): number | undefined {
-  if (typeof value === "string" ? value.trim() === "" : typeof value !== "number") return undefined
-  const n = Number(value)
-  return Number.isFinite(n) && n > 0 ? n : undefined
-}
 
 /** The run as the log has it now; undefined when it is not there or the log cannot be read. */
 const storedCopy = (run: RouteRun): RouteRun | undefined => readRoutes(run.account).find((r) => r.id === run.id)
@@ -295,38 +275,19 @@ function interruption(run: RouteRun, underlying: { code: string; decimals: numbe
 }
 
 /**
- * One look at a sent step by its hash, through the 0001 poll helper. A NOT_FOUND is `final` only when
- * the network can no longer include it (its ledger close time passed the transaction's time bound)
- * and RPC's history reaches back to before it was sent; `lost` when the time bound passed but the
- * history does not reach that far.
+ * One look at a sent step by its hash (`lookupTransaction`: `final` and `lost` as it decides them),
+ * with a confirmed step's output read for its action: null, with the reason, when it cannot be read.
  */
-async function lookup(manifest: Manifest, action: ActionId, step: RouteStep): Promise<Lookup> {
-  const { rpcUrl } = manifest
-  const rpc = createRpcServer(rpcUrl)
-  let window: { latest?: number; oldest?: number } = {}
-  const server: PollServer = {
-    getTransaction: async (hash) => {
-      const res = await rpc.getTransaction(hash)
-      window = { latest: closeTimeOf(res.latestLedgerCloseTime), oldest: closeTimeOf(res.oldestLedgerCloseTime) }
-      return res
-    },
+async function lookup(manifest: Manifest, action: ActionId, step: RouteStep): Promise<StepLookup> {
+  const found = await lookupTransaction(manifest, { hash: step.hash ?? "", validUntil: step.validUntil, sentAt: step.sentAt })
+  if (found.status !== "SUCCESS") return found
+  if (found.decodeError) return { status: "SUCCESS", output: null, decodeError: found.decodeError }
+  if (found.returnValue === undefined) return { status: "SUCCESS", output: null, decodeError: "it returned no value" }
+  try {
+    return { status: "SUCCESS", output: parseOutput(action, found.returnValue) }
+  } catch (error) {
+    return { status: "SUCCESS", output: null, decodeError: text(error) }
   }
-  const polled = await pollTransactionStatus({ rpcUrl, hash: step.hash ?? "", attempts: 1, server })
-  if (polled.status === "SUCCESS") {
-    if (polled.decodeError) return { status: "SUCCESS", output: null, decodeError: polled.decodeError }
-    if (polled.returnValue === undefined) return { status: "SUCCESS", output: null, decodeError: "it returned no value" }
-    try {
-      return { status: "SUCCESS", output: parseOutput(action, polled.returnValue) }
-    } catch (error) {
-      return { status: "SUCCESS", output: null, decodeError: text(error) }
-    }
-  }
-  if (polled.status === "FAILED") return { status: "FAILED", reason: failedTransactionReason(polled.failure) }
-  const { latest, oldest } = window
-  const pastLimit = step.validUntil !== undefined && latest !== undefined && latest > step.validUntil
-  const covered = step.sentAt !== undefined && oldest !== undefined && oldest <= step.sentAt - CLOCK_SLACK_S
-  const final = pastLimit && covered
-  return { status: "NOT_FOUND", final, lost: !final && (step.validUntil === undefined || pastLimit) }
 }
 
 /**
@@ -579,7 +540,7 @@ export function useRoute(opts: UseRouteOptions): RouteControls {
       busy.current = true
       const { error, lost } = viewRef.current
       show(g, { phase: "waiting", index: i, checking: true, ...(error ? { error } : {}), ...(lost ? { lost } : {}) })
-      let found: Lookup
+      let found: StepLookup
       try {
         found = await lookup(latest.current.manifest, step.action, step)
       } catch (error) {

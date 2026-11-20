@@ -1020,6 +1020,25 @@ describe("executeReview", () => {
       expect(server.calls.polled.every((h) => h === hashOf(r.unsignedXdr))).toBe(true)
     })
 
+    it("keeps, with a result not known yet, the signed transaction's time bound and when it was prepared (M-21)", async () => {
+      const server = fakeRpc({
+        async getTransaction(hash) {
+          server.calls.polled.push(hash)
+          return { status: "NOT_FOUND" }
+        },
+      })
+      const r = await review("buy_pt", {}, server)
+      vi.useFakeTimers({ toFake: ["setTimeout"] })
+      const pending = executeReview({ review: r, manifest, sign: signWith(), rpc: server })
+      await vi.runAllTimersAsync()
+      const result = await pending
+
+      const maxTime = Number(new Transaction(r.unsignedXdr, passphrase).timeBounds?.maxTime)
+      expect(maxTime).toBeGreaterThan(0)
+      // Read from the transaction that was signed, not from the review's description of it.
+      expect(result).toEqual({ hash: hashOf(r.unsignedXdr), status: "NOT_FOUND", validUntil: maxTime, sentAt: Math.floor(r.preparedAtMs / 1000) })
+    })
+
     it("uses the local hash when RPC returns none", async () => {
       const server = fakeRpc({
         async sendTransaction() {

@@ -1,7 +1,8 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest"
+import { formatUnixTime } from "@/lib/protocol/format"
 import { SubmissionRejectedError } from "@/lib/protocol/stellar"
-import { noticeForError, noticeForResult } from "../tx-notice"
+import { noticeForError, noticeForPending, noticeForResult, noticeForSettled } from "../tx-notice"
 
 const HASH = "ab".repeat(32)
 
@@ -72,5 +73,60 @@ describe("noticeForError", () => {
       detail: "User declined",
     })
     expect(noticeForError("Buy PT", "weird", "testnet").detail).toBe("weird")
+  })
+})
+
+describe("noticeForPending (M-21)", () => {
+  it("says the last action was sent, is being checked, and until when it can land", () => {
+    const n = noticeForPending("Buy PT", { hash: HASH, validUntil: 1_700_000_300 }, "testnet")
+    expect(n).toEqual({
+      tone: "warning",
+      title: "Your last Buy PT was sent but is not confirmed yet.",
+      detail: `Checking… It can still land until ${formatUnixTime(1_700_000_300)}.`,
+      hash: HASH,
+      url: `https://stellar.expert/explorer/testnet/tx/${HASH}`,
+    })
+    expect(noticeForPending("Buy PT", { hash: HASH, validUntil: 1_700_000_300 }, "local").url).toBeNull()
+  })
+})
+
+describe("noticeForSettled (M-21)", () => {
+  it("confirms a pending action that landed", () => {
+    expect(noticeForSettled("Buy PT", HASH, { status: "SUCCESS", returnValue: 5n }, "testnet")).toEqual({
+      tone: "success",
+      title: "Buy PT confirmed.",
+      hash: HASH,
+      url: `https://stellar.expert/explorer/testnet/tx/${HASH}`,
+    })
+  })
+
+  it("names the cause of a pending action that failed on-chain, as a direct result does", () => {
+    const reason = "Cause: the contract call failed. Nothing was taken except the network fee."
+    expect(noticeForSettled("Buy PT", HASH, { status: "FAILED", reason }, "testnet")).toEqual(
+      noticeForResult("Buy PT", { hash: HASH, status: "FAILED", reason }, "testnet"),
+    )
+  })
+
+  it("says a pending action that can no longer land did not land, and moved nothing", () => {
+    const n = noticeForSettled("Buy PT", HASH, { status: "NOT_FOUND", final: true, lost: false }, "testnet")
+    expect(n.tone).toBe("warning")
+    expect(n.title).toBe("Buy PT did not land.")
+    expect(n.detail).toBe("Its time limit passed before the network included it, so it moved nothing and charged no fee. You can review it again.")
+    expect(n.hash).toBe(HASH)
+  })
+
+  it("says when the network can no longer tell whether a pending action landed", () => {
+    const n = noticeForSettled("Buy PT", HASH, { status: "NOT_FOUND", final: false, lost: true }, "testnet")
+    expect(n.tone).toBe("warning")
+    expect(n.title).toBe("Buy PT: the network can no longer say whether it landed.")
+    expect(n.detail).toMatch(/can no longer land/)
+    expect(n.detail).toMatch(/look it up by its hash and check your balances/i)
+    expect(n.hash).toBe(HASH)
+  })
+
+  it("an answer that is still pending reads as a result not known yet", () => {
+    expect(noticeForSettled("Buy PT", HASH, { status: "NOT_FOUND", final: false, lost: false }, "testnet")).toEqual(
+      noticeForResult("Buy PT", { hash: HASH, status: "NOT_FOUND" }, "testnet"),
+    )
   })
 })

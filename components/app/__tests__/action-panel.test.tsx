@@ -5,7 +5,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { AccountState } from "@/lib/protocol/account-state"
 import type { ActionInput } from "@/lib/protocol/actions"
-import { formatAmount, formatRate } from "@/lib/protocol/format"
+import { formatAmount, formatRate, formatUnixTime } from "@/lib/protocol/format"
 import type { Review, RestoreReview } from "@/lib/protocol/review"
 import type { Finding, WalletState } from "@/lib/protocol/types"
 import { TooltipProvider } from "@/components/ui/tooltip"
@@ -18,6 +18,13 @@ const B = "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
 const HASH = "ab".repeat(32)
 const RESTORE_HASH = "cd".repeat(32)
 const SY_100 = 1_000_000_000n
+/** A sent action's time bound and send time (M-21), as executeReview reports them with a NOT_FOUND. */
+const VALID_UNTIL = LEDGER_TIME + 300
+const SENT_AT = LEDGER_TIME
+const NOT_KNOWN = { hash: HASH, status: "NOT_FOUND", validUntil: VALID_UNTIL, sentAt: SENT_AT }
+/** RPC's answers to a look by hash: inside the time bound, and past it with the send in its history. */
+const STILL_PENDING = { status: "NOT_FOUND", latestLedgerCloseTime: LEDGER_TIME + 30, oldestLedgerCloseTime: LEDGER_TIME - 3600 }
+const NEVER_LANDED = { status: "NOT_FOUND", latestLedgerCloseTime: VALID_UNTIL + 10, oldestLedgerCloseTime: LEDGER_TIME - 3600 }
 
 const mocks = vi.hoisted(() => ({
   manifest: {
@@ -63,6 +70,7 @@ const mocks = vi.hoisted(() => ({
   executeReview: vi.fn(),
   prepareRestore: vi.fn(),
   executeRestore: vi.fn(),
+  getTransaction: vi.fn(),
   toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn(), message: vi.fn() },
 }))
 
@@ -80,7 +88,8 @@ vi.mock("@/lib/protocol/compliance", async (orig) => ({
 }))
 vi.mock("@/lib/protocol/stellar", async (orig) => ({
   ...(await orig<object>()),
-  createRpcServer: () => ({}),
+  // A pending action's look by its hash (M-21) is the only RPC call made through it here.
+  createRpcServer: () => ({ getTransaction: mocks.getTransaction }),
   getLedgerClock: mocks.getLedgerClock,
   simulateInvocation: mocks.simulateInvocation,
 }))
@@ -113,6 +122,8 @@ import { resetSettingsStoreForTests } from "@/hooks/use-settings"
 import { SIMULATION_DEBOUNCE_MS } from "@/hooks/use-simulation"
 import { evaluateGates } from "@/lib/protocol/gates"
 import { readLog } from "@/lib/app/local-log"
+import { PENDING_KEY, readPending } from "@/lib/app/pending-tx"
+import { PENDING_RECHECK_MS } from "@/hooks/use-pending-tx"
 
 // ---------------------------------------------------------------------------------------------
 // Panel configs used by the tests (Tasks 15–18 write the real ones).
@@ -286,6 +297,7 @@ beforeEach(() => {
   mocks.executeReview.mockResolvedValue({ hash: HASH, status: "SUCCESS", output: { kind: "amount", value: SY_100 } })
   mocks.prepareRestore.mockImplementation(async () => fakeRestore())
   mocks.executeRestore.mockResolvedValue({ hash: RESTORE_HASH, status: "SUCCESS" })
+  mocks.getTransaction.mockResolvedValue(STILL_PENDING)
 })
 
 afterEach(() => {
@@ -843,14 +855,16 @@ describe("ActionPanel — results", () => {
     expect(screen.getByLabelText("SY to spend").getAttribute("aria-invalid")).toBeNull()
   })
 
-  it("a submitted transaction whose result is not known yet clears the form too, so it is not sent twice", async () => {
-    mocks.executeReview.mockResolvedValue({ hash: HASH, status: "NOT_FOUND" })
+  it("a submitted transaction whose result is not known yet keeps the form: the pending guard refuses a second send instead (M-21)", async () => {
+    mocks.executeReview.mockResolvedValue(NOT_KNOWN)
     await renderPanel()
     await openReview()
     await user().click(signButton())
     await settle()
-    expect(screen.getByText("Buy PT: result not known yet.")).toBeTruthy()
-    expect((screen.getByLabelText("SY to spend") as HTMLInputElement).value).toBe("")
+    expect(mocks.toast.warning.mock.calls[0][0]).toBe("Buy PT: result not known yet.")
+    expect(screen.getByText("Your last Buy PT was sent but is not confirmed yet.")).toBeTruthy()
+    expect((screen.getByLabelText("SY to spend") as HTMLInputElement).value).toBe("10")
+    expect(reviewButton().disabled).toBe(true)
   })
 
   it("a failed transaction keeps the amounts, so they can be corrected and sent again", async () => {
@@ -873,6 +887,154 @@ describe("ActionPanel — results", () => {
     expect(screen.getByText("Buy PT failed on-chain.")).toBeTruthy()
     expect(screen.getByText(`${reason} Look it up by its hash for the details.`)).toBeTruthy()
     expect(readLog(A)[0]).toEqual(expect.objectContaining({ hash: HASH, status: "FAILED", reason }))
+  })
+})
+
+describe("ActionPanel — a late confirmation cannot double an action (M-21)", () => {
+  const notice = () => screen.queryByText("Your last Buy PT was sent but is not confirmed yet.")
+
+  /** Signs a Buy PT of 10 SY whose result is not known when the polls stop. */
+  async function sendNotKnown() {
+    mocks.executeReview.mockResolvedValue(NOT_KNOWN)
+    await renderPanel()
+    await openReview()
+    await user().click(signButton())
+    await settle()
+  }
+
+  it("after a NOT_FOUND result the notice shows, with the time bound and the hash, and Review is off with the reason", async () => {
+    await sendNotKnown()
+    expect(notice()).toBeTruthy()
+    expect(screen.getByText(`Checking… It can still land until ${formatUnixTime(VALID_UNTIL)}.`)).toBeTruthy()
+    const box = notice()!.closest('[role="status"]') as HTMLElement
+    expect(within(box).getByText(HASH)).toBeTruthy()
+    expect(within(box).getByRole("link", { name: "View on stellar.expert" }).getAttribute("href")).toBe(`https://stellar.expert/explorer/testnet/tx/${HASH}`)
+    // The pending notice replaces the result line for the same hash: one box, not two.
+    expect(screen.queryByText("Buy PT: result not known yet.")).toBeNull()
+    expect(within(gateList()).getByText("Wait for the last transaction to settle.")).toBeTruthy()
+    expect(reviewButton().disabled).toBe(true)
+    expect(readPending(A)).toEqual([{ hash: HASH, action: "buy_pt", marketId: "m1", account: A, validUntil: VALID_UNTIL, sentAt: SENT_AT }])
+    // It is checked by its hash, at once and again every 5 s.
+    const looks = mocks.getTransaction.mock.calls.length
+    expect(looks).toBeGreaterThan(0)
+    expect(mocks.getTransaction).toHaveBeenLastCalledWith(HASH)
+    await settle(PENDING_RECHECK_MS)
+    expect(mocks.getTransaction.mock.calls.length).toBe(looks + 1)
+    expect(reviewButton().disabled).toBe(true)
+    expect(mocks.prepareReview).toHaveBeenCalledTimes(1)
+  })
+
+  it("when the look turns SUCCESS the notice goes, a success toast shows, the log says confirmed, and Review is on again", async () => {
+    await sendNotKnown()
+    expect(notice()).toBeTruthy()
+    mocks.getTransaction.mockResolvedValue({ status: "SUCCESS" })
+    await settle(PENDING_RECHECK_MS)
+    await settle()
+    expect(notice()).toBeNull()
+    expect(mocks.toast.success).toHaveBeenCalledTimes(1)
+    expect(mocks.toast.success.mock.calls[0][0]).toBe("Buy PT confirmed.")
+    expect(screen.getByText("Buy PT confirmed.")).toBeTruthy()
+    expect(readPending(A)).toEqual([])
+    expect(readLog(A)).toEqual([expect.objectContaining({ hash: HASH, status: "SUCCESS" })])
+    expect(screen.queryByText("Wait for the last transaction to settle.")).toBeNull()
+    expect(reviewButton().disabled).toBe(false)
+  })
+
+  it("when the look turns final NOT_FOUND, Review is on again and the notice says it did not land", async () => {
+    await sendNotKnown()
+    mocks.getTransaction.mockResolvedValue(NEVER_LANDED)
+    await settle(PENDING_RECHECK_MS)
+    await settle()
+    expect(notice()).toBeNull()
+    expect(screen.getByText("Buy PT did not land.")).toBeTruthy()
+    expect(screen.getByText(/moved nothing and charged no fee/)).toBeTruthy()
+    expect(readPending(A)).toEqual([])
+    // The amounts were kept: the same Buy PT can be reviewed again.
+    expect((screen.getByLabelText("SY to spend") as HTMLInputElement).value).toBe("10")
+    expect(reviewButton().disabled).toBe(false)
+  })
+
+  it("a changed amount (a fresh review flow) and a remounted panel keep the notice and the guard", async () => {
+    await sendNotKnown()
+    await enter("SY to spend", "20")
+    expect(notice()).toBeTruthy()
+    expect(within(gateList()).getByText("Wait for the last transaction to settle.")).toBeTruthy()
+    expect(reviewButton().disabled).toBe(true)
+    cleanup()
+    await renderPanel()
+    await enter("SY to spend", "5")
+    expect(notice()).toBeTruthy()
+    expect(reviewButton().disabled).toBe(true)
+  })
+
+  it("settled in another tab, the guard lifts here and the old result line does not come back", async () => {
+    await sendNotKnown()
+    expect(notice()).toBeTruthy()
+    act(() => {
+      localStorage.setItem(PENDING_KEY, JSON.stringify({ [A]: [] }))
+      window.dispatchEvent(new StorageEvent("storage", { key: PENDING_KEY }))
+    })
+    await settle()
+    expect(notice()).toBeNull()
+    expect(screen.queryByText("Buy PT: result not known yet.")).toBeNull()
+    expect(reviewButton().disabled).toBe(false)
+  })
+
+  it("an action left pending in an earlier visit is checked on load and settles", async () => {
+    localStorage.setItem(
+      PENDING_KEY,
+      JSON.stringify({ [A]: [{ hash: HASH, action: "buy_pt", marketId: "m1", account: A, validUntil: VALID_UNTIL, sentAt: SENT_AT }] }),
+    )
+    mocks.getTransaction.mockResolvedValue({ status: "FAILED" })
+    await renderPanel()
+    await settle()
+    expect(notice()).toBeNull()
+    expect(mocks.toast.error.mock.calls[0][0]).toBe("Buy PT failed on-chain.")
+    expect(screen.getByText("Buy PT failed on-chain.")).toBeTruthy()
+    await enter("SY to spend", "10")
+    expect(reviewButton().disabled).toBe(false)
+  })
+
+  it("only guards its own action and market", async () => {
+    localStorage.setItem(
+      PENDING_KEY,
+      JSON.stringify({ [A]: [{ hash: HASH, action: "sell_pt", marketId: "m1", account: A, validUntil: VALID_UNTIL, sentAt: SENT_AT }] }),
+    )
+    await renderPanel()
+    await enter("SY to spend", "10")
+    expect(notice()).toBeNull()
+    expect(reviewButton().disabled).toBe(false)
+  })
+
+  it("renders when storage throws, and the guard still holds in this tab", async () => {
+    const getItem = Storage.prototype.getItem
+    const setItem = Storage.prototype.setItem
+    const refuse = () => {
+      throw new DOMException("The operation is insecure.", "SecurityError")
+    }
+    const spies = [
+      vi.spyOn(Storage.prototype, "getItem").mockImplementation(function (this: Storage, key: string) {
+        return key === PENDING_KEY ? refuse() : getItem.call(this, key)
+      }),
+      vi.spyOn(Storage.prototype, "setItem").mockImplementation(function (this: Storage, key: string, value: string) {
+        return key === PENDING_KEY ? refuse() : setItem.call(this, key, value)
+      }),
+    ]
+    try {
+      await sendNotKnown()
+      expect(screen.getByLabelText("SY to spend")).toBeTruthy()
+      expect(notice()).toBeTruthy()
+      expect(reviewButton().disabled).toBe(true)
+    } finally {
+      for (const spy of spies) spy.mockRestore()
+    }
+    // Storage works again: the settle is written to it, and this tab's copy is dropped.
+    mocks.getTransaction.mockResolvedValue({ status: "SUCCESS" })
+    await settle(PENDING_RECHECK_MS)
+    await settle()
+    expect(notice()).toBeNull()
+    expect(reviewButton().disabled).toBe(false)
+    expect(JSON.parse(localStorage.getItem(PENDING_KEY)!)).toEqual({ [A]: [] })
   })
 })
 

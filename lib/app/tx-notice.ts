@@ -1,7 +1,9 @@
 import { userErrorMessage } from "@/lib/protocol/errors"
 import { explorerUrl } from "@/lib/protocol/explorer"
+import { formatUnixTime } from "@/lib/protocol/format"
 import type { TxResult } from "@/lib/protocol/review"
 import { SubmissionRejectedError } from "@/lib/protocol/stellar"
+import type { Lookup } from "@/lib/protocol/tx-lookup"
 import type { Network } from "@/lib/protocol/types"
 
 /** What the UI says about a transaction attempt: a toast and the panel's last-result line. */
@@ -54,4 +56,46 @@ export function noticeForError(label: string, error: unknown, network: Network):
     return { tone: "error", title: `${label} was not accepted by the network.`, detail, hash: error.hash, url: explorerUrl(network, "tx", error.hash) }
   }
   return { tone: "error", title: `${label} was not sent.`, detail }
+}
+
+/**
+ * A sent action whose result is not known yet (M-21): its panel keeps checking it by its hash and
+ * refuses a second send until the ledger passes its time bound, `validUntil` (unix seconds).
+ */
+export function noticeForPending(label: string, tx: { hash: string; validUntil: number }, network: Network): TxNotice {
+  return {
+    tone: "warning",
+    title: `Your last ${label} was sent but is not confirmed yet.`,
+    detail: `Checking… It can still land until ${formatUnixTime(tx.validUntil)}.`,
+    hash: tx.hash,
+    url: explorerUrl(network, "tx", tx.hash),
+  }
+}
+
+/**
+ * How a pending action settled (M-21): confirmed or failed on-chain, as a direct result reads; past
+ * its time bound and never included; or past it with the network no longer able to tell.
+ */
+export function noticeForSettled(label: string, hash: string, lookup: Lookup, network: Network): TxNotice {
+  const link = { hash, url: explorerUrl(network, "tx", hash) }
+  if (lookup.status === "SUCCESS") return noticeForResult(label, { hash, status: "SUCCESS" }, network)
+  if (lookup.status === "FAILED") return noticeForResult(label, { hash, status: "FAILED", reason: lookup.reason }, network)
+  if (lookup.final) {
+    return {
+      tone: "warning",
+      title: `${label} did not land.`,
+      detail: "Its time limit passed before the network included it, so it moved nothing and charged no fee. You can review it again.",
+      ...link,
+    }
+  }
+  if (lookup.lost) {
+    return {
+      tone: "warning",
+      title: `${label}: the network can no longer say whether it landed.`,
+      detail:
+        "Its time limit has passed, so it can no longer land, but the network no longer shows that far back. Look it up by its hash and check your balances before sending it again.",
+      ...link,
+    }
+  }
+  return noticeForResult(label, { hash, status: "NOT_FOUND" }, network)
 }
