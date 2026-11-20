@@ -7,6 +7,12 @@
  * failure is thrown as it is.
  */
 
+/**
+ * `getLedgers` is asked a little behind `getLatestLedger`: behind a load balancer the ledger just
+ * reported may not be stored on the backend that answers ("Unknown block"), which refuses it.
+ */
+const LEDGERS_BEHIND = 20
+
 export type RpcWindow = { oldestLedger: number; latestLedger: number }
 
 /** The calls `readRpcWindow` makes: the SDK's `rpc.Server` satisfies it, tests inject a fake. */
@@ -37,6 +43,6 @@ export async function readRpcWindow(rpc: RpcWindowSource): Promise<RpcWindow> {
   } catch (error) {
     if (!isMethodUnsupported(error) || !rpc.getLedgers || !rpc.getLatestLedger) throw error
     const { sequence } = await rpc.getLatestLedger()
-    return windowOf(await rpc.getLedgers({ startLedger: sequence, pagination: { limit: 1 } }))
+    return windowOf(await rpc.getLedgers({ startLedger: Math.max(1, sequence - LEDGERS_BEHIND), pagination: { limit: 1 } }))
   }
 }

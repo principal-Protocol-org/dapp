@@ -262,7 +262,7 @@ describe("oldestLedgerAt (the capture's RPC window)", () => {
     })
     expect(await oldestLedgerAt("https://rpc.example", fetchImpl)).toBe(120)
     expect(calls.map((c) => c.method)).toEqual(["getHealth", "getLatestLedger", "getLedgers"])
-    expect(calls[2].params).toEqual({ startLedger: 900, pagination: { limit: 1 } })
+    expect(calls[2].params).toEqual({ startLedger: 880, pagination: { limit: 1 } })
   })
 
   it("does not fall back when getHealth fails for another reason", async () => {

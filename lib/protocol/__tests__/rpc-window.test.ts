@@ -28,7 +28,7 @@ describe("readRpcWindow", () => {
   ])("takes the window from getLedgers when getHealth is unsupported (%s)", async (_, error) => {
     const rpc = withoutHealth(error)
     expect(await readRpcWindow(rpc)).toEqual(WINDOW)
-    expect(rpc.getLedgers).toHaveBeenCalledWith({ startLedger: 900, pagination: { limit: 1 } })
+    expect(rpc.getLedgers).toHaveBeenCalledWith({ startLedger: 880, pagination: { limit: 1 } })
   })
 
   it.each([

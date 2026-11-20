@@ -208,9 +208,10 @@ export async function oldestLedgerAt(rpcUrl, fetchImpl = fetch) {
     const oldest = health.body?.result?.oldestLedger
     if (Number.isInteger(oldest)) return oldest
     if (health.status !== 400 && health.body?.error?.code !== -32601) return null
+    // A little behind the latest: behind a load balancer the newest ledger may not be stored on the backend that answers.
     const latest = (await rpcCall(rpcUrl, "getLatestLedger", {}, fetchImpl)).body?.result?.sequence
     if (!Number.isInteger(latest)) return null
-    const page = await rpcCall(rpcUrl, "getLedgers", { startLedger: latest, pagination: { limit: 1 } }, fetchImpl)
+    const page = await rpcCall(rpcUrl, "getLedgers", { startLedger: Math.max(1, latest - 20), pagination: { limit: 1 } }, fetchImpl)
     const fromLedgers = page.body?.result?.oldestLedger
     return Number.isInteger(fromLedgers) ? fromLedgers : null
   } catch {
