@@ -910,10 +910,14 @@ in this repository, and nothing is signed on Mainnet by an agent, a test or CI.
    MOCKUSDY's stored value is near its feed's price (0.03 % apart).
 6. **The schedules**, on the `principalmarket-mainnet` QStash account, each to the exact
    `https://principalmarket.fi/api/cron/<job>` URL: `record` (`*/15 * * * *`) and `index`
-   (`*/5 * * * *`); once the first `index` run has completed (`GET /api/health` shows
-   `indexer.status` `ok`), `alerts` (`*/5 * * * *`, retries 0); then `oracle` (`*/5 * * * *`).
-   While an oracle is stale, `cron/alerts` answers 500 (a critical alert is open), so with retries
-   every run would be repeated seconds later.
+   (`*/5 * * * *`). Then wait until the index has caught up: `GET /api/health` shows
+   `indexer.lagSeconds` under 3,600 and `indexer.gaps` empty (`[]`). `indexer.status` `ok` alone
+   does not show it: it reads `ok` right after step 2's import, whose cursors are hours or days old.
+   A gap there means the capture's cursors had left the RPC's window (see "Event indexer"). Only
+   then `alerts` (`*/5 * * * *`, retries 0): started earlier, its first run would open (and post)
+   `indexer_lag` for every group. Then `oracle` (`*/5 * * * *`). While an oracle is stale,
+   `cron/alerts` answers 500 (a critical alert is open), so with retries every run would be
+   repeated seconds later.
 7. **A test alert.** One QStash message to `https://principalmarket.fi/api/cron/alerts?test=1`, with
    retries 0, as in the Testnet steps. It answers 200 with `delivered: true`, and
    `GET /api/dashboard/alerts` then shows it as `lastTest`.
@@ -966,8 +970,9 @@ manifest's RPC and passphrase: no key, no database, nothing signed.
 - It prints one table (market, topology, oracle state, feed, value against feed, paused), what it
   found, and a summary line, `PASS` or `FAIL`.
 - It exits 1 when a topology differs, a pinned code hash differs, or a contract the manifest names
-  cannot be read; 2 for a usage error. A stale oracle, a paused contract, a contract with no pin and
-  a feed it cannot read are warnings: reported, never a failure.
+  cannot be read (its code, pinned or not, or any of its views); 2 for a usage error. A stale oracle,
+  a paused contract, a contract with no pin (its code read) and a feed it cannot read are warnings:
+  reported, never a failure.
 - `--json` prints the same as JSON. `node --experimental-transform-types scripts/smoke.mjs --network testnet`
   checks another network (`testnet` or `local`).
 - Its reads take the app's read cap (6 in flight). The Mainnet gateway still refuses a burst as busy

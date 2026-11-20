@@ -15,11 +15,11 @@
 //   5. each market's state (fetchMarketState), RiskControl (fetchRiskView) and the pauses (fetchPauses).
 //
 // It prints one table (market, topology, oracle state, feed, value against feed, paused), then what
-// it found and a summary line. Exit code 0 when every topology matches, every pinned code hash
-// matches and every read of a manifest contract answered; 1 otherwise; 2 for a usage error. A stale
-// oracle, a paused contract, a contract with no pin and a failed read of a contract the manifest
-// does not name (an oracle's feed) are warnings: reported, never a failure. `--json` prints the
-// same as JSON.
+// it found and a summary line. Exit code 0 when every topology matches, every contract's code could
+// be read, every pinned code hash matches and every read of a manifest contract answered; 1
+// otherwise; 2 for a usage error. A stale oracle, a paused contract, a contract with no pin (its code
+// read) and a failed read of a contract the manifest does not name (an oracle's feed) are warnings:
+// reported, never a failure. `--json` prints the same as JSON.
 //
 // A public RPC refuses a burst as busy (HTTP 429, -32004): the Mainnet gateway took about 100 reads
 // at 6 in flight, then refused the rest for a while (2026-11-20). A read refused that way, or one the
@@ -107,8 +107,8 @@ function oracles(rows) {
 
 /**
  * 1 when a topology mismatches or could not be read, a pinned code hash differs or could not be
- * read, or a read of a manifest contract failed; else 0. A stale oracle, a pause, a contract with no
- * pin and a failed read of another contract do not count.
+ * read (pinned or not), or a read of a manifest contract failed; else 0. A stale oracle, a pause, a
+ * contract with no pin whose code was read, and a failed read of another contract do not count.
  * @param {Row[]} rows
  * @returns {0 | 1}
  */
@@ -116,7 +116,7 @@ export function exitCode(rows) {
   const bad = rows.some(
     (row) =>
       (row.topology !== null && row.topology.status !== "match") ||
-      row.code.some((c) => pinned(c) && !codeMatches(c)) ||
+      row.code.some((c) => c.actual === null || (pinned(c) && !codeMatches(c))) ||
       row.unread.some((read) => read.manifest),
   )
   return bad ? 1 : 0
@@ -136,8 +136,8 @@ export function summarize(rows) {
     if (t?.status === "mismatch") failures.push(`FAIL: topology of ${named(row)}: ${t.fields.join(", ")} ${t.fields.length === 1 ? "differs" : "differ"} from the manifest`)
     if (t?.status === "unread") failures.push(`FAIL: topology of ${named(row)} could not be read: ${t.reason}`)
     for (const c of row.code) {
-      if (!pinned(c)) warnings.push(`warning: ${c.kind} ${c.contract} (${where(row)}) has no pinned code hash in the manifest; not checked`)
-      else if (c.actual === null) failures.push(`FAIL: code of ${c.kind} ${c.contract} (${where(row)}) could not be read: ${c.reason ?? "no answer"}`)
+      if (c.actual === null) failures.push(`FAIL: code of ${c.kind} ${c.contract} (${where(row)}) could not be read: ${c.reason ?? "no answer"}`)
+      else if (!pinned(c)) warnings.push(`warning: ${c.kind} ${c.contract} (${where(row)}) has no pinned code hash in the manifest; not checked`)
       else if (c.actual !== c.expected) failures.push(`FAIL: code of ${c.kind} ${c.contract} (${where(row)}): the chain runs ${c.actual}, the manifest pins ${c.expected}`)
     }
   }
@@ -247,8 +247,12 @@ function unavailableReads(tree, out = []) {
 
 const callText = (r) => `${r.contract} ${r.fn}${r.args.length > 0 ? `(${r.args.map((a) => shortId(typeof a?.value === "string" ? a.value : JSON.stringify(a))).join(", ")})` : ""}`
 
-/** The contracts a check reads the code of, each once and in a row: a market's, then the shared ones. */
-function codeTargets(manifest) {
+/**
+ * The contracts a check reads the code of, each once and in a row (`market` null for the shared
+ * row): the shared Router first, so a market on it does not claim it; then each market's oracle,
+ * its Router when it has one of its own, and its seven contracts; then the other shared contracts.
+ */
+export function codeTargets(manifest) {
   const seen = new Set()
   const targets = []
   const add = (market, kind, contract, expected) => {
@@ -256,13 +260,14 @@ function codeTargets(manifest) {
     seen.add(contract)
     targets.push({ market, kind, contract, expected: expected ? expected.toLowerCase() : null })
   }
-  const KINDS = ["sy", "pt", "yt", "config", "manager", "pool", "recoveryEscrow"]
+  add(null, "router", manifest.shared.router, manifest.wasmHashes.router)
+  const KINDS = ["router", "sy", "pt", "yt", "config", "manager", "pool", "recoveryEscrow"]
   for (const m of manifest.markets) {
     const pin = (kind) => m.wasmHashes?.[kind] ?? manifest.wasmHashes[kind]
     add(m.marketId, "oracle", m.contracts.oracle, pin("oracle"))
     for (const kind of KINDS) add(m.marketId, kind, m.contracts[kind], pin(kind))
   }
-  for (const kind of ["router", "oracle", "permissioning", "riskControl", "factory"]) add(null, kind, manifest.shared[kind], manifest.wasmHashes[kind])
+  for (const kind of ["oracle", "permissioning", "riskControl", "factory"]) add(null, kind, manifest.shared[kind], manifest.wasmHashes[kind])
   return targets
 }
 

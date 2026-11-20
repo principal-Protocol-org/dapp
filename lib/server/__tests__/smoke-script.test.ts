@@ -2,7 +2,7 @@
 import { readFileSync } from "node:fs"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import { exitCode, summarize } from "../../../scripts/smoke.mjs"
+import { codeTargets, exitCode, summarize } from "../../../scripts/smoke.mjs"
 
 const ROOT = join(__dirname, "..", "..", "..")
 
@@ -95,6 +95,15 @@ describe("the smoke check's verdict", () => {
     expect(summarize(unpinned).some((l) => /^warning: pool .* has no pinned code hash/.test(l))).toBe(true)
   })
 
+  it("a contract whose code cannot be read fails even with no pin, and says why", () => {
+    const rows = allGood()
+    rows[2].code[0] = { kind: "factory", contract: ROUTER, expected: null, actual: null, reason: "There is no contract at it." } as never
+    expect(exitCode(rows)).toBe(1)
+    const lines = summarize(rows)
+    expect(lines).toContain(`FAIL: code of factory ${ROUTER} (shared) could not be read: There is no contract at it.`)
+    expect(lines.at(-1)).toMatch(/^FAIL: /)
+  })
+
   it("a manifest contract that cannot be read fails; another contract's failed read (the feed) only warns", () => {
     const busy = allGood()
     busy[2].unread = [{ call: `${ROUTER} market`, reason: "The Stellar network is busy. Try again in a moment.", manifest: true }]
@@ -125,6 +134,31 @@ describe("the smoke check's verdict", () => {
     rows[0].paused = ["Market pool (mainnet-a)"]
     expect(exitCode(rows)).toBe(0)
     expect(summarize(rows)).toContain("warning: paused: Market pool (mainnet-a)")
+  })
+})
+
+describe("the contracts whose code the check reads", () => {
+  const id = (n: number) => `C${String(n).padStart(55, "A")}`
+  const market = (n: number, router: string) => ({
+    marketId: `m${n}`,
+    wasmHashes: undefined,
+    contracts: { router, oracle: id(n * 10), sy: id(n * 10 + 1), pt: id(n * 10 + 2), yt: id(n * 10 + 3), config: id(n * 10 + 4), manager: id(n * 10 + 5), pool: id(n * 10 + 6), recoveryEscrow: id(n * 10 + 7) },
+  })
+  const manifest = (markets: ReturnType<typeof market>[]) => ({
+    shared: { router: id(1), oracle: id(10), permissioning: id(2), riskControl: id(3), factory: id(4) },
+    wasmHashes: { router: "aa".repeat(32) },
+    markets,
+  })
+
+  it("names a market's own Router under that market, and the shared Router once, under the shared contracts", () => {
+    const targets = codeTargets(manifest([market(1, id(1)), market(2, id(9))]))
+    expect(targets.filter((t: { kind: string }) => t.kind === "router")).toEqual([
+      { market: null, kind: "router", contract: id(1), expected: "aa".repeat(32) },
+      { market: "m2", kind: "router", contract: id(9), expected: "aa".repeat(32) },
+    ])
+    // Every contract once: 2 markets × 8 (oracle and seven market contracts) + market 2's Router + 4 shared (its oracle is market 1's).
+    expect(new Set(targets.map((t: { contract: string }) => t.contract)).size).toBe(targets.length)
+    expect(targets).toHaveLength(2 * 8 + 1 + 4)
   })
 })
 
