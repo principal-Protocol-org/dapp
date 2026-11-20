@@ -67,9 +67,10 @@ network's name. What the network itself changes:
 - **Test tokens.** "Get test tokens" is offered on `testnet` and `local` only; on `mainnet`
   `POST /api/faucet` answers 403 ("Get test tokens runs only on Testnet or a local network.").
 - **Access.** On `mainnet`, the compliance card and the gates use network-neutral texts ("Access to
-  this market is granted by the protocol team."), and an access block lists what is still missing and
-  names the manifest's `accessContact`. A missing trustline has an **Add trustline** button on every
-  network.
+  this market is granted by the protocol team."), and an access block lists what is still missing
+  (and, apart, what could not be checked, with its reason) and names the manifest's `accessContact`.
+  A missing trustline has an **Add trustline** button there. On `testnet` and `local` it has none:
+  Get test tokens adds the trustline (spec 0005).
 - **The wizard** (`/app/manage/new`) is not offered on `mainnet`: every `create_*` call is signed by
   the asset's issuer, whose Mainnet keys are the protocol team's.
 - **The banner** on `/app` and `/dashboard` says the network, and on `mainnet` that the markets use
@@ -906,9 +907,12 @@ deploys with that pull request on `testnet.principalmarket.fi`, while Mainnet is
    step 5:
    - **in `rpcFallbackUrls`** (the smaller change): the gateway is still asked first. A read it
      refuses (HTTP 429 or 5xx, a timeout, a network error) is asked again of the fallback, and the
-     gateway is then asked last for 30 s (see the manifest's `rpcFallbackUrls` above). The manifest
-     test removes this field before it compares the file with the contracts team's, as it removes our
-     other additions;
+     gateway is then asked last for 30 s (see the manifest's `rpcFallbackUrls` above). Only contract
+     reads (`createRpcReader`, which is most of the dashboard's load) and the alert check's ledger
+     clock fall back. Trade simulations, the ledger clock, event pages (history and the indexer),
+     preparing and sending a transaction, transaction lookups and the keeper stay on `rpcUrl`. The
+     manifest test removes this field before it compares the file with the contracts team's, as it
+     removes our other additions;
    - **or as `rpcUrl`**: every read goes to the new provider first. Keep the gateway in
      `rpcFallbackUrls`. `rpcUrl` is a field of the contracts team's file, so the comparison in
      `lib/protocol/__tests__/mainnet-manifest.test.ts` must then put the gateway's URL back before it
