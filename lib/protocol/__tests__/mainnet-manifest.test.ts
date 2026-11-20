@@ -13,6 +13,11 @@
  * their creating transactions: Horizon, by the hashes in each asset's `transactions[]`),
  * `accessContact` (spec 0005 M-17) and `rpcFallbackUrls`
  * (spec 0004) are ours too when present.
+ *
+ * `rpcUrl` differs from the handover on purpose: the developer chose a keyed provider (dRPC) as the
+ * read path, and the handover's public gateway is kept as our fallback. The comparison with the
+ * handover therefore asserts that the handover's `rpcUrl` is in our `rpcFallbackUrls` and puts it
+ * back as `rpcUrl`; any other difference stays visible (spec M-1).
  */
 import { describe, expect, it } from "vitest"
 import mainnetJson from "@/config/manifests/mainnet.json"
@@ -26,6 +31,9 @@ type RawManifest = Record<string, unknown> & { markets: { underlying: Record<str
 /** A copy of `json` without the fields we add to the contracts team's file. */
 function withoutOurAdditions(json: RawManifest): RawManifest {
   const raw = structuredClone(json)
+  // Our `rpcUrl` is the keyed provider; the contracts team's is our fallback. Assert that, then put it back.
+  expect(raw.rpcFallbackUrls).toContain(handover.rpcUrl)
+  raw.rpcUrl = handover.rpcUrl
   for (const key of ["deployLedger", "protocolAbi", "createdLedgers", "accessContact", "rpcFallbackUrls"]) delete raw[key]
   for (const market of raw.markets) delete market.underlying.tracks
   return raw
@@ -38,6 +46,12 @@ describe("config/manifests/mainnet.json", () => {
     expect(validateManifest(m)).toEqual([])
   })
 
+  it("reads through a keyed provider and keeps the handover's RPC as its first fallback", () => {
+    const m = parseManifest(mainnetJson)
+    expect(m.rpcUrl).not.toBe(handover.rpcUrl)
+    expect(m.rpcFallbackUrls?.[0]).toBe(handover.rpcUrl)
+  })
+
   it("is the handover file once our additions are removed", () => {
     expect(withoutOurAdditions(mainnetJson as RawManifest)).toEqual(handover)
   })
@@ -47,7 +61,9 @@ describe("config/manifests/mainnet.json", () => {
     ["RPC fallbacks", { rpcFallbackUrls: ["https://rpc.second.example"] }],
     ["both", { accessContact: { label: "access@principal.example", url: "mailto:access@principal.example" }, rpcFallbackUrls: ["https://rpc.second.example"] }],
   ])("stays the handover file with %s added (ours too)", (_, added) => {
-    const raw = { ...(structuredClone(mainnetJson) as RawManifest), ...added }
+    const base = structuredClone(mainnetJson) as RawManifest
+    const extra = (added as { rpcFallbackUrls?: string[] }).rpcFallbackUrls
+    const raw = { ...base, ...added, ...(extra ? { rpcFallbackUrls: [...(base.rpcFallbackUrls as string[]), ...extra] } : {}) }
     expect(validateManifest(parseManifest(raw))).toEqual([])
     expect(withoutOurAdditions(raw)).toEqual(handover)
   })
