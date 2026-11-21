@@ -121,6 +121,9 @@ market.
   or 429, the RPC's busy answer `-32004`). A contract's own error is never asked again elsewhere. Each
   read records the endpoint that answered, and a page's "Ledger N" line adds "via fallback <host>"
   when one of its reads came from a fallback.
+- `verifyRpcUrl` (optional, https off the local network): an RPC URL anyone may use, with no key. Every
+  "How to verify" command names it in `--rpc-url`; it defaults to `rpcUrl`. The app never shows a full
+  RPC URL: the overview and the evidence name hosts only. Our addition to the contracts team's file.
 - `mainnet.json` is the contracts team's file `deployments/mainnet-dapp-manifest.json`, taken from
   the `mainnet` branch of the contracts repository (`principal`). Its contracts were built from
   `principal` at `3af9388`, the manifest's `sourceCommit`. It is the file after the contracts team's

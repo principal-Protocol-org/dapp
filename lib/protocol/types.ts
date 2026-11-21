@@ -61,6 +61,8 @@ export type Manifest = {
   oracleSources?: { hash: string; preimage: string }[]
   /** RPC endpoints tried, in order, after `rpcUrl`. */
   rpcFallbackUrls?: string[]
+  /** An RPC URL anyone may use, with no key: what "How to verify" commands name. Defaults to `rpcUrl`. */
+  verifyRpcUrl?: string
   shared: SharedContracts
   /** Pinned Wasm hash (hex) per market contract kind; the trust anchor for restoring code (R29b). */
   wasmHashes: Partial<Record<WasmHashKey, string>>

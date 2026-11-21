@@ -73,6 +73,8 @@ const envelope = {
     .optional(),
   /** RPC endpoints tried, in order, after `rpcUrl`. */
   rpcFallbackUrls: z.array(z.string().url()).optional(),
+  /** An RPC URL anyone may use, with no key: what "How to verify" commands name. Defaults to `rpcUrl`. */
+  verifyRpcUrl: z.string().url().optional(),
 }
 
 const manifestSchemaV1 = z.object({
@@ -134,6 +136,9 @@ export const ROUTER_ABI_BY_WASM: Readonly<Record<string, 1 | 2>> = {
 }
 
 /** The contract-interface version a manifest declares; 1 when it does not say. */
+/** The RPC URL a "How to verify" command names: the manifest's keyless `verifyRpcUrl`, else its `rpcUrl`. */
+export const verifyRpcUrlOf = (m: Pick<Manifest, "rpcUrl" | "verifyRpcUrl">): string => m.verifyRpcUrl ?? m.rpcUrl
+
 export function protocolAbi(m: Pick<Manifest, "protocolAbi">): 1 | 2 {
   return m.protocolAbi ?? 1
 }
@@ -206,6 +211,7 @@ export function validateManifest(m: Manifest): Finding[] {
   if (m.network !== "local") {
     if (!m.rpcUrl.startsWith("https://")) error(`rpcUrl must use https:// on ${m.network}.`)
     if (!m.horizonUrl.startsWith("https://")) error(`horizonUrl must use https:// on ${m.network}.`)
+    if (m.verifyRpcUrl && !m.verifyRpcUrl.startsWith("https://")) error(`verifyRpcUrl must use https:// on ${m.network}.`)
     for (const url of m.rpcFallbackUrls ?? []) {
       if (!url.startsWith("https://")) error(`rpcFallbackUrls must use https:// on ${m.network}: ${url}.`)
     }

@@ -3,6 +3,7 @@
   "network": "mainnet",
   "networkPassphrase": "Public Global Stellar Network ; September 2015",
   "rpcUrl": "https://lb.drpc.live/stellar/AhvS4Q9fu0d1j2S3qGN-HPjhrtwO5ToR8bRN5p94qkhR",
+  "verifyRpcUrl": "https://soroban-rpc.mainnet.stellar.gateway.fm",
   "rpcFallbackUrls": ["https://soroban-rpc.mainnet.stellar.gateway.fm"],
   "horizonUrl": "https://horizon.stellar.org",
   "generatedAt": "2026-11-21T00:00:00Z",

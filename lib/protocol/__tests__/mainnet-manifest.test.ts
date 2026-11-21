@@ -34,7 +34,7 @@ function withoutOurAdditions(json: RawManifest): RawManifest {
   // Our `rpcUrl` is the keyed provider; the contracts team's is our fallback. Assert that, then put it back.
   expect(raw.rpcFallbackUrls).toContain(handover.rpcUrl)
   raw.rpcUrl = handover.rpcUrl
-  for (const key of ["deployLedger", "protocolAbi", "createdLedgers", "accessContact", "rpcFallbackUrls"]) delete raw[key]
+  for (const key of ["deployLedger", "protocolAbi", "createdLedgers", "accessContact", "rpcFallbackUrls", "verifyRpcUrl"]) delete raw[key]
   for (const market of raw.markets) delete market.underlying.tracks
   return raw
 }
