@@ -45,8 +45,8 @@ import { bytesToHex } from "@/lib/protocol/bytes"
 import { cursorLedger, decodeEvent, idOf, type RawEvent, type Role } from "@/lib/protocol/events"
 import { manifestOracles } from "@/lib/protocol/manifest"
 import { createRpcReader, type ContractReader } from "@/lib/protocol/reader"
+import { prunedOldestOf, readRpcWindow } from "@/lib/protocol/rpc-window"
 import type { Manifest, Market, Network } from "@/lib/protocol/types"
-import { prunedOldestOf, readRpcWindow, type RpcWindowSource } from "@/lib/protocol/rpc-window"
 import { DatabaseConfigError, type Sql } from "./db"
 
 // ---------------------------------------------------------------- groups
@@ -371,7 +371,7 @@ async function indexGroup(
         // which widens the gap.
         if (attempt === START_ATTEMPTS) throw error
         // dRPC names its first available state in the refusal; the window it reports can be a few ledgers older.
-        const newOldest = prunedOldestOf(error) ?? (await readRpcWindow(rpc as RpcWindowSource)).oldestLedger
+        const newOldest = prunedOldestOf(error) ?? (await readRpcWindow(rpc)).oldestLedger
         if (newOldest <= from) throw error
         oldest = newOldest
         for (const c of chunks) {
@@ -520,7 +520,7 @@ export async function indexEvents(
 
   // The cursors first: a missing database is reported as such, whatever the RPC does.
   const saved = await Promise.all(groups.map((g) => readCursor(sql, indexCursorName(g, network))))
-  const health = await readRpcWindow(rpc as RpcWindowSource)
+  const health = await readRpcWindow(rpc)
 
   const progress: Progress[] = groups.map(() => ({ inserted: 0, saved: null, gap: null }))
   const results = await Promise.all(

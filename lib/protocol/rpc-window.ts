@@ -11,7 +11,7 @@
  * `getLedgers` is asked a little behind `getLatestLedger`: behind a load balancer the ledger just
  * reported may not be stored on the backend that answers ("Unknown block"), which refuses it.
  */
-const LEDGERS_BEHIND = 20
+export const LEDGERS_BEHIND = 20
 
 export type RpcWindow = { oldestLedger: number; latestLedger: number }
 
@@ -19,7 +19,7 @@ export type RpcWindow = { oldestLedger: number; latestLedger: number }
 export type RpcWindowSource = {
   getHealth(): Promise<RpcWindow>
   getLatestLedger?(): Promise<{ sequence: number }>
-  getLedgers?(req: { startLedger: number; pagination: { limit: number } }): Promise<RpcWindow & { ledgers?: unknown[] }>
+  getLedgers?(req: { startLedger: number; pagination: { limit: number } }): Promise<{ oldestLedger?: number; latestLedger?: number; ledgers?: unknown[] }>
 }
 
 /** True when the RPC does not offer the method: HTTP 400 or JSON-RPC -32601. */
@@ -57,13 +57,28 @@ const FIRST_STATE = /First available state is (\d+)/
  * dRPC says only "Request failed with status code 400" in its message).
  */
 export function prunedOldestOf(error: unknown): number | undefined {
+  return firstStateOf(error) ?? rangeOldestOf(error)
+}
+
+function refusalTexts(error: unknown): string[] {
   const e = error as { message?: unknown; response?: { data?: { error?: { message?: unknown } } } } | null
-  const texts = [typeof error === "string" ? error : e?.message, e?.response?.data?.error?.message].filter((t): t is string => typeof t === "string")
-  for (const text of texts) {
-    const range = PRUNED_RANGE.exec(text)
-    if (range) return Number(range[1])
+  return [typeof error === "string" ? error : e?.message, e?.response?.data?.error?.message].filter((t): t is string => typeof t === "string")
+}
+
+/** The ledger dRPC's refusal names as its first available state (a start there is served), or undefined. */
+export function firstStateOf(error: unknown): number | undefined {
+  for (const text of refusalTexts(error)) {
     const state = FIRST_STATE.exec(text)
     if (state) return Number(state[1])
+  }
+  return undefined
+}
+
+/** The oldest ledger of the range Stellar's refusal names (it may be gone by the next call), or undefined. */
+export function rangeOldestOf(error: unknown): number | undefined {
+  for (const text of refusalTexts(error)) {
+    const range = PRUNED_RANGE.exec(text)
+    if (range) return Number(range[1])
   }
   return undefined
 }

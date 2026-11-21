@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it, vi } from "vitest"
-import { clearGap, clearGapRefusal, isLocalDatabase, mergeCursor, oldestLedgerAt, parseArgs, readExport, reindexRefusal } from "../../../scripts/indexer.mjs"
+import { clearGap, clearGapRefusal, isLocalDatabase, mergeCursor, LEDGERS_BEHIND, oldestLedgerAt, parseArgs, readExport, reindexRefusal } from "../../../scripts/indexer.mjs"
 
 const POOL = "CB3JI6H2HZ3PMWKLEKDPQUURFSKJSFTLNFNBU4CFEHAZXMWL5SNNS6OJ"
 const ESCROW = "CAMOWBMTMDLFJLFOSTULXQO7MUK2PT3XAQ62CA4L5DGPQKZFJWEKN24Q"
@@ -234,6 +234,11 @@ describe("mergeCursor (import)", () => {
 })
 
 describe("oldestLedgerAt (the capture's RPC window)", () => {
+  it("asks getLedgers as far behind the latest ledger as lib/protocol does", async () => {
+    const { LEDGERS_BEHIND: inLib } = await import("@/lib/protocol/rpc-window")
+    expect(LEDGERS_BEHIND).toBe(inLib)
+  })
+
   const reply = (status: number, body: unknown) => ({ status, json: async () => body }) as Response
   const server = (handlers: Record<string, (params: unknown) => Response>) => {
     const calls: { method: string; params: unknown }[] = []

@@ -34,7 +34,7 @@ import { fetchTopology } from "@/lib/protocol/market-state"
 import { isContractError, readLive, toBool, type ContractReader } from "@/lib/protocol/reader"
 import type { Manifest, Market, MarketContractName } from "@/lib/protocol/types"
 import { contractWasmHash, contractWasmHashesSettled, WasmReadError, type LedgerEntriesRpc } from "@/lib/protocol/wasm"
-import { prunedOldestOf, readRpcWindow } from "@/lib/protocol/rpc-window"
+import { firstStateOf, rangeOldestOf, readRpcWindow } from "@/lib/protocol/rpc-window"
 import { DatabaseConfigError, type Sql } from "./db"
 import { createRollingLimiter, redact } from "./request"
 
@@ -794,8 +794,11 @@ export async function discover(deps: RegistryDeps, opts: { deadline?: number } =
     } catch (error) {
       // The oldest ledger moves on a busy node: a start just behind it is refused once; start after it.
       if (request.startLedger === undefined || page > 0) throw error
-      // dRPC names its first available state in the refusal; the window it reports can be a few ledgers older.
-      const start = prunedOldestOf(error) ?? (await readRpcWindow(rpc)).oldestLedger + 1
+      // dRPC names its first available state in the refusal (a start there is served); the window it reports can
+      // be a few ledgers older. Stellar's refusal names the range's oldest ledger: start after it, as before.
+      // The moved start is not a gap: this discovery scan is not the indexed history (that is the indexer's, which
+      // records its gaps); older markets come from the manifest's seeds.
+      const start = firstStateOf(error) ?? (rangeOldestOf(error) ?? (await readRpcWindow(rpc)).oldestLedger) + 1
       request = { startLedger: start, filters, limit: EVENTS_PAGE }
       res = await rpc.getEvents(request)
     }

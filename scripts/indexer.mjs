@@ -197,6 +197,9 @@ async function rpcCall(rpcUrl, method, params, fetchImpl) {
   return { status: res.status, body }
 }
 
+/** `getLedgers` is asked this far behind the latest ledger; the same constant as `LEDGERS_BEHIND` in `lib/protocol/rpc-window.ts` (a test pins them equal). */
+export const LEDGERS_BEHIND = 20
+
 /**
  * The RPC's oldest ledger at `rpcUrl`, or null when it cannot be read. `getHealth` first; only when the
  * method is unsupported (HTTP 400 or JSON-RPC -32601, as on dRPC) the window comes from `getLedgers`.
@@ -211,7 +214,7 @@ export async function oldestLedgerAt(rpcUrl, fetchImpl = fetch) {
     // A little behind the latest: behind a load balancer the newest ledger may not be stored on the backend that answers.
     const latest = (await rpcCall(rpcUrl, "getLatestLedger", {}, fetchImpl)).body?.result?.sequence
     if (!Number.isInteger(latest)) return null
-    const page = await rpcCall(rpcUrl, "getLedgers", { startLedger: Math.max(1, latest - 20), pagination: { limit: 1 } }, fetchImpl)
+    const page = await rpcCall(rpcUrl, "getLedgers", { startLedger: Math.max(1, latest - LEDGERS_BEHIND), pagination: { limit: 1 } }, fetchImpl)
     const fromLedgers = page.body?.result?.oldestLedger
     return Number.isInteger(fromLedgers) ? fromLedgers : null
   } catch {
@@ -227,6 +230,8 @@ async function rpcOldestLedger(network) {
     return null
   }
 }
+
+// ---------------------------------------------------------------- reindex
 
 /**
  * Why a reindex must not run, or null. It never moves a cursor forward (that would skip events

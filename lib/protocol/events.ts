@@ -238,9 +238,6 @@ export function cursorLedger(cursor: string): number {
 
 type Scan = { maxPages: number; windowLedgers: number }
 
-/** The oldest ledger a pruned-range refusal names, or undefined for any other failure. */
-const prunedOldest = prunedOldestOf
-
 async function fetchGroup(
   server: EventsRpcServer,
   contractIds: string[],
@@ -271,7 +268,7 @@ async function fetchGroup(
         // Each page takes a slot of the read cap (spec 0005 M-20): five markets walk ten groups at once.
         res = await limitRpc(() => server.getEvents(request))
       } catch (error) {
-        const oldest = cursor === undefined && !readAgain ? prunedOldest(error) : undefined
+        const oldest = cursor === undefined && !readAgain ? prunedOldestOf(error) : undefined
         if (oldest === undefined || oldest <= start) throw error
         readAgain = true
         floor = oldest
