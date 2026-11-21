@@ -7,7 +7,7 @@ import * as classes from "@/lib/protocol/dashboard/rejections"
 import { isSignificantRejection } from "@/lib/protocol/dashboard/rejections"
 import { parseManifest } from "@/lib/protocol/manifest"
 import { assertPreparedMatches } from "@/lib/protocol/review"
-import { buildInvocationEnvelope, type ContractInvocation, type PolledTransactionResult } from "@/lib/protocol/stellar"
+import { buildInvocationEnvelope, INCLUSION_FEE_STROOPS, type ContractInvocation, type PolledTransactionResult } from "@/lib/protocol/stellar"
 import type { Manifest } from "@/lib/protocol/types"
 
 vi.mock("server-only", () => ({}))
@@ -1269,6 +1269,10 @@ describe("the RPC keeper account", () => {
     expect(runs.map((r) => r.outcome.status)).toEqual(["synced", "synced"])
     expect(server.getAccount).toHaveBeenCalledTimes(1)
     expect(sent.map((t) => t.sequence)).toEqual(["71", "72"])
+    // Each bids the app's inclusion fee, not the network minimum Mainnet refused (txInsufficientFee,
+    // 2026-11-21), plus the 100-stroop resource fee the fake simulation asks.
+    const fee = (BigInt(INCLUSION_FEE_STROOPS) + 100n).toString()
+    expect(sent.map((t) => t.fee)).toEqual([fee, fee])
     expect(server.getTransaction.mock.invocationCallOrder[0]).toBeLessThan(server.sendTransaction.mock.invocationCallOrder[1])
   })
 })

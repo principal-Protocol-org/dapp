@@ -1,5 +1,5 @@
 // @vitest-environment node
-import { Keypair, StrKey, Transaction, nativeToScVal, rpc, scValToNative, xdr } from "@stellar/stellar-sdk";
+import { BASE_FEE, Keypair, StrKey, Transaction, nativeToScVal, rpc, scValToNative, xdr } from "@stellar/stellar-sdk";
 import { describe, expect, it } from "vitest";
 import testnetJson from "@/lib/protocol/__tests__/fixtures/testnet-interim.json";
 import { parseManifest } from "../manifest";
@@ -11,6 +11,7 @@ import {
   failedTransactionReason,
   FOOTPRINT_MOVED_REASON,
   getLedgerClock,
+  INCLUSION_FEE_STROOPS,
   SubmissionRejectedError,
   pollTransactionStatus,
   scArgEquals,
@@ -147,6 +148,16 @@ describe("buildInvokeTransaction", () => {
     expect(built.unsignedXdrHash).toMatch(/^sha256:[a-f0-9]{64}$/);
     expect(transaction.operations).toHaveLength(1);
     expect(built.call).toBe(`${testnetMarket.contracts.router}.mint`);
+  });
+
+  it("bids the app's inclusion fee, above the network minimum (Mainnet's Soroban lane cleared at 200 stroops on 2026-11-21)", () => {
+    const source = Keypair.random().publicKey();
+    const invocation = principalInvocationForIntent(testnetMarket, { action: "mint", source, amount: "10000000" });
+    const built = buildInvokeTransaction({ source, sequence: "1", networkPassphrase: testnetMarket.networkPassphrase, invocation });
+    const transaction = new Transaction(built.unsignedXdr, testnetMarket.networkPassphrase);
+
+    expect(transaction.fee).toBe(INCLUSION_FEE_STROOPS);
+    expect(BigInt(INCLUSION_FEE_STROOPS)).toBeGreaterThan(BigInt(BASE_FEE) * 2n);
   });
 });
 
