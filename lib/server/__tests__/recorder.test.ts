@@ -6,7 +6,7 @@ import type { ContractReader } from "@/lib/protocol/reader"
 
 vi.mock("server-only", () => ({}))
 
-import { recordAll, SLOT_SECONDS } from "@/lib/server/recorder"
+import { ledgerCloseTimeOf, recordAll, SLOT_SECONDS } from "@/lib/server/recorder"
 import { DatabaseConfigError, type Sql } from "@/lib/server/db"
 
 const manifest = parseManifest(testnetJson)
@@ -240,5 +240,75 @@ describe("recordAll and the registry (R2-4)", () => {
       throw new DatabaseConfigError()
     }
     await expect(recordAll({ ...base(makeReader(), sql), refreshRegistry })).rejects.toBeInstanceOf(DatabaseConfigError)
+  })
+})
+
+describe("ledgerCloseTimeOf", () => {
+  const page = (sequence: number, closeTime: string) => ({ ledgers: [{ sequence, ledgerCloseTime: closeTime }] })
+  const noSleep = vi.fn(async () => {})
+
+  it("asks getLedgers for that one ledger and answers its close time in seconds", async () => {
+    const getLedgers = vi.fn(async () => page(100, "1795269896"))
+    expect(await ledgerCloseTimeOf({ getLedgers }, 100, { sleep: noSleep })).toBe(1_795_269_896)
+    expect(getLedgers).toHaveBeenCalledWith({ startLedger: 100, pagination: { limit: 1 } })
+  })
+
+  it("asks again after a pause when the node does not have the ledger yet (dRPC: HTTP 400 Unknown block for the newest one)", async () => {
+    const sleep = vi.fn(async () => {})
+    const getLedgers = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("Request failed with status code 400"))
+      .mockResolvedValueOnce({ ledgers: [] })
+      .mockResolvedValueOnce(page(100, "1795269896"))
+    expect(await ledgerCloseTimeOf({ getLedgers }, 100, { sleep, pauseMs: 2_000 })).toBe(1_795_269_896)
+    expect(getLedgers).toHaveBeenCalledTimes(3)
+    expect(sleep).toHaveBeenCalledTimes(2)
+    expect(sleep).toHaveBeenCalledWith(2_000)
+  })
+
+  it("takes the newest ledger's close time from getLatestLedger when getLedgers cannot serve it yet, with no pause", async () => {
+    const sleep = vi.fn(async () => {})
+    const getLedgers = vi.fn(async (): Promise<ReturnType<typeof page>> => {
+      throw new Error("Request failed with status code 400")
+    })
+    const getLatestLedger = vi.fn(async () => ({ sequence: 100, closeTime: "1795270346" }))
+    expect(await ledgerCloseTimeOf({ getLedgers, getLatestLedger }, 100, { sleep })).toBe(1_795_270_346)
+    expect(sleep).not.toHaveBeenCalled()
+    // Another newest ledger, or one with no close time, is no answer for this one: ask again.
+    getLatestLedger.mockResolvedValueOnce({ sequence: 101, closeTime: "1795270351" }).mockResolvedValueOnce({ sequence: 100, closeTime: "0" })
+    getLedgers.mockRejectedValueOnce(new Error("Request failed with status code 400")).mockRejectedValueOnce(new Error("Request failed with status code 400")).mockResolvedValueOnce(page(100, "1795270346"))
+    expect(await ledgerCloseTimeOf({ getLedgers, getLatestLedger }, 100, { sleep })).toBe(1_795_270_346)
+    expect(sleep).toHaveBeenCalledTimes(2)
+  })
+
+  it("stops at its deadline: no pause or attempt past it, and the last failure is reported", async () => {
+    let clock = 1_000
+    const sleep = vi.fn(async (ms: number) => {
+      clock += ms
+    })
+    const getLedgers = vi.fn(async (): Promise<ReturnType<typeof page>> => {
+      throw new Error("Request failed with status code 400")
+    })
+    // Room for one pause only: two attempts, then the deadline.
+    await expect(ledgerCloseTimeOf({ getLedgers }, 100, { sleep, now: () => clock, pauseMs: 2_000, deadlineMs: 4_500 })).rejects.toThrow("status code 400")
+    expect(getLedgers).toHaveBeenCalledTimes(2)
+    expect(sleep).toHaveBeenCalledTimes(1)
+  })
+
+  it("does not wait on a call that hangs: each call has its own timeout", async () => {
+    const getLedgers = vi.fn(() => new Promise<ReturnType<typeof page>>(() => {}))
+    const getLatestLedger = vi.fn(() => new Promise<{ sequence: number; closeTime: string }>(() => {}))
+    await expect(ledgerCloseTimeOf({ getLedgers, getLatestLedger }, 100, { sleep: noSleep, attempts: 2, callTimeoutMs: 20 })).rejects.toThrow("timed out")
+    expect(getLedgers).toHaveBeenCalledTimes(2)
+  })
+
+  it("gives up after its attempts with the last failure, never a made-up time", async () => {
+    const getLedgers = vi.fn(async () => {
+      throw new Error("Request failed with status code 400")
+    })
+    await expect(ledgerCloseTimeOf({ getLedgers }, 100, { sleep: noSleep, attempts: 3 })).rejects.toThrow("Request failed with status code 400")
+    expect(getLedgers).toHaveBeenCalledTimes(3)
+    const missing = vi.fn(async () => page(99, "1"))
+    await expect(ledgerCloseTimeOf({ getLedgers: missing }, 100, { sleep: noSleep, attempts: 2 })).rejects.toThrow("ledger 100 not found on the RPC node")
   })
 })
