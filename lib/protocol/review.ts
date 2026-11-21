@@ -23,7 +23,6 @@
 import {
   Account,
   Address,
-  BASE_FEE,
   Operation,
   SorobanDataBuilder,
   Transaction,
@@ -42,6 +41,7 @@ import { getMarket } from "./manifest"
 import {
   assertSignedTransactionMatchesReview,
   buildInvocationEnvelope,
+  INCLUSION_FEE_STROOPS,
   createRpcServer,
   failedTransactionReason,
   pollTransactionStatus,
@@ -1048,14 +1048,14 @@ export async function prepareRestore(p: {
   const { transactionData, minResourceFee } = simulation.restorePreamble
   const resourceFee = /^\d+$/.test(minResourceFee) ? BigInt(minResourceFee) : undefined
   if (resourceFee === undefined) throw new Error("RPC returned no valid restore fee. Refusing to restore; try again.")
-  assertFeeCapped(BigInt(BASE_FEE) + resourceFee, "The restore")
+  assertFeeCapped(BigInt(INCLUSION_FEE_STROOPS) + resourceFee, "The restore")
   // A copy: the checked footprint is the one that is signed.
   const sorobanData = new SorobanDataBuilder(transactionData.build()).setResourceFee(resourceFee.toString())
   assertRestorable(sorobanData, scope)
 
   // build() adds the resource fee to `fee`, so `fee` is the inclusion fee alone.
   const restore = new TransactionBuilder(new Account(source, sequence), {
-    fee: BASE_FEE,
+    fee: INCLUSION_FEE_STROOPS,
     networkPassphrase: manifest.networkPassphrase,
   })
     .setSorobanData(sorobanData.build())

@@ -13,7 +13,7 @@ import "server-only"
 import { activeManifest } from "@/lib/protocol/manifest-source"
 import { DatabaseConfigError, sql } from "@/lib/server/db"
 import { cronAuthorized, cronJson as json } from "@/lib/server/cron-auth"
-import { recordAll } from "@/lib/server/recorder"
+import { ledgerCloseTimeOf, recordAll } from "@/lib/server/recorder"
 import { createServerRpc, serverReader } from "@/lib/server/rpc-urls"
 import { discover, resolvedMarkets, revalidate, sqlRegistryStore } from "@/lib/server/registry"
 
@@ -27,7 +27,11 @@ export const maxDuration = 60
  */
 const RECORDER_ROWS_TIMEOUT_MS = 10_000
 
+/** No close-time lookup starts or waits past this many ms into the run: the rest of `maxDuration` is for the inserts and the answer. */
+const CLOSE_TIME_DEADLINE_MS = 50_000
+
 export async function GET(request: Request) {
+  const startedAt = Date.now()
   if (!(await cronAuthorized(request))) return json({ error: "unauthorized" }, 401)
 
   try {
@@ -59,12 +63,7 @@ export async function GET(request: Request) {
       },
       markets: () => resolvedMarkets({ store, manifest, timeoutMs: RECORDER_ROWS_TIMEOUT_MS }),
       now: () => Date.now(),
-      ledgerCloseTime: async (ledger) => {
-        const page = await server.getLedgers({ startLedger: ledger, pagination: { limit: 1 } })
-        const found = page.ledgers.find((l) => l.sequence === ledger)
-        if (!found) throw new Error(`ledger ${ledger} not found on the RPC node`)
-        return Number(found.ledgerCloseTime)
-      },
+      ledgerCloseTime: (ledger) => ledgerCloseTimeOf(server, ledger, { deadlineMs: startedAt + CLOSE_TIME_DEADLINE_MS }),
     })
     // Non-2xx when any market failed, so a scheduler alerts instead of seeing success.
     return json(result, result.failed.length > 0 ? 500 : 200)

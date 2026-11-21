@@ -1,6 +1,5 @@
 import {
   Account,
-  BASE_FEE,
   Contract,
   Keypair,
   StrKey,
@@ -146,6 +145,16 @@ function invocationCall(invocation: ContractInvocation) {
   return `${invocation.contractId}.${invocation.functionName}`;
 }
 
+/**
+ * The inclusion fee this app bids on every contract call, in stroops: 10,000 (0.001 XLM). The
+ * network minimum, `BASE_FEE` (100), is refused while the Soroban lane is in surge pricing: on
+ * Mainnet on 2026-11-21 the keeper's calls at 100 came back `txInsufficientFee` at 14:02 UTC and
+ * one sat unconfirmed at 14:07, while `getFeeStats` showed other Soroban transactions bidding 200;
+ * the same calls at 100 landed at 14:12. The bid is a ceiling: the cost of a busy lane, not of
+ * every call.
+ */
+export const INCLUSION_FEE_STROOPS = "10000";
+
 export function buildInvocationEnvelope(params: {
   source: string;
   sequence: string;
@@ -159,7 +168,7 @@ export function buildInvocationEnvelope(params: {
   const account = new Account(params.source, params.sequence);
   const operation = contract.call(params.invocation.functionName, ...params.invocation.args.map(scArgToVal));
   return new TransactionBuilder(account, {
-    fee: params.baseFee ?? BASE_FEE,
+    fee: params.baseFee ?? INCLUSION_FEE_STROOPS,
     networkPassphrase: params.networkPassphrase,
   })
     .addOperation(operation)

@@ -108,6 +108,82 @@ async function readOnce(reader: ContractReader, manifest: Manifest, market: Mark
   }
 }
 
+/** What `ledgerCloseTimeOf` asks of RPC. */
+export type LedgersServer = {
+  getLedgers(req: { startLedger: number; pagination: { limit: number } }): Promise<{ ledgers: { sequence: number; ledgerCloseTime: string | number }[] }>
+  getLatestLedger?(): Promise<{ sequence: number; closeTime?: string | number }>
+}
+
+/**
+ * The close time of `ledger`, in seconds, from RPC's `getLedgers`. The reads come from the newest
+ * ledger, and a node may not serve that one through `getLedgers` yet: dRPC answers it `400 Unknown
+ * block` (Mainnet, 2026-11-21) for up to several seconds, and the one before it at once. So after a
+ * failure, or an answer without the ledger, `getLatestLedger` is asked: while `ledger` is still the
+ * newest, its close time is there. Otherwise the lookup is tried again after `pauseMs` (a ledger
+ * closes about every 5 s), `attempts` times in all. Each call gets `callTimeoutMs`, and nothing
+ * starts past `deadlineMs` (the route's own time limit), so a provider that hangs cannot outlast
+ * the run. Out of attempts or time, the last failure is thrown, never a guessed time.
+ */
+export async function ledgerCloseTimeOf(
+  server: LedgersServer,
+  ledger: number,
+  opts: {
+    attempts?: number
+    pauseMs?: number
+    callTimeoutMs?: number
+    deadlineMs?: number
+    now?: () => number
+    sleep?: (ms: number) => Promise<void>
+  } = {},
+): Promise<number> {
+  const {
+    attempts = 4,
+    pauseMs = 2_000,
+    callTimeoutMs = 5_000,
+    deadlineMs = Number.POSITIVE_INFINITY,
+    now = Date.now,
+    sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
+  } = opts
+  const timed = async <T>(call: () => Promise<T>, what: string): Promise<T> => {
+    const ms = Math.max(0, Math.min(callTimeoutMs, deadlineMs - now()))
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const late = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${what} for ledger ${ledger} timed out after ${ms} ms`)), ms)
+    })
+    try {
+      return await Promise.race([call(), late])
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+  let last: unknown = new Error(`no time left to read the close time of ledger ${ledger}`)
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    if (attempt > 0) {
+      if (now() + pauseMs >= deadlineMs) break
+      await sleep(pauseMs)
+    }
+    if (now() >= deadlineMs) break
+    try {
+      const page = await timed(() => server.getLedgers({ startLedger: ledger, pagination: { limit: 1 } }), "getLedgers")
+      const found = page.ledgers.find((l) => l.sequence === ledger)
+      if (found) return Number(found.ledgerCloseTime)
+      last = new Error(`ledger ${ledger} not found on the RPC node`)
+    } catch (error) {
+      last = error
+    }
+    const getLatest = server.getLatestLedger?.bind(server)
+    if (!getLatest || now() >= deadlineMs) continue
+    try {
+      const latest = await timed(getLatest, "getLatestLedger")
+      const closeTime = Number(latest.closeTime)
+      if (latest.sequence === ledger && Number.isFinite(closeTime) && closeTime > 0) return closeTime
+    } catch {
+      // The newest ledger is only a shortcut: its failure leaves `getLedgers`'s to report.
+    }
+  }
+  throw last
+}
+
 /** Reads one market at a single ledger, retrying when the reads straddle a ledger boundary. */
 export async function readSnapshot(reader: ContractReader, manifest: Manifest, market: Market): Promise<Snapshot> {
   let last: unknown
