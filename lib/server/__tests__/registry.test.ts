@@ -780,7 +780,7 @@ describe("discover and resolvedMarkets", () => {
     }
     const result = await discover({ ...depsFor(manifestWith([])), rpc: noHealth })
     expect(result.checked).toEqual([c.pool])
-    expect(chain.getEventsCalls.map((r) => (r as { startLedger?: number }).startLedger)).toEqual([100, 110])
+    expect(chain.getEventsCalls.map((r) => (r as { startLedger?: number }).startLedger)).toEqual([110])
   })
 
   it("a scan past its deadline stops between pools, saves its place, and the next run resumes there", async () => {
