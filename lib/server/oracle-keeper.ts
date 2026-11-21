@@ -32,6 +32,7 @@ import {
 } from "@/lib/protocol/stellar"
 import type { Manifest } from "@/lib/protocol/types"
 import type { KeeperFailure } from "./oracle-ticks"
+import { serverRpcUrlOf } from "./rpc-urls"
 
 /** Yearly growth of the test reference value, in percent. */
 export const ORACLE_APY_PERCENT = 5
@@ -123,7 +124,8 @@ export type OracleRpcServer = {
 
 /** The oracle chain on the manifest's RPC. */
 export function createOracleChain(manifest: Manifest, deps: { server?: OracleRpcServer } = {}): OracleChain {
-  const { rpcUrl, networkPassphrase } = manifest
+  const { networkPassphrase } = manifest
+  const rpcUrl = serverRpcUrlOf(manifest)
   const server: OracleRpcServer = deps.server ?? createRpcServer(rpcUrl)
   const oracle = manifest.shared.oracle
   return {
@@ -146,7 +148,8 @@ export type Landed = { hash: string; returnValue: unknown; events?: readonly xdr
  * value and its contract events. A transaction that does not land throws `OracleSubmitError` with its hash.
  */
 async function sendInvocation(manifest: Manifest, server: OracleRpcServer, signer: Keypair, invocation: ContractInvocation): Promise<Landed> {
-  const { rpcUrl, networkPassphrase } = manifest
+  const { networkPassphrase } = manifest
+  const rpcUrl = serverRpcUrlOf(manifest)
   const sequence = (await server.getAccount(signer.publicKey())).sequenceNumber()
   const built = buildInvocationEnvelope({ source: signer.publicKey(), sequence, networkPassphrase, invocation, timeoutSeconds: TX_TIMEOUT_SECONDS })
   const prepared = await server.prepareTransaction(built)
@@ -296,7 +299,8 @@ export type FeedChain = {
 
 /** The feed chain of `oracle` on the manifest's RPC. */
 export function createFeedChain(manifest: Manifest, oracle: string, deps: { server?: OracleRpcServer } = {}): FeedChain {
-  const { rpcUrl, networkPassphrase } = manifest
+  const { networkPassphrase } = manifest
+  const rpcUrl = serverRpcUrlOf(manifest)
   const server: OracleRpcServer = deps.server ?? createRpcServer(rpcUrl)
   return {
     async read(fn) {
@@ -335,7 +339,7 @@ export type KeeperAccount = {
 
 /** The keeper account on the manifest's RPC. */
 export function createKeeperAccount(manifest: Manifest, deps: { server?: OracleRpcServer } = {}): KeeperAccount {
-  const { rpcUrl } = manifest
+  const rpcUrl = serverRpcUrlOf(manifest)
   const server: OracleRpcServer = deps.server ?? createRpcServer(rpcUrl)
   return {
     sequence: async (address) => (await server.getAccount(address)).sequenceNumber(),
@@ -668,7 +672,7 @@ export async function tickFeedAll(deps: {
   const run: Run = { mode: "feed", signer: keeper.publicKey() }
   const notSent: FeedOutcome = { ...run, status: "failed", name: NOT_SENT }
   let server: OracleRpcServer | undefined
-  const rpcServer = () => (server ??= createRpcServer(manifest.rpcUrl))
+  const rpcServer = () => (server ??= createRpcServer(serverRpcUrlOf(manifest)))
   const chainFor = deps.chainFor ?? ((oracle: string) => createFeedChain(manifest, oracle, { server: rpcServer() }))
   const account = deps.account ?? createKeeperAccount(manifest, { server: rpcServer() })
 

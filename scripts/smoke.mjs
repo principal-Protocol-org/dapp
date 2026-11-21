@@ -278,8 +278,9 @@ export function codeTargets(manifest) {
 async function check(network) {
   const load = loadAppTypeScript(root)
   const { parseManifest, validateManifest, manifestOracles } = await load("lib/protocol/manifest.ts")
-  const { createRpcReader, dedupeReads, isTransientRpcError } = await load("lib/protocol/reader.ts")
-  const { createRpcServer, getLedgerClock } = await load("lib/protocol/stellar.ts")
+  const { dedupeReads, isTransientRpcError } = await load("lib/protocol/reader.ts")
+  const { getLedgerClock } = await load("lib/protocol/stellar.ts")
+  const { createServerRpc, serverReader, serverRpcUrlOf } = await load("lib/server/rpc-urls.ts")
   const { limitRpc } = await load("lib/protocol/rpc-limiter.ts")
   const { contractWasmHashesSettled } = await load("lib/protocol/wasm.ts")
   const { fetchTopology, fetchMarketState } = await load("lib/protocol/market-state.ts")
@@ -315,11 +316,11 @@ async function check(network) {
     retries.longestMs = Math.max(retries.longestMs, ms)
   }
   const patient = (run) => patiently(run, { isTransient: isTransientRpcError, deadline, waited })
-  const rpc = createRpcServer(manifest.rpcUrl)
-  const direct = createRpcReader(manifest)
+  const rpc = createServerRpc(manifest)
+  const direct = serverReader(manifest)
   // One answer per distinct call for the whole run; the retry sits inside, so a refused read is asked again.
   const reader = dedupeReads(Object.assign((call) => patient(() => direct(call)), { rpcUrl: direct.rpcUrl }))
-  console.error(`smoke: reading the ${network} deployment from ${new URL(manifest.rpcUrl).host} (${plural(manifest.markets.length, "market")})`)
+  console.error(`smoke: reading the ${network} deployment from ${new URL(serverRpcUrlOf(manifest)).host} (${plural(manifest.markets.length, "market")})`)
 
   // 1. The ledger clock: the oracles' age is measured on it.
   const sharedUnread = []
@@ -467,7 +468,7 @@ async function main(argv) {
     console.log(JSON.stringify({ network, rpcUrl: manifest.rpcUrl, sourceCommit: manifest.sourceCommit, ledger, rows, lines, exitCode: code, retries }, null, 2))
   } else {
     const at = ledger ? `ledger ${ledger.sequence} (${ledger.closeTime})` : "ledger unread"
-    console.log(`Principal deployment check: ${network}, ${at}, RPC ${new URL(manifest.rpcUrl).host}, contracts at ${manifest.sourceCommit.slice(0, 7)}`)
+    console.log(`Principal deployment check: ${network}, ${at}, RPC ${new URL(serverRpcUrlOf(manifest)).host}, contracts at ${manifest.sourceCommit.slice(0, 7)}`)
     console.log("")
     if (rows !== null) for (const line of table(rows)) console.log(line)
     console.log("")

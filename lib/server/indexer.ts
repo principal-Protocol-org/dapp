@@ -44,10 +44,11 @@ import { scValToNative, type xdr } from "@stellar/stellar-sdk"
 import { bytesToHex } from "@/lib/protocol/bytes"
 import { cursorLedger, decodeEvent, idOf, type RawEvent, type Role } from "@/lib/protocol/events"
 import { manifestOracles } from "@/lib/protocol/manifest"
-import { createRpcReader, type ContractReader } from "@/lib/protocol/reader"
+import type { ContractReader } from "@/lib/protocol/reader"
 import { prunedOldestOf, readRpcWindow } from "@/lib/protocol/rpc-window"
 import type { Manifest, Market, Network } from "@/lib/protocol/types"
 import { DatabaseConfigError, type Sql } from "./db"
+import { serverReader } from "./rpc-urls"
 
 // ---------------------------------------------------------------- groups
 
@@ -140,7 +141,7 @@ export type IndexDeps = {
   markets: Market[]
   /** Wall clock (ms) for the deadline; `Date.now` by default. */
   now?: () => number
-  /** Reads `record_count` for the reconciliation; `createRpcReader(manifest)` by default. */
+  /** Reads `record_count` for the reconciliation; `serverReader(manifest)` by default. */
   reader?: ContractReader
 }
 
@@ -540,7 +541,7 @@ export async function indexEvents(
   const escrow = results.find((r) => r.group === "escrow")
   let reconciled: Reconcile[] = []
   if (escrow?.complete && !ctx.late()) {
-    reconciled = await reconcile(sql, deps.reader ?? createRpcReader(manifest), network, markets)
+    reconciled = await reconcile(sql, deps.reader ?? serverReader(manifest), network, markets)
     await saveReconcile(sql, indexCursorName("escrow", network), { at: new Date().toISOString(), results: reconciled })
   }
   return { inserted: progress.reduce((n, p) => n + p.inserted, 0), groups: results, reconcile: reconciled }

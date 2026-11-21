@@ -22,10 +22,9 @@ import "server-only"
 import { StrKey } from "@stellar/stellar-sdk"
 import { connection } from "next/server"
 import { activeManifest, activeNetwork } from "@/lib/protocol/manifest-source"
-import { createRpcReader } from "@/lib/protocol/reader"
-import { createRpcServer } from "@/lib/protocol/stellar"
 import { DatabaseConfigError, sql } from "@/lib/server/db"
 import { listedMarkets, logOutcome, PUBLISH_WINDOW_MS, publishMarket, sqlRegistryStore, takePublishSlot } from "@/lib/server/registry"
+import { createServerRpc, serverReader } from "@/lib/server/rpc-urls"
 import { clientIp, isCrossSite, isJson, readBody } from "@/lib/server/request"
 
 // ~40 simulations and ledger-entry reads for one pool.
@@ -128,7 +127,7 @@ export async function POST(request: Request): Promise<Response> {
   try {
     const manifest = activeManifest()
     const outcome = await publishMarket(
-      { store: sqlRegistryStore(sql), reader: createRpcReader(manifest), rpc: createRpcServer(manifest.rpcUrl), manifest },
+      { store: sqlRegistryStore(sql), reader: serverReader(manifest), rpc: createServerRpc(manifest), manifest },
       pool,
     )
     if (outcome.status === "valid") return json({ market: outcome.market })

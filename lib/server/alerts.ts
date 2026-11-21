@@ -33,13 +33,14 @@ import { fetchPauses, type PauseView } from "@/lib/protocol/dashboard/pauses"
 import { BROKEN, isSignificantRejection, rejectionText } from "@/lib/protocol/dashboard/rejections"
 import { fetchRiskView, type RiskView } from "@/lib/protocol/dashboard/risk"
 import { fetchAccount } from "@/lib/protocol/horizon"
-import { createRpcReader, isTransientRpcError, type ContractReader } from "@/lib/protocol/reader"
+import { isTransientRpcError, type ContractReader } from "@/lib/protocol/reader"
 import { createRpcServer, getLedgerClock } from "@/lib/protocol/stellar"
 import type { Live, Manifest, Network } from "@/lib/protocol/types"
 import type { Sql } from "./db"
 import { INDEX_GROUPS, indexCursorName, type IndexGroup } from "./indexer"
 import { keeperHealth, keeperIntervalSeconds, type KeeperHealth, type TickDecision } from "./oracle-ticks"
 import { sqlRegistryStore, type RegistryStore } from "./registry"
+import { serverReader, serverRpcUrls } from "./rpc-urls"
 import { redact } from "./request"
 
 // ---------------------------------------------------------------- kinds and thresholds
@@ -920,7 +921,7 @@ async function readCursors(sql: Sql, network: Network): Promise<CursorSeen[]> {
 
 /** The latest ledger from `rpcUrl`, then each of `rpcFallbackUrls` on a transient failure, as the contract reads do (D-6). */
 async function ledgerClockOf(manifest: Manifest): Promise<{ sequence: number; closeTime: number }> {
-  const urls = [manifest.rpcUrl, ...(manifest.rpcFallbackUrls ?? [])]
+  const urls = serverRpcUrls(manifest)
   for (let i = 0; ; i++) {
     try {
       return await getLedgerClock(createRpcServer(urls[i]))
@@ -1002,7 +1003,7 @@ export async function collectAlertInput(deps: AlertDeps): Promise<AlertInput> {
   const network = manifest.network
   // Read per run from the same environment as the keeper's keys; a bad value holds the keeper's and the feed's alerts, never a silent default.
   const intervalSeconds = intervalOf(deps.env)
-  const reader = deps.reader ?? createRpcReader(manifest)
+  const reader = deps.reader ?? serverReader(manifest)
   const registry = deps.registry ?? sqlRegistryStore(sql)
   const since = iso(now - REJECTION_WINDOW_SECONDS * 1000)
   const noLedger: Unread = { error: "the ledger could not be read" }

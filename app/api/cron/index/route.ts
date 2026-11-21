@@ -15,10 +15,10 @@ import "server-only"
  * and is never prerendered. No `runtime` export: the default Node.js runtime.
  */
 import { activeManifest } from "@/lib/protocol/manifest-source"
-import { createRpcServer } from "@/lib/protocol/stellar"
 import { DatabaseConfigError, sql } from "@/lib/server/db"
 import { cronAuthorized, cronJson as json } from "@/lib/server/cron-auth"
 import { indexEvents, runGroups } from "@/lib/server/indexer"
+import { createServerRpc } from "@/lib/server/rpc-urls"
 import { listedMarkets, sqlRegistryStore } from "@/lib/server/registry"
 
 // Pages of 200 events per group until the deadline, then one record_count read per escrow.
@@ -40,7 +40,7 @@ export async function GET(request: Request) {
     // The seeds alone would drop every registry market from the market and escrow cursors: those wait.
     const { groups, skipped } = runGroups(listed.fromRegistry)
     if (skipped) console.warn(`index: skipped the ${skipped.groups.join(" and ")} groups: ${skipped.reason}`)
-    const result = await indexEvents({ sql, rpc: createRpcServer(manifest.rpcUrl), manifest, markets: listed.markets }, { deadline, groups })
+    const result = await indexEvents({ sql, rpc: createServerRpc(manifest), manifest, markets: listed.markets }, { deadline, groups })
     return json(skipped ? { ...result, skipped } : result, result.groups.some((g) => g.error) ? 500 : 200)
   } catch (error) {
     if (error instanceof DatabaseConfigError) return json({ error: "not_configured" }, 503)

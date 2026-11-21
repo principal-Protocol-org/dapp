@@ -238,6 +238,7 @@ Copy `.env.example` to `.env.local`. Never commit real keys.
 | `ORACLE_KEEPER_INTERVAL_SECONDS` | Server only | Optional. The keeper's schedule in seconds (default 1800; 300 on Mainnet). Keeper health and the alerts measure against it, so set it to the schedule you configure. A value that is not a whole number from 60 to 86400 makes `cron/oracle` answer 503 `not_configured` in feed mode, and the keeper's health unavailable. |
 | `ORACLE_KEEPER_RECORD_REJECTIONS` | Server only | Optional, feed mode only. Exactly `1` (no spaces) puts each new significant rejection on-chain with one transaction (one fee). Anything else, or unset, records it from the simulation with no transaction (the default; Mainnet). |
 | `ALERT_WEBHOOK_URL` | Server only | Where `cron/alerts` posts each alert it opens or closes (Slack or Discord incoming webhook, or any http(s) endpoint). Never logged or answered. Unset, the check answers 503 `not_configured`. |
+| `SERVER_RPC_URL` | Server only | Optional. A secret RPC URL (an `http:` or `https:` URL) the server jobs read and send through first: the keeper (`cron/oracle`), the indexer (`cron/index`), the recorder, the alert check, the registry (`/api/markets`), `/api/health` and the faucet. The manifest's `rpcUrl`, then its `rpcFallbackUrls`, follow as before. It is a second key, separate from the public one in the manifest (that one ships in the browser bundle and anyone can use up its quota); on Mainnet the keeper and the indexer depend on it, so set it. Never logged, answered or recorded (a read source names the manifest's `rpcUrl`, a log line at most a host). A value that is not an http(s) URL is ignored with one warning that names the variable. `scripts/indexer.mjs` and `scripts/smoke.mjs` accept it too. Unset, nothing changes. |
 | `ALERT_SIGNER_MIN_XLM` | Server only | Optional. The keeper signer's XLM floor for `signer_low` (default 20). |
 
 `pnpm db:migrate [--env-file .env.testnet]` applies `db/migrations/*.sql` over a direct connection and
@@ -249,10 +250,10 @@ pnpm db:migrate --env-file .env.testnet
 pnpm db:migrate --env-file .env.mainnet
 ```
 
-The `FAUCET_*`, `DATABASE_URL`, `CRON_SECRET`, `QSTASH_*`, `ORACLE_ADMIN_SECRET`, `ORACLE_KEEPER_*` and
-`ALERT_*` variables are read only in files that start with `import "server-only"` (a unit test checks
+The `FAUCET_*`, `DATABASE_URL`, `CRON_SECRET`, `QSTASH_*`, `ORACLE_ADMIN_SECRET`, `ORACLE_KEEPER_*`,
+`ALERT_*` and `SERVER_RPC_URL` variables are read only in files that start with `import "server-only"` (a unit test checks
 it). CI fails the build if `FAUCET_`, `DATABASE_URL`, `CRON_SECRET`, `QSTASH_`, `ORACLE_ADMIN_`,
-`ORACLE_KEEPER_`, `ALERT_WEBHOOK` or `ALERT_SIGNER` appears in `.next/static`. The local stack writes its own throwaway secret to
+`ORACLE_KEEPER_`, `ALERT_WEBHOOK`, `ALERT_SIGNER` or `SERVER_RPC` appears in `.next/static`. The local stack writes its own throwaway secret to
 `.env.local`, which is git-ignored.
 
 ## Rate recorder and database
@@ -909,6 +910,9 @@ deploys with that pull request on `testnet.principalmarket.fi`, while Mainnet is
    - `QSTASH_CURRENT_SIGNING_KEY` and `QSTASH_NEXT_SIGNING_KEY` of the `principalmarket-mainnet`
      QStash account;
    - `ALERT_WEBHOOK_URL`, the alert channel's incoming webhook;
+   - `SERVER_RPC_URL`, a second, secret dRPC key for the server jobs only (never `NEXT_PUBLIC_`, never
+     the public key of the manifest). The keeper and the indexer depend on it: without it they read
+     through the public key, and the keeper has no fallback;
    - `ORACLE_KEEPER_MODE=feed`, `ORACLE_KEEPER_SECRET` (a new key with no protocol role, funded with
      XLM by the developer) and `ORACLE_KEEPER_INTERVAL_SECONDS=300`. A keeper key funded with less
      than 20 XLM raises `signer_low` (the default floor) from the first alert run: fund it with more
@@ -923,7 +927,9 @@ deploys with that pull request on `testnet.principalmarket.fi`, while Mainnet is
    (`https://soroban-rpc.mainnet.stellar.gateway.fm`, which answered HTTP 429 after about 96 reads in
    one measurement on 2026-11-20, 6 at a time) is its `rpcFallbackUrls` entry. One `/dashboard` tab
    reads about 70 oracle values per refresh, so the public pages alone can use up a public allowance.
-   Every read goes to dRPC first; a contract read it refuses (HTTP 429 or 5xx, a timeout, a network
+   The server jobs (keeper, indexer, recorder, alert check, registry, `/api/health`, faucet) ask
+   `SERVER_RPC_URL` first when it is set, then these (the keeper and event reads stay on that one URL
+   or, unset, on `rpcUrl`). Every browser read goes to dRPC first; a contract read it refuses (HTTP 429 or 5xx, a timeout, a network
    error) is asked again of the gateway, which is then asked last for 30 s (see the manifest's
    `rpcFallbackUrls` above). Only contract reads (`createRpcReader`, most of the dashboard's load) and
    the alert check's ledger clock fall back; trade simulations, event pages (history and the
@@ -942,7 +948,8 @@ deploys with that pull request on `testnet.principalmarket.fi`, while Mainnet is
 
    The manifest is public (this repository, and every browser that loads the app), so a key in its
    URL is public too, and it is not a server secret. The key has a usage cap the developer accepts. The
-   server jobs (keeper, alert check, indexer) read through the same URL, so a key that only answers
+   server jobs read through `SERVER_RPC_URL` when it is set (a separate secret key, so the public one
+   being used up does not stop them), else through the same URL, and then a key that only answers
    requests from the site's origin can refuse them. On Mainnet the dashboard's live widgets already
    refresh every 60 s instead of 15 s (see "Cadence" under "Dashboard").
 5. **Move `main` to the app.** `main` has three commits the app line (`testnet`) lacks: `0d2754c`

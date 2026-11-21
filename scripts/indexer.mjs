@@ -222,10 +222,12 @@ export async function oldestLedgerAt(rpcUrl, fetchImpl = fetch) {
   }
 }
 
-/** The RPC's oldest ledger for `network` (its manifest's `rpcUrl`), or null when it cannot be read. */
+/** The RPC's oldest ledger for `network` (`SERVER_RPC_URL` when it is an http(s) URL, else the manifest's `rpcUrl`), or null when it cannot be read. */
 async function rpcOldestLedger(network) {
   try {
-    return await oldestLedgerAt(readManifestJson(network).rpcUrl)
+    const secret = (process.env.SERVER_RPC_URL ?? "").trim()
+    const usable = /^https?:$/.test(URL.canParse(secret) ? new URL(secret).protocol : "")
+    return await oldestLedgerAt(usable ? secret : readManifestJson(network).rpcUrl)
   } catch {
     return null
   }
@@ -548,19 +550,18 @@ async function capture(pool, { network, out }) {
   const { parseManifest } = await load("lib/protocol/manifest.ts")
   const { indexEvents, INDEX_GROUPS } = await load("lib/server/indexer.ts")
   const { discover, resolvedMarkets, sqlRegistryStore } = await load("lib/server/registry.ts")
-  const { createRpcReader } = await load("lib/protocol/reader.ts")
-  const { createRpcServer } = await load("lib/protocol/stellar.ts")
+  const { createServerRpc, serverReader, serverRpcUrlOf } = await load("lib/server/rpc-urls.ts")
 
   const manifest = parseManifest(readManifestJson(network))
   if (manifest.network !== network) throw new UsageError(`config/manifests/${network}.json is for "${manifest.network}"`)
   const sql = sqlOf(pool)
   const store = sqlRegistryStore(sql)
-  const rpc = createRpcServer(manifest.rpcUrl)
-  console.log(`capture: ${network} from ${new URL(manifest.rpcUrl).host} (deploy ledger ${manifest.deployLedger ?? "not set"})`)
+  const rpc = createServerRpc(manifest)
+  console.log(`capture: ${network} from ${new URL(serverRpcUrlOf(manifest)).host} (deploy ledger ${manifest.deployLedger ?? "not set"})`)
 
   const started = Date.now()
   for (let run = 1; ; run++) {
-    const found = await discover({ store, reader: createRpcReader(manifest), rpc, manifest }, { deadline: Date.now() + CAPTURE_RUN_MS })
+    const found = await discover({ store, reader: serverReader(manifest), rpc, manifest }, { deadline: Date.now() + CAPTURE_RUN_MS })
     console.log(`capture: market discovery run ${run}: ${found.checked.length} pool(s) checked${found.gap ? ", with a registry gap" : ""}${found.complete ? "" : " (partial)"}`)
     if (found.complete) break
     if (run === 10) throw new Error("market discovery did not finish in 10 runs; run the capture again to resume")

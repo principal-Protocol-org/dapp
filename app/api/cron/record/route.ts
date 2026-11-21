@@ -11,11 +11,10 @@ import "server-only"
  * Components runs handlers on the default Node.js runtime.
  */
 import { activeManifest } from "@/lib/protocol/manifest-source"
-import { createRpcReader } from "@/lib/protocol/reader"
-import { createRpcServer } from "@/lib/protocol/stellar"
 import { DatabaseConfigError, sql } from "@/lib/server/db"
 import { cronAuthorized, cronJson as json } from "@/lib/server/cron-auth"
 import { recordAll } from "@/lib/server/recorder"
+import { createServerRpc, serverReader } from "@/lib/server/rpc-urls"
 import { discover, resolvedMarkets, revalidate, sqlRegistryStore } from "@/lib/server/registry"
 
 // Discovery (a few getEvents pages), ~40 validation reads per market, then ~30 simulations per
@@ -34,8 +33,8 @@ export async function GET(request: Request) {
   try {
     // Inside the try: a manifest that cannot be read answers this route's JSON, never a bare 500.
     const manifest = activeManifest()
-    const server = createRpcServer(manifest.rpcUrl)
-    const reader = createRpcReader(manifest)
+    const server = createServerRpc(manifest)
+    const reader = serverReader(manifest)
     const store = sqlRegistryStore(sql)
     const registry = { store, reader, rpc: server, manifest }
     const result = await recordAll({

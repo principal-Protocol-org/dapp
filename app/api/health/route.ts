@@ -27,7 +27,8 @@ import "server-only"
 import { connection } from "next/server"
 import { assetCodes, manifestOracles } from "@/lib/protocol/manifest"
 import { activeManifest } from "@/lib/protocol/manifest-source"
-import { createRpcServer, getLedgerClock } from "@/lib/protocol/stellar"
+import { getLedgerClock } from "@/lib/protocol/stellar"
+import { createServerRpc } from "@/lib/server/rpc-urls"
 import type { Manifest } from "@/lib/protocol/types"
 import { openAlertCounts } from "@/lib/server/alerts"
 import { DatabaseConfigError, sql } from "@/lib/server/db"
@@ -104,8 +105,7 @@ export async function GET() {
   }
   const { network } = manifest
   const oracles = manifestOracles(manifest)
-  const rpcUrl = manifest.rpcUrl
-  // The keeper's schedule, read per request: a bad value makes the keeper part unavailable, never a silent default.
+    // The keeper's schedule, read per request: a bad value makes the keeper part unavailable, never a silent default.
   let intervalSeconds: number | null = null
   try {
     intervalSeconds = keeperIntervalSeconds(process.env)
@@ -115,7 +115,7 @@ export async function GET() {
 
   const [ledger, indexer, keepersPart, openAlerts] = await Promise.all([
     part(async () => {
-      const clock = await getLedgerClock(createRpcServer(rpcUrl))
+      const clock = await getLedgerClock(createServerRpc(manifest))
       return { sequence: clock.sequence, closeTime: new Date(clock.closeTime * 1000).toISOString() }
     }, "the RPC could not be read"),
     part(async () => {

@@ -43,6 +43,7 @@ import {
   type ScArg,
 } from "@/lib/protocol/stellar"
 import type { Manifest, Market } from "@/lib/protocol/types"
+import { serverRpcUrlOf } from "./rpc-urls"
 
 /** The asset the faucet pays: the same one the onboarding dialog trusts and reads (R2-14). */
 const faucetAsset = (manifest: Manifest): Market["underlying"] | null => testAssetOf(manifest)
@@ -415,8 +416,9 @@ export function createStellarFaucetChain(
     throw new FaucetConfigError(`The test asset must be a classic asset with 7 decimals; the manifest says ${asset.decimals}.`)
   }
 
-  const server: FaucetRpcServer = opts.server ?? createRpcServer(manifest.rpcUrl)
-  const { networkPassphrase, rpcUrl } = manifest
+  const { networkPassphrase } = manifest
+  const rpcUrl = serverRpcUrlOf(manifest, env)
+  const server: FaucetRpcServer = opts.server ?? createRpcServer(rpcUrl)
   const permissioning = manifest.shared.permissioning
   const address = (value: string): ScArg => ({ type: "address", value })
 
