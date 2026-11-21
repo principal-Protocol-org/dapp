@@ -1,13 +1,15 @@
 "use client"
 
 import { showLive } from "@/components/app/live"
-import type { IndicativeContext, PanelConfig, PreviewLine } from "@/components/app/actions/panel-config"
+import type { IndicativeContext, PanelConfig, PreviewLine, SignedSecondary } from "@/components/app/actions/panel-config"
 import { amountOf, max0, outputOf, plain, tokens, withoutAccount } from "@/components/app/actions/panel-lines"
+import { abiSecondaryAmount, signsAbiSecondary } from "@/lib/protocol/actions"
+import { errorReason } from "@/lib/protocol/errors"
 import { formatBps, formatRate } from "@/lib/protocol/format"
 import type { MarketState } from "@/lib/protocol/market-state"
 import { previewDeposit, previewMint, previewWithdraw } from "@/lib/protocol/previews"
 import { allLive } from "@/lib/protocol/reader"
-import type { Market } from "@/lib/protocol/types"
+import type { Manifest, Market } from "@/lib/protocol/types"
 
 /**
  * The 0001 deposit, withdraw and mint panels (spec §6), hosted by the Quick actions dialogs: deposit
@@ -102,6 +104,26 @@ export function withdrawPanel(market: Market): PanelConfig {
   }
 }
 
+/**
+ * Split's `sy_in` on a version-2 Router (principal 3af9388): `wrap_and_mint` signs the SY the deposit
+ * gives as a literal, worked out by `abiSecondaryAmount` from the reads the preview uses. None on
+ * version 1. A read it needs that failed is named, and nothing stands in for it.
+ */
+function splitSyIn(manifest: Manifest, ms: MarketState | undefined, amount: bigint): SignedSecondary {
+  if (!signsAbiSecondary(manifest, "mint")) return {}
+  if (!ms) return { missing: "This market's data has not loaded yet, so the SY this split signs cannot be worked out." }
+  const unread = (what: string, error: string): SignedSecondary => ({
+    missing: `Could not read ${what} (${errorReason(error)}), so the SY this split signs cannot be worked out. Signing stays off until it loads; try again in a moment.`,
+  })
+  const { exchangeRate, oracleRate } = ms
+  const fee = ms.fees.tokenizationBps
+  if (exchangeRate.status !== "live") return unread("the SY exchange rate", exchangeRate.error)
+  if (oracleRate.status !== "live") return unread("the oracle rate", oracleRate.error)
+  if (fee.status !== "live") return unread("the tokenization fee", fee.error)
+  if (exchangeRate.value <= 0n) return { missing: "The SY exchange rate reads zero, so the SY this split signs cannot be worked out." }
+  return { amount: abiSecondaryAmount(manifest, "mint", amount, { exchangeRate: exchangeRate.value, oracleRate: oracleRate.value, tokenizationFeeBps: fee.value }) }
+}
+
 export function mintPanel(market: Market): PanelConfig {
   const { code, decimals } = market.underlying
   return {
@@ -148,5 +170,6 @@ export function mintPanel(market: Market): PanelConfig {
       if (sy?.status !== "live" || sy.value <= 0n) return []
       return [`You hold ${plain(sy.value)} SY. Minting starts from ${code}. ${SY_NOTE}`]
     },
+    signedSecondary: splitSyIn,
   }
 }

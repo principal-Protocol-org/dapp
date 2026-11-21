@@ -23,13 +23,13 @@ vi.mock("server-only", () => ({}))
 
 import { ratesFrom } from "@/hooks/use-simulation"
 import { fetchAccountState, type AccountState, type ComplianceKind } from "@/lib/protocol/account-state"
-import { invocationFor, type ActionId, type ActionInput } from "@/lib/protocol/actions"
+import { abiSecondaryAmount, invocationFor, signsAbiSecondary, type ActionId, type ActionInput } from "@/lib/protocol/actions"
 import { evaluateAccountCompliance, fetchMarketCompliance, type ComplianceItem } from "@/lib/protocol/compliance"
 import { fetchAccountHistory } from "@/lib/protocol/events"
 import { evaluateGates, type GateContext } from "@/lib/protocol/gates"
 import { guardsFrom, openGuards, parseOutput, type ActionOutput } from "@/lib/protocol/guards"
 import { createHorizon } from "@/lib/protocol/horizon"
-import { validateManifest } from "@/lib/protocol/manifest"
+import { protocolAbi, validateManifest } from "@/lib/protocol/manifest"
 import { fetchMarketState, type MarketState } from "@/lib/protocol/market-state"
 import { BPS, ceilDiv } from "@/lib/protocol/math"
 import { addTrustline, fetchMarketPermissions, onboardingSteps } from "@/lib/protocol/onboarding"
@@ -49,7 +49,7 @@ import type { Finding, Manifest, Market } from "@/lib/protocol/types"
 import { pendingYield } from "@/lib/protocol/yield"
 import { createStellarFaucetChain, resetFaucetStateForTests, runFaucet } from "@/lib/server/faucet"
 import { fundedKeypairSigner, type KeypairSigner } from "./keypair-signer"
-import { expectFloors } from "./route-runner"
+import { abiReads, expectFloors } from "./route-runner"
 import {
   DAPP,
   DEV_STACK,
@@ -218,7 +218,7 @@ describe.skipIf(skip !== null)("protocol layer on the local network", () => {
       fetchMarketState(reader(), manifest, market.marketId),
       fetchAccountState(reader(), horizon(), manifest, market.marketId, account, kind),
     ])
-    return { ms, acc, compliance: evaluateAccountCompliance(acc, kind), ledgerTime: clock.now() }
+    return { ms, acc, compliance: evaluateAccountCompliance(acc, kind, undefined, manifest.network), ledgerTime: clock.now() }
   }
 
   function gateContext(s: Snapshot, simulation: SimulationOutcome): GateContext {
@@ -231,11 +231,19 @@ describe.skipIf(skip !== null)("protocol layer on the local network", () => {
       ledgerTime: s.ledgerTime,
       simulation,
       managerId: market.contracts.manager,
+      network: manifest.network,
+      protocolAbi: protocolAbi(manifest),
+      underlying: market.underlying.code,
     }
   }
 
-  /** The simulation input, as the action panel builds it: open guards, deadline from ledger time. */
-  function simInputFor(action: ActionId, amount: bigint, secondaryAmount: bigint | undefined, s: Snapshot): ActionInput {
+  /**
+   * The simulation input, as the action panel builds it: open guards, deadline from ledger time. On a
+   * version-2 Router the literal of mint, buy_pt_underlying and buy_yt (`sy_in`, `pt_in`) is worked out
+   * from the same reads, as the app does it (`abiSecondaryAmount`); none on version 1.
+   */
+  function simInputFor(action: ActionId, amount: bigint, given: bigint | undefined, s: Snapshot): ActionInput {
+    const secondaryAmount = given ?? (signsAbiSecondary(manifest, action) ? abiSecondaryAmount(manifest, action, amount, abiReads(s.ms)) : undefined)
     return {
       action,
       marketId: market.marketId,
@@ -352,7 +360,8 @@ describe.skipIf(skip !== null)("protocol layer on the local network", () => {
       try {
         await run(join(DEV_STACK, "deploy.sh"), [], {
           cwd: DAPP,
-          env: { ...process.env, MATURITY_SECONDS: String(DEPLOY_MATURITY_SECONDS) },
+          // One market: a second costs about 90 s of the 600 s this suite runs in.
+          env: { ...process.env, MATURITY_SECONDS: String(DEPLOY_MATURITY_SECONDS), SECOND_MARKET: "0" },
           maxBuffer: 64 * 1024 * 1024,
         })
       } catch (error) {
@@ -440,11 +449,12 @@ describe.skipIf(skip !== null)("protocol layer on the local network", () => {
     expect(trusted.sacAuthorized).toMatchObject({ status: "live", value: false })
     expect(evaluateAccountCompliance(trusted, kind).find((i) => i.id === "authorized")).toMatchObject({ status: "blocked", fix: "onboarding" })
 
-    // The server faucet on the real chain: authorize, grant account, PT, YT, pay.
+    // The server faucet on the real chain: authorize, grant account, PT and YT of every manifest market
+    // (two on the default local stack, one with SECOND_MARKET=0), pay.
     resetFaucetStateForTests()
     const chain = createStellarFaucetChain(manifest, { env: { FAUCET_ISSUER_SECRET: issuerSecret } })
     const outcome = await runFaucet({ account, manifest, ip: "127.0.0.1", now: Date.now(), chain })
-    expect(outcome).toEqual({ performed: ["authorize", "grant_account", "grant_pt", "grant_yt", "pay"] })
+    expect(outcome).toEqual({ performed: ["authorize", "grant_account", ...manifest.markets.flatMap(() => ["grant_pt", "grant_yt"]), "pay"] })
     // Read back through the real chain: nothing is left to do.
     resetFaucetStateForTests()
     expect(await runFaucet({ account, manifest, ip: "127.0.0.2", now: Date.now(), chain })).toEqual({ performed: [] })

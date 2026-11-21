@@ -2,12 +2,11 @@ import type { Metadata } from "next"
 import { Suspense } from "react"
 import { ManifestProvider } from "@/components/app/manifest-provider"
 import { Providers } from "@/components/app/providers"
-import { MainnetPending } from "@/components/app/shell/mainnet-pending"
-import { TestnetBanner } from "@/components/app/shell/testnet-banner"
+import { NetworkBanner } from "@/components/app/shell/network-banner"
 import { DashboardFallback } from "@/components/dashboard/dashboard-fallback"
 import { DashboardHeader } from "@/components/dashboard/dashboard-header"
 import { Container } from "@/components/landing/layout"
-import { manifestPending } from "@/lib/protocol/manifest-source"
+import { activeManifest } from "@/lib/protocol/manifest-source"
 import { resolvedManifest } from "@/lib/server/manifest"
 
 export const metadata: Metadata = {
@@ -23,7 +22,7 @@ export const metadata: Metadata = {
 async function ResolvedDashboard({ children }: { children: React.ReactNode }) {
   const manifest = await resolvedManifest()
   return (
-    <ManifestProvider manifest={manifest}>
+    <ManifestProvider manifest={manifest} seedCount={activeManifest().markets.length}>
       <Providers>{children}</Providers>
     </ManifestProvider>
   )
@@ -32,25 +31,12 @@ async function ResolvedDashboard({ children }: { children: React.ReactNode }) {
 /**
  * The public dashboard (spec 0004 D-1, D-2), outside `/app`: the URL itself says no wallet is
  * needed. The banner and the header need only the static manifest, so they are the prerendered
- * shell with a page skeleton; the page streams in once the markets are resolved. While the Mainnet
- * manifest is the pending stub (D-24), the header frames one static page saying so instead.
+ * shell with a page skeleton; the page streams in once the markets are resolved.
  */
 export default function DashboardLayout({ children }: LayoutProps<"/dashboard">) {
-  if (manifestPending()) {
-    return (
-      <>
-        <DashboardHeader />
-        <main id="main" className="min-h-[60vh] bg-ground py-8 text-ink">
-          <Container>
-            <MainnetPending />
-          </Container>
-        </main>
-      </>
-    )
-  }
   return (
     <>
-      <TestnetBanner />
+      <NetworkBanner />
       <DashboardHeader />
       <main id="main" className="min-h-[60vh] bg-ground py-8 text-ink">
         <Container>

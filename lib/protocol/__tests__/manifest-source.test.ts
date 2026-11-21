@@ -1,9 +1,10 @@
 // @vitest-environment node
 import { afterEach, describe, expect, it, vi } from "vitest"
 import localJson from "@/config/manifests/local.json"
+import mainnetJson from "@/config/manifests/mainnet.json"
 import testnetJson from "@/config/manifests/testnet.json"
-import { MainnetPendingError } from "../manifest"
-import { activeManifest, activeNetwork, manifestPending } from "../manifest-source"
+import { seedMarketParams } from "@/lib/app/static-params"
+import { activeManifest, activeNetwork } from "../manifest-source"
 
 afterEach(() => {
   vi.unstubAllEnvs()
@@ -34,12 +35,13 @@ describe("activeManifest (M8)", () => {
   })
 })
 
-describe("the Mainnet branch (D-24)", () => {
-  it("throws MainnetPendingError for the committed stub, every time", () => {
+describe("the Mainnet manifest", () => {
+  it("is the active manifest under mainnet: its five markets are the seeds the build prerenders", () => {
     vi.stubEnv("NEXT_PUBLIC_PRINCIPAL_NETWORK", "mainnet")
-    expect(() => activeManifest()).toThrow(MainnetPendingError)
-    expect(() => activeManifest()).toThrow("Mainnet contracts are not deployed yet.")
-    expect(manifestPending()).toBe(true)
+    const m = activeManifest()
+    expect(m.network).toBe("mainnet")
+    expect(m.markets).toHaveLength(5)
+    expect(seedMarketParams()).toEqual(mainnetJson.markets.map((x) => ({ marketId: x.marketId })))
   })
 
   it("names the network without parsing its manifest, for the static shell", () => {
@@ -47,10 +49,8 @@ describe("the Mainnet branch (D-24)", () => {
     expect(activeNetwork()).toBe("mainnet")
     vi.stubEnv("NEXT_PUBLIC_PRINCIPAL_NETWORK", "local")
     expect(activeNetwork()).toBe("local")
-    expect(manifestPending()).toBe(false)
     vi.stubEnv("NEXT_PUBLIC_PRINCIPAL_NETWORK", undefined)
     expect(activeNetwork()).toBe("testnet")
-    expect(manifestPending()).toBe(false)
   })
 })
 
@@ -68,6 +68,5 @@ describe("the file matches the network asked for (fix round 1)", () => {
     expect(() => source.activeManifest()).toThrow('config/manifests/mainnet.json is for "testnet", not "mainnet"')
     // Every time: the refusal is never cached as a manifest.
     expect(() => source.activeManifest()).toThrow("is for")
-    expect(() => source.manifestPending()).toThrow("is for")
   })
 })

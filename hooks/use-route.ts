@@ -8,6 +8,7 @@ import { useMarketState } from "@/hooks/use-market-state"
 import { useMatured } from "@/hooks/use-matured"
 import { useSettings } from "@/hooks/use-settings"
 import { derive, ratesFrom, simulate } from "@/hooks/use-simulation"
+import { removePending } from "@/lib/app/pending-tx"
 import {
   closedCopy,
   firstOpen,
@@ -40,14 +41,9 @@ import {
   type Unwind,
 } from "@/lib/protocol/routes"
 import { errorReason, userErrorMessage } from "@/lib/protocol/errors"
-import {
-  createRpcServer,
-  failedTransactionReason,
-  pollTransactionStatus,
-  transactionEnvelopeHash,
-  type ContractInvocation,
-  type SimulationOutcome,
-} from "@/lib/protocol/stellar"
+import { forgetInFlight } from "@/lib/protocol/rpc-limiter"
+import { transactionEnvelopeHash, type ContractInvocation, type SimulationOutcome } from "@/lib/protocol/stellar"
+import { lookupTransaction } from "@/lib/protocol/tx-lookup"
 import type { Manifest } from "@/lib/protocol/types"
 
 /**
@@ -85,7 +81,7 @@ export type RouteState = {
    * the slippage setting (D-26 item 4). A warning only: the step can still be signed.
    */
   quoteWarning?: true
-  /** Interrupted: the single call back to USDY, or why there is none. */
+  /** Interrupted: the single call back to the market's asset, or why there is none. */
   unwind?: { available: true; amount: bigint } | { available: false; reason: string }
   /** Interrupted by an archived entry: the call to restore first (0001's restore flow). */
   restore?: { source: string; invocation: ContractInvocation }
@@ -137,7 +133,7 @@ export type RouteControls = {
   sign(): void
   /** Interrupted: prepares the first step not confirmed. Waiting: re-checks the unknown step by its hash. */
   continue(): void
-  /** Interrupted: replaces the remaining steps by the single call back to USDY, and prepares it. */
+  /** Interrupted: replaces the remaining steps by the single call back to the market's asset, and prepares it. */
   unwind(): void
   /**
    * Closes what is on screen: a review not signed yet, a finished or interrupted route, or a lost
@@ -165,24 +161,20 @@ type Prepared = { review: Review; draft: ActionInput; outcome: SimulationOutcome
 
 const HOLDINGS: readonly string[] = ["underlying", "sy", "pt", "yt", "lp"]
 
-/** The run's logged preview when it has the right shape; a run turned back into USDY is never compared. */
+/** The run's logged preview when it has the right shape; a run turned back into the market's asset is never compared. */
 function previewOf(run: RouteRun): StepPreview | undefined {
   const p = run.preview as Partial<StepPreview> | undefined
   if (run.unwound || !p || typeof p !== "object") return undefined
   return typeof p.step === "number" && typeof p.amount === "bigint" && typeof p.token === "string" && HOLDINGS.includes(p.token) ? (p as StepPreview) : undefined
 }
 
-type Lookup =
+/** A look at a step by its hash, with a confirmed step's output read for its action. */
+type StepLookup =
   | { status: "SUCCESS"; output: ActionOutput | null; decodeError?: string }
   | { status: "FAILED"; reason: string }
   | { status: "NOT_FOUND"; final: boolean; lost: boolean }
 
-type PollServer = NonNullable<Parameters<typeof pollTransactionStatus>[0]["server"]>
-
 const IDLE: View = { phase: "idle", index: 0 }
-
-/** Slack for the interpolated ledger clock when deciding a step cannot have landed before `sentAt`. */
-const CLOCK_SLACK_S = 60
 
 const text = (error: unknown) => userErrorMessage(error)
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0))
@@ -209,16 +201,6 @@ const neverLanded = (n: number) =>
 const MOVED_ON = "This route moved on in another window."
 const unreadable = (n: number, why?: string) =>
   `Step ${n} went through, but its result could not be read${why ? ` (${why})` : ""}, so this app does not know the amount step ${n + 1} should use. Check your balances in the Portfolio.`
-
-/**
- * A ledger close time as RPC passes it through from its JSON: a number or a decimal string (as
- * `getLedgerClock` reads `closeTime`). Anything else is unknown, so it can never prove a step lost.
- */
-function closeTimeOf(value: unknown): number | undefined {
-  if (typeof value === "string" ? value.trim() === "" : typeof value !== "number") return undefined
-  const n = Number(value)
-  return Number.isFinite(n) && n > 0 ? n : undefined
-}
 
 /** The run as the log has it now; undefined when it is not there or the log cannot be read. */
 const storedCopy = (run: RouteRun): RouteRun | undefined => readRoutes(run.account).find((r) => r.id === run.id)
@@ -261,6 +243,15 @@ const holdingsOf = (run: RouteRun): Holdings | undefined =>
   routeHoldings(run.request, run.plans, run.outputs, firstOpen(run))
 
 /**
+ * The market's asset, which the holdings and the way back name. Read from the manifest, never from the
+ * run: runs logged before plan 0009 carry no code. Neutral words for a market no longer in the manifest.
+ */
+function assetOf(manifest: Manifest, marketId: string): { code: string; decimals: number } {
+  const u = getMarket(manifest, marketId)?.underlying
+  return u ? { code: u.code, decimals: u.decimals } : { code: "the underlying", decimals: 7 }
+}
+
+/**
  * Waiting on step `n`: what the confirmed steps left before it, said as such, since the unknown step
  * may have changed it (ruling R2-24: shown before a lost step can be closed).
  */
@@ -274,49 +265,30 @@ function waitingHoldings(run: RouteRun, n: number, underlying: { code: string; d
 }
 
 /**
- * What the confirmed steps left with the user, in words, and the single call back to USDY from it;
- * after maturity its reason names Redeem rather than a sale that has closed.
+ * What the confirmed steps left with the user, in words, and the single call back to the market's
+ * asset from it; after maturity its reason names Redeem rather than a sale that has closed.
  */
 function interruption(run: RouteRun, underlying: { code: string; decimals: number }, matured: boolean): { holdings: string; unwind: Unwind } {
-  if (firstOpen(run) === 0) return { holdings: NOTHING_MOVED, unwind: unwindFrom({}) }
+  if (firstOpen(run) === 0) return { holdings: NOTHING_MOVED, unwind: unwindFrom({}, underlying.code) }
   const h = holdingsOf(run)
-  if (!h) return { holdings: UNREADABLE_HOLDINGS, unwind: unwindFrom(undefined) }
-  return { holdings: describeHoldings(h, underlying) ?? NOTHING_LEFT, unwind: unwindFrom(h, { matured }) }
+  if (!h) return { holdings: UNREADABLE_HOLDINGS, unwind: unwindFrom(undefined, underlying.code) }
+  return { holdings: describeHoldings(h, underlying) ?? NOTHING_LEFT, unwind: unwindFrom(h, underlying.code, { matured }) }
 }
 
 /**
- * One look at a sent step by its hash, through the 0001 poll helper. A NOT_FOUND is `final` only when
- * the network can no longer include it (its ledger close time passed the transaction's time bound)
- * and RPC's history reaches back to before it was sent; `lost` when the time bound passed but the
- * history does not reach that far.
+ * One look at a sent step by its hash (`lookupTransaction`: `final` and `lost` as it decides them),
+ * with a confirmed step's output read for its action: null, with the reason, when it cannot be read.
  */
-async function lookup(manifest: Manifest, action: ActionId, step: RouteStep): Promise<Lookup> {
-  const { rpcUrl } = manifest
-  const rpc = createRpcServer(rpcUrl)
-  let window: { latest?: number; oldest?: number } = {}
-  const server: PollServer = {
-    getTransaction: async (hash) => {
-      const res = await rpc.getTransaction(hash)
-      window = { latest: closeTimeOf(res.latestLedgerCloseTime), oldest: closeTimeOf(res.oldestLedgerCloseTime) }
-      return res
-    },
+async function lookup(manifest: Manifest, action: ActionId, step: RouteStep): Promise<StepLookup> {
+  const found = await lookupTransaction(manifest, { hash: step.hash ?? "", validUntil: step.validUntil, sentAt: step.sentAt })
+  if (found.status !== "SUCCESS") return found
+  if (found.decodeError) return { status: "SUCCESS", output: null, decodeError: found.decodeError }
+  if (found.returnValue === undefined) return { status: "SUCCESS", output: null, decodeError: "it returned no value" }
+  try {
+    return { status: "SUCCESS", output: parseOutput(action, found.returnValue) }
+  } catch (error) {
+    return { status: "SUCCESS", output: null, decodeError: text(error) }
   }
-  const polled = await pollTransactionStatus({ rpcUrl, hash: step.hash ?? "", attempts: 1, server })
-  if (polled.status === "SUCCESS") {
-    if (polled.decodeError) return { status: "SUCCESS", output: null, decodeError: polled.decodeError }
-    if (polled.returnValue === undefined) return { status: "SUCCESS", output: null, decodeError: "it returned no value" }
-    try {
-      return { status: "SUCCESS", output: parseOutput(action, polled.returnValue) }
-    } catch (error) {
-      return { status: "SUCCESS", output: null, decodeError: text(error) }
-    }
-  }
-  if (polled.status === "FAILED") return { status: "FAILED", reason: failedTransactionReason(polled.failure) }
-  const { latest, oldest } = window
-  const pastLimit = step.validUntil !== undefined && latest !== undefined && latest > step.validUntil
-  const covered = step.sentAt !== undefined && oldest !== undefined && oldest <= step.sentAt - CLOCK_SLACK_S
-  const final = pastLimit && covered
-  return { status: "NOT_FOUND", final, lost: !final && (step.validUntil === undefined || pastLimit) }
 }
 
 /**
@@ -414,6 +386,8 @@ export function useRoute(opts: UseRouteOptions): RouteControls {
     /** Refetches the account and market reads, then lets the panel render them so `gate` sees them. */
     async function refreshReads() {
       const { network } = latest.current.manifest
+      // A step landed: no refetch may join a read sent before it (the gate would see pre-step figures).
+      forgetInFlight()
       try {
         await Promise.all([
           queryClient.refetchQueries({ queryKey: ["account", network] }),
@@ -460,6 +434,10 @@ export function useRoute(opts: UseRouteOptions): RouteControls {
           guards: openGuards(plan.action, amounts.amount, rates),
           deadline: BigInt(ledgerAt + latest.current.deadlineSeconds),
         }
+        // The call this manifest's contracts take, built before anything is simulated: a plan logged
+        // before the version-2 arguments (a step without its `sy_in` or `pt_in`) stops here with the
+        // reason, and nothing is sent with the wrong argument count (plan 0009, Review Focus 1).
+        invocationFor(latest.current.manifest, draft)
         const outcome = await simulate(latest.current.manifest, draft)
         if (!live(g)) return
         const restore =
@@ -563,7 +541,7 @@ export function useRoute(opts: UseRouteOptions): RouteControls {
       busy.current = true
       const { error, lost } = viewRef.current
       show(g, { phase: "waiting", index: i, checking: true, ...(error ? { error } : {}), ...(lost ? { lost } : {}) })
-      let found: Lookup
+      let found: StepLookup
       try {
         found = await lookup(latest.current.manifest, step.action, step)
       } catch (error) {
@@ -578,6 +556,9 @@ export function useRoute(opts: UseRouteOptions): RouteControls {
       }
       release(g)
       const hash = step.hash
+      // Settled (landed, failed, or past its time bound): useExecute kept this send pending for the
+      // single-action panel's guard (M-21), and that entry goes now, whatever the log says below.
+      if (hash && (found.status !== "NOT_FOUND" || found.final || found.lost)) removePending(r.account, hash)
       // Written only over the copy this look started from: another window may have moved on since.
       if (found.status === "SUCCESS") {
         const cur = withStep(r, i, { action: step.action, status: "confirmed", hash }, found.output)
@@ -640,7 +621,7 @@ export function useRoute(opts: UseRouteOptions): RouteControls {
       const r = runRef.current
       if (!r || busy.current || viewRef.current.phase !== "interrupted") return
       const k = firstOpen(r)
-      const u = unwindFrom(holdingsOf(r))
+      const u = unwindFrom(holdingsOf(r), assetOf(latest.current.manifest, r.marketId).code)
       if (!u.available || r.steps[k]?.status === "unknown") return
       const g = gen.current
       const next: RouteRun = {
@@ -756,8 +737,7 @@ export function useRoute(opts: UseRouteOptions): RouteControls {
     return () => clearInterval(id)
   }, [view, engine])
 
-  const market = getMarket(manifest, marketId)
-  const underlying = market ? { code: market.underlying.code, decimals: market.underlying.decimals } : { code: "USDY", decimals: 7 }
+  const underlying = assetOf(manifest, marketId)
   const n = run?.steps.length ?? 0
   const idle = view.phase === "idle" || run === null
   const stop = view.phase === "interrupted" && run ? interruption(run, underlying, matured) : undefined

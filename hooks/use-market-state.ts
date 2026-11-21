@@ -7,23 +7,26 @@ import { createRpcReader } from "@/lib/protocol/reader"
 import type { Manifest } from "@/lib/protocol/types"
 
 export const MARKET_REFETCH_MS = 6000
+/** The market list and the manage list: every market's figures at once, so less often than one market's page (spec 0005 M-20). */
+export const MARKET_LIST_REFETCH_MS = 30_000
 
-function marketQuery(m: Manifest, marketId: string) {
+function marketQuery(m: Manifest, marketId: string, refetchMs = MARKET_REFETCH_MS) {
   return {
     queryKey: ["market", m.network, marketId],
     queryFn: () => fetchMarketState(createRpcReader(m), m, marketId),
-    refetchInterval: MARKET_REFETCH_MS,
+    refetchInterval: refetchMs,
   }
 }
 
 /**
- * Several markets at once (the list needs every market's figures for its asset rows). Same query
- * keys as `useMarketState`, so the market page reuses what the list fetched.
+ * Several markets at once (the list needs every market's figures for its asset rows), refetched
+ * every `refetchMs`: the lists pass `MARKET_LIST_REFETCH_MS`. Same query keys as `useMarketState`,
+ * so the market page reuses what the list fetched, and keeps its own 6 s.
  */
-export function useMarketStates(marketIds: string[]) {
+export function useMarketStates(marketIds: string[], refetchMs = MARKET_REFETCH_MS) {
   const m = useManifest()
   return useQueries({
-    queries: marketIds.map((id) => marketQuery(m, id)),
+    queries: marketIds.map((id) => marketQuery(m, id, refetchMs)),
     combine: (results) => results.map((q) => ({ data: q.data, isPending: q.isPending, stale: q.isError })),
   })
 }

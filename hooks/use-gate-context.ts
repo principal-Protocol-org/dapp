@@ -10,7 +10,7 @@ import type { AccountState } from "@/lib/protocol/account-state"
 import { evaluateAccountCompliance } from "@/lib/protocol/compliance"
 import { errorReason } from "@/lib/protocol/errors"
 import type { Blocker, GateContext } from "@/lib/protocol/gates"
-import { getMarket } from "@/lib/protocol/manifest"
+import { getMarket, protocolAbi } from "@/lib/protocol/manifest"
 import { useManifest } from "@/components/app/manifest-provider"
 import type { MarketState } from "@/lib/protocol/market-state"
 import type { WalletState } from "@/lib/protocol/types"
@@ -49,7 +49,8 @@ export function useGateContext(marketId: string): GateInputs {
   const market = useMarketState(marketId)
   const accountQuery = useAccountState(marketId)
   const compliance = useMarketCompliance(marketId)
-  const contracts = getMarket(manifest, marketId)?.contracts
+  const entry = getMarket(manifest, marketId)
+  const contracts = entry?.contracts
   const managerId = contracts?.manager
 
   const ms = market.stale ? undefined : market.data
@@ -88,7 +89,7 @@ export function useGateContext(marketId: string): GateInputs {
   }
 
   let base: GateInputs["base"] = null
-  if (unavailable.length === 0 && ms && ledgerTime !== null && managerId !== undefined) {
+  if (unavailable.length === 0 && ms && ledgerTime !== null && entry !== undefined && managerId !== undefined) {
     const model = compliance.data
     const kind = !compliance.isError && model?.status === "live" ? model.value.kind : null
     const kindError =
@@ -98,9 +99,12 @@ export function useGateContext(marketId: string): GateInputs {
       wallet,
       market: ms,
       account,
-      compliance: account ? evaluateAccountCompliance(account, kind, kindError) : [],
+      compliance: account ? evaluateAccountCompliance(account, kind, kindError, manifest.network) : [],
       ledgerTime,
       managerId,
+      network: manifest.network,
+      protocolAbi: protocolAbi(manifest),
+      underlying: entry.underlying.code,
     }
   }
 

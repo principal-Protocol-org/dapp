@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
-# Push a fresh, higher reference value to the OracleAdapter (local, or testnet with PRINCIPAL_NETWORK=testnet,
-# where the app's /api/cron/oracle schedule normally does it).
-# Usage: [PRINCIPAL_NETWORK=local|testnet] scripts/dev-stack/oracle-tick.sh [--apy <percent>] [rate]
-#   rate: 7-decimal integer (10000000 = 1.0); when given it wins over --apy.
+# Push a fresh, higher reference value to every OracleAdapter of the manifest (local, or testnet with
+# PRINCIPAL_NETWORK=testnet, where the app's /api/cron/oracle schedule normally does it): each distinct
+# .markets[].contracts.oracle, in manifest order. The local stack has two, one per market.
+# Usage: [PRINCIPAL_NETWORK=local|testnet] [ORACLE_TICK_ORACLE=<contract id>] scripts/dev-stack/oracle-tick.sh [--apy <percent>] [rate]
+#   rate: 7-decimal integer (10000000 = 1.0); when given it wins over --apy. A rate is one oracle's value:
+#   with several oracles, name the one with ORACLE_TICK_ORACLE.
 #   --apy <percent>: yearly growth, default 5. New rate = current x (1 + apy/100)^(elapsed/31536000),
-#   elapsed = seconds since the oracle's last reference timestamp, rounded down, never below current.
+#   elapsed = seconds since that oracle's last reference timestamp, rounded down, never below current.
+#   ORACLE_TICK_ORACLE=<contract id>: tick that oracle only; the manifest must name it.
+# Each oracle is read on its own: its current value, its last timestamp and its primary source.
 # The timestamp is the latest ledger close time (the oracle rejects future timestamps), so run it
 # at least every hour (the freshness window, max_stale_seconds, is 3600 s); every 30 minutes is comfortable.
+# With one oracle it prints one line, "oracle rate <old> -> <new> at ledger time <t>"; with several, one
+# line per oracle, "oracle <id> rate ...". The first failure stops the run.
 set -euo pipefail
 # shellcheck source=common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
@@ -34,40 +40,80 @@ while [ $# -gt 0 ]; do
   esac
 done
 [[ "$APY" =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "--apy must be a non-negative number (percent), got '$APY'"
+[ -z "$RATE_ARG" ] || [[ "$RATE_ARG" =~ ^[0-9]+$ ]] || die "rate must be a positive integer with 7 decimals (e.g. 10001000), got '$RATE_ARG'"
 
-ORACLE="$(jq -er '.shared.oracle // .markets[0].contracts.oracle' "$MANIFEST")" || die "cannot read the oracle id from $MANIFEST"
-[[ "$ORACLE" =~ ^C[A-Z2-7]{55}$ ]] || die "manifest oracle id is not a contract id (is $NETWORK.json still the example file?)"
+# The oracles: each distinct market oracle in manifest order (shared.oracle when no market is listed),
+# one id per line.
+ORACLES="$(jq -r '([.markets[]?.contracts.oracle] | reduce .[] as $o ([]; if any(.[]; . == $o) then . else . + [$o] end)) as $list |
+  (if ($list | length) > 0 then $list else [.shared.oracle // empty] end) | .[]' "$MANIFEST")" ||
+  die "cannot read the oracle ids from $MANIFEST"
+[ -n "$ORACLES" ] || die "$MANIFEST names no oracle"
+while IFS= read -r id; do
+  [[ "$id" =~ ^C[A-Z2-7]{55}$ ]] || die "manifest oracle id is not a contract id (is $NETWORK.json still the example file?)"
+done <<<"$ORACLES"
+if [ -n "${ORACLE_TICK_ORACLE:-}" ]; then
+  # One contract id and nothing else, before the list check: grep reads each line of its pattern as a pattern
+  # of its own, so a value of several lines (one of them listed) would pass it and then be ticked as given.
+  # `=~` refuses any newline, a trailing one too, and a CLI alias.
+  [[ "$ORACLE_TICK_ORACLE" =~ ^C[A-Z2-7]{55}$ ]] || die "ORACLE_TICK_ORACLE is not a contract id (one line: C and 55 base32 characters)"
+  grep -qxF -- "$ORACLE_TICK_ORACLE" <<<"$ORACLES" ||
+    die "ORACLE_TICK_ORACLE $ORACLE_TICK_ORACLE is not an oracle of $MANIFEST (it names $(tr '\n' ' ' <<<"$ORACLES" | sed 's/ $//'))"
+  ORACLES="$ORACLE_TICK_ORACLE"
+fi
+COUNT="$(grep -c . <<<"$ORACLES")"
+# Checked before anything is read or signed: a rate meant for one oracle would push a value that is
+# lower than (never allowed), or far from (refused as deviate), another oracle's.
+[ -z "$RATE_ARG" ] || [ "$COUNT" -eq 1 ] || die "a rate is one oracle's value, and $MANIFEST names $COUNT oracles: set ORACLE_TICK_ORACLE=<contract id> to pick one, or leave the rate out (each grows by --apy)"
+
 rpc_healthy || die "the $NETWORK network is not answering on $RPC_URL."
 ORACLE_ADMIN="$(stellar keys address "$ORACLE_KEY")" || die "key $ORACLE_KEY is missing"
 
-# Reads are simulations only (--send=no): they never sign or send, whatever the CLI's default would do.
-view() { stellar contract invoke --id "$ORACLE" --source "$ORACLE_KEY" --network "$NETWORK" --send=no -- "$@"; }
+# view <oracle id> <fn> [args...]: reads are simulations only (--send=no): they never sign or send,
+# whatever the CLI's default would do.
+view() {
+  local id="$1"
+  shift
+  stellar contract invoke --id "$id" --source "$ORACLE_KEY" --network "$NETWORK" --send=no -- "$@"
+}
 
-CURRENT="$(view get_reference_value | tr -d '"[:space:]')"
-[[ "$CURRENT" =~ ^[0-9]+$ ]] || die "unexpected oracle value '$CURRENT'"
-TS="$(ledger_close_time)"
-if [ -n "$RATE_ARG" ]; then
-  NEW="$RATE_ARG"
-  [[ "$NEW" =~ ^[0-9]+$ ]] || die "rate must be a positive integer with 7 decimals (e.g. 10001000), got '$NEW'"
-else
-  LAST_TS="$(view get_reference_timestamp | tr -d '"[:space:]')"
-  [[ "$LAST_TS" =~ ^[0-9]+$ ]] || die "unexpected oracle timestamp '$LAST_TS'"
-  # current x (1 + apy/100)^(elapsed/year), floored; a double is exact enough for a dev rate, the result stays >= current.
-  NEW="$(node -e '
-    const c = BigInt(process.argv[1]); const apy = Number(process.argv[2]);
-    const elapsed = Math.max(0, Number(process.argv[3]) - Number(process.argv[4]));
-    const f = Math.pow(1 + apy / 100, elapsed / 31536000);
-    const scaled = BigInt(Math.floor(f * 1e12));
-    const n = (c * scaled) / 1000000000000n;
-    console.log((n > c ? n : c).toString())' "$CURRENT" "$APY" "$TS" "$LAST_TS")"
-fi
-[ "$NEW" -ge "$CURRENT" ] || die "the oracle never decreases: new $NEW < current $CURRENT"
+# tick <oracle id>: one push to that oracle, from its own current value and under its own primary source.
+# With several oracles, its line and its errors name it.
+tick() {
+  local id="$1" label="oracle" at="" current ts new last_ts primary result
+  if [ "$COUNT" -gt 1 ]; then
+    label="oracle $id"
+    at="$id: "
+  fi
+  current="$(view "$id" get_reference_value | tr -d '"[:space:]')"
+  [[ "$current" =~ ^[0-9]+$ ]] || die "${at}unexpected oracle value '$current'"
+  ts="$(ledger_close_time)"
+  if [ -n "$RATE_ARG" ]; then
+    new="$RATE_ARG"
+  else
+    last_ts="$(view "$id" get_reference_timestamp | tr -d '"[:space:]')"
+    [[ "$last_ts" =~ ^[0-9]+$ ]] || die "${at}unexpected oracle timestamp '$last_ts'"
+    # current x (1 + apy/100)^(elapsed/year), floored; a double is exact enough for a dev rate, the result stays >= current.
+    new="$(node -e '
+      const c = BigInt(process.argv[1]); const apy = Number(process.argv[2]);
+      const elapsed = Math.max(0, Number(process.argv[3]) - Number(process.argv[4]));
+      const f = Math.pow(1 + apy / 100, elapsed / 31536000);
+      const scaled = BigInt(Math.floor(f * 1e12));
+      const n = (c * scaled) / 1000000000000n;
+      console.log((n > c ? n : c).toString())' "$current" "$APY" "$ts" "$last_ts")"
+  fi
+  [ "$new" -ge "$current" ] || die "${at}the oracle never decreases: new $new < current $current"
 
-# v2 (R4-8): the source id is the oracle's primary source; Option<BytesN<32>> prints as a JSON hex string.
-SOURCE="$(view get_primary_source | tr -d '"[:space:]')"
-[[ "$SOURCE" =~ ^[0-9a-f]{64}$ ]] || die "the oracle has no primary source (not initialized with set_sources, or a v1 oracle)"
-RESULT="$(invoke "$ORACLE_KEY" "$ORACLE" set_reference_value --caller "$ORACLE_ADMIN" --source "$SOURCE" --value "$NEW" --timestamp "$TS" | tr -d '"[:space:]')" ||
-  die "set_reference_value failed (the transaction reverted)"
-# A rejection is a successful transaction that returns false (a second tick within the same ledger second returns false with reason stale_ts).
-[ "$RESULT" = "true" ] || die "the oracle rejected the value (returned '$RESULT'): $(view last_rejection)"
-echo "oracle rate $CURRENT -> $NEW at ledger time $TS"
+  # v2 (R4-8): the source id is the oracle's primary source; Option<BytesN<32>> prints as a JSON hex string.
+  primary="$(view "$id" get_primary_source | tr -d '"[:space:]')"
+  [[ "$primary" =~ ^[0-9a-f]{64}$ ]] || die "${at}the oracle has no primary source (not initialized with set_sources, or a v1 oracle)"
+  result="$(invoke "$ORACLE_KEY" "$id" set_reference_value --caller "$ORACLE_ADMIN" --source "$primary" --value "$new" --timestamp "$ts" | tr -d '"[:space:]')" ||
+    die "${at}set_reference_value failed (the transaction reverted)"
+  # A rejection is a successful transaction that returns false (a second tick within the same ledger second returns false with reason stale_ts).
+  [ "$result" = "true" ] || die "${at}the oracle rejected the value (returned '$result'): $(view "$id" last_rejection)"
+  echo "$label rate $current -> $new at ledger time $ts"
+}
+
+# Read from fd 3: the CLI calls inside keep the caller's stdin.
+while IFS= read -r id <&3; do
+  tick "$id"
+done 3<<<"$ORACLES"

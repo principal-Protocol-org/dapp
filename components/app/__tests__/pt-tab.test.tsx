@@ -140,6 +140,37 @@ describe("PT tab — Buy", () => {
     expect(payoffTip).toMatch(/About 5\.2666 USDY at today's USDY price \(indicative\)/)
   })
 
+  it("Testnet (no tracked asset): the card and the payoff hint keep their words, byte for byte", async () => {
+    simulateReturns(mocks, 1_106_350_000n)
+    await renderUi(<PtTab marketId="m1" side="buy" />)
+    expect(screen.getByText(/^Each PT redeems/).textContent).toBe("Each PT redeems for $1 of USDY at maturity, so buying it below $1 fixes your return in USD.")
+    await pick("Pay with", /SY/)
+    await enter("You pay", "100.1")
+    expect(await tipOf("At maturity")).toBe(
+      "Fixed in USD whatever USDY's price does. About 5.2666 USDY at today's USDY price (indicative). Counted in USDY, this falls as USDY's price rises, so only the USD figure is fixed.",
+    )
+  })
+
+  it("a mock asset that tracks a real one (Mainnet): the USD figure is at the oracle's price at maturity, which never goes down", async () => {
+    mocks.manifest = {
+      ...usdyManifest,
+      network: "mainnet",
+      markets: [{ ...MARKET, underlying: { ...MARKET.underlying, code: "MOCKGILTS", tracks: "GILTS" } }],
+    } as unknown as typeof mocks.manifest
+    simulateReturns(mocks, 1_106_350_000n)
+    await renderUi(<PtTab marketId="m1" side="buy" />)
+    expect(screen.getByText(/^Each PT redeems/).textContent).toBe(
+      "Each PT redeems at maturity for $1 of MOCKGILTS, priced by this market's oracle at maturity. Buying it below $1 fixes your return at that price.",
+    )
+    await pick("Pay with", /SY/)
+    await enter("You pay", "100.1")
+    // The same figures as on Testnet: only the words around them change.
+    expect(detail("At maturity")).toBe("+$5.53 (5.26%)")
+    expect(await tipOf("At maturity")).toBe(
+      "In USD at the oracle's price at maturity. The oracle's price never goes down, so if MOCKGILTS's market price ends lower, the MOCKGILTS you receive is worth less than this. About 5.2666 MOCKGILTS at today's oracle price (indicative).",
+    )
+  })
+
   it("simulated output replaces the indicative one and the APY after is recomputed from it", async () => {
     let answer: (value: unknown) => void = () => {}
     mocks.simulateInvocation.mockImplementation(() => new Promise((resolve) => (answer = resolve)))
@@ -368,7 +399,7 @@ describe("PT tab — a quote it cannot work out", () => {
 
 /** A Buy PT paid in USDY whose deposit confirmed: the user holds its SY between the steps. */
 function buyPtRun(id: string, startedAt: number, sy: bigint): RouteRun {
-  const request: RouteRequest = { kind: "buy_pt", marketId: "m1", source: A, amount: 100n * 10_000_000n, pay: "underlying", receive: "underlying", matured: false }
+  const request: RouteRequest = { kind: "buy_pt", marketId: "m1", source: A, amount: 100n * 10_000_000n, pay: "underlying", receive: "underlying", matured: false, underlying: "USDY" }
   return {
     id,
     account: A,

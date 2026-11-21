@@ -159,6 +159,9 @@ function healthyCtx(action: ActionId): GateContext {
     ledgerTime: action === "redeem" ? AFTER : BEFORE,
     simulation: okSimulation,
     managerId: MANAGER,
+    network: "testnet",
+    protocolAbi: 1,
+    underlying: "USDY",
   }
 }
 
@@ -1607,5 +1610,112 @@ describe("breakerReport and capCharge for the one-transaction Router actions (R2
       expect(breakerReport(at(a), { market })).toBe(0n)
       expect(capCharge(at(a))).toBe(0n)
     }
+  })
+})
+
+describe("protocolAbi 2: the literal in secondaryAmount of mint, buy_pt_underlying and buy_yt is never read as an amount (plan 0009)", () => {
+  /** On version 2 these three carry sy_in (or Buy YT's pt_in) there: a value the user neither gives nor holds. */
+  const THREE: ActionId[] = ["mint", "buy_pt_underlying", "buy_yt"]
+  const literal = (action: ActionId) => (action === "buy_yt" ? 9n * UNIT : 10n * UNIT)
+
+  it("the amount gate reads the amount alone: a literal never stands in for it, nor refuses a valid one", () => {
+    for (const action of THREE) {
+      expect(gates(action, undefined, { secondaryAmount: literal(action) }), action).toEqual(gates(action))
+      expect(codes(gates(action, undefined, { amount: 0n, secondaryAmount: literal(action) })), action).toContain("amount")
+      expect(gates(action, undefined, { secondaryAmount: 0n }), action).toEqual([])
+    }
+  })
+
+  it("balances: the literal is not checked against any balance (no PT is needed for Buy YT's pt_in, no SY for a split's sy_in)", () => {
+    const none: Mutate = (c) => {
+      c.account!.pt = live(0n)
+      c.account!.sy = live(0n)
+    }
+    expect(gates("mint", none, { secondaryAmount: BIG })).toEqual([])
+    expect(gates("buy_pt_underlying", none, { secondaryAmount: BIG })).toEqual([])
+    expect(gates("buy_yt", (c) => (c.account!.pt = live(0n)), { secondaryAmount: BIG })).toEqual([])
+    // The amount is still what is spent.
+    expect(codes(gates("buy_yt", (c) => (c.account!.sy = live(UNIT)), { secondaryAmount: literal("buy_yt") }))).toContain("balance")
+  })
+
+  it("the breaker report and the deposit cap charge count the amount, as on version 1", () => {
+    const market = healthyMarket()
+    for (const action of THREE) {
+      const v1 = inputFor(action)
+      const v2 = inputFor(action, { secondaryAmount: literal(action) * 3n })
+      expect(breakerReport(v2, { market }), action).toBe(breakerReport(v1, { market }))
+      expect(capCharge(v2), action).toBe(capCharge(v1))
+    }
+    expect(breakerReport(inputFor("mint", { secondaryAmount: 7n * UNIT }), { market })).toBe(20n * UNIT)
+    expect(capCharge(inputFor("buy_pt_underlying", { secondaryAmount: 7n * UNIT }))).toBe(10n * UNIT)
+  })
+})
+
+describe("the circuit-breaker message by contract version (plan 0009)", () => {
+  const FIXED_TAIL = "Lower the amount or wait for the window to reset."
+  const SLIDING_TAIL = "The protocol's deposit limit is reached for now. Room frees up gradually: try a smaller amount or try again later."
+  const protocolFull: Mutate = (c) => {
+    c.market.cb.limit = live(100n * UNIT)
+    c.market.cb.volume = live(95n * UNIT)
+  }
+  const assetFull: Mutate = (c) => {
+    c.market.cb.assetLimit = live(100n * UNIT)
+    c.market.cb.assetVolume = live(95n * UNIT)
+  }
+  const breaker = (ctx: Pick<GateContext, "network" | "protocolAbi">, full: Mutate = protocolFull) => {
+    const found = gates("deposit", (c, a) => {
+      c.network = ctx.network
+      c.protocolAbi = ctx.protocolAbi
+      full(c, a)
+    }).filter((b) => b.code === "risk")
+    expect(found).toHaveLength(1)
+    return found[0].message
+  }
+
+  it("version 1 (a fixed window): the message is unchanged", () => {
+    expect(breaker({ network: "testnet", protocolAbi: 1 })).toBe(
+      "This would trip the protocol-wide circuit breaker: 95 of its 100 limit is already used in the current window and this adds 10. Room left: 5. Lower the amount or wait for the window to reset.",
+    )
+  })
+
+  it("version 2 (a sliding window): the same figures, then room that frees up gradually; no reset", () => {
+    const v1 = breaker({ network: "testnet", protocolAbi: 1 })
+    const v2 = breaker({ network: "mainnet", protocolAbi: 2 })
+    expect(v2).toBe(v1.replace(FIXED_TAIL, SLIDING_TAIL))
+    expect(v2.endsWith(`Room left: 5. ${SLIDING_TAIL}`)).toBe(true)
+    expect(v2).not.toMatch(/reset/)
+  })
+
+  it("the per-asset breaker follows the version the same way", () => {
+    expect(breaker({ network: "testnet", protocolAbi: 1 }, assetFull)).toMatch(/^This would trip the per-asset circuit breaker: 95 of its 100 limit .* Lower the amount or wait for the window to reset\.$/)
+    expect(breaker({ network: "mainnet", protocolAbi: 2 }, assetFull)).toBe(breaker({ network: "testnet", protocolAbi: 1 }, assetFull).replace(FIXED_TAIL, SLIDING_TAIL))
+  })
+
+  it("the version decides it, never the network (the local stack is version 2)", () => {
+    expect(breaker({ network: "local", protocolAbi: 2 })).toBe(breaker({ network: "mainnet", protocolAbi: 2 }))
+    expect(breaker({ network: "mainnet", protocolAbi: 1 })).toBe(breaker({ network: "testnet", protocolAbi: 1 }))
+  })
+})
+
+describe("the risk-control pause names the market's asset (plan 0009, Task 13)", () => {
+  const paused = (underlying: string) => {
+    const found = gates("deposit", (c) => {
+      c.underlying = underlying
+      c.market.riskPaused = live(true)
+    }).filter((b) => b.code === "pause")
+    expect(found).toHaveLength(1)
+    return found[0].message
+  }
+
+  it("on Testnet (USDY) it reads as before, word for word", () => {
+    expect(paused("USDY")).toBe(
+      "Risk control is paused: anything that deposits or mints is stopped (deposits, minting, buying YT, buying PT in USDY, and adding liquidity in USDY) until it is unpaused.",
+    )
+  })
+
+  it("on a Mainnet mock asset it names that asset, never USDY", () => {
+    expect(paused("MOCKGILTS")).toBe(
+      "Risk control is paused: anything that deposits or mints is stopped (deposits, minting, buying YT, buying PT in MOCKGILTS, and adding liquidity in MOCKGILTS) until it is unpaused.",
+    )
   })
 })

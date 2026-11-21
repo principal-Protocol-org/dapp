@@ -8,6 +8,7 @@ import { useSimulation, type Simulation } from "@/hooks/use-simulation"
 import type { AmountCheck } from "@/lib/app/amounts"
 import type { ActionInput } from "@/lib/protocol/actions"
 import { evaluateGates, type Blocker } from "@/lib/protocol/gates"
+import { getMarket, protocolAbi } from "@/lib/protocol/manifest"
 import { preStartDraft, routePreStartBlockers } from "@/lib/protocol/route-gates"
 import type { RouteRequest, StepPlan, StepPreview } from "@/lib/protocol/routes"
 import { currentContractsAdapter, stepPreview, toRouteRequest, type PlanContext, type TradeAdapter, type TradeQuote, type TradeRequest, type TradeState } from "@/lib/protocol/trade-adapter"
@@ -74,15 +75,21 @@ export function useTradeRoute({
   const { slippageBps } = useSettings()
   const { wallet, ms } = gate
   const source = wallet.status === "connected" ? wallet.publicKey : null
+  // The market's asset code, which the route's steps and refusals name; empty only without the
+  // market, when no tab renders.
+  const underlying = getMarket(manifest, marketId)?.underlying.code ?? ""
 
-  // The manifest alone decides a one-step route (R5-4). The plan sizes with the quote's slippage, so
-  // the flash Buy YT's planned sy_in is the one quoted (R5-2).
+  // The manifest alone decides a one-step route (R5-4), and the argument lists its contracts take
+  // (`protocolAbi`, plan 0009). The plan sizes with the quote's slippage, so the flash Buy YT's
+  // planned sy_in is the one quoted (R5-2).
   const ctx: PlanContext = {
     marketId,
     source: source ?? "",
     matured,
     routerFunctions: manifest.routerFunctions ?? [],
+    protocolAbi: protocolAbi(manifest),
     slippageBps,
+    underlying,
     ...(ms ? { ms } : {}),
   }
   const planned = adapter.plan(trade, ctx)
@@ -95,13 +102,13 @@ export function useTradeRoute({
   // The connected account's LP, for the LP tab's pool share; absent without one.
   const lp = gate.account?.lp
   const held = lp?.status === "live" ? { heldLp: lp.value } : {}
-  const quote = ms && trade.amount > 0n ? adapter.quote(trade, { ms, slippageBps, plans, ...held, ...(firstStep ? { firstStep } : {}) }) : null
+  const quote = ms && trade.amount > 0n ? adapter.quote(trade, { ms, slippageBps, underlying, plans, ...held, ...(firstStep ? { firstStep } : {}) }) : null
   const preview = quote?.status === "live" ? stepPreview(trade, quote.value, plans) : undefined
   const quoteFor = (amount: bigint): Live<TradeQuote> | null => {
     if (!ms) return null
     const at = { ...trade, amount }
     const p = adapter.plan(at, ctx)
-    return adapter.quote(at, { ms, slippageBps, plans: Array.isArray(p) ? p : [], ...held })
+    return adapter.quote(at, { ms, slippageBps, underlying, plans: Array.isArray(p) ? p : [], ...held })
   }
 
   return {

@@ -2,22 +2,28 @@
 # Deploy a SEP-40 mock feed and a standalone OracleAdapter that pulls from it, on the LOCAL network
 # only (spec 0004 D-22): the proof of the keeper's feed mode (ORACLE_KEEPER_MODE=feed, D-21).
 #
-# Usage: [PRINCIPAL_REPO=../principal] [PRINCIPAL_REF=24d980d] [FEED_DECIMALS=8] scripts/dev-stack/feed-oracle.sh
+# Usage: [PRINCIPAL_REPO=../principal] [PRINCIPAL_REF=3af9388…] [FEED_DECIMALS=8] [FEED_MIN_INTERVAL=0]
+#        [FEED_INITIALIZED=1] scripts/dev-stack/feed-oracle.sh
 #
 # 1. Builds the mock feed (tests/fixtures/sep40-mock, its Cargo.lock) and the OracleAdapter of
-#    PRINCIPAL_REF (24d980d: sync_from_feed with the rejection-masking fix), both for wasm32v1-none.
+#    PRINCIPAL_REF, both for wasm32v1-none. The default is 3af938853e5818aa8d56bd35670b9a19cfa55a78, the
+#    Mainnet contracts and the local stack's default (sync_from_feed with its throttle and feed_err).
 #    The principal sources are extracted read-only with `git archive` into a cache keyed by the commit,
 #    as deploy.sh does: never a worktree, never a checkout in the principal repository.
 # 2. Deploys both as the dev stack's local admin (principal-localdev-admin), then:
-#    - feed.initialize(FEED_DECIMALS): 8 by default (RedStone's scale), so a sync really rescales to 7;
+#    - feed.initialize(FEED_DECIMALS): 8 by default (RedStone's scale), so a sync really rescales to 7.
+#      FEED_INITIALIZED=0 skips it: the feed's decimals() then fails, and the oracle answers feed_err;
 #    - oracle.initialize(admin, max_stale_seconds 3600, max_deviation_bps 1000);
-#    - oracle.set_feed_source(admin, feed, {"Other":"USDY"}).
+#    - oracle.set_feed_source(admin, feed, {"Other":"USDY"});
+#    - oracle.set_feed_min_interval(admin, FEED_MIN_INTERVAL): 0 by default, which turns the throttle off
+#      (3af9388 throttles to 300 s when it is never set), so back-to-back feed updates are taken. With
+#      300, the first accepted update is exempt and a second one inside 300 s is answered throttle.
 # 3. Prints {"oracle": "C…", "feed": "C…"} on stdout, and nothing else (progress goes to stderr).
 #
-# Nothing else changes: the market, config/manifests/local.json and .env.local are untouched. Point the
-# keeper at the new oracle with ORACLE_KEEPER_MODE=feed and ORACLE_KEEPER_ORACLE_ID=<oracle>. The mock's
-# set_price and clear_price take no authorization: anyone may move this feed, which is why it exists on
-# the local network only.
+# Nothing else changes: the markets, config/manifests/local.json and .env.local are untouched. Point the
+# keeper at the new oracle with ORACLE_KEEPER_MODE=feed and ORACLE_KEEPER_ORACLE_ID=<oracle> (a
+# comma-separated list for several). The mock's set_price and clear_price take no authorization: anyone
+# may move this feed, which is why it exists on the local network only.
 set -euo pipefail
 # shellcheck source=common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
@@ -32,13 +38,18 @@ need jq "brew install jq"
 need git ""
 
 PRINCIPAL_REPO="${PRINCIPAL_REPO:-../principal}"
-PRINCIPAL_REF="${PRINCIPAL_REF:-24d980d}"
+PRINCIPAL_REF="${PRINCIPAL_REF:-3af938853e5818aa8d56bd35670b9a19cfa55a78}"
 FEED_DECIMALS="${FEED_DECIMALS:-8}"
+FEED_MIN_INTERVAL="${FEED_MIN_INTERVAL:-0}"
+FEED_INITIALIZED="${FEED_INITIALIZED:-1}"
 FEED_ASSET='{"Other":"USDY"}'
 MAX_STALE_SECONDS=3600
 MAX_DEVIATION_BPS=1000
 case "$FEED_DECIMALS" in '' | *[!0-9]*) die "FEED_DECIMALS must be a non-negative integer" ;; esac
 [ "${#FEED_DECIMALS}" -le 2 ] || die "FEED_DECIMALS is too large"
+case "$FEED_MIN_INTERVAL" in '' | *[!0-9]*) die "FEED_MIN_INTERVAL must be a non-negative integer (seconds)" ;; esac
+[ "${#FEED_MIN_INTERVAL}" -le 6 ] || die "FEED_MIN_INTERVAL is too large"
+case "$FEED_INITIALIZED" in 0 | 1) ;; *) die "FEED_INITIALIZED must be 1 (initialize the mock feed) or 0 (leave it uninitialized)" ;; esac
 case "$PRINCIPAL_REPO" in /*) ;; *) PRINCIPAL_REPO="$DAPP_DIR/$PRINCIPAL_REPO" ;; esac
 [ -d "$PRINCIPAL_REPO" ] || die "PRINCIPAL_REPO '$PRINCIPAL_REPO' does not exist"
 
@@ -69,7 +80,8 @@ ADMIN="$(stellar keys address "$ADMIN_KEY")"
 # ---------------------------------------------------------------------------------------------
 RUSTC_VERSION="$(rustc --version)"
 log "Rust: $RUSTC_VERSION"
-# The committed wasm hashes (mock a12b60b8…, OracleAdapter cf58bbd8…) were built with Rust 1.95.0.
+# The documented wasm hashes (mock a12b60b8…; OracleAdapter 56786ca6… at 3af9388, the local stack's,
+# cf58bbd8… at 24d980d) were built with Rust 1.95.0.
 case "$RUSTC_VERSION" in
   "rustc 1.95.0 "* | "rustc 1.95.0") ;;
   *) echo "warning: built with '$RUSTC_VERSION', not rustc 1.95.0: the wasm hashes may differ from the documented ones" >&2 ;;
@@ -122,15 +134,21 @@ adm() {
 
 log "Deploying the mock feed"
 FEED="$(deploy_wasm "$FEED_WASM")"
-adm "$FEED" initialize --decimals "$FEED_DECIMALS" || die "the mock feed's initialize failed"
-log "  feed $FEED, $FEED_DECIMALS decimals"
+if [ "$FEED_INITIALIZED" = 1 ]; then
+  adm "$FEED" initialize --decimals "$FEED_DECIMALS" || die "the mock feed's initialize failed"
+  log "  feed $FEED, $FEED_DECIMALS decimals"
+else
+  log "  feed $FEED, left uninitialized (FEED_INITIALIZED=0): its decimals() fails, so a sync answers feed_err"
+fi
 
 log "Deploying a standalone OracleAdapter ($PRINCIPAL_REF)"
 ORACLE="$(deploy_wasm "$ORACLE_WASM")"
 adm "$ORACLE" initialize --admin "$ADMIN" --max_stale_seconds "$MAX_STALE_SECONDS" --max_deviation_bps "$MAX_DEVIATION_BPS" ||
   die "the oracle's initialize failed"
 adm "$ORACLE" set_feed_source --caller "$ADMIN" --feed "$FEED" --asset "$FEED_ASSET" || die "set_feed_source failed"
+adm "$ORACLE" set_feed_min_interval --caller "$ADMIN" --seconds "$FEED_MIN_INTERVAL" ||
+  die "set_feed_min_interval failed (does PRINCIPAL_REF $PRINCIPAL_REF have the feed throttle? 3af9388 does)"
 SOURCE="$(cli contract invoke --id "$ORACLE" --source "$ADMIN_KEY" --network "$NETWORK" -- feed_source)" || die "feed_source could not be read"
-log "  oracle $ORACLE: max_stale $MAX_STALE_SECONDS s, deviation cap $MAX_DEVIATION_BPS bps, feed_source $SOURCE"
+log "  oracle $ORACLE: max_stale $MAX_STALE_SECONDS s, deviation cap $MAX_DEVIATION_BPS bps, feed throttle $FEED_MIN_INTERVAL s, feed_source $SOURCE"
 
 jq -cn --arg oracle "$ORACLE" --arg feed "$FEED" '{oracle: $oracle, feed: $feed}'

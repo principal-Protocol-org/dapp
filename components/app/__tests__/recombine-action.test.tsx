@@ -297,7 +297,7 @@ describe("Recombine quick action — figures it cannot work out", () => {
 
 /** A recombine to USDY whose step 1 confirmed: the user holds its SY (History lists it with Continue). */
 function interruptedRun(): RouteRun {
-  const request: RouteRequest = { kind: "recombine", marketId: "m1", source: A, amount: 100n * UNIT, pay: "underlying", receive: "underlying", matured: false }
+  const request: RouteRequest = { kind: "recombine", marketId: "m1", source: A, amount: 100n * UNIT, pay: "underlying", receive: "underlying", matured: false, underlying: "USDY" }
   const plans = planRoute(request, { routerFunctions: [] }) as StepPlan[]
   return {
     id: "run-recombine",
@@ -385,7 +385,7 @@ describe("Recombine quick action — after maturity", () => {
 
 /** A Buy PT whose deposit confirmed: a PT-tab run, which no Recombine dialog may show (R2-77). */
 function buyPtRun(): RouteRun {
-  const request: RouteRequest = { kind: "buy_pt", marketId: "m1", source: A, amount: 100n * UNIT, pay: "underlying", receive: "underlying", matured: false }
+  const request: RouteRequest = { kind: "buy_pt", marketId: "m1", source: A, amount: 100n * UNIT, pay: "underlying", receive: "underlying", matured: false, underlying: "USDY" }
   return {
     id: "run-buy-pt",
     account: A,

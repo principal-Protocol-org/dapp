@@ -1,12 +1,13 @@
 "use client"
 
 import { useEffect, useState } from "react"
-import { useInfiniteQuery, useQuery } from "@tanstack/react-query"
+import { useInfiniteQuery, useQueries, useQuery } from "@tanstack/react-query"
 import { useManifest } from "@/components/app/manifest-provider"
 import { parseOpenAlerts, type OpenAlertsAnswer } from "@/lib/app/alert-types"
 import { useLedgerClock } from "@/hooks/use-ledger-clock"
 import { fetchAssetCompliance, fetchEscrowRecords } from "@/lib/protocol/dashboard/compliance"
-import { fetchOracleView, type OracleView } from "@/lib/protocol/dashboard/oracle"
+import { fetchOracleView } from "@/lib/protocol/dashboard/oracle"
+import type { OracleViewAt } from "@/lib/protocol/dashboard/oracle-state"
 import { fetchPauses } from "@/lib/protocol/dashboard/pauses"
 import { fetchPausers, indexedPausers } from "@/lib/protocol/dashboard/pausers"
 import { createHorizon } from "@/lib/protocol/horizon"
@@ -14,16 +15,28 @@ import { fetchMarketDashboard, fetchProtocolState, pendingClaim, type MarketDash
 import { getMarket } from "@/lib/protocol/manifest"
 import { fetchRiskView } from "@/lib/protocol/dashboard/risk"
 import { createRpcReader } from "@/lib/protocol/reader"
-import type { Live } from "@/lib/protocol/types"
+import type { Manifest, Network } from "@/lib/protocol/types"
 import type { IndexedEvent, IndexedEvents, IndexGroup } from "@/lib/server/indexer"
 import type { KeeperHealth, RecordedTick } from "@/lib/server/oracle-ticks"
 
-/** Live widgets (oracle, RiskControl, pauses) refresh every 15 s (D-6, TRANCHE_2_3 l.1077). */
+/** Live widgets (oracle, RiskControl, pauses) refresh every 15 s on Testnet and a local network (D-6, TRANCHE_2_3 l.1077). */
 export const DASHBOARD_LIVE_MS = 15_000
+/**
+ * On Mainnet they refresh every 60 s (plan 0009 final review, I-2): the public RPC refused reads after
+ * about 96 in one measurement, and one `/dashboard` tab reads about 70 oracle values per refresh.
+ */
+export const MAINNET_DASHBOARD_LIVE_MS = 60_000
+
+/** The live widgets' cadence on `network`. */
+export function dashboardLiveMs(network: Network): number {
+  return network === "mainnet" ? MAINNET_DASHBOARD_LIVE_MS : DASHBOARD_LIVE_MS
+}
 /** Aggregates (the every-market sweep and its totals) and history (the index) refresh every 60 s. */
 export const DASHBOARD_AGGREGATE_MS = 60_000
 
-export type { IndexedEvent, IndexedEvents, IndexGroup, KeeperHealth, RecordedTick }
+export type { IndexedEvent, IndexedEvents, IndexGroup, KeeperHealth, OracleViewAt, RecordedTick }
+/** The oracle pages' clock rule, kept here for the hook's callers (it lives in `lib/protocol/dashboard/oracle-state`). */
+export { secondsToBlockNow } from "@/lib/protocol/dashboard/oracle-state"
 
 /**
  * The query, plus `stale`: a failed refetch keeps the old `data`, and `stale` tells callers not to
@@ -52,9 +65,10 @@ export function useProtocolState(marketIds?: readonly string[]) {
 }
 
 /**
- * One market's dashboard figures (`fetchMarketDashboard`), for its detail page: one batch of reads every
- * 15 s, the live cadence, since the page watches that one market. An id the manifest does not list is an
- * error, never a read (the route shows the not-found page before this runs).
+ * One market's dashboard figures (`fetchMarketDashboard`), for its detail page: one batch of reads at
+ * the live cadence (`dashboardLiveMs`: 15 s, 60 s on Mainnet), since the page watches that one market.
+ * An id the manifest does not list is an error, never a read (the route shows the not-found page
+ * before this runs).
  */
 export function useMarketDashboard(marketId: string) {
   const m = useManifest()
@@ -66,14 +80,14 @@ export function useMarketDashboard(marketId: string) {
         if (!market) throw new Error(`Unknown market "${marketId}"`)
         return fetchMarketDashboard(createRpcReader(m), m, market)
       },
-      refetchInterval: DASHBOARD_LIVE_MS,
+      refetchInterval: dashboardLiveMs(m.network),
     }),
   )
 }
 
 /**
  * What `account` would be paid by claiming its YT yield now, net of the YT fee (`pendingClaim`, D-9),
- * every 15 s. It reads nothing until an address has been looked up (`account`, already validated) and
+ * at the live cadence. It reads nothing until an address has been looked up (`account`, already validated) and
  * the market's state (`ms`) is in: the net needs its fee, exchange rate and oracle value. No wallet.
  */
 export function usePendingClaim(marketId: string, account: string | null, ms: MarketDashboard | undefined) {
@@ -87,45 +101,49 @@ export function usePendingClaim(marketId: string, account: string | null, ms: Ma
         return pendingClaim(createRpcReader(m), market, account as string, ms as MarketDashboard)
       },
       enabled: account !== null && ms !== undefined,
-      refetchInterval: DASHBOARD_LIVE_MS,
+      refetchInterval: dashboardLiveMs(m.network),
     }),
   )
 }
 
+/** One oracle's query: the same key, read and cadence wherever it is asked, so pages share it. */
+function oracleViewQuery(m: Manifest, oracle: string, ledgerTime: number | null) {
+  return {
+    queryKey: ["dashboard", "oracle", m.network, oracle],
+    queryFn: async (): Promise<OracleViewAt> => {
+      const at = ledgerTime as number
+      return { view: await fetchOracleView(createRpcReader(m), m, oracle, at), ledgerTime: at }
+    },
+    enabled: ledgerTime !== null,
+    refetchInterval: dashboardLiveMs(m.network),
+  }
+}
+
 /**
- * The oracle (`fetchOracleView`) every 15 s, with the ledger time its freshness and time to block
- * were computed at, so a countdown can follow the ledger clock between reads (`secondsToBlockNow`).
- * It waits for the first ledger time: a view read without one would have no time to block.
+ * The oracle `oracle` (an OracleAdapter id; `fetchOracleView`) at the live cadence, with the ledger time its
+ * freshness and time to block were computed at, so a countdown can follow the ledger clock between
+ * reads (`secondsToBlockNow`). It waits for the first ledger time: a view read without one would
+ * have no time to block. Each oracle has its own query.
  */
-export function useOracleView() {
+export function useOracleView(oracle: string) {
   const m = useManifest()
   const { ledgerTime } = useLedgerClock()
-  return withStale(
-    useQuery({
-      queryKey: ["dashboard", "oracle", m.network],
-      queryFn: async (): Promise<{ view: OracleView; ledgerTime: number }> => {
-        const at = ledgerTime as number
-        return { view: await fetchOracleView(createRpcReader(m), m, at), ledgerTime: at }
-      },
-      enabled: ledgerTime !== null,
-      refetchInterval: DASHBOARD_LIVE_MS,
-    }),
-  )
+  return withStale(useQuery(oracleViewQuery(m, oracle, ledgerTime)))
 }
 
 /**
- * Seconds until operations block, now: the read's `timeToBlock` less the ledger time elapsed since
- * it was computed. It follows the ledger clock (ledger time plus elapsed seconds), never the
- * browser's wall clock alone. Null without a ledger time or a time to block.
+ * Every oracle of `oracles`, in that order, as `useOracleView` reads each: one query per oracle,
+ * under the same key, so a page that also shows one of them reads it once. Each result has its own
+ * `stale`: one oracle's failed refresh does not touch the others.
  */
-export function secondsToBlockNow(timeToBlock: Live<number>, readLedgerTime: number, ledgerTimeNow: number | null): number | null {
-  if (timeToBlock.status !== "live" || ledgerTimeNow === null) return null
-  // `fetchOracleView` floors the ledger time it is given; whole seconds left, rounded down.
-  return Math.floor(timeToBlock.value + Math.floor(readLedgerTime) - ledgerTimeNow)
+export function useOracleViews(oracles: readonly string[]) {
+  const m = useManifest()
+  const { ledgerTime } = useLedgerClock()
+  return useQueries({ queries: oracles.map((oracle) => oracleViewQuery(m, oracle, ledgerTime)) }).map(withStale)
 }
 
 /**
- * RiskControl (`fetchRiskView`) every 15 s. It is given the ledger clock's sequence, for the lapsed
+ * RiskControl (`fetchRiskView`) at the live cadence. It is given the ledger clock's sequence, for the lapsed
  * window, which is deliberately not in the key (it would refetch on every ledger).
  */
 export function useRiskView() {
@@ -136,19 +154,19 @@ export function useRiskView() {
       queryKey: ["dashboard", "risk", m.network],
       queryFn: () => fetchRiskView(createRpcReader(m), m, sequence as number),
       enabled: sequence !== null,
-      refetchInterval: DASHBOARD_LIVE_MS,
+      refetchInterval: dashboardLiveMs(m.network),
     }),
   )
 }
 
-/** Every pausable contract's `is_paused` (`fetchPauses`), every 15 s. */
+/** Every pausable contract's `is_paused` (`fetchPauses`), at the live cadence. */
 export function usePauses() {
   const m = useManifest()
   return withStale(
     useQuery({
       queryKey: ["dashboard", "pauses", m.network, idsOf(m.markets.map((market) => market.marketId))],
       queryFn: () => fetchPauses(createRpcReader(m), m),
-      refetchInterval: DASHBOARD_LIVE_MS,
+      refetchInterval: dashboardLiveMs(m.network),
     }),
   )
 }
@@ -277,51 +295,68 @@ const TICK_REASONS: Reasons = {
   unavailable: "the keeper telemetry could not be read",
 }
 
-/** `GET /api/dashboard/oracle-ticks`: the keeper's recent runs, its health and its schedule. */
-export type OracleTicksAnswer = { ticks: RecordedTick[]; health: KeeperHealth; intervalSeconds: number }
+/** One oracle's keeper telemetry: the underlying codes of its markets (`asset`), its health and its recent runs. */
+export type OracleTicksEntry = { oracle: string; asset: string; health: KeeperHealth; ticks: RecordedTick[] }
+/** `GET /api/dashboard/oracle-ticks`: the keeper's schedule and, per oracle of the manifest (or the one asked), its runs and health. */
+export type OracleTicksAnswer = { intervalSeconds: number; oracles: OracleTicksEntry[] }
 
 const isText = (v: unknown) => typeof v === "string"
 const isTextOrNull = (v: unknown) => v === null || typeof v === "string"
 const isCount = (v: unknown) => typeof v === "number" && Number.isInteger(v) && v >= 0
 
-/** The answer, checked field by field: anything else is refused, never read as a healthy keeper. */
-export function parseOracleTicks(body: unknown): OracleTicksAnswer {
-  const b = body as Partial<OracleTicksAnswer> | null
-  const h = b?.health as Partial<KeeperHealth> | undefined
-  const ticksOk =
-    Array.isArray(b?.ticks) &&
-    b.ticks.every(
-      (t) =>
-        t !== null &&
-        typeof t === "object" &&
-        isText(t.id) &&
-        isText(t.at) &&
-        isText(t.oracle) &&
-        isText(t.mode) &&
-        isText(t.decision) &&
-        [t.value, t.reason, t.txHash, t.signer].every(isTextOrNull),
-    )
-  const healthOk =
+function isTick(t: unknown): boolean {
+  const r = t as Partial<RecordedTick> | null
+  return (
+    r !== null &&
+    typeof r === "object" &&
+    isText(r.id) &&
+    isText(r.at) &&
+    isText(r.oracle) &&
+    isText(r.mode) &&
+    isText(r.decision) &&
+    [r.value, r.reason, r.txHash, r.signer].every(isTextOrNull)
+  )
+}
+
+function isHealth(v: unknown): boolean {
+  const h = v as Partial<KeeperHealth> | null | undefined
+  return (
     h !== undefined &&
     h !== null &&
     typeof h.healthy === "boolean" &&
     isTextOrNull(h.lastSuccessAt) &&
+    isTextOrNull(h.lastOkAt) &&
     isTextOrNull(h.lastTickAt) &&
     isCount(h.rejected24h) &&
     isCount(h.failures24h)
-  if (!ticksOk || !healthOk || !isCount(b?.intervalSeconds) || (b?.intervalSeconds as number) <= 0)
+  )
+}
+
+function isEntry(v: unknown): boolean {
+  const e = v as Partial<OracleTicksEntry> | null
+  return e !== null && typeof e === "object" && isText(e.oracle) && isText(e.asset) && isHealth(e.health) && Array.isArray(e.ticks) && e.ticks.every(isTick)
+}
+
+/** The answer, checked field by field: anything else is refused, never read as a healthy keeper. */
+export function parseOracleTicks(body: unknown): OracleTicksAnswer {
+  const b = body as Partial<OracleTicksAnswer> | null
+  if (!Array.isArray(b?.oracles) || !b.oracles.every(isEntry) || !isCount(b.intervalSeconds) || (b.intervalSeconds as number) <= 0)
     throw new Error("the keeper telemetry answered in an unexpected shape")
   return b as OracleTicksAnswer
 }
 
-/** The keeper's telemetry (spec 0004 D-19): its `limit` latest runs and its health, every 60 s (history). */
-export function useOracleTicks(limit = 20) {
+/**
+ * The keeper's telemetry (spec 0004 D-19), every 60 s (history): for `oracle` (one of the manifest's),
+ * or every oracle of the manifest when omitted, its `limit` latest runs and its health.
+ */
+export function useOracleTicks(oracle?: string, limit = 20) {
   const m = useManifest()
   return withStale(
     useQuery({
-      queryKey: ["dashboard", "oracle-ticks", m.network, limit],
+      queryKey: ["dashboard", "oracle-ticks", m.network, oracle ?? null, limit],
       queryFn: async (): Promise<OracleTicksAnswer> => {
-        const body = await getJson<unknown>(`/api/dashboard/oracle-ticks?limit=${limit}`, TICK_REASONS)
+        const query = `${oracle ? `oracle=${encodeURIComponent(oracle)}&` : ""}limit=${limit}`
+        const body = await getJson<unknown>(`/api/dashboard/oracle-ticks?${query}`, TICK_REASONS)
         try {
           return parseOracleTicks(body)
         } catch (error) {
@@ -334,20 +369,24 @@ export function useOracleTicks(limit = 20) {
   )
 }
 
-/** Which indexed events a list shows: one group (every group when omitted), one pool, some topics. */
-export type EventQuery = { group?: IndexGroup; pool?: string; topics?: readonly string[] }
+/**
+ * Which indexed events a list shows: one group (every group when omitted), one pool, one contract
+ * (one oracle's history), some topics.
+ */
+export type EventQuery = { group?: IndexGroup; pool?: string; contract?: string; topics?: readonly string[] }
 
 /** `GET /api/dashboard/events` for `q`, plus the extra parameters (`limit`, `before`, `counts`). */
 function eventsUrl(q: EventQuery, extra: Record<string, string>): string {
   const params = new URLSearchParams()
   if (q.group) params.set("group", q.group)
   if (q.pool) params.set("pool", q.pool)
+  if (q.contract) params.set("contract", q.contract)
   if (q.topics && q.topics.length > 0) params.set("topic", q.topics.join(","))
   for (const [k, v] of Object.entries(extra)) params.set(k, v)
   return `/api/dashboard/events?${params}`
 }
 
-const queryKeyOf = (q: EventQuery) => [q.group ?? "all", q.pool ?? "all", (q.topics ?? []).join(",")] as const
+const queryKeyOf = (q: EventQuery) => [q.group ?? "all", q.pool ?? "all", (q.topics ?? []).join(","), q.contract ?? "all"] as const
 
 /**
  * One indexed-event list, newest first, `pageSize` rows a page (`EventList`). `fetchNextPage` reads
@@ -432,7 +471,7 @@ const PAUSER_TOPICS = ["add_psr", "rm_psr"] as const
 
 /**
  * RiskControl's pausers: `indexed`, from every indexed `add_psr`/`rm_psr` (60 s), and `live`, each
- * of them confirmed with `is_pauser`, plus the admin (`fetchPausers`, 15 s). `events` is the index query.
+ * of them confirmed with `is_pauser`, plus the admin (`fetchPausers`, the live cadence). `events` is the index query.
  */
 export function usePausers() {
   const m = useManifest()
@@ -445,7 +484,7 @@ export function usePausers() {
       queryFn: () => fetchPausers(createRpcReader(m), m, accounts),
       // The admin is read whatever the index says; the accounts wait for it.
       enabled: events.data !== undefined || events.isError,
-      refetchInterval: DASHBOARD_LIVE_MS,
+      refetchInterval: dashboardLiveMs(m.network),
     }),
   )
   return { events, indexed, live }

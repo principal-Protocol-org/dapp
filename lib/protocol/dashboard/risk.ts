@@ -2,6 +2,7 @@
  * The RiskControl page's read model (D-10, D-11): the protocol-wide circuit breaker, its window,
  * the per-asset limits, the pause, and the effective wrap-and-mint capacity under double-reporting.
  */
+import { protocolAbi } from "../manifest"
 import { allLive, readLive, toBigint, toBool, unavailable, type ContractReader } from "../reader"
 import type { ScArg } from "../stellar"
 import type { Live, Manifest } from "../types"
@@ -16,10 +17,29 @@ export type ConsumerReads = { sy: Live<boolean>; manager: Live<boolean> }
 /** How the dashboard labels the effective capacity. */
 export const EFFECTIVE_WRAP_AND_MINT_LABEL = "Effective wrap-and-mint capacity, for markets whose SY and manager both report"
 
+/**
+ * RiskControl's window. Version 1 (Testnet): a fixed window. `get_window_start` keeps the stored
+ * start after it lapses (only a counted deposit rewrites it), so `lapsed` (`ledger − start ≥ length`)
+ * says the next counted deposit opens a new one. Version 2 (Mainnet): a sliding window. The volume
+ * counted is the current window's plus the previous one's, weighted by how much of it is still in
+ * range, so it decays as older deposits leave it; the start is normalized and it never lapses.
+ */
+export type RiskWindow =
+  | { kind: "fixed"; start: Live<number>; length: Live<number>; lapsed: Live<boolean> }
+  | { kind: "sliding"; start: Live<number>; length: Live<number> }
+
+/** The window a manifest's contracts count in: sliding from contract version 2. */
+export function riskWindowKind(m: Pick<Manifest, "protocolAbi">): RiskWindow["kind"] {
+  return protocolAbi(m) === 2 ? "sliding" : "fixed"
+}
+
 export type RiskView = {
   contractId: string
   limit: Live<bigint>
-  /** Volume in the current window; the contract reports 0 once the window has lapsed. */
+  /**
+   * The volume the contract counts now: on a fixed window (version 1) 0 once the window has lapsed;
+   * on a sliding one (version 2) it decays as older deposits leave the window.
+   */
   volume: Live<bigint>
   remaining: Live<Remaining>
   /**
@@ -35,11 +55,7 @@ export type RiskView = {
   doubleReporting: string[]
   /** The `is_consumer` reads behind `effectiveWrapAndMint`, per market. */
   consumers: Record<string, ConsumerReads>
-  /**
-   * `get_window_start` keeps the stored start after the window lapses (only a counted deposit
-   * rewrites it), so `lapsed` (`ledger − start ≥ length`) says the next counted deposit opens a new window.
-   */
-  window: { start: Live<number>; length: Live<number>; lapsed: Live<boolean> }
+  window: RiskWindow
   assetLimits: AssetLimitView[]
   paused: Live<boolean>
 }
@@ -124,7 +140,11 @@ export async function fetchRiskView(reader: ContractReader, manifest: Manifest, 
   const { effectiveWrapAndMint, doubleReporting } = effectiveCapacity(remaining, consumerPairs)
 
   // `ledger` is the caller's ledger clock, not a read: only the two window reads carry provenance.
-  const lapsed = allLive([start, length] as const, ([s, len]) => ledger - s >= len)
+  // A sliding window never lapses: nothing is worked out from the clock.
+  const window: RiskWindow =
+    riskWindowKind(manifest) === "sliding"
+      ? { kind: "sliding", start, length }
+      : { kind: "fixed", start, length, lapsed: allLive([start, length] as const, ([s, len]) => ledger - s >= len) }
 
   return {
     contractId: risk,
@@ -134,7 +154,7 @@ export async function fetchRiskView(reader: ContractReader, manifest: Manifest, 
     effectiveWrapAndMint,
     doubleReporting,
     consumers,
-    window: { start, length, lapsed },
+    window,
     assetLimits,
     paused,
   }

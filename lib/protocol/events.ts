@@ -1,7 +1,8 @@
 import { scValToNative, type xdr } from "@stellar/stellar-sdk"
-import { errorMessage } from "./errors"
 import { formatAmount, shorten } from "./format"
 import { getMarket } from "./manifest"
+import { limitRpc } from "./rpc-limiter"
+import { prunedOldestOf, readRpcWindow } from "./rpc-window"
 import { createRpcServer } from "./stellar"
 import type { Manifest, Market } from "./types"
 
@@ -213,6 +214,8 @@ type EventsRequest =
 /** The RPC calls used here; `createRpcServer` satisfies it, tests inject a fake. */
 export type EventsRpcServer = {
   getHealth(): Promise<{ oldestLedger: number; latestLedger: number }>
+  getLatestLedger?(): Promise<{ sequence: number }>
+  getLedgers?(req: { startLedger: number; pagination: { limit: number } }): Promise<{ oldestLedger: number; latestLedger: number }>
   getEvents(req: EventsRequest): Promise<{ events: RawEvent[]; cursor: string }>
 }
 
@@ -234,16 +237,6 @@ export function cursorLedger(cursor: string): number {
 }
 
 type Scan = { maxPages: number; windowLedgers: number }
-
-/** The RPC's refusal of a range that starts before its oldest ledger, which it names. */
-const PRUNED_RANGE = /startLedger must be within the ledger range:\s*(\d+)\s*-\s*(\d+)/
-
-/** The oldest ledger a pruned-range refusal names, or undefined for any other failure. */
-function prunedOldest(error: unknown): number | undefined {
-  const message = errorMessage(error)
-  const match = PRUNED_RANGE.exec(message)
-  return match ? Number(match[1]) : undefined
-}
 
 async function fetchGroup(
   server: EventsRpcServer,
@@ -269,14 +262,13 @@ async function fetchGroup(
       if (calls >= scan.maxPages) return { events, truncated: true }
       calls++
       let res: Awaited<ReturnType<EventsRpcServer["getEvents"]>>
+      const request: EventsRequest =
+        cursor === undefined ? { startLedger: start, endLedger: end, filters, limit: EVENTS_LIMIT } : { cursor, filters, limit: EVENTS_LIMIT }
       try {
-        res = await server.getEvents(
-          cursor === undefined
-            ? { startLedger: start, endLedger: end, filters, limit: EVENTS_LIMIT }
-            : { cursor, filters, limit: EVENTS_LIMIT },
-        )
+        // Each page takes a slot of the read cap (spec 0005 M-20): five markets walk ten groups at once.
+        res = await limitRpc(() => server.getEvents(request))
       } catch (error) {
-        const oldest = cursor === undefined && !readAgain ? prunedOldest(error) : undefined
+        const oldest = cursor === undefined && !readAgain ? prunedOldestOf(error) : undefined
         if (oldest === undefined || oldest <= start) throw error
         readAgain = true
         floor = oldest
@@ -492,7 +484,7 @@ export async function fetchAccountHistory(p: {
     [k.oracle, "oracle"],
   ])
 
-  const health = p.window ?? (await server.getHealth())
+  const health = p.window ?? (await readRpcWindow(server))
   const window = { oldestLedger: health.oldestLedger, latestLedger: health.latestLedger }
   const scan = { maxPages: p.maxPages ?? MAX_PAGES, windowLedgers: p.windowLedgers ?? WINDOW_LEDGERS }
   // The RPC accepts at most 5 contract IDs per request (checked 2026-10-27): two requests.

@@ -10,9 +10,11 @@ import "server-only"
  * any browser (spec 0002 §5 "Resuming"); where it stands is read from the chain, never from here.
  *
  * A market is listed only after it passes `validateMarket`: 0001's topology rule, wiring to this
- * network's Router, oracle, Permissioning and RiskControl, and every contract running the code the
- * manifest pins for its kind. Validation runs on discovery, on publish and on every recorder run;
- * pages read the cached verdicts and never validate inline (R2-36).
+ * network's Router, Permissioning and RiskControl and to one of the oracles the manifest names, and
+ * every contract running the code the manifest pins for its kind. Validation runs on discovery, on
+ * publish and on every recorder run; pages read the cached verdicts and never validate inline
+ * (R2-36). On Mainnet only the manifest's own markets are listed: a discovered market is checked
+ * and cached, never shown.
  *
  * Verdicts are three-state: `valid = true` lists a market, `false` hides it (a seed too), and
  * `null` means the check could not finish (the RPC failed, which is not an answer): an existing
@@ -32,6 +34,7 @@ import { fetchTopology } from "@/lib/protocol/market-state"
 import { isContractError, readLive, toBool, type ContractReader } from "@/lib/protocol/reader"
 import type { Manifest, Market, MarketContractName } from "@/lib/protocol/types"
 import { contractWasmHash, contractWasmHashesSettled, WasmReadError, type LedgerEntriesRpc } from "@/lib/protocol/wasm"
+import { firstStateOf, rangeOldestOf, readRpcWindow } from "@/lib/protocol/rpc-window"
 import { DatabaseConfigError, type Sql } from "./db"
 import { createRollingLimiter, redact } from "./request"
 
@@ -58,6 +61,8 @@ type EventsRequest =
 /** The RPC calls the registry makes; the SDK's `rpc.Server` satisfies it, tests inject a fake. */
 export type RegistryRpc = LedgerEntriesRpc & {
   getHealth(): Promise<{ oldestLedger: number; latestLedger: number }>
+  getLatestLedger?(): Promise<{ sequence: number }>
+  getLedgers?(req: { startLedger: number; pagination: { limit: number } }): Promise<{ oldestLedger: number; latestLedger: number }>
   getEvents(req: EventsRequest): Promise<{ events: RawEvent[]; cursor: string; latestLedger: number }>
 }
 
@@ -330,12 +335,22 @@ function verdict(f: Findings): Validation | null {
 }
 
 /**
+ * The oracles a market may use: the manifest markets' own oracles and `shared.oracle`. Read from the
+ * committed manifest only (never one whose markets came from the registry): the factory is
+ * permissionless, so a market built on anyone else's oracle must never pass.
+ */
+export function allowedOracles(manifest: Manifest): ReadonlySet<string> {
+  return new Set([manifest.shared.oracle, ...manifest.markets.map((m) => m.contracts.oracle)])
+}
+
+/**
  * 0001's topology rule (`Router.market(pool)` and the manager's maturity) plus: the market is
- * registered with this network's Router; each contract is wired to this network's oracle,
- * Permissioning and RiskControl and to the market's own config, recovery escrow and manager (PT
- * and YT are minted by the manager only); the underlying is the Stellar asset contract of its code
- * and issuer; and every market contract runs the Wasm the manifest pins for its kind. A market
- * wired to foreign infrastructure is invalid.
+ * registered with this network's Router; its oracle is one the manifest names (`allowedOracles`),
+ * and its manager and YT read that oracle; each contract is wired to this network's Permissioning
+ * and RiskControl and to the market's own config, recovery escrow and manager (PT and YT are minted
+ * by the manager only); the underlying is the Stellar asset contract of its code and issuer; and
+ * every market contract runs the Wasm the manifest pins for its kind. A market wired to foreign
+ * infrastructure is invalid.
  *
  * In three steps, each returning early on a definite problem (R2-40): what needs no read (the
  * market's Router and oracle, its underlying); then the Router registration and the manager's
@@ -348,7 +363,7 @@ export async function validateMarket(reader: ContractReader, rpc: LedgerEntriesR
   const sac = market.underlying.sac
 
   if (c.router !== s.router) f.problems.push(`its Router (${c.router}) is not this network's Router`)
-  if (c.oracle !== s.oracle) f.problems.push(`its oracle (${c.oracle}) is not this network's oracle`)
+  if (!allowedOracles(manifest).has(c.oracle)) f.problems.push(`its oracle (${c.oracle}) is not one of this network's oracles`)
   try {
     const derived = new Asset(market.underlying.code, market.underlying.issuer).contractId(manifest.networkPassphrase)
     if (derived !== sac) f.problems.push(`its underlying ${sac} is not the asset contract of ${market.underlying.code}:${market.underlying.issuer}`)
@@ -358,7 +373,7 @@ export async function validateMarket(reader: ContractReader, rpc: LedgerEntriesR
   if (f.problems.length > 0) return verdict(f) as Validation
 
   const shared: Wire[] = [
-    ["manager", "oracle_address", s.oracle],
+    ["manager", "oracle_address", c.oracle],
     ["manager", "permissioning_address", s.permissioning],
     ["manager", "risk_control", s.riskControl, "option"],
   ]
@@ -387,7 +402,7 @@ export async function validateMarket(reader: ContractReader, rpc: LedgerEntriesR
     ["pt", "recovery_escrow", c.recoveryEscrow],
     ["pt", "minter", c.manager],
     ["yt", "permissioning_address", s.permissioning],
-    ["yt", "oracle_address", s.oracle],
+    ["yt", "oracle_address", c.oracle],
     ["yt", "recovery_escrow", c.recoveryEscrow],
     ["yt", "minter", c.manager],
     ["config", "underlying", sac],
@@ -427,15 +442,31 @@ function storedMarket(raw: unknown): Market | null {
   }
 }
 
+/**
+ * The registry rows this network lists, shows or builds on: every row, except on Mainnet, where
+ * only the manifest's own markets' rows (the seeds) count. The factory is permissionless and the
+ * oracles are public, so on Mainnet a market anyone builds is checked and cached, never shown. The
+ * one place that rule lives: `listedMarkets`, `invalidMarkets`, `resumableSalts` and `listedAssets`
+ * all read their rows through it.
+ */
+function listableRows(manifest: Manifest, rows: RegistryRow[]): RegistryRow[] {
+  if (manifest.network !== "mainnet") return rows
+  const seeds = new Set(manifest.markets.map((m) => m.contracts.pool))
+  return rows.filter((r) => seeds.has(r.pool))
+}
+
 /** Seeds plus every stored market: the ids a new market must not take. */
 function knownMarkets(manifest: Manifest, rows: RegistryRow[]): Market[] {
   const seeds = new Set(manifest.markets.map((m) => m.contracts.pool))
   return [...manifest.markets, ...rows.flatMap((r) => (seeds.has(r.pool) ? [] : (storedMarket(r.market) ?? [])))]
 }
 
-/** A stored market wired to another Router or oracle: never listed under this manifest, never re-checked. */
-const isForeign = (manifest: Manifest, market: Market | null) =>
-  market !== null && (market.contracts.router !== manifest.shared.router || market.contracts.oracle !== manifest.shared.oracle)
+/**
+ * A stored market on another Router, or on an oracle the manifest does not name: never listed under
+ * this manifest, never re-checked. `oracles` is `allowedOracles(manifest)`, built once per call.
+ */
+const isForeign = (manifest: Manifest, oracles: ReadonlySet<string>, market: Market | null) =>
+  market !== null && (market.contracts.router !== manifest.shared.router || !oracles.has(market.contracts.oracle))
 
 export type Outcome =
   | { status: "valid"; market: Market }
@@ -633,11 +664,13 @@ function withCreatedLedger(outcome: Outcome, ledgers: (number | undefined)[]): O
 
 /**
  * The assets whose half-finished markets the app lists: the test asset's, and those of the markets it
- * lists (the seeds and the stored registry markets). Only an asset's issuer can create a market on it
- * that runs the pinned code (each child contract's `initialize` checks the SAC's live admin, R5-10).
+ * lists (the seeds and the stored registry markets; on Mainnet the seeds only, `listableRows`). Only
+ * an asset's issuer can create a market on it that runs the pinned code (each child contract's
+ * `initialize` checks the SAC's live admin, R5-10).
  */
 function listedAssets(manifest: Manifest, rows: RegistryRow[]): Set<string> {
-  return new Set([...(manifest.testAsset ? [manifest.testAsset.sac] : []), ...knownMarkets(manifest, rows).map((m) => m.underlying.sac)])
+  const markets = knownMarkets(manifest, listableRows(manifest, rows))
+  return new Set([...(manifest.testAsset ? [manifest.testAsset.sac] : []), ...markets.map((m) => m.underlying.sac)])
 }
 
 /** How many SY wrappers `verifySalts` reads at once. */
@@ -728,7 +761,7 @@ export async function discover(deps: RegistryDeps, opts: { deadline?: number } =
   const factory = manifest.shared.factory
   const filters = [{ type: "contract" as const, contractIds: factory ? [router, factory] : [router] }]
   const name = cursorName(manifest)
-  const [saved, health] = await Promise.all([store.cursor(name), rpc.getHealth()])
+  const [saved, health] = await Promise.all([store.cursor(name), readRpcWindow(rpc)])
 
   let gap = false
   let request: EventsRequest
@@ -761,8 +794,12 @@ export async function discover(deps: RegistryDeps, opts: { deadline?: number } =
     } catch (error) {
       // The oldest ledger moves on a busy node: a start just behind it is refused once; start after it.
       if (request.startLedger === undefined || page > 0) throw error
-      const now = await rpc.getHealth()
-      request = { startLedger: now.oldestLedger + 1, filters, limit: EVENTS_PAGE }
+      // dRPC names its first available state in the refusal (a start there is served); the window it reports can
+      // be a few ledgers older. Stellar's refusal names the range's oldest ledger: start after it, as before.
+      // The moved start is not a gap: this discovery scan is not the indexed history (that is the indexer's, which
+      // records its gaps); older markets come from the manifest's seeds.
+      const start = firstStateOf(error) ?? (rangeOldestOf(error) ?? (await readRpcWindow(rpc)).oldestLedger) + 1
+      request = { startLedger: start, filters, limit: EVENTS_PAGE }
       res = await rpc.getEvents(request)
     }
 
@@ -820,8 +857,8 @@ export const INVALID_RECHECKS_PER_RUN = 2
  * verdict is `valid = true` or not known yet (`null`), so a market that turns invalid drops off.
  * Invalid rows are re-checked a few per run, oldest first (R2-40), so a factory market the Router
  * has since registered appears without every junk row costing reads each run; rows of another
- * Router or oracle are skipped. Stored markets are re-checked as stored; `skip` names pools this
- * run already checked; nothing new starts after `deadline` (ms).
+ * Router, or on an oracle the manifest does not name, are skipped. Stored markets are re-checked as
+ * stored; `skip` names pools this run already checked; nothing new starts after `deadline` (ms).
  */
 export async function revalidate(
   deps: RegistryDeps,
@@ -831,6 +868,7 @@ export async function revalidate(
   const rows = await store.rows()
   const known = knownMarkets(manifest, rows)
   const seedPools = new Set(manifest.markets.map((m) => m.contracts.pool))
+  const oracles = allowedOracles(manifest)
   const queue: { pool: string; source: RegistrySource; stored: Market | null }[] = manifest.markets.map((m) => ({
     pool: m.contracts.pool,
     source: "seed",
@@ -839,7 +877,7 @@ export async function revalidate(
   const others = rows
     .filter((r) => !seedPools.has(r.pool))
     .map((r) => ({ row: r, stored: storedMarket(r.market) }))
-    .filter(({ stored }) => !isForeign(manifest, stored))
+    .filter(({ stored }) => !isForeign(manifest, oracles, stored))
   for (const { row, stored } of others) if (row.valid !== false) queue.push({ pool: row.pool, source: row.source, stored })
   const oldest = others
     .filter(({ row }) => row.valid === false)
@@ -885,10 +923,11 @@ function currentPins(manifest: Manifest): Record<string, string> | undefined {
 /**
  * The markets clients see: the manifest seeds, minus those whose cached verdict is `valid = false`,
  * then every other registry row with `valid = true` whose market parses and is wired to this
- * manifest's Router and oracle (a row left from another deployment is not listed). Ids are unique,
- * seeds first. A registry market carries the manifest's current pins, never stored ones: the
- * restore path trusts them (R29b, R2-40). With the database down, not configured, or slower than
- * `timeoutMs`, the seeds alone (R2-36, R2-40), and `fromRegistry` is false.
+ * manifest's Router and to one of its oracles (a row left from another deployment is not listed).
+ * On Mainnet the seeds alone (`listableRows`): a market the factory built is never listed there. Ids
+ * are unique, seeds first. A registry market carries the manifest's current pins, never stored
+ * ones: the restore path trusts them (R29b, R2-40). With the database down, not configured, or
+ * slower than `timeoutMs`, the seeds alone (R2-36, R2-40), and `fromRegistry` is false.
  *
  * The registry read is bounded (D-26 item 1): `where valid is true`, plus the seeds' own rows for
  * their verdicts. Invalid rows are never read here.
@@ -913,10 +952,12 @@ export async function listedMarkets(deps: {
     }
     return { markets: seeds, fromRegistry: false }
   }
+  rows = listableRows(manifest, rows)
   const pins = currentPins(manifest)
   const verdicts = new Map(rows.map((r) => [r.pool, r.valid]))
   const listed = seeds.filter((m) => verdicts.get(m.contracts.pool) !== false)
   const ids = new Set(seeds.map((m) => m.marketId))
+  const oracles = allowedOracles(manifest)
   for (const row of rows) {
     if (row.valid !== true || seedPools.has(row.pool)) continue
     let market: Market
@@ -927,7 +968,7 @@ export async function listedMarkets(deps: {
       continue
     }
     const c = market.contracts
-    if (c.pool !== row.pool || isForeign(manifest, market)) continue
+    if (c.pool !== row.pool || isForeign(manifest, oracles, market)) continue
     if (ids.has(market.marketId)) continue
     ids.add(market.marketId)
     const current: Market = { ...market }
@@ -948,8 +989,10 @@ export type InvalidMarket = { pool: string; name: string | null; reason: string 
 
 /**
  * The rows the registry holds as `valid = false` (a hidden seed too), for the manager view
- * (R2-38), except rows from another deployment (another Router or oracle). Their reasons were written by this module's checks (Task 11: no RPC text). When the
- * registry cannot be read, or is slower than `timeoutMs`, the answer is `unavailable`, never an
+ * (R2-38), except rows from another deployment (another Router, or an oracle the manifest does not
+ * name). On Mainnet the seeds' rows only (`listableRows`): a stranger's market is never shown.
+ * Their reasons were written by this module's checks (Task 11: no RPC text). When the registry
+ * cannot be read, or is slower than `timeoutMs`, the answer is `unavailable`, never an
  * empty list that would read as "nothing is invalid".
  */
 export async function invalidMarkets(deps: {
@@ -975,9 +1018,10 @@ export async function invalidMarkets(deps: {
       return null
     }
   }
-  // A row whose stored market names another Router or oracle is from another deployment (an earlier
-  // manifest): it is not this app's to list, valid or not.
-  const invalid = rows.filter((r) => r.valid === false && !isForeign(deps.manifest, stored(r)))
+  // A row whose stored market names another Router, or an oracle the manifest does not name, is from
+  // another deployment (an earlier manifest): it is not this app's to list, valid or not.
+  const oracles = allowedOracles(deps.manifest)
+  const invalid = listableRows(deps.manifest, rows).filter((r) => r.valid === false && !isForeign(deps.manifest, oracles, stored(r)))
   return {
     status: "ok",
     rows: invalid.map((r) => ({
@@ -995,8 +1039,8 @@ export const MAX_RESUMABLE = 20
  * The salts of markets this network's factory started and that are not listed yet (spec 0002 §5
  * "Resuming"): newest first, on an asset this network lists (the index holds only those, and a
  * manifest change may drop one), leaving out each one whose pool is a listed market (a seed not
- * hidden, or a registry row with `valid = true`): it has nothing left to resume. Capped at
- * `MAX_RESUMABLE` per asset, never overall, so one asset's issuer cannot push another's markets out
+ * hidden, or a registry row with `valid = true`; on Mainnet a seed only, `listableRows`): it has
+ * nothing left to resume. Capped at `MAX_RESUMABLE` per asset, never overall, so one asset's issuer cannot push another's markets out
  * (security review, Task 8). Each comes with its asset, so the manager view decides who owns it with
  * one `admin()` read per asset before it reads any market's progress. When the registry cannot be read, or is slower than
  * `timeoutMs`, the answer is `unavailable`, never an empty list.
@@ -1022,10 +1066,12 @@ export async function resumableSalts(deps: {
     }
     return { status: "unavailable" }
   }
-  const hidden = new Set(rows.filter((r) => r.valid === false).map((r) => r.pool))
+  // A pool whose market is listed has nothing left to resume. On Mainnet only a seed is listed.
+  const visible = listableRows(manifest, rows)
+  const hidden = new Set(visible.filter((r) => r.valid === false).map((r) => r.pool))
   const listed = new Set([
     ...manifest.markets.map((m) => m.contracts.pool).filter((pool) => !hidden.has(pool)),
-    ...rows.filter((r) => r.valid === true).map((r) => r.pool),
+    ...visible.filter((r) => r.valid === true).map((r) => r.pool),
   ])
   const assets = listedAssets(manifest, rows)
   const perAsset = new Map<string, number>()

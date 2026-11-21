@@ -1,20 +1,23 @@
 "use client"
 
-import { useId, useState } from "react"
+import { useEffect, useId, useRef, useState } from "react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Skeleton } from "@/components/ui/skeleton"
 import { AmountField } from "@/components/app/actions/amount-field"
 import { GateList } from "@/components/app/actions/gate-list"
 import type { FieldKey, FloorSpec, PanelConfig, PanelInputs, PreviewLine } from "@/components/app/actions/panel-config"
+import { PendingNotice } from "@/components/app/actions/pending-notice"
 import { PreviewList, safeLines, useQuoteLines } from "@/components/app/actions/preview-lines"
 import { SignFlow } from "@/components/app/actions/sign-flow"
-import { TxNoticeView } from "@/components/app/actions/tx-feedback"
+import { dismissPendingToast, showTxToast, TxNoticeView } from "@/components/app/actions/tx-feedback"
 import { STALE, useGateContext } from "@/hooks/use-gate-context"
+import { usePendingTx } from "@/hooks/use-pending-tx"
 import { useSettings } from "@/hooks/use-settings"
 import { useSimulation } from "@/hooks/use-simulation"
 import { amountsComplete, checkAmount, spendBalance } from "@/lib/app/amounts"
+import { readPending, type PendingTx } from "@/lib/app/pending-tx"
 import type { AccountState } from "@/lib/protocol/account-state"
-import type { TxNotice } from "@/lib/app/tx-notice"
+import { noticeForSettled, type TxNotice } from "@/lib/app/tx-notice"
 import { ACTION_META, invocationFor, type ActionId, type ActionInput, type GuardValues } from "@/lib/protocol/actions"
 import { formatAmount, formatBps } from "@/lib/protocol/format"
 import { BLOCKER_ORDER, evaluateGates, type Blocker } from "@/lib/protocol/gates"
@@ -25,6 +28,9 @@ import type { MarketState } from "@/lib/protocol/market-state"
 
 /** Every Principal token has 7 decimals; the underlying's are read from the manifest. */
 const TOKEN_DECIMALS = 7
+
+/** Why Review is off while the panel's last send is pending (M-21). */
+const WAIT_TO_SETTLE = "Wait for the last transaction to settle."
 
 /** The guard values a call signs. */
 type SignedGuard = keyof GuardValues
@@ -86,6 +92,24 @@ export function ActionPanel({ config, marketId }: { config: PanelConfig; marketI
   const { wallet, ms, account, ledgerTime } = gate
   const source = wallet.status === "connected" ? wallet.publicKey : null
   const decimals = market?.underlying.decimals ?? TOKEN_DECIMALS
+  // The review is bound to the wallet; a result is shown only to the wallet it was for.
+  const owner = JSON.stringify(wallet)
+
+  // M-21: a send whose result is not known yet stays pending until its time bound, and no second
+  // send is offered before then. How it settles replaces the panel's last result.
+  const pending = usePendingTx(source, marketId, config.action, ({ tx, lookup }) => {
+    const notice = noticeForSettled(meta.label, tx.hash, lookup, manifest.network)
+    showTxToast(notice)
+    setLast({ owner, notice })
+  })
+  // Once the send shown here has settled (here, in another panel or tab, or by its route), its
+  // result-not-known toast closes. One only hidden by an account or market change is still pending.
+  const shownPending = useRef<PendingTx | null>(null)
+  useEffect(() => {
+    const was = shownPending.current
+    shownPending.current = pending
+    if (was && was.hash !== pending?.hash && !readPending(was.account).some((e) => e.hash === was.hash)) dismissPendingToast(was.hash)
+  }, [pending])
 
   // --- Amounts (Review Focus 3): parsed without rounding, checked against the balance spent (R24).
   const fields = config.fields.map((spec) => {
@@ -100,8 +124,13 @@ export function ActionPanel({ config, marketId }: { config: PanelConfig; marketI
   for (const f of fields) if (f.check.ok) inputs[f.spec.id] = f.check.raw
   const fieldError = fields.some((f) => !f.check.ok)
   const amount = inputs.amount ?? 0n
-  const secondaryAmount = config.fields.some((f) => f.id === "secondaryAmount") ? (inputs.secondaryAmount ?? 0n) : undefined
-  const complete = !fieldError && amountsComplete(config.action, amount, secondaryAmount)
+  // A second amount no field gives (Split's version-2 `sy_in`) is worked out from the market reads;
+  // while it cannot be, the amounts are not complete: nothing is simulated or signed.
+  const signed = config.signedSecondary?.(manifest, ms, amount)
+  const secondaryMissing = signed !== undefined && "missing" in signed
+  const fieldSecondary = config.fields.some((f) => f.id === "secondaryAmount") ? (inputs.secondaryAmount ?? 0n) : undefined
+  const secondaryAmount = signed !== undefined && "amount" in signed ? signed.amount : fieldSecondary
+  const complete = !fieldError && !secondaryMissing && amountsComplete(config.action, amount, secondaryAmount)
   const deadlineAt = (t: number) => BigInt(Math.floor(t) + deadlineSeconds)
 
   // --- Exact quote (R28: every action), as the connected user, once the network clock is known.
@@ -115,6 +144,8 @@ export function ActionPanel({ config, marketId }: { config: PanelConfig; marketI
   let blockers: Blocker[] = gate.unavailable
   if (gate.base) {
     blockers = evaluateGates({ ...draft, guards: {}, deadline: 0n }, { ...gate.base, simulation: sim.outcome })
+    // The read the signed second amount needs, when it failed (the gates already say so when the market data did not load).
+    if (signed !== undefined && "missing" in signed) blockers = [...blockers, { code: "unavailable", message: signed.missing }]
     if (sim.guards && !sim.guards.ok) blockers = [...blockers, { code: "quote", message: sim.guards.reason }]
     // Nothing is simulated until the amounts are complete: the amount is the reason, not a missing quote.
     if (!complete) blockers = blockers.filter((b) => b.code !== "quote")
@@ -128,6 +159,8 @@ export function ActionPanel({ config, marketId }: { config: PanelConfig; marketI
       blockers = [...refusals, ...blockers.filter((b) => b.code !== "amount" && b.code !== "balance")].sort((a, b) => rank(a) - rank(b))
     }
   }
+  // Listed first: nothing in the form lifts it, so it takes the code of a refusal the inputs cannot lift.
+  if (pending) blockers = [{ code: "disabled", message: WAIT_TO_SETTLE }, ...blockers]
   // Signing needs every gate evaluated (a context) and passed, and floors from this input's simulation.
   const canReview = gate.base !== null && simInput !== null && blockers.length === 0 && guards !== undefined
   const buildInput = (): ActionInput | null =>
@@ -153,7 +186,6 @@ export function ActionPanel({ config, marketId }: { config: PanelConfig; marketI
   const notes = configNotes(config, ms, account)
 
   // The review is bound to all of this; a change remounts SignFlow and discards it (Review Focus 2).
-  const owner = JSON.stringify(wallet)
   const ownerKey = JSON.stringify([marketId, config.action, owner, texts.amount ?? "", texts.secondaryAmount ?? "", slippageBps.toString(), deadlineSeconds])
   const restoreCall =
     sim.outcome && !sim.outcome.ok && sim.outcome.kind === "restore_required" && sim.simulated && source !== null
@@ -242,11 +274,13 @@ export function ActionPanel({ config, marketId }: { config: PanelConfig; marketI
           restoreCall={restoreCall}
           onRestored={sim.refresh}
           onNotice={(notice) => {
-            setLast({ owner, notice })
-            // Once a transaction reached the network (confirmed, or result not known yet) the form
-            // starts over as on first load: the old amounts would fail against the new balances, and
-            // must not be sent twice. A refused or failed attempt keeps them, to correct and retry.
-            if (notice.tone !== "error") {
+            // A result not known yet (the one warning a send gives) is shown by the pending notice
+            // until it settles, then by how it settled: it is not kept to come back afterwards.
+            setLast(notice.tone === "warning" ? null : { owner, notice })
+            // Once a transaction is confirmed the form starts over as on first load: the old amounts
+            // would fail against the new balances. A result not known yet keeps them (the pending
+            // guard refuses a second send until it settles), as a refused or failed attempt does.
+            if (notice.tone === "success") {
               setTexts({})
               setTouched({})
             }
@@ -255,7 +289,11 @@ export function ActionPanel({ config, marketId }: { config: PanelConfig; marketI
           network={manifest.network}
         />
 
-        {last && last.owner === owner ? <TxNoticeView notice={last.notice} /> : null}
+        {pending ? (
+          <PendingNotice label={meta.label} tx={pending} network={manifest.network} />
+        ) : last && last.owner === owner ? (
+          <TxNoticeView notice={last.notice} />
+        ) : null}
       </CardContent>
     </Card>
   )

@@ -93,6 +93,9 @@ function base(patch: (b: Omit<GateContext, "simulation">) => void = () => {}): O
     compliance,
     ledgerTime: BEFORE,
     managerId: "CMANAGER",
+    network: "testnet",
+    protocolAbi: 1,
+    underlying: "USDY",
   }
   patch(b)
   return b
@@ -106,6 +109,7 @@ const request = (kind: RouteRequest["kind"], amount: bigint): RouteRequest => ({
   pay: "underlying",
   receive: "underlying",
   matured: false,
+  underlying: "USDY",
 })
 
 const ok: SimulationOutcome = { ok: true, retval: 1n, latestLedger: 500, minResourceFee: "100" }

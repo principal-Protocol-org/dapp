@@ -8,13 +8,14 @@ import { MATURITY_DATE } from "@/components/app/market/market-header"
 import { Metric } from "@/components/app/market/metric"
 import { marketStatus } from "@/components/app/markets/market-groups"
 import { StatusBadge } from "@/components/app/markets/status-badge"
-import { DASHBOARD_LIVE_MS, useMarketDashboard, usePendingClaim } from "@/hooks/use-dashboard"
+import { dashboardLiveMs, useMarketDashboard, usePendingClaim } from "@/hooks/use-dashboard"
 import { useLedgerClock } from "@/hooks/use-ledger-clock"
 import { TVL_LABEL, type MarketDashboard } from "@/lib/protocol/dashboard/protocol-state"
 import type { VerifiableFigure } from "@/lib/protocol/dashboard/verify"
 import { explorerUrl } from "@/lib/protocol/explorer"
 import { formatAmountFixed, formatBps, formatRate } from "@/lib/protocol/format"
 import { getMarket } from "@/lib/protocol/manifest"
+import { assetNote } from "@/lib/protocol/onboarding"
 import { unavailable } from "@/lib/protocol/reader"
 import type { Live, Network } from "@/lib/protocol/types"
 import { AsOf, readsOf } from "./as-of"
@@ -50,8 +51,8 @@ function addressLink(network: Network, label: string): FigureRender<string> {
 
 /**
  * `/dashboard/markets/[marketId]`: one market's figures, its settlement state, its fee buckets and
- * recipients, and the pending-yield address lookup (D-9). One batch of reads every 15 s
- * (`useMarketDashboard`); the lookup adds an address's three YT reads once one is entered. No wallet.
+ * recipients, and the pending-yield address lookup (D-9). One batch of reads at the live cadence
+ * (`useMarketDashboard`, 15 s, 60 s on Mainnet); the lookup adds an address's three YT reads once one is entered. No wallet.
  */
 export function MarketPanel({ marketId }: { marketId: string }) {
   const m = useManifest()
@@ -64,7 +65,9 @@ export function MarketPanel({ marketId }: { marketId: string }) {
   if (!market) return null
 
   const { decimals, code } = market.underlying
-  const read = readOf(q, DASHBOARD_LIVE_MS)
+  const note = assetNote(m, market)
+  const liveMs = dashboardLiveMs(m.network)
+  const read = readOf(q, liveMs)
   const pick = <T,>(f: (x: MarketDashboard) => Live<T>) => current(q, f)
   const amount = (unit: string) => amountIn(decimals, unit)
   const fee = (unit: string) => amountIn(decimals, unit, 4)
@@ -122,7 +125,7 @@ export function MarketPanel({ marketId }: { marketId: string }) {
       ? unavailable(`the market's last refresh failed: ${q.error?.message ?? "unknown error"}`)
       : current(pending, (x) => x)
   const pendingFigure: FigureSpec<bigint> | null = account
-    ? { label: "Pending yield", live: pendingLive, format: amountIn(decimals, code, decimals), scale: scale(code), read: readOf(pending, DASHBOARD_LIVE_MS) }
+    ? { label: "Pending yield", live: pendingLive, format: amountIn(decimals, code, decimals), scale: scale(code), read: readOf(pending, liveMs) }
     : null
 
   const all = [
@@ -153,6 +156,7 @@ export function MarketPanel({ marketId }: { marketId: string }) {
               </h1>
               <StatusBadge status={status} />
             </div>
+            {note ? <p className="max-w-[68ch] text-sm text-ink-muted">{note}</p> : null}
             <p className="font-mono text-xs text-ink-muted wrap-anywhere">{market.marketId}</p>
             <p className="max-w-[68ch] text-ink-muted">
               This market&apos;s state, read from its contracts. No wallet is needed. Each figure&apos;s info button shows the contract call behind it
@@ -166,7 +170,7 @@ export function MarketPanel({ marketId }: { marketId: string }) {
             <CopyEvidence figures={evidence} />
           </div>
         </div>
-        <AsOf sources={readsOf(all.map((f) => f.live))} updatedAt={updatedAt} cadenceMs={DASHBOARD_LIVE_MS} />
+        <AsOf sources={readsOf(all.map((f) => f.live))} updatedAt={updatedAt} cadenceMs={liveMs} />
       </div>
 
       <div className="grid grid-cols-[minmax(0,1fr)] gap-6 min-[900px]:grid-cols-2">

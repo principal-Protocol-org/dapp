@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { Button } from "@/components/ui/button"
 import { RestoreBanner, type RestoreStep } from "@/components/app/actions/restore-banner"
 import { ReviewDialog } from "@/components/app/actions/review-dialog"
-import { showTxToast } from "@/components/app/actions/tx-feedback"
+import { pendingToastId, showTxToast } from "@/components/app/actions/tx-feedback"
 import { useExecute } from "@/hooks/use-execute"
 import { noticeForError, noticeForResult, type TxNotice } from "@/lib/app/tx-notice"
 import type { ActionInput } from "@/lib/protocol/actions"
@@ -129,16 +129,19 @@ export function SignFlow(props: SignFlowProps) {
     reviewRef.current = null
     setFlow({ step: "signing", review })
     let notice: TxNotice
+    let toastId: string | undefined
     try {
       const result = await exec.execute(review)
       const message = result.status === "SUCCESS" && result.output ? latest.current.describeResult(result.output, review.input) : undefined
       notice = noticeForResult(latest.current.label, result, latest.current.network, message)
+      // A result not known yet stays up until it settles: the panel then closes it (M-21).
+      if (result.status === "NOT_FOUND") toastId = pendingToastId(result.hash)
     } catch (error) {
       notice = noticeForError(latest.current.label, error, latest.current.network)
     }
     busy.current = false
     setFlow({ step: "idle" })
-    showTxToast(notice)
+    showTxToast(notice, toastId)
     latest.current.onNotice(notice)
   }
 

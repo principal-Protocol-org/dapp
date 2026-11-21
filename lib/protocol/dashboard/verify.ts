@@ -34,6 +34,7 @@ export const NULL_ACCOUNT = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
  * | `market` | Router `:464` | `pool` |
  * | `is_allowed` | Permissioning `:87` | `account` |
  * | `is_allowed_for_asset` | Permissioning `:119` | `account`, `asset` |
+ * | `lastprice` | SEP-40 price feed (principal 3af9388 `oracle_adapter:172-176` `Sep40Interface`; the mock `tests/fixtures/sep40-mock` `:62`) | `asset` |
  *
  * `balance` is ambiguous: PTToken and YTToken name it `account`, not `id`. A read of those records
  * the name on its source with `nameArgs`, which wins over this map.
@@ -58,10 +59,11 @@ export const ARG_NAMES: Readonly<Record<string, readonly string[]>> = {
   market: ["pool"],
   is_allowed: ["account"],
   is_allowed_for_asset: ["account", "asset"],
+  lastprice: ["asset"],
 }
 
-/** A source argument as `readLive` records it (`{ type, value }`, bigints as decimal strings), maybe named. */
-type RecordedArg = { type?: unknown; value?: unknown; name?: unknown }
+/** A source argument as `readLive` records it (`{ type, value }`, an enum's `variant`, bigints as decimal strings), maybe named. */
+type RecordedArg = { type?: unknown; value?: unknown; variant?: unknown; name?: unknown }
 
 const asRecorded = (arg: unknown): RecordedArg => (arg && typeof arg === "object" ? (arg as RecordedArg) : { value: arg })
 
@@ -72,12 +74,37 @@ export function nameArgs<T>(live: Live<T>, names: readonly string[]): Live<T> {
   return { ...live, source: { ...live.source, args } } as Live<T>
 }
 
-/** The argument value as the CLI takes it: addresses, numbers and symbols as they are, bytes as hex, structs as JSON. */
+const isEnum = (arg: RecordedArg): arg is RecordedArg & { variant: string } => arg.type === "enum" && typeof arg.variant === "string"
+
+/**
+ * A recorded enum in the CLI's JSON form: `{"Stellar":"C…"}`, `{"Other":"USDY"}` for a tuple variant
+ * (an enum inside nests its own form), the variant's name alone for a unit variant.
+ */
+function enumJson(arg: RecordedArg & { variant: string }): unknown {
+  if (arg.value === undefined) return arg.variant
+  const inner = asRecorded(arg.value)
+  return { [arg.variant]: isEnum(inner) ? enumJson(inner) : inner.value }
+}
+
+/** The argument value as the CLI takes it: addresses, numbers and symbols as they are, bytes as hex, enums in the CLI's JSON form, structs as JSON. */
 function argValue(arg: RecordedArg): string {
+  if (isEnum(arg)) {
+    const json = enumJson(arg)
+    return typeof json === "string" ? json : JSON.stringify(json)
+  }
   const v = arg.value
   if (typeof v === "string") return v
   if (typeof v === "number" || typeof v === "boolean" || typeof v === "bigint") return String(v)
   return JSON.stringify(v, (_k, x) => (typeof x === "bigint" ? x.toString() : x))
+}
+
+/** An endpoint's host, for display: a full RPC URL may carry a key. The URL itself when it does not parse. */
+export function hostOf(url: string): string {
+  try {
+    return new URL(url).host
+  } catch {
+    return url
+  }
 }
 
 /** Quotes a shell word unless it is plainly safe (addresses, numbers, hex, URLs). */
@@ -93,7 +120,7 @@ const MAINNET_PASSPHRASE = "Public Global Stellar Network ; September 2015"
  * built-in `mainnet` has no RPC ("Bring Your Own"), and `--rpc-url` cannot be added to `--network`
  * (the CLI then asks for the passphrase), so a Mainnet command names the RPC and passphrase instead.
  */
-function networkFlags(network: Network, rpcUrl: string): string {
+function networkFlags(network: Network, rpcUrl: string | undefined): string {
   if (network === "mainnet" && rpcUrl) return `--rpc-url ${shellWord(rpcUrl)} --network-passphrase ${shellWord(MAINNET_PASSPHRASE)}`
   return `--network ${network}`
 }
@@ -111,14 +138,15 @@ function argNames(source: Pick<ReadSource, "fn" | "args">): string[] {
 /**
  * The command that re-reads a figure as a simulation (nothing is signed or sent):
  * `stellar contract invoke --network <net> --id <C…> --source-account <null account> --send=no -- <fn> --<arg> <value>…`.
+ * On Mainnet `rpcUrl` is the manifest's `verifyRpcUrlOf` (never a read's own endpoint, which may carry a key).
  * Throws when an argument's name is unknown: a command with a guessed flag would fail or mislead.
  */
-export function verifyCommand(network: Network, source: ReadSource | Omit<ReadSource, "rawXdr" | "ledger">): string {
+export function verifyCommand(network: Network, source: ReadSource | Omit<ReadSource, "rawXdr" | "ledger">, rpcUrl?: string): string {
   const names = argNames(source)
   const args = source.args.map((raw, i) => `--${names[i]} ${shellWord(argValue(asRecorded(raw)))}`)
   return [
     "stellar contract invoke",
-    networkFlags(network, source.rpcUrl),
+    networkFlags(network, rpcUrl),
     `--id ${source.contractId}`,
     `--source-account ${NULL_ACCOUNT}`,
     "--send=no",
@@ -128,12 +156,20 @@ export function verifyCommand(network: Network, source: ReadSource | Omit<ReadSo
   ].join(" ")
 }
 
+/**
+ * An input a figure needed but could not read (one oracle among several): whose it is (`name`), why,
+ * and the call attempted, so the reader can repeat it. The figure's value is computed without it.
+ */
+export type UnreadInput = { name: string; error: string; source?: Omit<ReadSource, "rawXdr" | "ledger"> }
+
 export type VerifiableFigure = {
   label: string
   display: string
   live: Live<unknown>
   /** When the figure's reads arrived (ms) and how often they refresh: the status then says "read Xs ago", and Stale past 2 × the cadence. */
   read?: { at: number; cadenceMs: number }
+  /** Inputs that could not be read: the evidence and the drawer name each, with its attempted call. */
+  unread?: UnreadInput[]
 }
 
 /** What the evidence needs beyond the figure: the manifest (to name contracts by role) and the time now (ms, for the read's age). */
@@ -309,8 +345,26 @@ function liveStatus(f: VerifiableFigure, spread: { min: number; max: number } | 
 const unique = (xs: string[]) => [...new Set(xs.filter((x) => x !== ""))]
 const orNone = (xs: string[], sep: string) => (xs.length > 0 ? xs.join(sep) : NONE)
 
-/** The evidence for one figure, as the drawer and the evidence table read it. */
+/** "Not read: MOCKXAUM: rpc down", for the status. */
+export const unreadText = (unread: UnreadInput[]) => `Not read: ${unread.map((u) => `${u.name}: ${u.error}`).join("; ")}`
+
+/** The evidence for one figure, as the drawer and the evidence table read it; an unread input adds its contract, its attempted call and why. */
 export function figureEvidence(f: VerifiableFigure, ctx: EvidenceContext = {}): FigureEvidence {
+  const e = readEvidence(f, ctx)
+  const unread = f.unread ?? []
+  if (unread.length === 0) return e
+  const calls = unread.flatMap((u) => (u.source ? [`${qualifiedCall(u.source, ctx.manifest)} (not read)`] : []))
+  const contracts = unread.flatMap((u) => (u.source ? [u.source.contractId] : []))
+  const known = (text: string, sep: string) => (text === NONE ? [] : text.split(sep))
+  return {
+    ...e,
+    contract: orNone(unique([...known(e.contract, ", "), ...contracts]), ", "),
+    call: orNone([...known(e.call, "; "), ...calls], "; "),
+    status: `${e.status} · ${unreadText(unread)}`,
+  }
+}
+
+function readEvidence(f: VerifiableFigure, ctx: EvidenceContext): FigureEvidence {
   const { live } = f
   if (live.status === "unavailable") {
     const s = live.source
@@ -321,7 +375,7 @@ export function figureEvidence(f: VerifiableFigure, ctx: EvidenceContext = {}): 
       raw: NONE,
       display: f.display,
       ledger: NONE,
-      coverage: s?.rpcUrl || NONE,
+      coverage: s?.rpcUrl ? hostOf(s.rpcUrl) : NONE,
       status: `Unavailable: ${live.error}`,
       verified: "",
       rawXdr: [],
@@ -340,7 +394,7 @@ export function figureEvidence(f: VerifiableFigure, ctx: EvidenceContext = {}): 
     raw: reads.length > 0 ? rawValues(reads, ctx.manifest) : NONE,
     display: f.display,
     ledger: spread ? `${spread.min}–${spread.max}` : String(live.ledger),
-    coverage: orNone(unique(reads.map((s) => s.rpcUrl)), ", "),
+    coverage: orNone(unique(reads.map((s) => hostOf(s.rpcUrl))), ", "),
     status: liveStatus(f, spread, ctx.now),
     verified: "",
     rawXdr: reads.map((s) => s.rawXdr),

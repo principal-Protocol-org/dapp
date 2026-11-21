@@ -578,6 +578,23 @@ describe("prepareReview", () => {
       })
     })
 
+    it("protocolAbi 2: sy_in and pt_in are signed, never shown as something the user gives or gets (plan 0009)", async () => {
+      const m2: Manifest = { ...manifest, protocolAbi: 2 }
+      const g: GuardValues = { minOut: 1_2345678n, maxNetCost: 3_5000000n }
+      for (const [action, literal, args] of [
+        ["mint", 10_0000000n, 6],
+        ["buy_pt_underlying", 10_0000000n, 6],
+        ["buy_yt", 9_8000000n, 7],
+      ] as const) {
+        const v1 = await review(action, { guards: g })
+        const v2 = await prepareReview({ manifest: m2, input: input(action, { guards: g, secondaryAmount: literal }), rpc: fakeRpc() })
+        expect(v2.invocation.args, action).toHaveLength(args)
+        expect(v2.invocation.args[3], action).toEqual({ type: "i128", value: literal })
+        expect({ ...v2.summary, validUntil: 0 }, action).toEqual({ ...v1.summary, validUntil: 0 })
+        expect(v2.callTree, action).toEqual(v1.callTree)
+      }
+    })
+
     it("LP only from USDY and the exit to USDY (R5-5, R5-6)", async () => {
       const g: GuardValues = { minOut: 1_2345678n }
       const lines = async (action: ActionId, extra: Partial<ActionInput> = {}) => {
@@ -1001,6 +1018,25 @@ describe("executeReview", () => {
         "Sending the transaction failed (socket hang up), and the network does not show it yet. Look it up by its hash before trying again.",
       )
       expect(server.calls.polled.every((h) => h === hashOf(r.unsignedXdr))).toBe(true)
+    })
+
+    it("keeps, with a result not known yet, the signed transaction's time bound and when it was prepared (M-21)", async () => {
+      const server = fakeRpc({
+        async getTransaction(hash) {
+          server.calls.polled.push(hash)
+          return { status: "NOT_FOUND" }
+        },
+      })
+      const r = await review("buy_pt", {}, server)
+      vi.useFakeTimers({ toFake: ["setTimeout"] })
+      const pending = executeReview({ review: r, manifest, sign: signWith(), rpc: server })
+      await vi.runAllTimersAsync()
+      const result = await pending
+
+      const maxTime = Number(new Transaction(r.unsignedXdr, passphrase).timeBounds?.maxTime)
+      expect(maxTime).toBeGreaterThan(0)
+      // Read from the transaction that was signed, not from the review's description of it.
+      expect(result).toEqual({ hash: hashOf(r.unsignedXdr), status: "NOT_FOUND", validUntil: maxTime, sentAt: Math.floor(r.preparedAtMs / 1000) })
     })
 
     it("uses the local hash when RPC returns none", async () => {
@@ -1591,6 +1627,33 @@ describe("manager reviews (0002 §5): the same review → sign pipeline as an ac
       await expect(preparedBy((tx) => assemble(tx, { auth: [authWith(callOf(tx), poolTree)] }), pool)).resolves.toBeTruthy()
       // create_tokens' tree under create_engine is not create_engine's.
       await expect(preparedBy((tx) => assemble(tx, { auth: [authWith(callOf(tx), childInits())] }), engine)).rejects.toThrow(foreignAuth)
+    })
+
+    it("version 2 (principal 3af9388): create_pool_and_escrow's tree has RecoveryEscrow.initialize; each version's tree is refused on the other", async () => {
+      const m2: Manifest = { ...factoryManifest, protocolAbi: 2 }
+      const c = { issuer: SOURCE, salt: SALT, params }
+      const v2Calls = poolAuthTree(m2, c)
+      expect(v2Calls).toHaveLength(6)
+      expect(v2Calls[1]).toMatchObject({ contractId: deriveMarketContracts(m2, SALT).recoveryEscrow, functionName: "initialize" })
+      const v1Tree = poolAuthTree(factoryManifest, c).map(argsOfInvocation)
+      const v2Tree = v2Calls.map(argsOfInvocation)
+      const pool = (m: Manifest) => createPoolAndEscrowCall(m, { source: SOURCE, salt: SALT, params })
+      const prepared = (m: Manifest, tree: xdr.InvokeContractArgs[]) =>
+        prepareManagerReview({ manifest: m, call: pool(m), rpc: fakeRpc({ prepareTransaction: async (tx) => assemble(tx, { auth: [authWith(callOf(tx), tree)] }) }) })
+      const r = await prepared(m2, v2Tree)
+      expect(r.callTree).toEqual([
+        "MarketFactory.create_pool_and_escrow",
+        "MarketPool.initialize",
+        "RecoveryEscrow.initialize",
+        "SYWrapper.set_recovery_escrow",
+        "PTToken.set_recovery_escrow",
+        "YTToken.set_recovery_escrow",
+        "MarketPool.set_recovery_escrow",
+      ])
+      await expect(prepared(m2, v1Tree)).rejects.toThrow(foreignAuth)
+      await expect(prepared(factoryManifest, v2Tree)).rejects.toThrow(foreignAuth)
+      // The escrow's entry out of the contract's order is refused too.
+      await expect(prepared(m2, [v2Tree[0], ...v2Tree.slice(2), v2Tree[1]])).rejects.toThrow(foreignAuth)
     })
 
     it("refuses any call beneath the root that the factory does not make: RPC may not slip one into what the issuer signs", async () => {

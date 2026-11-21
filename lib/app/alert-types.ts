@@ -9,7 +9,10 @@ export type AlertSeverity = "warning" | "critical"
 export type Alert = {
   /** The condition, e.g. "oracle_stale", "risk_exhausted". */
   kind: string
-  /** What it is about: a contract id, a group, a signer. */
+  /**
+   * What it is about: an oracle's id (its freshness, feed and keeper alerts), `<oracle id>:<reason>`
+   * (a rejection), a market id (`seed_invalid`), a contract, a group, a signer.
+   */
   subject: string
   severity: AlertSeverity
   /** ISO time it opened. */
@@ -28,6 +31,7 @@ const KIND_WORDS: Readonly<Record<string, string>> = {
   oracle_rejection: "Oracle rejected an update",
   feed_broken: "Oracle feed broken",
   keeper_unhealthy: "Oracle keeper unhealthy",
+  seed_invalid: "Manifest market failed its checks",
   paused: "Contract paused",
   risk_warning: "Circuit breaker near its limit",
   risk_exhausted: "Circuit breaker exhausted",

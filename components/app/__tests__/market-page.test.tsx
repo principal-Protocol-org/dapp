@@ -1,3 +1,4 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { cleanup, render, screen, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { beforeEach, describe, expect, it, vi } from "vitest"
@@ -34,7 +35,8 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@/components/app/manifest-provider", () => {
   // One object per network, as the provider gives: hooks depend on its identity.
   const byNetwork = new Map<string, unknown>()
-  const make = (network: string) => ({ network, markets: [MARKET] })
+  // On Mainnet the underlying is a mock asset that names the asset it follows (plan 0009).
+  const make = (network: string) => ({ network, markets: [network === "mainnet" ? { ...MARKET, underlying: { ...MARKET.underlying, tracks: "GILTS" } } : MARKET] })
   return {
     useManifest: () => {
       if (!byNetwork.has(mocks.network)) byNetwork.set(mocks.network, make(mocks.network))
@@ -43,7 +45,7 @@ vi.mock("@/components/app/manifest-provider", () => {
   }
 })
 // Server side: generateStaticParams reads the static seeds, MarketRoute the resolved markets.
-vi.mock("@/lib/protocol/manifest-source", () => ({ activeManifest: () => ({ network: mocks.network, markets: [MARKET] }), manifestPending: () => false }))
+vi.mock("@/lib/protocol/manifest-source", () => ({ activeManifest: () => ({ network: mocks.network, markets: [MARKET] }) }))
 vi.mock("@/lib/server/manifest", () => ({
   resolvedManifest: async () => ({ network: mocks.network, markets: [MARKET, { ...MARKET, marketId: "testnet-sta-registry" }] }),
 }))
@@ -114,7 +116,13 @@ import { MarketStats } from "../market/market-stats"
 import { MarketView } from "../market/market-view"
 import { SafetyContent } from "../market/safety-card"
 
-const wrap = (ui: React.ReactElement) => render(<TooltipProvider>{ui}</TooltipProvider>)
+// The compliance card's Add trustline button refreshes the account reads through the query client.
+const wrap = (ui: React.ReactElement) =>
+  render(
+    <QueryClientProvider client={new QueryClient()}>
+      <TooltipProvider>{ui}</TooltipProvider>
+    </QueryClientProvider>,
+  )
 const sac = live({
   kind: "sac" as const,
   authRequired: true,
@@ -204,6 +212,15 @@ describe("MarketHeader", () => {
     mocks.clock = { ledgerTime: null, isError: true }
     wrap(<MarketHeader marketId="m1" />)
     expect(badge()).toBe("Unavailable")
+  })
+  it("says a Mainnet mock asset is one, and names the asset it follows (plan 0009)", () => {
+    mocks.network = "mainnet"
+    wrap(<MarketHeader marketId="m1" />)
+    expect(screen.getByText("Mock asset issued by Principal for testing. It follows the price of GILTS and is not GILTS.")).toBeTruthy()
+  })
+  it("shows no note for an asset that is neither a mock nor the test asset", () => {
+    wrap(<MarketHeader marketId="m1" />)
+    expect(screen.queryByText(/Mock asset|Test token/)).toBeNull()
   })
 })
 
@@ -441,7 +458,9 @@ describe("ComplianceContent", () => {
     mocks.network = "mainnet"
     wrap(<ComplianceContent marketId="m1" onGetTestTokens={() => {}} />)
     expect(screen.queryByRole("button", { name: "Get test tokens" })).toBeNull()
-    expect(screen.getAllByText(/Fix: Ask the market's administrator/).length).toBeGreaterThan(0)
+    // Mainnet: the grants are asked of the protocol team (plan 0009, Task 12).
+    expect(screen.getAllByText(/Fix: Request access below\./).length).toBeGreaterThan(0)
+    expect(screen.getByRole("region", { name: "Request access" })).toBeTruthy()
   })
 })
 

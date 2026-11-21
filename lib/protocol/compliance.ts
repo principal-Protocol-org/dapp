@@ -1,7 +1,7 @@
 import type { AccountState, ComplianceKind } from "./account-state"
 import type { Horizon } from "./horizon"
 import { isContractError, liveValue, readLive, toAddress, unavailable } from "./reader"
-import type { Live, Market } from "./types"
+import type { Live, Market, Network } from "./types"
 import type { ContractReader } from "./reader"
 
 export type MarketCompliance =
@@ -22,8 +22,26 @@ export type ComplianceItem = {
   id: "account" | "trustline" | "authorized" | "permissioning" | "perm_pt" | "perm_yt"
   status: "ok" | "missing" | "blocked" | "unavailable"
   message: string
-  fix?: "friendbot" | "trustline" | "onboarding" | "issuer"
+  /**
+   * What clears it. `friendbot` and `onboarding` exist where Get test tokens does (Testnet, a local
+   * network); on Mainnet the account is funded with XLM (`fund`) and the issuer's authorization and
+   * the Permissioning grants are asked of the protocol team (`access`).
+   */
+  fix?: "friendbot" | "fund" | "trustline" | "onboarding" | "access" | "issuer"
 }
+
+/** Each item's short name, lower case: "The <label> check has not run yet", "Still missing: …". */
+export const COMPLIANCE_ITEM_LABEL: Record<ComplianceItem["id"], string> = {
+  account: "account",
+  trustline: "trustline",
+  authorized: "issuer authorization",
+  permissioning: "Principal permissioning",
+  perm_pt: "PT permissioning",
+  perm_yt: "YT permissioning",
+}
+
+/** Where nothing can be granted from the app (Mainnet): the protocol team grants access by hand. */
+const ACCESS_BY_TEAM = "Access to this market is granted by the protocol team."
 
 /**
  * Positive evidence only. `sac`: `admin()` returns a valid address. `sep57`: `admin()` fails with a
@@ -60,19 +78,26 @@ function unavailableItem(id: ComplianceItem["id"], what: string, input: { status
 /**
  * `kind` is null when the market's compliance read is unavailable; `kindError` is then its cause.
  * The trustline and authorization items are unavailable (not guessed) in that case.
+ *
+ * `network` words the fixes only: on Testnet and a local network Get test tokens does the funding,
+ * the authorization and the grants (the texts the live Testnet suites pin); on Mainnet there is no
+ * faucet, so a missing account is sent XLM and the rest is asked of the protocol team. The checks
+ * and their status are the same everywhere.
  */
 export function evaluateAccountCompliance(
   acc: AccountState,
   kind: ComplianceKind | null,
   kindError = "compliance model unknown",
+  network: Network = "testnet",
 ): ComplianceItem[] {
+  const faucet = network !== "mainnet"
   return [
-    accountItem(acc),
+    accountItem(acc, faucet),
     kind === null ? unknownKindItem("trustline", kindError) : trustlineItem(acc, kind),
-    kind === null ? unknownKindItem("authorized", kindError) : authorizedItem(acc, kind),
-    permissionItem("permissioning", acc.permAllowed, "Principal permissioning", "your account"),
-    permissionItem("perm_pt", acc.permPt, "PT permissioning", "PT"),
-    permissionItem("perm_yt", acc.permYt, "YT permissioning", "YT"),
+    kind === null ? unknownKindItem("authorized", kindError) : authorizedItem(acc, kind, faucet),
+    permissionItem("permissioning", acc.permAllowed, "Principal permissioning", "your account", faucet),
+    permissionItem("perm_pt", acc.permPt, "PT permissioning", "PT", faucet),
+    permissionItem("perm_yt", acc.permYt, "YT permissioning", "YT", faucet),
   ]
 }
 
@@ -84,17 +109,18 @@ function unknownKindItem(id: ComplianceItem["id"], cause: string): ComplianceIte
   }
 }
 
-function accountItem(acc: AccountState): ComplianceItem {
+function accountItem(acc: AccountState, faucet: boolean): ComplianceItem {
   const { accountExists } = acc
   if (accountExists.status === "unavailable") return unavailableItem("account", "Whether your account exists", accountExists)
-  return accountExists.value
-    ? { id: "account", status: "ok", message: "Your account exists on the network." }
-    : {
+  if (accountExists.value) return { id: "account", status: "ok", message: "Your account exists on the network." }
+  return faucet
+    ? {
         id: "account",
         status: "missing",
         fix: "friendbot",
         message: "Your account does not exist on the network yet. Fund it first (on Testnet, use Friendbot).",
       }
+    : { id: "account", status: "missing", fix: "fund", message: "Your account does not exist on the network yet. Send it XLM first." }
 }
 
 function trustlineItem(acc: AccountState, kind: ComplianceKind): ComplianceItem {
@@ -113,7 +139,7 @@ function trustlineItem(acc: AccountState, kind: ComplianceKind): ComplianceItem 
     : { id: "trustline", status: "ok", message: "You have a trustline to the underlying asset." }
 }
 
-function authorizedItem(acc: AccountState, kind: ComplianceKind): ComplianceItem {
+function authorizedItem(acc: AccountState, kind: ComplianceKind, faucet: boolean): ComplianceItem {
   if (kind === "sep57") return sep57Item(acc)
   const { sacAuthorized, trustline } = acc
   if (sacAuthorized.status === "unavailable") return unavailableItem("authorized", "The issuer's authorization", sacAuthorized)
@@ -129,12 +155,14 @@ function authorizedItem(acc: AccountState, kind: ComplianceKind): ComplianceItem
     }
   }
   if (trustline.status === "live" && trustline.value === "unauthorized") {
-    return {
-      id: "authorized",
-      status: "blocked",
-      fix: "onboarding",
-      message: "Blocked by the issuer: your trustline exists but is not authorized. On Testnet, Get test tokens asks the issuer to authorize it.",
-    }
+    return faucet
+      ? {
+          id: "authorized",
+          status: "blocked",
+          fix: "onboarding",
+          message: "Blocked by the issuer: your trustline exists but is not authorized. On Testnet, Get test tokens asks the issuer to authorize it.",
+        }
+      : { id: "authorized", status: "blocked", fix: "access", message: `Your trustline is not authorized yet. ${ACCESS_BY_TEAM}` }
   }
   return {
     id: "authorized",
@@ -167,14 +195,15 @@ function sep57Item(acc: AccountState): ComplianceItem {
   return { id: "authorized", status: "ok", message: "Your account is not frozen and your identity is verified." }
 }
 
-function permissionItem(id: ComplianceItem["id"], input: Live<boolean>, what: string, subject: string): ComplianceItem {
+function permissionItem(id: ComplianceItem["id"], input: Live<boolean>, what: string, subject: string, faucet: boolean): ComplianceItem {
   if (input.status === "unavailable") return unavailableItem(id, what, input)
-  return input.value
-    ? { id, status: "ok", message: `${what}: ${subject} is allowed.` }
-    : {
+  if (input.value) return { id, status: "ok", message: `${what}: ${subject} is allowed.` }
+  return faucet
+    ? {
         id,
         status: "missing",
         fix: "onboarding",
         message: `${what}: ${subject} is not allowed yet. Get test tokens grants it on Testnet.`,
       }
+    : { id, status: "missing", fix: "access", message: `${what}: ${subject} is not allowed yet. ${ACCESS_BY_TEAM}` }
 }

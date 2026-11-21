@@ -17,8 +17,12 @@ const mocks = vi.hoisted(() => ({
   clockError: false,
   testAsset: true,
   extraAsset: false,
+  /** Mainnet's shape (plan 0009): no test asset, and the underlying names the asset it tracks. */
+  tracks: undefined as string | undefined,
   history: {} as Record<string, unknown>,
   sparks: undefined as unknown,
+  /** The refresh interval the list asked `useMarketStates` for. */
+  refetchMs: undefined as number | undefined,
 }))
 
 vi.mock("@/components/app/manifest-provider", () => {
@@ -31,26 +35,29 @@ vi.mock("@/components/app/manifest-provider", () => {
     maturity: 1_800_000_000,
     contracts: { pool },
   })
-  const make = (testAsset: boolean, extra: boolean) => ({
-    network: "testnet",
-    testAsset: testAsset ? { ...underlying, displayName: "USDY (test)" } : undefined,
-    markets: [
-      mk("m1", "C" + "A".repeat(55), underlying),
-      mk("m2", "C" + "B".repeat(55), underlying),
-      ...(extra ? [mk("m3", "C" + "D".repeat(55), other)] : []),
-    ],
-  })
+  const make = (testAsset: boolean, extra: boolean, tracks: string | undefined) => {
+    const u = tracks ? { code: `MOCK${tracks}`, issuer: "GISS", sac: "CSAC", decimals: 7, tracks } : underlying
+    return {
+      network: tracks ? "mainnet" : "testnet",
+      testAsset: testAsset ? { ...underlying, displayName: "USDY (test)" } : undefined,
+      markets: [mk("m1", "C" + "A".repeat(55), u), mk("m2", "C" + "B".repeat(55), u), ...(extra ? [mk("m3", "C" + "D".repeat(55), other)] : [])],
+    }
+  }
   const cache = new Map<string, unknown>()
   return {
     useManifest: () => {
-      const key = `${mocks.testAsset}${mocks.extraAsset}`
-      if (!cache.has(key)) cache.set(key, make(mocks.testAsset, mocks.extraAsset))
+      const key = `${mocks.testAsset}${mocks.extraAsset}${mocks.tracks}`
+      if (!cache.has(key)) cache.set(key, make(mocks.testAsset, mocks.extraAsset, mocks.tracks))
       return cache.get(key)
     },
   }
 })
 vi.mock("@/hooks/use-market-state", () => ({
-  useMarketStates: (ids: string[]) => ids.map((id) => mocks.states[id] ?? { data: undefined, isPending: true, stale: false }),
+  MARKET_LIST_REFETCH_MS: 30_000,
+  useMarketStates: (ids: string[], refetchMs?: number) => {
+    mocks.refetchMs = refetchMs
+    return ids.map((id) => mocks.states[id] ?? { data: undefined, isPending: true, stale: false })
+  },
 }))
 vi.mock("@/hooks/use-market-history", () => ({
   useMarketHistory: (pool: string): Query<MarketHistory> => {
@@ -110,6 +117,7 @@ beforeEach(() => {
   mocks.states = {}
   mocks.testAsset = true
   mocks.extraAsset = false
+  mocks.tracks = undefined
   mocks.ledgerTime = LEDGER_TIME
   mocks.clockError = false
   // m1: PT 0.98 -> 50x, 5% APR. m2: PT 0.95 -> 20x, 7% APR (longer-dated look, same maturity in the fixture).
@@ -160,6 +168,11 @@ describe("MarketGroups", () => {
     )
   const assetRow = () => screen.getByRole("button", { name: /USDY \(test\)/ })
   const marketCard = (id: string) => screen.getByRole("listitem", { name: new RegExp(`USDY · ${id}`) })
+
+  it("refreshes every market's figures every 30 s, not the market page's 6 s", () => {
+    renderList()
+    expect(mocks.refetchMs).toBe(30_000)
+  })
 
   it("groups markets by underlying with a count badge", () => {
     mocks.extraAsset = true
@@ -285,6 +298,15 @@ describe("MarketGroups", () => {
     expect(screen.getByRole("button", { name: /USDY/ })).toBeTruthy()
     expect(screen.queryByText(/USDY \(test\)/)).toBeNull()
     expect(screen.queryByText(/not Ondo's USDY/)).toBeNull()
+  })
+
+  it("labels a mock asset with the asset it follows, and says it is not that asset (plan 0009)", () => {
+    mocks.testAsset = false
+    mocks.tracks = "GILTS"
+    renderList()
+    const row = screen.getByRole("button", { name: /MOCKGILTS/ })
+    expect(within(row).getByText("Mock asset issued by Principal for testing. It follows the price of GILTS and is not GILTS.")).toBeTruthy()
+    expect(screen.queryByText(/Test token issued by Principal/)).toBeNull()
   })
 
   it("collapses and expands an asset", async () => {

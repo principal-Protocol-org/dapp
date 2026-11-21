@@ -2,11 +2,11 @@
 import { describe, expect, it } from "vitest"
 import testnetJson from "@/lib/protocol/__tests__/fixtures/testnet-interim.json"
 import type { AccountState } from "../account-state"
-import { evaluateAccountCompliance, fetchMarketCompliance } from "../compliance"
+import { evaluateAccountCompliance, fetchMarketCompliance, type ComplianceItem } from "../compliance"
 import type { Horizon } from "../horizon"
 import { parseManifest } from "../manifest"
 import type { ContractReader } from "../reader"
-import type { Live } from "../types"
+import type { Live, Network } from "../types"
 
 const manifest = parseManifest(testnetJson)
 const market = manifest.markets[0]
@@ -120,6 +120,79 @@ describe("evaluateAccountCompliance", () => {
       expect(byId(evaluateAccountCompliance(sep(live(false), down()), "sep57")).authorized.status).toBe("unavailable")
       expect(byId(evaluateAccountCompliance(account({ sep57: null }), "sep57")).authorized.status).toBe("unavailable")
     })
+  })
+})
+
+describe("evaluateAccountCompliance by network", () => {
+  /** Every account state whose item is not OK, and the item it is about. */
+  const cases = {
+    "account missing": [account({ accountExists: live(false) }), "account"],
+    "no trustline": [account({ trustline: live("none"), sacAuthorized: live(false) }), "trustline"],
+    "no trustline to authorize": [account({ trustline: live("none"), sacAuthorized: live(false) }), "authorized"],
+    "trustline not authorized": [account({ trustline: live("unauthorized"), sacAuthorized: live(false) }), "authorized"],
+    "blocked by the issuer": [account({ sacAuthorized: live(false) }), "authorized"],
+    "account not allowed": [account({ permAllowed: live(false) }), "permissioning"],
+    "PT not allowed": [account({ permPt: live(false) }), "perm_pt"],
+    "YT not allowed": [account({ permYt: live(false) }), "perm_yt"],
+  } as const satisfies Record<string, readonly [AccountState, ComplianceItem["id"]]>
+  type Case = keyof typeof cases
+  const itemFor = (name: Case, network?: Network) => {
+    const [acc, id] = cases[name]
+    const items = network === undefined ? evaluateAccountCompliance(acc, "sac") : evaluateAccountCompliance(acc, "sac", undefined, network)
+    return byId(items)[id]
+  }
+
+  // Pinned by the live Testnet suites (journey, lifecycle): these must never change on Testnet or a local network.
+  const TESTNET: Record<Case, { message: string; fix: ComplianceItem["fix"] }> = {
+    "account missing": { message: "Your account does not exist on the network yet. Fund it first (on Testnet, use Friendbot).", fix: "friendbot" },
+    "no trustline": { message: "You have no trustline to the underlying asset. Add one before you can hold it.", fix: "trustline" },
+    "no trustline to authorize": { message: "The issuer cannot authorize you until you add a trustline.", fix: "trustline" },
+    "trustline not authorized": {
+      message: "Blocked by the issuer: your trustline exists but is not authorized. On Testnet, Get test tokens asks the issuer to authorize it.",
+      fix: "onboarding",
+    },
+    "blocked by the issuer": { message: "Blocked by the issuer: the underlying asset does not authorize your account. Contact the issuer.", fix: "issuer" },
+    "account not allowed": { message: "Principal permissioning: your account is not allowed yet. Get test tokens grants it on Testnet.", fix: "onboarding" },
+    "PT not allowed": { message: "PT permissioning: PT is not allowed yet. Get test tokens grants it on Testnet.", fix: "onboarding" },
+    "YT not allowed": { message: "YT permissioning: YT is not allowed yet. Get test tokens grants it on Testnet.", fix: "onboarding" },
+  }
+
+  const ACCESS = "Access to this market is granted by the protocol team."
+  const MAINNET: Record<Case, { message: string; fix: ComplianceItem["fix"] }> = {
+    "account missing": { message: "Your account does not exist on the network yet. Send it XLM first.", fix: "fund" },
+    "no trustline": TESTNET["no trustline"],
+    "no trustline to authorize": TESTNET["no trustline to authorize"],
+    "trustline not authorized": { message: `Your trustline is not authorized yet. ${ACCESS}`, fix: "access" },
+    "blocked by the issuer": TESTNET["blocked by the issuer"],
+    "account not allowed": { message: `Principal permissioning: your account is not allowed yet. ${ACCESS}`, fix: "access" },
+    "PT not allowed": { message: `PT permissioning: PT is not allowed yet. ${ACCESS}`, fix: "access" },
+    "YT not allowed": { message: `YT permissioning: YT is not allowed yet. ${ACCESS}`, fix: "access" },
+  }
+  const names = Object.keys(cases) as Case[]
+
+  it.each(names)("%s: the Testnet text is unchanged without a network, on testnet and on a local network", (name) => {
+    for (const network of [undefined, "testnet", "local"] as const) {
+      const item = itemFor(name, network)
+      expect(item.message).toBe(TESTNET[name].message)
+      expect(item.fix).toBe(TESTNET[name].fix)
+    }
+  })
+
+  it.each(names)("%s: the Mainnet text names no faucet", (name) => {
+    const item = itemFor(name, "mainnet")
+    expect(item.message).toBe(MAINNET[name].message)
+    expect(item.fix).toBe(MAINNET[name].fix)
+    expect(item.message).not.toMatch(/Friendbot|Get test tokens|Testnet/)
+  })
+
+  it("the SEP-57 issuer items and the status of every item are the same on Mainnet", () => {
+    const sep = account({ sacAuthorized: down("n/a"), trustline: live("none"), sep57: { frozen: live(true), identityVerified: live(true) } })
+    expect(byId(evaluateAccountCompliance(sep, "sep57", undefined, "mainnet")).authorized).toEqual(byId(evaluateAccountCompliance(sep, "sep57")).authorized)
+    for (const name of names) expect(itemFor(name, "mainnet").status).toBe(itemFor(name).status)
+  })
+
+  it("a fully compliant account is OK with no fix on Mainnet too", () => {
+    expect(evaluateAccountCompliance(account(), "sac", undefined, "mainnet").every((i) => i.status === "ok" && i.fix === undefined)).toBe(true)
   })
 })
 

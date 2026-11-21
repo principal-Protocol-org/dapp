@@ -95,4 +95,4 @@ for key in "$ADMIN_KEY" "$TREASURY_KEY"; do
   echo "  $key  $addr"
 done
 
-echo "Local network is up. Next: MATURITY_SECONDS=3600 scripts/dev-stack/deploy.sh"
+echo "Local network is up. Next: scripts/dev-stack/deploy.sh (two markets maturing in a day; MATURITY_SECONDS sets another term)"

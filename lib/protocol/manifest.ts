@@ -36,6 +36,8 @@ const marketSchema = z.object({
     issuer: accountId,
     sac: contractId,
     decimals: z.number().int().min(0).max(18),
+    /** Optional: the asset this underlying tracks (e.g. the token behind a wrapped one), shown beside it. */
+    tracks: z.string().min(1).max(12).optional(),
   }),
   maturity: z.number().int().positive(),
   contracts: z.object({
@@ -71,6 +73,8 @@ const envelope = {
     .optional(),
   /** RPC endpoints tried, in order, after `rpcUrl`. */
   rpcFallbackUrls: z.array(z.string().url()).optional(),
+  /** An RPC URL anyone may use, with no key: what "How to verify" commands name. Defaults to `rpcUrl`. */
+  verifyRpcUrl: z.string().url().optional(),
 }
 
 const manifestSchemaV1 = z.object({
@@ -102,6 +106,17 @@ export const manifestSchema = z
         displayName: z.string().min(1),
       })
       .optional(),
+    /** Contract-interface version the Router speaks. Absent means 1 (Testnet). */
+    protocolAbi: z.union([z.literal(1), z.literal(2)]).optional(),
+    /** Where a person without access can ask for it. */
+    accessContact: z
+      .object({
+        label: z.string().min(1),
+        url: z.string().url().refine((u) => /^(https:|mailto:)/i.test(u), "Expected an https: or mailto: URL"),
+      })
+      .optional(),
+    /** Ledger each contract was created at, by contract id. */
+    createdLedgers: z.record(contractId, z.number().int().positive()).optional(),
     markets: z.array(marketSchema),
   })
   // The indexer starts at `deployLedger`: off the local network, a manifest without it would make
@@ -112,23 +127,35 @@ export const manifestSchema = z
     }
   })
 
-/** What the app shows, and the API answers, while the Mainnet manifest is the pending stub (D-24). */
-export const MAINNET_PENDING_MESSAGE = "Mainnet contracts are not deployed yet."
-
-/**
- * The manifest is the committed stub `{ "network": "mainnet", "pending": true }`: the contracts are
- * not deployed yet. Pages show one clear page and the API answers 503 `not_configured`; nothing is
- * guessed. Replacing the stub with the real manifest is the whole switch.
- */
-export class MainnetPendingError extends Error {
-  constructor() {
-    super(MAINNET_PENDING_MESSAGE)
-    this.name = "MainnetPendingError"
-  }
+/** Router code hashes (hex) whose interface version is known. */
+export const ROUTER_ABI_BY_WASM: Readonly<Record<string, 1 | 2>> = {
+  // Testnet, 665bb67
+  "9cd0403a156b192e09c1c614743e99c0b167e9a3c65c7e5553596639e772fd39": 1,
+  // Mainnet, 3af9388
+  "2a0997317651edb0f7e2bd753570b03a88462aa6d216c14b06ebec246bb3c1c2": 2,
 }
 
-/** The stub, and nothing else: one carrying an address, a URL or a market is refused (D-24). */
-const pendingStubSchema = z.object({ network: z.literal("mainnet"), pending: z.literal(true) }).strict()
+/** The contract-interface version a manifest declares; 1 when it does not say. */
+/** The RPC URL a "How to verify" command names: the manifest's keyless `verifyRpcUrl`, else its `rpcUrl`. */
+export const verifyRpcUrlOf = (m: Pick<Manifest, "rpcUrl" | "verifyRpcUrl">): string => m.verifyRpcUrl ?? m.rpcUrl
+
+export function protocolAbi(m: Pick<Manifest, "protocolAbi">): 1 | 2 {
+  return m.protocolAbi ?? 1
+}
+
+/** The distinct oracles of a manifest in first-seen order, each with the markets that use it. */
+export function manifestOracles(m: Pick<Manifest, "markets">): { oracle: string; markets: Market[] }[] {
+  const byOracle = new Map<string, Market[]>()
+  for (const market of m.markets) {
+    const list = byOracle.get(market.contracts.oracle)
+    if (list) list.push(market)
+    else byOracle.set(market.contracts.oracle, [market])
+  }
+  return [...byOracle].map(([oracle, markets]) => ({ oracle, markets }))
+}
+
+/** The underlying codes of `markets`, distinct, in order, joined by ", " ("USDY", "USTRY, GILT"): what an oracle's alerts and health name. */
+export const assetCodes = (markets: Pick<Market, "underlying">[]): string => [...new Set(markets.map((m) => m.underlying.code))].join(", ")
 
 export const PASSPHRASES: Record<Network, string> = {
   local: "Standalone Network ; February 2017",
@@ -154,18 +181,8 @@ function upgradeV1(v1: z.infer<typeof manifestSchemaV1>): unknown {
   }
 }
 
-/**
- * Accepts a v1 or v2 manifest and returns v2. The pending Mainnet stub throws `MainnetPendingError`;
- * any other file with a `pending` key is refused.
- */
+/** Accepts a v1 or v2 manifest and returns v2. */
 export function parseManifest(json: unknown): Manifest {
-  if (typeof json === "object" && json !== null && "pending" in json) {
-    const stub = pendingStubSchema.safeParse(json)
-    if (!stub.success) {
-      throw new Error(`Invalid manifest: a pending stub is exactly { "network": "mainnet", "pending": true } (${describe(stub.error)})`)
-    }
-    throw new MainnetPendingError()
-  }
   let input = json
   if (typeof json === "object" && json !== null && (json as { schemaVersion?: unknown }).schemaVersion === 1) {
     const v1 = manifestSchemaV1.safeParse(json)
@@ -194,6 +211,7 @@ export function validateManifest(m: Manifest): Finding[] {
   if (m.network !== "local") {
     if (!m.rpcUrl.startsWith("https://")) error(`rpcUrl must use https:// on ${m.network}.`)
     if (!m.horizonUrl.startsWith("https://")) error(`horizonUrl must use https:// on ${m.network}.`)
+    if (m.verifyRpcUrl && !m.verifyRpcUrl.startsWith("https://")) error(`verifyRpcUrl must use https:// on ${m.network}.`)
     for (const url of m.rpcFallbackUrls ?? []) {
       if (!url.startsWith("https://")) error(`rpcFallbackUrls must use https:// on ${m.network}: ${url}.`)
     }
@@ -202,13 +220,17 @@ export function validateManifest(m: Manifest): Finding[] {
     }
   }
 
+  const routerHash = m.wasmHashes?.router?.toLowerCase()
+  // Own keys only: a hash such as "constructor" must not find a prototype member.
+  const known = routerHash && Object.hasOwn(ROUTER_ABI_BY_WASM, routerHash) ? ROUTER_ABI_BY_WASM[routerHash] : undefined
+  if (known !== undefined && known !== protocolAbi(m)) {
+    error(`protocolAbi is ${protocolAbi(m)} but the Router code is the version-${known} one.`)
+  }
+
   const seen = new Set<string>()
   for (const market of m.markets) {
     if (market.contracts.router !== m.shared.router) {
       error(`Market "${market.marketId}" router differs from shared.router.`)
-    }
-    if (market.contracts.oracle !== m.shared.oracle) {
-      error(`Market "${market.marketId}" oracle differs from shared.oracle.`)
     }
     if (seen.has(market.marketId)) error(`Duplicate marketId "${market.marketId}".`)
     seen.add(market.marketId)

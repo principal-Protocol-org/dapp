@@ -96,7 +96,7 @@ describe("/api/cron/alerts", () => {
     expect((await res.json()).open).toHaveLength(2)
   })
 
-  it.each(["oracle_stale", "oracle_unavailable", "keeper_unhealthy", "risk_exhausted", "indexer_gap"])("500 while a critical alert is open (%s)", async (kind) => {
+  it.each(["oracle_stale", "oracle_unavailable", "keeper_unhealthy", "seed_invalid", "risk_exhausted", "indexer_gap"])("500 while a critical alert is open (%s)", async (kind) => {
     mocks.runAlertCheck.mockResolvedValue(result([openAlert("paused", "warning"), openAlert(kind, "critical")]))
     const res = await call(auth)
     expect(res.status).toBe(500)

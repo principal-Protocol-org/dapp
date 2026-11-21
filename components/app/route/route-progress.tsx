@@ -13,9 +13,10 @@ const holdsFunds = (state: RouteControls["state"]) =>
 /**
  * "Step n of m" and what to do next, for a route that is waiting, interrupted or done. While a
  * route holds funds, Dismiss shows only after the holdings sentence is on screen, and asks for an
- * explicit confirmation (R2-24); the run stays in History either way.
+ * explicit confirmation (R2-24); the run stays in History either way. `code` is the market's asset
+ * code, the one the way back goes to.
  */
-export function RouteProgress({ route }: { route: RouteControls }) {
+export function RouteProgress({ route, code }: { route: RouteControls; code: string }) {
   const { state } = route
   const [confirming, setConfirming] = useState(false)
   if (state.phase === "idle" || state.phase === "reviewing" || state.phase === "signing" || !state.run) return null
@@ -30,7 +31,7 @@ export function RouteProgress({ route }: { route: RouteControls }) {
     <section aria-label="Route progress" className="grid gap-3 rounded-lg border border-line p-3 text-sm text-ink wrap-anywhere">
       <h3 className="font-medium">
         {state.phase === "done"
-          ? `${state.run.unwound ? "Turned back into USDY" : "Route complete"}: ${state.of} of ${state.of} steps confirmed`
+          ? `${state.run.unwound ? `Turned back into ${code}` : "Route complete"}: ${state.of} of ${state.of} steps confirmed`
           : `Step ${state.step} of ${state.of}`}
       </h3>
       <RouteSteps plans={plans} steps={state.run.steps} current={state.phase === "done" ? 0 : state.step} />
@@ -55,7 +56,7 @@ export function RouteProgress({ route }: { route: RouteControls }) {
           </Button>
           {state.unwind?.available ? (
             <Button type="button" variant="secondary" onClick={route.unwind}>
-              Back to USDY
+              Back to {code}
             </Button>
           ) : state.unwind ? (
             <p className="text-ink-muted">{state.unwind.reason}</p>

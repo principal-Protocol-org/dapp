@@ -99,6 +99,33 @@ describe("scArgToVal: a contracttype struct (MarketFactory params, R5-10)", () =
   });
 });
 
+describe("scArgToVal: a contracttype enum (the SEP-40 feed's Sep40Asset)", () => {
+  const sac = StrKey.encodeContract(new Uint8Array(32).fill(5));
+
+  it("a tuple variant is a vec of its name as a symbol, then its value", () => {
+    const other: ScArg = { type: "enum", variant: "Other", value: { type: "symbol", value: "USDY" } };
+    expect(scArgToVal(other).toXDR("base64")).toBe(xdr.ScVal.scvVec([xdr.ScVal.scvSymbol("Other"), xdr.ScVal.scvSymbol("USDY")]).toXDR("base64"));
+    expect(scValToNative(scArgToVal(other))).toEqual(["Other", "USDY"]);
+    const stellar: ScArg = { type: "enum", variant: "Stellar", value: { type: "address", value: sac } };
+    expect(scArgToVal(stellar).toXDR("base64")).toBe(
+      xdr.ScVal.scvVec([xdr.ScVal.scvSymbol("Stellar"), nativeToScVal(sac, { type: "address" })]).toXDR("base64"),
+    );
+    expect(scValToNative(scArgToVal(stellar))).toEqual(["Stellar", sac]);
+  });
+
+  it("a unit variant is a one-element vec of its name", () => {
+    expect(scArgToVal({ type: "enum", variant: "None" }).toXDR("base64")).toBe(xdr.ScVal.scvVec([xdr.ScVal.scvSymbol("None")]).toXDR("base64"));
+  });
+
+  it("scArgEquals compares the encoding: same variant and value are equal, another variant or value is not", () => {
+    const a: ScArg = { type: "enum", variant: "Other", value: { type: "symbol", value: "USDY" } };
+    expect(scArgEquals(a, structuredClone(a))).toBe(true);
+    expect(scArgEquals(a, { type: "enum", variant: "Other", value: { type: "symbol", value: "XLM" } })).toBe(false);
+    expect(scArgEquals(a, { type: "enum", variant: "Stellar", value: { type: "address", value: sac } })).toBe(false);
+    expect(scArgEquals(a, { type: "symbol", value: "USDY" })).toBe(false);
+  });
+});
+
 describe("buildInvokeTransaction", () => {
   it("builds parseable unsigned XDR for a Principal Router call", () => {
     const source = Keypair.random().publicKey();
@@ -847,6 +874,89 @@ describe("simulateInvocation", () => {
     });
     expect(seen?.source).toBe(source);
     expect(seen?.sequence).toBe("6");
+  });
+
+  // The read cap and shared reads (spec 0005 M-20): a write simulation is a read of the RPC too.
+  const success = () =>
+    ({ id: "1", _parsed: true, latestLedger: 90, events: [], minResourceFee: "1", transactionData: {}, result: { auth: [], retval: nativeToScVal(7n, { type: "i128" }) } }) as unknown as rpc.Api.SimulateTransactionResponse;
+
+  /** A server that counts requests and those in flight; each stays open across a timer tick. */
+  function countingServer() {
+    const load = { requests: 0, inFlight: 0, peak: 0 };
+    const hold = async <T,>(answer: T): Promise<T> => {
+      load.requests++;
+      load.inFlight++;
+      load.peak = Math.max(load.peak, load.inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      load.inFlight--;
+      return answer;
+    };
+    const server = { getAccount: () => hold(account), simulateTransaction: () => hold(success()) };
+    return { server, load };
+  }
+
+  it("shares an identical simulation in flight; another source or another amount is its own", async () => {
+    const { server, load } = countingServer();
+    const other = Keypair.random().publicKey();
+    const params = (who: string, amount: bigint) => ({
+      rpcUrl: testnetMarket.rpcUrl,
+      networkPassphrase: testnetMarket.networkPassphrase,
+      source: who,
+      invocation: { ...invocation, args: [{ type: "i128", value: amount }] as ScArg[] },
+      server,
+    });
+    const [a, b, c, d] = await Promise.all([
+      simulateInvocation(params(source, 5n)),
+      simulateInvocation(params(source, 5n)),
+      simulateInvocation(params(other, 5n)),
+      simulateInvocation(params(source, 6n)),
+    ]);
+    expect(a).toBe(b);
+    expect([c.ok, d.ok]).toEqual([true, true]);
+    // Three simulations, each an account read then the simulation.
+    expect(load.requests).toBe(6);
+  });
+
+  it("never throws or rejects, even on an argument its sharing key cannot hold", async () => {
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+    const { server } = countingServer();
+    let outcome: Promise<unknown> | undefined;
+    expect(() => {
+      outcome = simulateInvocation({
+        rpcUrl: testnetMarket.rpcUrl,
+        networkPassphrase: testnetMarket.networkPassphrase,
+        source,
+        invocation: { ...invocation, args: [{ type: "struct", value: circular } as unknown as ScArg] },
+        server,
+      });
+    }).not.toThrow();
+    // Simulated on its own, unshared: an outcome, whatever the simulation made of the argument.
+    await expect(outcome).resolves.toMatchObject({ ok: expect.any(Boolean) });
+  });
+
+  it("never has more than six requests in flight with the contract reads, and answers every one", async () => {
+    const { server, load } = countingServer();
+    const writes = Array.from({ length: 10 }, (_, i) =>
+      simulateInvocation({
+        rpcUrl: testnetMarket.rpcUrl,
+        networkPassphrase: testnetMarket.networkPassphrase,
+        source,
+        invocation: { ...invocation, args: [{ type: "i128", value: BigInt(i) }] },
+        server,
+      }),
+    );
+    const reads = Array.from({ length: 10 }, (_, i) =>
+      simulateContractRead({
+        rpcUrl: testnetMarket.rpcUrl,
+        networkPassphrase: testnetMarket.networkPassphrase,
+        invocation: { contractId: testnetMarket.contracts.router, functionName: `view_${i}`, args: [] },
+        server,
+      }),
+    );
+    expect((await Promise.all(writes)).every((w) => w.ok)).toBe(true);
+    expect((await Promise.all(reads)).map((r) => r.value)).toEqual(Array(10).fill(7n));
+    expect(load.peak).toBe(6);
   });
 });
 

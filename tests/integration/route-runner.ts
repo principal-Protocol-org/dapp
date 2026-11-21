@@ -19,13 +19,14 @@
 import { expect } from "vitest"
 import { derive, ratesFrom, simulate } from "@/hooks/use-simulation"
 import { fetchAccountState, type AccountState, type ComplianceKind } from "@/lib/protocol/account-state"
-import { ACTION_META, invocationFor, type ActionInput, type GuardValues } from "@/lib/protocol/actions"
+import { abiSecondaryAmount, ACTION_META, invocationFor, signsAbiSecondary, type ActionInput, type GuardValues } from "@/lib/protocol/actions"
 import { evaluateAccountCompliance, type ComplianceItem } from "@/lib/protocol/compliance"
 import { userErrorMessage } from "@/lib/protocol/errors"
 import { impliedRate, type CurveState } from "@/lib/protocol/curve"
 import { evaluateGates, type Blocker, type GateContext } from "@/lib/protocol/gates"
 import { openGuards, type ActionOutput } from "@/lib/protocol/guards"
 import { createHorizon } from "@/lib/protocol/horizon"
+import { protocolAbi } from "@/lib/protocol/manifest"
 import { fetchMarketState, type MarketState, type PoolStateView } from "@/lib/protocol/market-state"
 import { BPS, ceilDiv } from "@/lib/protocol/math"
 import { createRpcReader, type ContractReader } from "@/lib/protocol/reader"
@@ -189,7 +190,7 @@ export function createRunner(p: {
         continue
       }
       if (unread.length === 0 || attempt >= SNAPSHOT_ATTEMPTS) {
-        return { ms, acc, compliance: evaluateAccountCompliance(acc, kind), ledgerTime: clock.now() }
+        return { ms, acc, compliance: evaluateAccountCompliance(acc, kind, undefined, manifest.network), ledgerTime: clock.now() }
       }
       log(`snapshot attempt ${attempt}: read again, the RPC did not answer ${unread.join("; ")}`)
       await sleep(1_000)
@@ -228,6 +229,9 @@ export function createRunner(p: {
       compliance: s.compliance,
       ledgerTime: s.ledgerTime,
       managerId: market.contracts.manager,
+      network: manifest.network,
+      protocolAbi: protocolAbi(manifest),
+      underlying: market.underlying.code,
     }
   }
 
@@ -330,10 +334,19 @@ export function createRunner(p: {
 
   /**
    * One action as an `ActionPanel` (a Quick action) runs it: the same simulation, gates, floors and
-   * review as a route step, for a fixed amount.
+   * review as a route step, for a fixed amount. A version-2 split also signs the `sy_in` the panel
+   * works out from the market reads (`abiSecondaryAmount`; none on version 1).
    */
   async function runAction(action: ActionInput["action"], amount: bigint, name = `quick action ${action}`): Promise<StepRecord> {
-    const plan: StepPlan = { action, amount: { from: "value", value: amount }, gives: "", takes: "" }
+    // Version 1 reads nothing more: the quick action runs exactly as it always has.
+    const second = signsAbiSecondary(manifest, action) ? abiSecondaryAmount(manifest, action, amount, abiReads((await snapshot()).ms)) : undefined
+    const plan: StepPlan = {
+      action,
+      amount: { from: "value", value: amount },
+      ...(second !== undefined ? { secondaryAmount: { from: "value", value: second } } : {}),
+      gives: "",
+      takes: "",
+    }
     // Only `amount` of a request is ever read, and only for an `input` amount: this plan has none.
     const req = { amount } as RouteRequest
     return runStep(req, [plan], [], 0, name)
@@ -350,6 +363,15 @@ export function live<T>(v: Live<T>, what: string): T {
   return v.value
 }
 
+/** The reads `abiSecondaryAmount` works a version-2 literal out from, as the app's panels read them. */
+export function abiReads(ms: MarketState): { exchangeRate: bigint; oracleRate: bigint; tokenizationFeeBps: bigint } {
+  return {
+    exchangeRate: live(ms.exchangeRate, "SY exchange rate"),
+    oracleRate: live(ms.oracleRate, "oracle rate"),
+    tokenizationFeeBps: live(ms.fees.tokenizationBps, "tokenization fee"),
+  }
+}
+
 export const showPool = (p: PoolStateView) => `PT ${units(p.ptReserve)}, SY ${units(p.syReserve)}, LP ${units(p.totalLp)}, τ ${p.secondsToMaturity} s`
 
 /** The fixed APR at `SCALE` of `after`'s reserves on `before`'s clock, exponent and oracle rate: the trade's own move. */
@@ -359,8 +381,8 @@ export function rateMove(before: PoolStateView, after: PoolStateView): { before:
 }
 
 /**
- * `useTradeRoute`'s plan context: the manifest alone decides a one-step route (R5-4), and the plan
- * sizes with the slippage the quote uses (R5-2).
+ * `useTradeRoute`'s plan context: the manifest alone decides a one-step route (R5-4) and the
+ * argument lists (`protocolAbi`, plan 0009), and the plan sizes with the slippage the quote uses (R5-2).
  */
 export function planContext(manifest: Manifest, market: Market, runner: Runner, s: Snapshot): PlanContext {
   return {
@@ -368,7 +390,9 @@ export function planContext(manifest: Manifest, market: Market, runner: Runner, 
     source: runner.account,
     matured: false,
     routerFunctions: manifest.routerFunctions ?? [],
+    protocolAbi: protocolAbi(manifest),
     slippageBps: SLIPPAGE_BPS,
+    underlying: market.underlying.code,
     ms: s.ms,
   }
 }
@@ -414,7 +438,7 @@ export async function runTrade(p: {
   expect(pre.blockers, `${req.kind}: refusals before the start`).toEqual([])
   const lp = s0.acc.lp.status === "live" ? { heldLp: s0.acc.lp.value } : {}
   const firstStep = pre.firstOutput ? { firstStep: { action: planned[0].action, output: pre.firstOutput } } : {}
-  const quoted = currentContractsAdapter.quote(req, { ms: s0.ms, slippageBps: SLIPPAGE_BPS, plans: planned, ...lp, ...firstStep })
+  const quoted = currentContractsAdapter.quote(req, { ms: s0.ms, slippageBps: SLIPPAGE_BPS, underlying: ctx.underlying, plans: planned, ...lp, ...firstStep })
   if (quoted.status !== "live") throw new Error(`${req.kind}: quote unavailable: ${quoted.error}`)
   const quote = quoted.value
   const pool0 = live(s0.ms.poolState, "pool state")

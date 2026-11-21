@@ -1,6 +1,8 @@
 // @vitest-environment node
 import { Keypair, Transaction, TransactionBuilder } from "@stellar/stellar-sdk"
 import { describe, expect, it, vi } from "vitest"
+import mainnetConfig from "@/config/manifests/mainnet.json"
+import testnetConfig from "@/config/manifests/testnet.json"
 import testnetJson from "@/lib/protocol/__tests__/fixtures/testnet-interim.json"
 import type { AccountState } from "../account-state"
 import { bytesToHex } from "../bytes"
@@ -8,6 +10,7 @@ import { parseManifest } from "../manifest"
 import type { ContractReader } from "../reader"
 import {
   addTrustline,
+  assetNote,
   buildChangeTrustXdr,
   fetchMarketPermissions,
   fundWithFriendbot,
@@ -147,6 +150,28 @@ describe("onboarding availability", () => {
     expect(testAssetOf({ ...manifest, testAsset: undefined })).toEqual(asset)
     const mixed = [manifest.markets[0], { ...manifest.markets[0], marketId: "b", underlying: { ...asset, code: "STB" } }]
     expect(testAssetOf({ ...manifest, testAsset: undefined, markets: mixed })).toBeNull()
+  })
+})
+
+describe("assetNote (plan 0009, Task 13)", () => {
+  it("a mock asset names the asset it follows, and says it is not that asset", () => {
+    const mainnet = parseManifest(mainnetConfig)
+    const note = (code: string) => assetNote(mainnet, mainnet.markets.find((x) => x.underlying.code === code)!)
+    expect(note("MOCKGILTS")).toBe("Mock asset issued by Principal for testing. It follows the price of GILTS and is not GILTS.")
+    expect(note("MOCKUSDY")).toBe("Mock asset issued by Principal for testing. It follows the price of USDY and is not USDY.")
+  })
+
+  it("the Testnet test asset keeps its note, word for word", () => {
+    const testnet = parseManifest(testnetConfig)
+    expect(assetNote(testnet, testnet.markets[0])).toBe("Test token issued by Principal for Stellar Testnet, not Ondo's USDY")
+  })
+
+  it("any other asset has none", () => {
+    // The interim fixture lists no test asset, and its underlying tracks nothing.
+    expect(assetNote(manifest, manifest.markets[0])).toBeNull()
+    const testnet = parseManifest(testnetConfig)
+    const other = { ...testnet.markets[0], underlying: { ...testnet.markets[0].underlying, code: "OTHER", sac: "C" + "Z".repeat(55) } }
+    expect(assetNote(testnet, other)).toBeNull()
   })
 })
 

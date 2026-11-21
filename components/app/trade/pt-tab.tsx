@@ -33,7 +33,9 @@ const TOKEN_DECIMALS = 7
  * trade adapter (R2-55) and the route runner. The route is the one the adapter planned: one Router
  * call when the manifest lists it, or the deposit or withdraw around the swap, and the copy reads
  * its steps. The details show the fixed APY before → after the trade, the effective fixed APY, the
- * fee, the minimum received and the payoff at maturity, fixed in USD.
+ * fee, the minimum received and the payoff at maturity, in USD. Where the underlying tracks a real
+ * asset (`underlying.tracks`, Mainnet's mock assets), that USD is the oracle's price at maturity,
+ * which never goes down, and the copy says so; elsewhere (Testnet) the words are unchanged.
  *
  * One `RouteFlow` serves both sides, so a route started on one side (or resumed from History)
  * stays on screen when the side changes; it shows only PT routes (R2-77). The amounts reset once a
@@ -51,7 +53,9 @@ export function PtTab({ marketId, side, routeId, onRouteOpened }: { marketId: st
   const [tokens, setTokens] = useState<Record<PtSide, PayToken>>({ buy: "underlying", sell: "underlying" })
   const [last, setLast] = useState<{ owner: string; notice: TxNotice } | null>(null)
 
-  const code = market?.underlying.code ?? "USDY"
+  // Empty only without the market, when nothing renders (below).
+  const code = market?.underlying.code ?? ""
+  const tracks = market?.underlying.tracks !== undefined
   const underlyingDecimals = market?.underlying.decimals ?? TOKEN_DECIMALS
   const token = tokens[side]
   const decimalsOf = (t: TradeToken) => (t === "underlying" ? underlyingDecimals : TOKEN_DECIMALS)
@@ -87,7 +91,7 @@ export function PtTab({ marketId, side, routeId, onRouteOpened }: { marketId: st
   )
 
   const note = routeNote({ plans: route.plans, q, connected: route.source !== null, pending: route.sim.pending })
-  const details: PreviewLine[] = q ? detailLines(q, side, code, slippageBps, steps, amountText, unitOf, underlyingDecimals) : []
+  const details: PreviewLine[] = q ? detailLines(q, side, code, tracks, slippageBps, steps, amountText, unitOf, underlyingDecimals) : []
   if (note) details.push(signaturesLine(note))
   const exactnessTip = [q?.swapOut ? `Indicative: the steps after step ${q.swapOut.step} turn its ${unitOf(q.swapOut.token)} into ${unitOf(q.outToken)} at today's rate.` : null, note?.exactness]
     .filter(Boolean)
@@ -99,7 +103,9 @@ export function PtTab({ marketId, side, routeId, onRouteOpened }: { marketId: st
         <CardTitle>{side === "buy" ? "Buy PT" : "Sell PT"}</CardTitle>
         <CardDescription>
           {side === "buy"
-            ? `Each PT redeems for $1 of ${code} at maturity, so buying it below $1 fixes your return in USD.`
+            ? tracks
+              ? `Each PT redeems at maturity for $1 of ${code}, priced by this market's oracle at maturity. Buying it below $1 fixes your return at that price.`
+              : `Each PT redeems for $1 of ${code} at maturity, so buying it below $1 fixes your return in USD.`
             : `Sell PT before maturity, for ${code} or its SY.`}
         </CardDescription>
       </CardHeader>
@@ -183,6 +189,7 @@ function detailLines(
   q: TradeQuote,
   side: PtSide,
   code: string,
+  tracks: boolean,
   slippageBps: bigint,
   steps: number,
   amountText: (raw: bigint, t: TradeToken) => string,
@@ -236,11 +243,15 @@ function detailLines(
     },
   )
   if (q.payoff) {
+    const about = `${formatGainLoss(q.payoff.gainUnderlying, underlyingDecimals, 4, { group: true })} ${code}`
     lines.push({
       label: "At maturity",
       // The ratio is left out when it cannot be worked out (nothing paid), never shown as 0%.
       value: q.payoff.pct === undefined ? formatUsdCents(q.payoff.gainUsd, TOKEN_DECIMALS) : `${formatUsdCents(q.payoff.gainUsd, TOKEN_DECIMALS)} (${formatPercent(q.payoff.pct)})`,
-      hint: `Fixed in USD whatever ${code}'s price does. About ${formatGainLoss(q.payoff.gainUnderlying, underlyingDecimals, 4, { group: true })} ${code} at today's ${code} price (indicative). Counted in ${code}, this falls as ${code}'s price rises, so only the USD figure is fixed.`,
+      // A tracked asset's oracle cannot follow a falling price (it never goes down), so its USD is the oracle's, not the market's.
+      hint: tracks
+        ? `In USD at the oracle's price at maturity. The oracle's price never goes down, so if ${code}'s market price ends lower, the ${code} you receive is worth less than this. About ${about} at today's oracle price (indicative).`
+        : `Fixed in USD whatever ${code}'s price does. About ${about} at today's ${code} price (indicative). Counted in ${code}, this falls as ${code}'s price rises, so only the USD figure is fixed.`,
     })
   }
   return lines

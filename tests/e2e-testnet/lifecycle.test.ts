@@ -6,7 +6,8 @@
  *
  * 1. `beforeAll` deploys it with `scripts/dev-stack/deploy.sh` (EPHEMERAL=1): four run-unique keys
  *    (`e2e-<runId>-<role>`) that the script generates and funds; the contracts built from
- *    `org/principal` at the official manifest's `sourceCommit`; the manifest written to a new file
+ *    `org/principal` at the Mainnet manifest's `sourceCommit` (`config/manifests/mainnet.json`), so the
+ *    run proves Mainnet's contracts on a deployment it controls; the manifest written to a new file
  *    in a temporary directory. The market matures `MATURITY_SECONDS` after the deploy reads the
  *    ledger time.
  * 2. Two fresh keypairs are onboarded with the run's own issuer (`keys` mode: the faucet's code run
@@ -49,13 +50,13 @@ vi.mock("server-only", () => ({}))
 
 import { derive, ratesFrom } from "@/hooks/use-simulation"
 import { fetchAccountState, type AccountState, type ComplianceKind } from "@/lib/protocol/account-state"
-import { invocationFor, type ActionInput } from "@/lib/protocol/actions"
+import { abiSecondaryAmount, invocationFor, signsAbiSecondary, type ActionInput } from "@/lib/protocol/actions"
 import { evaluateAccountCompliance } from "@/lib/protocol/compliance"
 import { errorMessage } from "@/lib/protocol/errors"
 import { evaluateGates, type Blocker } from "@/lib/protocol/gates"
 import { openGuards, type ActionOutput } from "@/lib/protocol/guards"
 import { createHorizon } from "@/lib/protocol/horizon"
-import { parseManifest, validateManifest } from "@/lib/protocol/manifest"
+import { parseManifest, protocolAbi, validateManifest } from "@/lib/protocol/manifest"
 import { fetchMarketState } from "@/lib/protocol/market-state"
 import { SCALE } from "@/lib/protocol/math"
 import { previewDeposit } from "@/lib/protocol/previews"
@@ -66,7 +67,7 @@ import type { TradeRequest } from "@/lib/protocol/trade-adapter"
 import type { Finding, Live, Manifest, Market } from "@/lib/protocol/types"
 import { pendingYield } from "@/lib/protocol/yield"
 import { nextReferenceValue } from "@/lib/server/oracle-keeper"
-import { createRunner, DEADLINE_SECONDS, live, runTrade, SLIPPAGE_BPS, type Runner, type StepRecord, type TradeRun } from "../integration/route-runner"
+import { abiReads, createRunner, DEADLINE_SECONDS, live, runTrade, SLIPPAGE_BPS, type Runner, type StepRecord, type TradeRun } from "../integration/route-runner"
 import {
   finalizeRecord,
   oracleSetSafetyParams,
@@ -455,16 +456,21 @@ describe("Suite B: the ephemeral lifecycle on a throwaway Testnet market (plan 0
       wallet: { status: "connected", publicKey: account, networkPassphrase: manifest.networkPassphrase },
       market: ms,
       account: acc,
-      compliance: evaluateAccountCompliance(acc, kind),
+      compliance: evaluateAccountCompliance(acc, kind, undefined, manifest.network),
       ledgerTime: clock.now(),
       managerId: market.contracts.manager,
+      network: manifest.network,
+      protocolAbi: protocolAbi(manifest),
+      underlying: market.underlying.code,
       simulation,
     })
     return { what: draft.action, account, ledger: clock.sequence, ledgerTime: Math.floor(clock.now()), simulatedLedger, blockers, simulation }
   }
 
-  const draftFor = async (who: Who, action: ActionInput["action"], amount: bigint, secondaryAmount?: bigint): Promise<ActionInput> => {
+  const draftFor = async (who: Who, action: ActionInput["action"], amount: bigint, given?: bigint): Promise<ActionInput> => {
     const ms = await fetchMarketState(reader(), manifest, market.marketId)
+    // A version-2 mint, buy_pt_underlying or buy_yt signs its literal, worked out as the app does it.
+    const secondaryAmount = given ?? (signsAbiSecondary(manifest, action) ? abiSecondaryAmount(manifest, action, amount, abiReads(ms)) : undefined)
     return {
       action,
       marketId: market.marketId,
@@ -478,12 +484,13 @@ describe("Suite B: the ephemeral lifecycle on a throwaway Testnet market (plan 0
 
   beforeAll(async () => {
     // Review Focus 3: a Testnet that cannot be reached fails the run with the reason; it never skips.
-    // The official manifest (`config/manifests/testnet.json`) is only read: its RPC and its `sourceCommit`.
+    // The official Testnet manifest (`config/manifests/testnet.json`) is only read, for its RPC.
     const official = liveContext({ network: "testnet" })
     const down = await official.unreachableReason()
     if (down) throw new Error(`Testnet cannot be reached: ${down}`)
-    // The contracts of the official deployment, never a moving branch head.
-    const sourceCommit = official.manifest.sourceCommit
+    // The contracts of the Mainnet deployment, never a moving branch head. Read from the file itself:
+    // `liveContext` opens the local and Testnet manifests only.
+    const sourceCommit = parseManifest(JSON.parse(readFileSync(join(DAPP, "config", "manifests", "mainnet.json"), "utf8"))).sourceCommit
     record.sourceCommit = sourceCommit
     const principalRepo = process.env.PRINCIPAL_REPO ?? "../principal"
     const repoDir = isAbsolute(principalRepo) ? principalRepo : resolve(DAPP, principalRepo)
@@ -511,7 +518,7 @@ describe("Suite B: the ephemeral lifecycle on a throwaway Testnet market (plan 0
     manifest = parseManifest(JSON.parse(readFileSync(manifestOut, "utf8")))
     market = manifest.markets[0]
     expect(manifest.network).toBe("testnet")
-    expect(manifest.sourceCommit, "the ephemeral market runs the official deployment's contracts").toBe(sourceCommit)
+    expect(manifest.sourceCommit, "the ephemeral market runs the Mainnet deployment's contracts").toBe(sourceCommit)
     expect(manifest.markets).toHaveLength(1)
     record.deploy = {
       seconds: deployed.seconds,
@@ -625,8 +632,10 @@ describe("Suite B: the ephemeral lifecycle on a throwaway Testnet market (plan 0
       expect(dep.b1.sy - dep.b0.sy).toBe(shares.value)
       for (const k of ["pt", "yt", "lp"] as const) expect(dep.b1[k] - dep.b0[k], `${who} deposit: ${k} moved`).toBe(0n)
 
-      const req: RouteRequest = { kind: "split", marketId: market.marketId, source: accountOf(who), amount: split, pay: "underlying", receive: "sy", matured: false }
-      const plans = planRoute(req, { routerFunctions: manifest.routerFunctions ?? [] })
+      const req: RouteRequest = { kind: "split", marketId: market.marketId, source: accountOf(who), amount: split, pay: "underlying", receive: "sy", matured: false, underlying: market.underlying.code }
+      // A version-2 split signs the SY its deposit gives (`sy_in`), from the exchange rate the panel reads.
+      const xr = live((await fetchMarketState(reader(), manifest, market.marketId)).exchangeRate, "SY exchange rate")
+      const plans = planRoute(req, { routerFunctions: manifest.routerFunctions ?? [], protocolAbi: protocolAbi(manifest), exchangeRate: xr })
       if (!Array.isArray(plans)) throw new Error(plans.disabled)
       expect(plans.map((p) => p.action)).toEqual(["mint"])
       const mint = await quickAction(who, "split", req, plans)

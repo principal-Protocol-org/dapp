@@ -671,7 +671,7 @@ describe("YT tab — after maturity", () => {
 describe("YT tab — a route interrupted between its steps, after maturity (R2-77)", () => {
   it("a Sell YT stopped after its sale still shows beside 'trading has closed', with its holdings and Back to USDY", async () => {
     mocks.getLedgerClock.mockImplementation(async () => ({ sequence: 1, closeTime: Number(MATURITY) + 100, readAtMs: Date.now() }))
-    const request: RouteRequest = { kind: "sell_yt", marketId: "m1", source: A, amount: 10n * SCALE, pay: "underlying", receive: "underlying", matured: false }
+    const request: RouteRequest = { kind: "sell_yt", marketId: "m1", source: A, amount: 10n * SCALE, pay: "underlying", receive: "underlying", matured: false, underlying: "USDY" }
     const plans = planRoute(request, { routerFunctions: [] }) as StepPlan[]
     expect(plans.map((p) => p.action)).toEqual(["sell_yt", "withdraw"])
     writeRoute({

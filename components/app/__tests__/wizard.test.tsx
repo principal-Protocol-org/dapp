@@ -5,7 +5,9 @@ import { Address, Contract, Keypair, StrKey, xdr } from "@stellar/stellar-sdk"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import testnetJson from "@/lib/protocol/__tests__/fixtures/testnet-interim.json"
 import { deriveMarketContracts } from "@/lib/protocol/factory"
+import { formatAmount } from "@/lib/protocol/format"
 import { minAfterSlippage } from "@/lib/protocol/guards"
+import { previewDeposit } from "@/lib/protocol/previews"
 import type { ManagerCall } from "@/lib/protocol/manager-calls"
 import { seedAmounts } from "@/lib/protocol/seed"
 import type { ContractInvocation, SimulationOutcome } from "@/lib/protocol/stellar"
@@ -109,6 +111,8 @@ const mocks = vi.hoisted(() => ({
 }))
 
 vi.mock("@/components/app/manifest-provider", () => ({ useManifest: () => mocks.manifest ?? manifest }))
+// The page (a server component) reads only the network, like the static shell.
+vi.mock("@/lib/protocol/manifest-source", () => ({ activeNetwork: () => (mocks.manifest ?? manifest).network }))
 vi.mock("@/hooks/use-wallet", () => ({ useWallet: () => ({ state: mocks.wallet }) }))
 vi.mock("@/hooks/use-ledger-clock", () => ({ useLedgerClock: () => ({ ledgerTime: LEDGER, sequence: 1, isError: false }) }))
 vi.mock("@/hooks/use-manifest-findings", () => ({ useManifestFindings: () => [] }))
@@ -164,6 +168,7 @@ vi.mock("@/lib/protocol/stellar", async (importOriginal) => ({
 vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} })
 
 import { readWizardSalts } from "@/lib/app/wizard-salts"
+import NewMarketPage from "@/app/app/manage/new/page"
 import { Wizard } from "../manage/wizard"
 
 function managerReview(call: ManagerCall): ManagerReview {
@@ -524,6 +529,68 @@ describe("the salt and the later steps", () => {
   })
 })
 
+describe("on Mainnet the wizard is not offered: the issuer keys of its assets are the protocol team's (plan 0009)", () => {
+  const TITLE = "New markets are created by the protocol team"
+  const BODY = "On Mainnet a market needs the asset issuer's keys. Ask the protocol team to list a market."
+  const mainnet = () => {
+    mocks.manifest = { ...manifest, network: "mainnet" }
+  }
+  const renderPage = () => {
+    client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    return render(
+      <QueryClientProvider client={client}>
+        <TooltipProvider>
+          <NewMarketPage />
+        </TooltipProvider>
+      </QueryClientProvider>,
+    )
+  }
+  /** The card, and nothing of the wizard: no step, no chain read, no salt written to the URL. */
+  async function expectCardOnly(replace: ReturnType<typeof vi.spyOn>) {
+    expect(screen.getByRole("heading", { name: TITLE })).toBeTruthy()
+    expect(screen.getByText(BODY)).toBeTruthy()
+    expect(screen.getByRole("link", { name: "Back to Manage" }).getAttribute("href")).toBe("/app/manage")
+    await act(async () => {})
+    expect(screen.queryByRole("heading", { name: /Step \d of 7/ })).toBeNull()
+    expect(screen.queryByText(/Loading the wizard/)).toBeNull()
+    expect(screen.queryByText(/Seven steps/)).toBeNull()
+    expect(mocks.readCalls).toEqual([])
+    expect(replace).not.toHaveBeenCalled()
+  }
+
+  it("the page shows the card in the wizard's place, also at a link with a salt", async () => {
+    mainnet()
+    const replace = vi.spyOn(window.history, "replaceState")
+    for (const search of [new URLSearchParams({ salt: SALT }), new URLSearchParams()]) {
+      mocks.search = search
+      const { unmount } = renderPage()
+      await expectCardOnly(replace)
+      unmount()
+    }
+    replace.mockRestore()
+  })
+
+  it("the wizard itself shows the card too, wherever it is mounted", async () => {
+    mainnet()
+    const replace = vi.spyOn(window.history, "replaceState")
+    show()
+    await expectCardOnly(replace)
+    replace.mockRestore()
+  })
+
+  it("on Testnet and the local network the page runs the wizard", async () => {
+    for (const network of ["testnet", "local"] as const) {
+      mocks.manifest = { ...manifest, network }
+      const { unmount } = renderPage()
+      expect(screen.getByRole("heading", { level: 1, name: "New market" })).toBeTruthy()
+      expect(screen.getByText(/Seven steps/)).toBeTruthy()
+      expect(await screen.findByRole("heading", { name: /Step 1 of 7/ })).toBeTruthy()
+      expect(screen.queryByRole("heading", { name: TITLE })).toBeNull()
+      unmount()
+    }
+  })
+})
+
 describe("steps 4 and 5: wire and grants (R5-10, spec 0002 §5)", () => {
   const { riskControl, router, permissioning } = manifest.shared
   const RC_ADMIN = Keypair.random().publicKey()
@@ -842,6 +909,41 @@ describe("steps 6 and 7: seed and publish (spec 0002 §5, R5-10)", () => {
     expect(add[4]).toBe(minAfterSlippage(1_000_000n, 50n))
     // The pool's first deposit is simulated only once the mint and the deposit have landed.
     expect(mocks.simulate.mock.invocationCallOrder[2]).toBeGreaterThan(mocks.execute.mock.invocationCallOrder[1])
+  })
+
+  it("on version 2 (principal 3af9388) the mint signs sy_in, the SY its deposit gives at the read exchange rate; floor and deadline move one place", async () => {
+    mocks.manifest = { ...manifest, protocolAbi: 2 }
+    granted()
+    chainAnswers()
+    connect(ISSUER)
+    const user = userEvent.setup()
+    show()
+    await typeSeed(user, "5", "1000")
+    const plan = seedAmounts({ apy: 500_000n, amountUnderlying: 10_000_000_000n, s: { secondsToMaturity: TAU, exponent: EXPONENT }, oracleRate: RATE, exchangeRate: XR, feeBps: 7n })
+    if ("error" in plan) throw new Error(plan.error)
+    const seed = screen.getByRole("button", { name: "Seed the pool" })
+    await waitFor(() => expect((seed as HTMLButtonElement).disabled).toBe(false))
+    await user.click(seed)
+    await signAll(user, 3)
+
+    expect(kinds()).toEqual(["seed_mint", "seed_deposit", "seed_add_liquidity"])
+    const calls = mocks.prepareManager.mock.calls.map(([c]) => c as ManagerCall)
+    const [mint, deposit, add] = calls.map((c) => c.invocation.args.map((a) => a.value))
+    // wrap_and_mint(from, pool, amount, sy_in, min_pt_out, deadline)
+    expect(mint).toHaveLength(6)
+    expect(mint[2]).toBe(plan.mintUnderlying)
+    expect(mint[3]).toBe(previewDeposit(plan.mintUnderlying, XR))
+    expect(mint[5]).toBe(BigInt(LEDGER + 300))
+    const sims = mocks.simulate.mock.calls.map(([p]) => (p as { invocation: ContractInvocation }).invocation)
+    expect(sims[0].args.map((a) => a.value)).toEqual([ISSUER, predicted.pool, plan.mintUnderlying, previewDeposit(plan.mintUnderlying, XR), 0n, BigInt(LEDGER + 300)])
+    const outs = await Promise.all(mocks.simulate.mock.results.map((r) => r.value as Promise<{ retval: unknown }>))
+    expect(mint[4]).toBe(minAfterSlippage((outs[0].retval as { pt_minted: bigint }).pt_minted, 50n))
+    // The deposit and the pool's first deposit are version 1's.
+    expect(deposit).toHaveLength(3)
+    expect(add).toHaveLength(6)
+    // sy_in is not something given or got: the label says the amount and the PT floor only.
+    const exact = (raw: unknown) => formatAmount(raw as bigint, 7, 7)
+    expect(calls[0].label).toBe(`Mint PT and YT of the new USDY market from ${exact(plan.mintUnderlying)} USDY: at least ${exact(mint[4])} PT, and as much YT`)
   })
 
   it("a pool another deposit seeded while the seed ran: its first deposit is refused when it is built, and nothing is prepared", async () => {

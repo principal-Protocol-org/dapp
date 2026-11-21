@@ -26,11 +26,12 @@
 // only the local database: the registry's tables and the index.
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs"
 import { lookup } from "node:dns/promises"
-import { createRequire, registerHooks } from "node:module"
+import { createRequire } from "node:module"
 import { dirname, join, relative, resolve } from "node:path"
-import { fileURLToPath, pathToFileURL } from "node:url"
+import { fileURLToPath } from "node:url"
 import { parseEnv } from "node:util"
 import pg from "pg"
+import { loadAppTypeScript, TypeScriptTransformRequired } from "./lib/load-app-ts.mjs"
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 
@@ -181,18 +182,52 @@ function readManifestJson(network) {
   return JSON.parse(readFileSync(path, "utf8"))
 }
 
-/** The RPC's oldest ledger for `network` (its manifest's `rpcUrl`), or null when it cannot be read. */
+/**
+ * One JSON-RPC call; the body always carries `params` (dRPC refuses a request without them).
+ * Returns the parsed body, or null when the answer is not JSON.
+ */
+async function rpcCall(rpcUrl, method, params, fetchImpl) {
+  const res = await fetchImpl(rpcUrl, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+    signal: AbortSignal.timeout(20_000),
+  })
+  const body = await res.json().catch(() => null)
+  return { status: res.status, body }
+}
+
+/** `getLedgers` is asked this far behind the latest ledger; the same constant as `LEDGERS_BEHIND` in `lib/protocol/rpc-window.ts` (a test pins them equal). */
+export const LEDGERS_BEHIND = 20
+
+/**
+ * The RPC's oldest ledger at `rpcUrl`, or null when it cannot be read. `getHealth` first; only when the
+ * method is unsupported (HTTP 400 or JSON-RPC -32601, as on dRPC) the window comes from `getLedgers`.
+ * Any other failure is null, as before. `fetchImpl` is a test hook.
+ */
+export async function oldestLedgerAt(rpcUrl, fetchImpl = fetch) {
+  try {
+    const health = await rpcCall(rpcUrl, "getHealth", {}, fetchImpl)
+    const oldest = health.body?.result?.oldestLedger
+    if (Number.isInteger(oldest)) return oldest
+    if (health.status !== 400 && health.body?.error?.code !== -32601) return null
+    // A little behind the latest: behind a load balancer the newest ledger may not be stored on the backend that answers.
+    const latest = (await rpcCall(rpcUrl, "getLatestLedger", {}, fetchImpl)).body?.result?.sequence
+    if (!Number.isInteger(latest)) return null
+    const page = await rpcCall(rpcUrl, "getLedgers", { startLedger: Math.max(1, latest - LEDGERS_BEHIND), pagination: { limit: 1 } }, fetchImpl)
+    const fromLedgers = page.body?.result?.oldestLedger
+    return Number.isInteger(fromLedgers) ? fromLedgers : null
+  } catch {
+    return null
+  }
+}
+
+/** The RPC's oldest ledger for `network` (`SERVER_RPC_URL` when it is an http(s) URL, else the manifest's `rpcUrl`), or null when it cannot be read. */
 async function rpcOldestLedger(network) {
   try {
-    const { rpcUrl } = readManifestJson(network)
-    const res = await fetch(rpcUrl, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getHealth" }),
-      signal: AbortSignal.timeout(20_000),
-    })
-    const oldest = (await res.json())?.result?.oldestLedger
-    return Number.isInteger(oldest) ? oldest : null
+    const secret = (process.env.SERVER_RPC_URL ?? "").trim()
+    const usable = /^https?:$/.test(URL.canParse(secret) ? new URL(secret).protocol : "")
+    return await oldestLedgerAt(usable ? secret : readManifestJson(network).rpcUrl)
   } catch {
     return null
   }
@@ -502,34 +537,6 @@ export async function importRows(pool, { path, network }) {
 
 // ---------------------------------------------------------------- capture
 
-/**
- * Lets Node load the app's TypeScript as Next and Vitest do: the `@/` alias, extensionless relative
- * imports, and `server-only` under the `react-server` condition (an empty module there).
- */
-function loadAppTypeScript() {
-  if (process.features?.typescript !== "transform") {
-    throw new UsageError("capture loads the app's TypeScript: run it with `pnpm indexer:capture` (node --experimental-transform-types)")
-  }
-  const EXTENSIONS = [".ts", ".tsx", "/index.ts"]
-  registerHooks({
-    resolve(specifier, context, next) {
-      if (specifier === "server-only") return next(specifier, { ...context, conditions: [...(context.conditions ?? []), "react-server"] })
-      let spec = specifier
-      if (spec.startsWith("@/")) spec = pathToFileURL(join(root, spec.slice(2))).href
-      const parent = context.parentURL?.startsWith("file:") ? fileURLToPath(context.parentURL) : null
-      const appRelative = (spec.startsWith("./") || spec.startsWith("../")) && parent !== null && !parent.includes("/node_modules/")
-      if (spec.startsWith("file:") || appRelative) {
-        const base = spec.startsWith("file:") ? fileURLToPath(spec) : join(dirname(parent), spec)
-        if (!(existsSync(base) && statSync(base).isFile())) {
-          for (const ext of EXTENSIONS) if (existsSync(base + ext)) return next(pathToFileURL(base + ext).href, context)
-        }
-      }
-      return next(spec, context)
-    },
-  })
-  return (path) => import(pathToFileURL(join(root, path)).href)
-}
-
 const today = () => new Date().toISOString().slice(0, 10).replaceAll("-", "")
 
 /**
@@ -539,23 +546,22 @@ const today = () => new Date().toISOString().slice(0, 10).replaceAll("-", "")
  * ledger, then exports that network's rows and cursors (with any stored gap) to `out`.
  */
 async function capture(pool, { network, out }) {
-  const load = loadAppTypeScript()
+  const load = loadAppTypeScript(root)
   const { parseManifest } = await load("lib/protocol/manifest.ts")
   const { indexEvents, INDEX_GROUPS } = await load("lib/server/indexer.ts")
   const { discover, resolvedMarkets, sqlRegistryStore } = await load("lib/server/registry.ts")
-  const { createRpcReader } = await load("lib/protocol/reader.ts")
-  const { createRpcServer } = await load("lib/protocol/stellar.ts")
+  const { createServerRpc, serverReader, serverRpcUrlOf } = await load("lib/server/rpc-urls.ts")
 
   const manifest = parseManifest(readManifestJson(network))
   if (manifest.network !== network) throw new UsageError(`config/manifests/${network}.json is for "${manifest.network}"`)
   const sql = sqlOf(pool)
   const store = sqlRegistryStore(sql)
-  const rpc = createRpcServer(manifest.rpcUrl)
-  console.log(`capture: ${network} from ${new URL(manifest.rpcUrl).host} (deploy ledger ${manifest.deployLedger ?? "not set"})`)
+  const rpc = createServerRpc(manifest)
+  console.log(`capture: ${network} from ${new URL(serverRpcUrlOf(manifest)).host} (deploy ledger ${manifest.deployLedger ?? "not set"})`)
 
   const started = Date.now()
   for (let run = 1; ; run++) {
-    const found = await discover({ store, reader: createRpcReader(manifest), rpc, manifest }, { deadline: Date.now() + CAPTURE_RUN_MS })
+    const found = await discover({ store, reader: serverReader(manifest), rpc, manifest }, { deadline: Date.now() + CAPTURE_RUN_MS })
     console.log(`capture: market discovery run ${run}: ${found.checked.length} pool(s) checked${found.gap ? ", with a registry gap" : ""}${found.complete ? "" : " (partial)"}`)
     if (found.complete) break
     if (run === 10) throw new Error("market discovery did not finish in 10 runs; run the capture again to resume")
@@ -660,7 +666,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   try {
     await main(process.argv.slice(2))
   } catch (error) {
-    if (error instanceof UsageError) fail(error.message)
+    if (error instanceof UsageError || error instanceof TypeScriptTransformRequired) fail(error.message)
     // A database error is reported by its code only; anything else by its name and scrubbed text.
     if (error && typeof error === "object" && "code" in error && /^[0-9A-Z]{5}$|^E[A-Z]+$/.test(String(error.code))) {
       fail(`the database refused (error code ${dbCode(error)}). Check it is reachable, the credentials, and that pnpm db:migrate ran.`)

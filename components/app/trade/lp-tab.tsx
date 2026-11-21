@@ -69,7 +69,8 @@ export function LpTab({ marketId, side, routeId, onRouteOpened }: { marketId: st
   const [keepYt, setKeepYt] = useState(true)
   const [last, setLast] = useState<{ owner: string; notice: TxNotice } | null>(null)
 
-  const code = market?.underlying.code ?? "USDY"
+  // Empty only without the market, when nothing renders (below).
+  const code = market?.underlying.code ?? ""
   const underlyingDecimals = market?.underlying.decimals ?? TOKEN_DECIMALS
   const token = tokens[side]
   const decimalsOf = (t: TradeToken) => (t === "underlying" ? underlyingDecimals : TOKEN_DECIMALS)

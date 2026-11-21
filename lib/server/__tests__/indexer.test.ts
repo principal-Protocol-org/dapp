@@ -2,9 +2,10 @@
 import { randomBytes } from "node:crypto"
 import { Address, Keypair, StrKey, nativeToScVal, xdr } from "@stellar/stellar-sdk"
 import { describe, expect, it, vi } from "vitest"
+import mainnetJson from "@/config/manifests/mainnet.json"
 import testnetJson from "@/config/manifests/testnet.json"
 import { cursorLedger, type RawEvent } from "@/lib/protocol/events"
-import { parseManifest } from "@/lib/protocol/manifest"
+import { manifestOracles, parseManifest } from "@/lib/protocol/manifest"
 import type { ContractReader } from "@/lib/protocol/reader"
 import type { Manifest, Market } from "@/lib/protocol/types"
 
@@ -280,6 +281,55 @@ describe("contractsOf", () => {
     const groups = contractsOf(manifest, [{ ...market, createdLedger: DEPLOY + 40 }])
     expect(groups.market.map((m) => m.createdLedger)).toEqual([DEPLOY + 40, DEPLOY + 40, DEPLOY + 40])
     expect(groups.escrow).toEqual([{ id: c.recoveryEscrow, role: "escrow", pool: c.pool, createdLedger: DEPLOY + 40 }])
+  })
+
+  it("on the Mainnet manifest: the oracle group holds its five oracles, from the manifest, not the markets listed", () => {
+    const mainnet = parseManifest(mainnetJson)
+    const groups = contractsOf(mainnet, mainnet.markets)
+    expect(groups.oracle).toHaveLength(5)
+    // The four v2 oracles carry their creation ledger (`createdLedgers`); MOCKUSDY's, the one that was not redeployed, none.
+    expect(groups.oracle).toEqual(
+      manifestOracles(mainnet).map((o) => {
+        const createdLedger = mainnet.createdLedgers?.[o.oracle]
+        return createdLedger === undefined ? { id: o.oracle, role: "oracle" } : { id: o.oracle, role: "oracle", createdLedger }
+      }),
+    )
+    expect(groups.escrow).toHaveLength(5)
+    expect(groups.market).toHaveLength(15)
+    // The registry may list fewer markets (or none, on the seeds-only fallback): the oracle group is the manifest's.
+    expect(contractsOf(mainnet, []).oracle).toEqual(groups.oracle)
+    expect(contractsOf(mainnet, mainnet.markets.slice(0, 1)).oracle).toEqual(groups.oracle)
+  })
+
+  it("the manifest's shared oracle is a member even when no manifest market uses it", () => {
+    const standalone = randomContract()
+    const groups = contractsOf({ ...manifest, shared: { ...manifest.shared, oracle: standalone } }, [])
+    expect(groups.oracle).toEqual([
+      { id: standalone, role: "oracle" },
+      { id: manifest.shared.oracle, role: "oracle" },
+    ])
+  })
+
+  it("a member's creation ledger: the manifest's createdLedgers entry first, else its market's; a shared contract reads the entry only", () => {
+    const m: Manifest = {
+      ...manifest,
+      createdLedgers: { [c.pool]: DEPLOY + 7, [c.recoveryEscrow]: DEPLOY + 8, [manifest.shared.oracle]: DEPLOY + 3, [manifest.shared.permissioning]: DEPLOY + 1 },
+    }
+    const built = contractsOf(m, [{ ...market, createdLedger: DEPLOY + 40 }])
+    expect(built.market.map((x) => x.createdLedger)).toEqual([DEPLOY + 40, DEPLOY + 40, DEPLOY + 7])
+    expect(built.escrow).toEqual([{ id: c.recoveryEscrow, role: "escrow", pool: c.pool, createdLedger: DEPLOY + 8 }])
+    // The oracle is not its market's: the market's creation ledger never applies to it.
+    expect(built.oracle).toEqual([{ id: manifest.shared.oracle, role: "oracle", createdLedger: DEPLOY + 3 }])
+    expect(built.permissioning).toEqual([{ id: manifest.shared.permissioning, role: "permissioning", createdLedger: DEPLOY + 1 }])
+    expect(built.risk).toEqual([{ id: manifest.shared.riskControl, role: "riskControl" }])
+    // A market without a creation ledger of its own: the entries alone, and no key where there is none.
+    const seed = contractsOf(m, [market])
+    expect(seed.market).toEqual([
+      { id: c.sy, role: "sy", pool: c.pool },
+      { id: c.manager, role: "manager", pool: c.pool },
+      { id: c.pool, role: "pool", pool: c.pool, createdLedger: DEPLOY + 7 },
+    ])
+    expect(contractsOf(m, [{ ...market, createdLedger: DEPLOY + 40 }]).oracle).toEqual(built.oracle)
   })
 })
 
@@ -624,7 +674,12 @@ describe("indexEvents", () => {
 
     // A new deployment on the same network: a new oracle, deployed at DEPLOY + 200, before the cursor.
     const newOracle = randomContract()
-    const switched: Manifest = { ...manifest, deployLedger: DEPLOY + 200, shared: { ...manifest.shared, oracle: newOracle } }
+    const switched: Manifest = {
+      ...manifest,
+      deployLedger: DEPLOY + 200,
+      shared: { ...manifest.shared, oracle: newOracle },
+      markets: manifest.markets.map((m) => ({ ...m, contracts: { ...m.contracts, oracle: newOracle } })),
+    }
     const first = ev(DEPLOY + 210, newOracle, "ref_set", xdr.ScVal.scvVec([i128(10_000_000n), u64(1n)]))
     const rpc = makeRpc({ events: [first], oldest: DEPLOY, latest: DEPLOY + 520 })
     const result = await indexEvents(deps(db.sql, rpc.rpc, { manifest: switched }), { deadline: FAR, groups: ["oracle"] })
@@ -632,6 +687,74 @@ describe("indexEvents", () => {
     expect(db.events.get(first.id)).toMatchObject({ contract_id: newOracle, topic: "ref_set" })
     expect(groupOf(result, "oracle")).toMatchObject({ complete: true, indexedThrough: DEPLOY + 520 })
     expect(db.cursors.get(name)).toMatchObject({ ledger: DEPLOY + 520, members: [newOracle] })
+  })
+
+  /** The testnet manifest after a swap: oracles A (the manifest's) and B, deployed at ledger 100. */
+  const swappedManifest = (b: string, createdLedgers?: Record<string, number>): Manifest => ({
+    ...manifest,
+    deployLedger: 100,
+    ...(createdLedgers ? { createdLedgers } : {}),
+    markets: [market, { ...market, marketId: "testnet-b", contracts: { ...c, oracle: b } }],
+  })
+
+  it("a swapped manifest starts new members at their created ledger", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    const A = manifest.shared.oracle
+    const B = randomContract()
+    const swapped = swappedManifest(B, { [B]: 900 })
+    const name = indexCursorName("oracle", "testnet")
+    // The saved cursor's members are oracle A, inside the RPC's window (oldest 500).
+    const db = makeDb({ cursors: oracleCursor(1_000) })
+    const firstOfB = ev(950, B, "ref_set", xdr.ScVal.scvVec([i128(10_000_000n), u64(1n)]))
+    const { rpc, calls } = makeRpc({ events: [firstOfB], oldest: 500, latest: 1_100 })
+    // The markets listed do not matter: the oracle group is the manifest's.
+    const result = await indexEvents(deps(db.sql, rpc, { manifest: swapped, markets: [] }), { deadline: FAR, groups: ["oracle"] })
+    expect(calls.find((x) => x.contractIds.includes(B))).toMatchObject({ startLedger: 900, contractIds: [B] })
+    expect(calls.find((x) => x.contractIds.includes(A))).toMatchObject({ startLedger: 1_001, contractIds: [A] })
+    expect(groupOf(result, "oracle")).toEqual({ group: "oracle", indexedThrough: 1_100, gap: null, complete: true })
+    expect(db.cursors.get(name)).toMatchObject({ ledger: 1_100, gap_from: null, gap_to: null, members: sorted([A, B]) })
+    expect(db.events.get(firstOfB.id)).toMatchObject({ contract_id: B, group_name: "oracle", topic: "ref_set" })
+    expect(warn).not.toHaveBeenCalled()
+  })
+
+  it("a swapped manifest without a createdLedgers entry starts the new member at deployLedger and records the gap", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    const B = randomContract()
+    const db = makeDb({ cursors: oracleCursor(1_000) })
+    const { rpc, calls } = makeRpc({ events: [], oldest: 500, latest: 1_100 })
+    const result = await indexEvents(deps(db.sql, rpc, { manifest: swappedManifest(B), markets: [] }), { deadline: FAR, groups: ["oracle"] })
+    // It wanted deployLedger (100); the RPC holds 500 onwards.
+    expect(calls.find((x) => x.contractIds.includes(B))).toMatchObject({ startLedger: 500, contractIds: [B] })
+    expect(groupOf(result, "oracle")).toEqual({ group: "oracle", indexedThrough: 1_100, gap: { from: 100, to: 499 }, complete: true })
+    expect(db.cursors.get(indexCursorName("oracle", "testnet"))).toMatchObject({ ledger: 1_100, gap_from: 100, gap_to: 499 })
+    expect(warn.mock.calls.flat().join(" ")).toMatch(/gap/i)
+  })
+
+  it("five oracles, one created later: a request of four from deployLedger, one of its own from its creation ledger", async () => {
+    // The committed manifest's own `createdLedgers` (the v2 oracles) are set aside: this case sets its own.
+    const mainnet: Manifest = { ...parseManifest(mainnetJson), createdLedgers: undefined }
+    const start = mainnet.deployLedger as number
+    const oracles = manifestOracles(mainnet).map((o) => o.oracle)
+    const late = oracles[3]
+    const m: Manifest = { ...mainnet, createdLedgers: { [late]: start + 40 } }
+    const early = ev(start + 2, oracles[0], "ref_set", xdr.ScVal.scvVec([i128(1n), u64(1n)]))
+    const fromLate = ev(start + 45, late, "ref_set", xdr.ScVal.scvVec([i128(2n), u64(2n)]))
+    const { rpc, calls } = makeRpc({ events: [early, fromLate], oldest: start, latest: start + 60 })
+    const db = makeDb()
+    const result = await indexEvents(deps(db.sql, rpc, { manifest: m, markets: m.markets }), { deadline: FAR, groups: ["oracle"] })
+    expect(calls.every((x) => x.contractIds.length <= 5)).toBe(true)
+    expect(calls.filter((x) => x.startLedger !== undefined)).toEqual([
+      expect.objectContaining({ startLedger: start, contractIds: oracles.filter((o) => o !== late) }),
+      expect.objectContaining({ startLedger: start + 40, contractIds: [late] }),
+    ])
+    expect(groupOf(result, "oracle")).toEqual({ group: "oracle", indexedThrough: start + 60, gap: null, complete: true })
+    expect(db.cursors.get(indexCursorName("oracle", "mainnet"))).toMatchObject({ ledger: start + 60, gap_from: null, gap_to: null, members: sorted(oracles) })
+    expect(db.events.has(early.id) && db.events.has(fromLate.id)).toBe(true)
+
+    // Without the entry, the five start together: one request.
+    const together = makeRpc({ events: [], oldest: start, latest: start + 60 })
+    await indexEvents(deps(makeDb().sql, together.rpc, { manifest: mainnet, markets: mainnet.markets }), { deadline: FAR, groups: ["oracle"] })
+    expect(together.calls).toEqual([expect.objectContaining({ startLedger: start, contractIds: oracles })])
   })
 
   it("stops at the deadline with complete:false, and the next run resumes from the saved ledger", async () => {
@@ -901,6 +1024,21 @@ describe("getIndexedEvents", () => {
     expect(plain.values[j]).not.toContainEqual(expect.any(Array))
   })
 
+  it("filters by contract in the query (one oracle's history); no contract filter passes null", async () => {
+    const oracle = manifest.shared.oracle
+    const db = readDb(allCursors(DEPLOY + 20, null))
+    await getIndexedEvents(db.sql, { network: "testnet", group: "oracle", contract: oracle, topics: ["ref_set"], limit: 20 })
+    const i = db.texts.findIndex((t) => t.includes("from events"))
+    expect(db.texts[i]).toMatch(/\(\?::text is null or contract_id = \?\)/)
+    expect(db.values[i]).toEqual(expect.arrayContaining(["testnet", "oracle", oracle, ["ref_set"], 20]))
+    expect(db.texts[i]).not.toContain(oracle)
+    const plain = readDb(allCursors(DEPLOY + 20, null))
+    await getIndexedEvents(plain.sql, { network: "testnet", group: "oracle", limit: 20 })
+    const j = plain.texts.findIndex((t) => t.includes("from events"))
+    expect(plain.texts[j]).toMatch(/contract_id = \?/)
+    expect(plain.values[j]).not.toContain(oracle)
+  })
+
   it("counts every indexed event per topic for the group and pool asked, not only one page", async () => {
     const db = readDb([])
     const inner = db.sql
@@ -921,5 +1059,11 @@ describe("getIndexedEvents", () => {
     expect(db.texts[i]).toMatch(/count\(\*\)/)
     expect(db.texts[i]).not.toMatch(/limit/)
     expect(db.values[i]).toEqual(expect.arrayContaining(["testnet", "permissioning"]))
+    // One contract's counts: filtered in the query too.
+    const oracle = manifest.shared.oracle
+    await getEventCounts(sql, { network: "testnet", group: "oracle", contract: oracle })
+    const j = db.texts.length - 1
+    expect(db.texts[j]).toMatch(/\(\?::text is null or contract_id = \?\)/)
+    expect(db.values[j]).toEqual(expect.arrayContaining(["testnet", "oracle", oracle]))
   })
 })

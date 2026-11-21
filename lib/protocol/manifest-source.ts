@@ -1,7 +1,7 @@
 import localJson from "@/config/manifests/local.json"
 import mainnetJson from "@/config/manifests/mainnet.json"
 import testnetJson from "@/config/manifests/testnet.json"
-import { MainnetPendingError, parseManifest } from "./manifest"
+import { parseManifest } from "./manifest"
 import type { Manifest, Network } from "./types"
 
 /**
@@ -14,8 +14,7 @@ const FILES: Record<Network, unknown> = { local: localJson, testnet: testnetJson
 
 /**
  * The network `NEXT_PUBLIC_PRINCIPAL_NETWORK` names (`testnet` by default), without parsing its
- * manifest: what the static shell (the banner, the dashboard's badge) needs, even while the Mainnet
- * manifest is the pending stub.
+ * manifest: what the static shell (the banner, the dashboard's badge) needs.
  */
 export function activeNetwork(): Network {
   const network = process.env.NEXT_PUBLIC_PRINCIPAL_NETWORK ?? "testnet"
@@ -25,10 +24,9 @@ export function activeNetwork(): Network {
 
 /**
  * The active network's manifest. Every file is imported statically so the bundler includes it; only
- * the active one is parsed. While `mainnet.json` is the pending stub this throws
- * `MainnetPendingError` (D-24), every time: a failure is never cached. A file whose `network` is not
- * the one asked for is refused, so a wrong file under `mainnet` never shows another network's data
- * without its banner.
+ * the active one is parsed. A failure is thrown every time, never cached. A file whose `network` is
+ * not the one asked for is refused, so a wrong file under `mainnet` never shows another network's
+ * data without its banner.
  */
 export function activeManifest(): Manifest {
   const network = activeNetwork()
@@ -38,15 +36,4 @@ export function activeManifest(): Manifest {
   if (manifest.network !== network) throw new Error(`config/manifests/${network}.json is for "${manifest.network}", not "${network}"`)
   parsed.set(network, manifest)
   return manifest
-}
-
-/** The active manifest is the pending Mainnet stub: the layouts show "not deployed yet" instead of the app. */
-export function manifestPending(): boolean {
-  try {
-    activeManifest()
-    return false
-  } catch (error) {
-    if (error instanceof MainnetPendingError) return true
-    throw error
-  }
 }

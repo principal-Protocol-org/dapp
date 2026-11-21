@@ -10,10 +10,10 @@ import "server-only"
  * served: a cross-site page cannot make a visitor's browser trigger a run (minor 5).
  */
 import { StrKey } from "@stellar/stellar-sdk"
+import { activeManifest } from "@/lib/protocol/manifest-source"
 import type { FaucetErrorCode, FaucetResponse, FaucetStep } from "@/lib/protocol/onboarding"
 import { sql } from "@/lib/server/db"
 import { FAUCET_RATE_LIMIT_MS, FaucetConfigError, FaucetStepError, runFaucet } from "@/lib/server/faucet"
-import { deployedManifest } from "@/lib/server/mainnet-pending"
 import { resolvedMarkets, sqlRegistryStore } from "@/lib/server/registry"
 import { clientIp, isCrossSite, isJson, readBody, redact } from "@/lib/server/request"
 
@@ -78,8 +78,6 @@ function accountFrom(text: string): string | null {
 }
 
 export async function POST(request: Request): Promise<Response> {
-  const manifest = deployedManifest()
-  if (manifest instanceof Response) return manifest
   if (isCrossSite(request)) return refuse("cross_site")
   if (!isJson(request)) return refuse("invalid_content_type")
   const body = await readBody(request, MAX_BODY_BYTES)
@@ -91,6 +89,7 @@ export async function POST(request: Request): Promise<Response> {
     // The faucet grants every listed market's PT and YT, and the dialog checks every listed market
     // (R44): both read the same resolved list (seeds when the database is down). The faucet reads
     // it only after its rate limit admits the request (R2-40).
+    const manifest = activeManifest()
     const markets = () => resolvedMarkets({ store: sqlRegistryStore(sql), manifest })
     const result = await runFaucet({ account, manifest, markets, ip: clientIp(request), now: Date.now() })
     if ("error" in result) return refuse(result.error)

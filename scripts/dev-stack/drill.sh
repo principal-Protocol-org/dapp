@@ -725,7 +725,9 @@ step_oracle() {
   log "  keeper tick (oracle-tick.sh as $ORACLE_KEY)"
   for attempt in 1 2; do
     # ORACLE_TICK_MANIFEST: the drill's manifest when DRILL_MANIFEST names another (local) deployment.
-    if PRINCIPAL_NETWORK="$NETWORK" ORACLE_KEY="$ORACLE_KEY" ORACLE_TICK_MANIFEST="${DRILL_MANIFEST:-}" \
+    # ORACLE_TICK_ORACLE: the drill's own oracle only. oracle-tick.sh ticks every oracle of the manifest (the
+    # local stack has two), and the hash recorded as oracle_tick below must be this oracle's tick.
+    if PRINCIPAL_NETWORK="$NETWORK" ORACLE_KEY="$ORACLE_KEY" ORACLE_TICK_MANIFEST="${DRILL_MANIFEST:-}" ORACLE_TICK_ORACLE="$ORACLE" \
       "$DEV_STACK_DIR/oracle-tick.sh" >"$WORK/tick.out" 2>"$WORK/tick.err"; then
       break
     fi

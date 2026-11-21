@@ -4,6 +4,7 @@ import { useCallback, useState } from "react"
 import { useQueryClient } from "@tanstack/react-query"
 import { useWallet } from "@/hooks/use-wallet"
 import { appendLog } from "@/lib/app/local-log"
+import { addPending } from "@/lib/app/pending-tx"
 import type { ActionInput } from "@/lib/protocol/actions"
 import { useManifest } from "@/components/app/manifest-provider"
 import type { ManagerCall } from "@/lib/protocol/manager-calls"
@@ -20,6 +21,7 @@ import {
   type SignTransaction,
   type TxResult,
 } from "@/lib/protocol/review"
+import { forgetInFlight } from "@/lib/protocol/rpc-limiter"
 import type { ContractInvocation } from "@/lib/protocol/stellar"
 
 export type Execute = {
@@ -37,10 +39,11 @@ export type Execute = {
 
 /**
  * The transaction pipeline for the panels and the manager view. Every submitted action is appended
- * to the local log (any status: a pending one should show at once); every submitted transaction
- * refreshes the market and account reads. A manager call is not logged: the log lists the user's
- * actions, and the manager view reads the call's effect back from the chain. A refusal before
- * submission throws and is not logged: nothing reached the network.
+ * to the local log (any status: a pending one should show at once), and one whose result is not
+ * known yet is kept pending (M-21), so its panel refuses a second send until it settles. Every
+ * submitted transaction refreshes the market and account reads. A manager call is not logged: the
+ * log lists the user's actions, and the manager view reads the call's effect back from the chain. A
+ * refusal before submission throws and is not logged: nothing reached the network.
  */
 export function useExecute(): Execute {
   const manifest = useManifest()
@@ -56,6 +59,8 @@ export function useExecute(): Execute {
 
   const refresh = useCallback(() => {
     const { network } = manifest
+    // The transaction landed: no refetch may join a read sent before it.
+    forgetInFlight()
     void queryClient.invalidateQueries({ queryKey: ["market", network] })
     void queryClient.invalidateQueries({ queryKey: ["account", network] })
     // The manager view's roles, fees and paused flags (the paused flags are in the market reads).
@@ -90,6 +95,18 @@ export function useExecute(): Execute {
             status: result.status,
             ...(result.reason ? { reason: result.reason } : {}),
           })
+          if (result.status === "NOT_FOUND") {
+            // executeReview reports the signed transaction's time bound; a result without it still
+            // arms the guard, from the review that was signed.
+            addPending({
+              hash: result.hash,
+              action,
+              marketId,
+              account: source,
+              validUntil: result.validUntil ?? review.summary.validUntil,
+              sentAt: result.sentAt ?? Math.floor(review.preparedAtMs / 1000),
+            })
+          }
         }
         refresh()
         return result

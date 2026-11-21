@@ -135,6 +135,13 @@ export type TxResult = {
   decodeError?: string
   /** The transaction was submitted but its status could not be read; it may still land. */
   pollError?: string
+  /**
+   * NOT_FOUND from `executeReview`: the signed transaction's own time bound (unix seconds). Until the
+   * ledger passes it the transaction may still land, so the same action is not offered again (M-21).
+   */
+  validUntil?: number
+  /** NOT_FOUND from `executeReview`: when the transaction was prepared (unix seconds, device clock): it cannot have landed before. */
+  sentAt?: number
 }
 
 type SimulateServer = NonNullable<Parameters<typeof simulateInvocation>[0]["server"]>
@@ -906,7 +913,8 @@ function unsuccessful(sent: SubmittedTransaction): TxResult {
  * signs, checks, submits, polls and decodes. After SUCCESS a return value that cannot be read gives
  * `output: undefined` and a `decodeError`, never a throw: the hash and status of an on-chain
  * transaction are not lost. A manager call has no action output: its SUCCESS carries none, and its
- * effect is read back from the chain.
+ * effect is read back from the chain. A NOT_FOUND carries the transaction's time bound and its
+ * preparation time, so it can be checked until it can no longer land (M-21).
  *
  * R31: only a review `prepareReview` or `prepareManagerReview` returned is executed, its expiry
  * counts from the issued time, it is re-checked in full before signing (`assertReviewIntact`, which
@@ -931,6 +939,12 @@ export async function executeReview(p: {
   }
   fresh()
   const call = assertReviewIntact(review, p.manifest, record)
+  // Kept with a result not known yet, so it is checked until it can no longer land (M-21): the time
+  // bound of the transaction checked above and signed below, and the issued preparation time.
+  const bounds = {
+    validUntil: maxTimeOf(new Transaction(review.unsignedXdr, p.manifest.networkPassphrase)),
+    sentAt: Math.floor(record.preparedAtMs / 1000),
+  }
 
   const sent = await signAndSubmit({
     unsignedXdr: review.unsignedXdr,
@@ -940,6 +954,7 @@ export async function executeReview(p: {
     rpc: p.rpc,
     afterSign: fresh,
   })
+  if (sent.status === "NOT_FOUND") return { ...unsuccessful(sent), ...bounds }
   if (sent.status !== "SUCCESS") return unsuccessful(sent)
   if (call.action === undefined) return { hash: sent.hash, status: "SUCCESS" }
 

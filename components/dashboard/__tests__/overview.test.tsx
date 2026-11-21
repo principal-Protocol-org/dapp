@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
-import { act, render, screen, within } from "@testing-library/react"
+import { act, render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import type { ReactNode } from "react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -9,7 +9,8 @@ const MARKET = "testnet-usdy-1802336344"
 const RPC = "https://rpc.test"
 const LEDGER_TIME = 1_800_000_000
 
-const src = (fn: string, ledger = 5_720_087): ReadSource => ({ contractId: "CCONTRACT", fn, args: [], rawXdr: "AAAA", ledger, rpcUrl: RPC })
+const srcOn = (contractId: string, fn: string, ledger = 5_720_087): ReadSource => ({ contractId, fn, args: [], rawXdr: "AAAA", ledger, rpcUrl: RPC })
+const src = (fn: string, ledger = 5_720_087): ReadSource => srcOn("CCONTRACT", fn, ledger)
 const live = <T,>(value: T, fn = "f"): Live<T> => ({ status: "live", value, ledger: 5_720_087, source: src(fn) })
 const down = (error = "rpc down"): Live<never> => ({ status: "unavailable", error })
 
@@ -21,13 +22,14 @@ const mocks = vi.hoisted(() => ({
   fetchRiskView: vi.fn(),
   fetchPauses: vi.fn(),
   fetch: vi.fn(),
+  seedCount: 1,
 }))
 
-const market = (marketId: string, underlying = { code: "USDY", decimals: 7, sac: "CSAC" }) => ({
+const market = (marketId: string, underlying = { code: "USDY", decimals: 7, sac: "CSAC" }, oracle = "CORACLE") => ({
   marketId,
-  displayName: "USDY",
+  displayName: underlying.code,
   underlying,
-  contracts: { sy: `CSY${marketId}`, pool: `CPOOL${marketId}`, manager: `CMGR${marketId}` },
+  contracts: { sy: `CSY${marketId}`, pool: `CPOOL${marketId}`, manager: `CMGR${marketId}`, oracle },
 })
 const baseManifest = () => ({
   network: "testnet",
@@ -36,7 +38,7 @@ const baseManifest = () => ({
   shared: { oracle: "CORACLE", riskControl: "CRISK", permissioning: "CPERM", router: "CROUTER" },
   wasmHashes: {},
 })
-vi.mock("@/components/app/manifest-provider", () => ({ useManifest: () => mocks.manifest }))
+vi.mock("@/components/app/manifest-provider", () => ({ useManifest: () => mocks.manifest, useSeedCount: () => mocks.seedCount }))
 vi.mock("@/lib/protocol/reader", async (importActual) => ({ ...(await importActual<object>()), createRpcReader: () => ({}) }))
 vi.mock("@/hooks/use-ledger-clock", () => ({ useLedgerClock: () => mocks.clock }))
 vi.mock("@/lib/protocol/dashboard/protocol-state", async (importActual) => ({
@@ -96,7 +98,7 @@ function riskView(over: Record<string, unknown> = {}) {
     effectiveWrapAndMint: null,
     doubleReporting: [],
     consumers: {},
-    window: { start: live(5_707_351), length: live(17_280), lapsed: live(false) },
+    window: { kind: "fixed", start: live(5_707_351), length: live(17_280), lapsed: live(false) },
     assetLimits: [],
     paused: live(false),
     ...over,
@@ -141,6 +143,7 @@ const wrap = (ui: ReactNode) => <QueryClientProvider client={client}>{ui}</Query
 
 beforeEach(() => {
   mocks.manifest = baseManifest()
+  mocks.seedCount = 1
   client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   mocks.clock = { ledgerTime: LEDGER_TIME, sequence: 5_720_087, isError: false }
   mocks.fetchProtocolState.mockReset().mockResolvedValue(protocolState())
@@ -180,7 +183,9 @@ describe("the overview (/dashboard)", () => {
     const safety = region("Safety")
     expect(await safety.findByText("10,000,000.00 USDY left of 10,000,000.00 USDY")).toBeTruthy()
     expect(safety.getByText("None paused")).toBeTruthy()
-    expect(safety.getByText("Fresh · operations block in 48m 12s without an update")).toBeTruthy()
+    // One oracle on Testnet: "1 of 1 fresh", the badge naming the worst state.
+    expect(safety.getByText("1 of 1 fresh")).toBeTruthy()
+    expect(within(safety.getByText("Oracles", { selector: "dt" }).parentElement!).getByText("Fresh")).toBeTruthy()
 
     const events = region("Latest compliance events")
     expect(await events.findByText("Account allowed")).toBeTruthy()
@@ -367,7 +372,10 @@ describe("the overview (/dashboard)", () => {
       oracleView({ freshness: "stale", timeToBlock: { status: "live", value: -40, ledger: 1, sources: [src("get_reference_timestamp")] } }),
     )
     render(wrap(<Overview />))
-    expect(await region("Safety").findByText("Stale · mint, trade, single-sided liquidity and redemption are blocked")).toBeTruthy()
+    const safety = region("Safety")
+    expect(await safety.findByText("0 of 1 fresh")).toBeTruthy()
+    expect(safety.getByText("Not fresh: USDY (Stale)")).toBeTruthy()
+    expect(safety.getByText("On a stale oracle's markets, mint, trade, single-sided liquidity and redemption are blocked")).toBeTruthy()
   })
 
   it("a Stale line decided by is_available() = false lists that read in How to verify, with the timestamp and max_stale reads (M-3)", async () => {
@@ -375,7 +383,8 @@ describe("the overview (/dashboard)", () => {
     const user = userEvent.setup()
     render(wrap(<Overview />))
     const safety = region("Safety")
-    expect(await safety.findByText("Stale · mint, trade, single-sided liquidity and redemption are blocked")).toBeTruthy()
+    expect(await safety.findByText("0 of 1 fresh")).toBeTruthy()
+    expect(safety.getByText("Not fresh: USDY (Stale)")).toBeTruthy()
     await user.click(safety.getByRole("button", { name: "How to verify Oracle freshness" }))
     const drawer = await screen.findByRole("dialog")
     // The command is one span per word; its <code> reads as typed.
@@ -388,7 +397,7 @@ describe("the overview (/dashboard)", () => {
     render(wrap(<Overview />))
     const safety = region("Safety")
     expect(await safety.findByRole("button", { name: "Why Oracle freshness is unavailable, and how to verify it" })).toBeTruthy()
-    expect(safety.queryByText(/^Fresh · /)).toBeNull()
+    expect(safety.queryByText(/ of 1 fresh$/)).toBeNull()
   })
 
   it("names the paused contracts", async () => {
@@ -414,9 +423,150 @@ describe("the overview (/dashboard)", () => {
     expect(screen.getByText("No fallback RPC configured")).toBeTruthy()
   })
 
+  it("shows the RPC's host, never its URL: a keyed provider URL is not advertised", async () => {
+    mocks.manifest = { ...baseManifest(), rpcUrl: "https://rpc.test/stellar/SECRET-PATH", rpcFallbackUrls: ["https://fb.test/KEY-PATH"] }
+    const { container } = render(wrap(<Overview />))
+    await screen.findByText("223,011.30 USDY")
+    expect(screen.getByText("RPC rpc.test")).toBeTruthy()
+    expect(screen.getByText("Fallback fb.test")).toBeTruthy()
+    expect(container.textContent).not.toMatch(/SECRET-PATH|KEY-PATH/)
+  })
+
   it("keeps a 375 px page from scrolling sideways: the page column may shrink below its content", () => {
     render(wrap(<Overview />))
     const section = screen.getByRole("heading", { level: 1, name: "Protocol overview" }).closest("section")
     expect(section?.className).toContain("grid-cols-[minmax(0,1fr)]")
+  })
+})
+
+/** Five markets, each with its own oracle (Mainnet's shape). */
+const FIVE = [
+  ["CCKXG4HSVH57AQTYJDNNXHQBCGNH6KRFNMCMATTMYFUX2TDQ7GD5K7IT", "MOCKUSDY"],
+  ["CBTW7CU46PMCPKZQ3VX6OBELOEC7HHQXJSAX535VW3EK34MVS7UWPFR7", "MOCKUSTRY"],
+  ["CD22HNREJHKTATZMFKALCTHJVKC35MHO2SAUSTG4M6PWLJZPS724J6X7", "MOCKGILTS"],
+  ["CBK2GO7UPMES2B7LZYZXNO3JP5JPNIIE74E4PUUJGSZZKD4FZ47QMUZK", "MOCKCETES"],
+  ["CDFI7IXUTGLV2EQE3VCHPCYOEBX2LSLXDKNU7ELJFZH726VDF73SOPFD", "MOCKXAUM"],
+] as const
+const fiveManifest = () => ({
+  ...baseManifest(),
+  markets: FIVE.map(([oracle, code], i) => market(`m${i}`, { code, decimals: 7, sac: `CSAC${i}` }, oracle)),
+})
+
+/** One oracle's view, its reads on that oracle; `left` seconds until operations block (3,600 s max stale). */
+function viewOn(id: string, left: number, over: Record<string, unknown> = {}) {
+  const on = <T,>(value: T, fn: string): Live<T> => ({ status: "live", value, ledger: 5_720_087, source: srcOn(id, fn) })
+  return oracleView({
+    contractId: id,
+    timestamp: on(BigInt(LEDGER_TIME - (3_600 - left)), "get_reference_timestamp"),
+    available: on(left >= 0, "is_available"),
+    freshness: left < 0 ? "stale" : (3_600 - left) * 4 >= 3_600 * 3 ? "warning" : "fresh",
+    timeToBlock: { status: "live", value: left, ledger: 5_720_087, sources: [srcOn(id, "get_reference_timestamp"), srcOn(id, "max_stale_seconds")] },
+    maxStale: on(3_600n, "max_stale_seconds"),
+    ...over,
+  })
+}
+
+/** A failed read on oracle `id`, with the call it attempted. */
+const downOn = (id: string, fn: string, error: string): Live<never> => ({ status: "unavailable", error, source: { contractId: id, fn, args: [], rpcUrl: RPC } })
+
+/** The command block in `drawer` that reads `fn` on contract `id`. */
+const command = (drawer: HTMLElement, id: string, fn: string) =>
+  within(drawer).queryAllByText((_, el) => el?.tagName === "CODE" && (el.textContent ?? "").includes(`--id ${id} `) && (el.textContent ?? "").endsWith(` -- ${fn}`))
+
+const by = (views: Record<string, unknown>) => async (_r: unknown, _m: unknown, oracle: string) => {
+  if (!(oracle in views)) throw new Error(`no fixture for ${oracle}`)
+  return views[oracle] instanceof Promise ? await views[oracle] : views[oracle]
+}
+
+describe("the overview with several oracles (plan 0009)", () => {
+  beforeEach(() => {
+    mocks.manifest = fiveManifest()
+    mocks.seedCount = 5
+  })
+
+  it("3 fresh of 5: '3 of 5 fresh', the badge naming the worst state, the others named, a link to the oracle page", async () => {
+    const [a, b, c, d, e] = FIVE.map(([id]) => id)
+    mocks.fetchOracleView.mockImplementation(by({ [a]: viewOn(a, 2_892), [b]: viewOn(b, 3_000), [c]: viewOn(c, 600), [d]: viewOn(d, 3_500), [e]: viewOn(e, -40) }))
+    render(wrap(<Overview />))
+    const safety = region("Safety")
+    expect(await safety.findByText("3 of 5 fresh")).toBeTruthy()
+    const oracles = within(safety.getByText("Oracles", { selector: "dt" }).parentElement!)
+    // Worst first: Stale over Warning over Fresh.
+    expect(oracles.getByText("Stale")).toBeTruthy()
+    expect(oracles.getByText("Not fresh: MOCKGILTS (Warning), MOCKXAUM (Stale)")).toBeTruthy()
+    expect(oracles.getByText("On a stale oracle's markets, mint, trade, single-sided liquidity and redemption are blocked")).toBeTruthy()
+    expect(oracles.getByRole("link", { name: "Each oracle" }).getAttribute("href")).toBe("/dashboard/oracle")
+  })
+
+  it("its How to verify drawer lists every oracle's inputs", async () => {
+    const user = userEvent.setup()
+    mocks.fetchOracleView.mockImplementation(by(Object.fromEntries(FIVE.map(([id]) => [id, viewOn(id, 2_892)]))))
+    render(wrap(<Overview />))
+    const safety = region("Safety")
+    expect(await safety.findByText("5 of 5 fresh")).toBeTruthy()
+    await user.click(safety.getByRole("button", { name: "How to verify Oracle freshness" }))
+    const drawer = await screen.findByRole("dialog")
+    for (const [id] of FIVE) for (const fn of ["get_reference_timestamp", "max_stale_seconds", "is_available"]) expect(command(drawer, id, fn).length, `${id} ${fn}`).toBe(1)
+  })
+
+  it("one oracle unread and one stale among five: the unread one is named apart with its reason, never as not fresh, and its call is in the drawer", async () => {
+    const [a, b, c, d, e] = FIVE.map(([id]) => id)
+    mocks.fetchOracleView.mockImplementation(
+      by({ [a]: viewOn(a, 2_892), [b]: viewOn(b, 2_892), [c]: viewOn(c, -40), [d]: viewOn(d, 2_892), [e]: viewOn(e, 2_892, { available: downOn(e, "is_available", "rpc down") }) }),
+    )
+    const user = userEvent.setup()
+    render(wrap(<Overview />))
+    const safety = region("Safety")
+    expect(await safety.findByText("3 of 5 fresh")).toBeTruthy()
+    const oracles = within(safety.getByText("Oracles", { selector: "dt" }).parentElement!)
+    // An oracle nobody could read colors the badge Unavailable.
+    expect(oracles.getByText("Unavailable")).toBeTruthy()
+    expect(oracles.getByText("Not fresh: MOCKGILTS (Stale)")).toBeTruthy()
+    expect(oracles.getByText("Not read: MOCKXAUM (rpc down)")).toBeTruthy()
+    expect(oracles.queryByText(/MOCKXAUM \(Unavailable\)/)).toBeNull()
+    await user.click(safety.getByRole("button", { name: "How to verify Oracle freshness" }))
+    const drawer = await screen.findByRole("dialog")
+    // The failed read's attempted call, beside the others' reads.
+    expect(command(drawer, e, "is_available")).toHaveLength(1)
+    expect(command(drawer, a, "is_available")).toHaveLength(1)
+    expect(within(drawer).getAllByText(/Not read: MOCKXAUM: rpc down/).length).toBeGreaterThan(0)
+  })
+
+  it("every oracle unread: the row is Unavailable, and its drawer gives each oracle's reason and attempted call", async () => {
+    mocks.fetchOracleView.mockImplementation(by(Object.fromEntries(FIVE.map(([id], i) => [id, viewOn(id, 2_892, { available: downOn(id, "is_available", `rpc down ${i}`) })]))))
+    const user = userEvent.setup()
+    render(wrap(<Overview />))
+    const safety = region("Safety")
+    await user.click(await safety.findByRole("button", { name: "Why Oracle freshness is unavailable, and how to verify it" }))
+    const drawer = await screen.findByRole("dialog")
+    expect(within(drawer).getAllByText(/none of the 5 oracles could be read/).length).toBeGreaterThan(0)
+    for (const [i, [id, code]] of FIVE.entries()) {
+      expect(within(drawer).getAllByText(new RegExp(`${code}: rpc down ${i}`)).length).toBeGreaterThan(0)
+      expect(command(drawer, id, "is_available"), code).toHaveLength(1)
+    }
+  })
+
+  it("while any oracle is still being read, the row is a skeleton, never a partial count", async () => {
+    const [a, b, c, d, e] = FIVE.map(([id]) => id)
+    mocks.fetchOracleView.mockImplementation(by({ [a]: viewOn(a, 2_892), [b]: viewOn(b, 2_892), [c]: viewOn(c, 2_892), [d]: viewOn(d, 2_892), [e]: new Promise(() => {}) }))
+    render(wrap(<Overview />))
+    const safety = region("Safety")
+    await safety.findByText("None paused")
+    await waitFor(() => expect(mocks.fetchOracleView).toHaveBeenCalledTimes(5))
+    expect(safety.queryByText(/ of 5 fresh$/)).toBeNull()
+    expect(safety.getByText("Oracles", { selector: "dt" }).parentElement!.querySelector("[data-slot=skeleton]")).toBeTruthy()
+  })
+
+  it("4 listed of 5 seeds: '4 of 5 manifest markets listed'; all listed: just the count", async () => {
+    mocks.fetchOracleView.mockImplementation(by(Object.fromEntries(FIVE.map(([id]) => [id, viewOn(id, 2_892)]))))
+    mocks.manifest = { ...fiveManifest(), markets: fiveManifest().markets.slice(0, 4) }
+    const first = render(wrap(<Overview />))
+    expect(await region("Protocol totals").findByText("4 of 5 manifest markets listed")).toBeTruthy()
+    first.unmount()
+    mocks.manifest = fiveManifest()
+    render(wrap(<Overview />))
+    const totals = region("Protocol totals")
+    expect(await totals.findByText("5")).toBeTruthy()
+    expect(totals.queryByText(/manifest markets listed/)).toBeNull()
   })
 })

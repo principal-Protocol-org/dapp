@@ -3,7 +3,7 @@ import { join, relative } from "node:path"
 import { render, renderHook, screen } from "@testing-library/react"
 import { describe, expect, it, vi } from "vitest"
 import type { Manifest } from "@/lib/protocol/types"
-import { ManifestProvider, useManifest } from "../manifest-provider"
+import { ManifestProvider, useManifest, useSeedCount } from "../manifest-provider"
 
 const ROOT = join(__dirname, "..", "..", "..")
 
@@ -38,15 +38,30 @@ describe("client code reads the server-resolved manifest", () => {
       return <p>{useManifest().markets[0].marketId}</p>
     }
     render(
-      <ManifestProvider manifest={manifest}>
+      <ManifestProvider manifest={manifest} seedCount={1}>
         <Name />
       </ManifestProvider>,
     )
     expect(screen.getByText("local-usdy-1")).toBeTruthy()
   })
 
-  it("useManifest outside the provider names the mistake", () => {
+  it("useSeedCount is the static manifest's market count, not the resolved list's", () => {
+    // The registry hid one of the five seeds: the resolved manifest lists four.
+    const manifest = { network: "mainnet", markets: [1, 2, 3, 4].map((n) => ({ marketId: `m${n}` })) } as unknown as Manifest
+    function Counts() {
+      return <p>{`${useManifest().markets.length} of ${useSeedCount()}`}</p>
+    }
+    render(
+      <ManifestProvider manifest={manifest} seedCount={5}>
+        <Counts />
+      </ManifestProvider>,
+    )
+    expect(screen.getByText("4 of 5")).toBeTruthy()
+  })
+
+  it("useManifest and useSeedCount outside the provider name the mistake", () => {
     vi.spyOn(console, "error").mockImplementation(() => {})
     expect(() => renderHook(() => useManifest())).toThrow(/ManifestProvider/)
+    expect(() => renderHook(() => useSeedCount())).toThrow(/ManifestProvider/)
   })
 })

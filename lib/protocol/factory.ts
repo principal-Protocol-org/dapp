@@ -1,7 +1,8 @@
 /**
  * The MarketFactory (spec 0002 §5 steps 1–3, R5-10): the creation wizard's parameters, the seven
  * addresses one salt gives, and the three `create_*` calls, encoded exactly as the contract declares
- * them (`principal` `contracts/market_factory/src/lib.rs` at 665bb67).
+ * them (`principal` `contracts/market_factory/src/lib.rs` at 665bb67; unchanged at 3af9388, whose
+ * only difference here is one more authorization under `create_pool_and_escrow`, `poolAuthTree`).
  *
  * Trust: nothing that decides where code runs comes from the caller. The factory, the shared
  * contracts (Permissioning, oracle, RiskControl) and the Wasm hash of every market contract come from
@@ -16,9 +17,10 @@ import { Address, StrKey, xdr } from "@stellar/stellar-sdk"
 import { sha256 } from "js-sha256"
 import { bytesToHex } from "./bytes"
 import { shorten } from "./format"
+import { protocolAbi } from "./manifest"
 import { readLive, toAddress, toBigint, type ContractReader } from "./reader"
 import type { ContractInvocation, ScArg } from "./stellar"
-import type { Live, Manifest, Market, MarketContractName, MarketContracts } from "./types"
+import type { Live, Manifest, Market, MarketContractName, MarketContracts, Network } from "./types"
 
 // ---------------------------------------------------------------- constants (market_factory, market_config, market_pool)
 
@@ -620,8 +622,12 @@ export function createPoolAndEscrowInvocation(manifest: Manifest, c: Create<Pool
  * the factory makes into the contracts it deploys that call `admin.require_auth()` (each child's
  * `initialize`, then its wiring through `assert_admin`), in the order it makes them, each with the
  * arguments it passes (market_factory `create_tokens`, `create_engine`, `create_pool_and_escrow`).
- * `RecoveryEscrow.initialize` takes no admin and asks no authorization. RPC prepares the
- * authorization entries and is untrusted: the review refuses any tree but this one.
+ * The manifest's contract version decides one entry. At version 1 (665bb67)
+ * `RecoveryEscrow.initialize` takes no admin and asks no authorization. At version 2 (3af9388) it takes
+ * the issuer as its `caller` and calls `caller.require_auth()` (recovery_escrow:245-258, audit H-4), so
+ * the issuer authorizes it too, between the pool's `initialize` and the wiring (market_factory:530-552).
+ * It makes no authorized call of its own. RPC prepares the authorization entries and is untrusted: the
+ * review refuses any tree but this one.
  */
 export function tokensAuthTree(manifest: Manifest, c: Create<TokenParamsInput>): ContractInvocation[] {
   const p = deriveMarketContracts(manifest, c.salt)
@@ -683,13 +689,34 @@ export function poolAuthTree(manifest: Manifest, c: Create<PoolParamsInput>): Co
   const p = deriveMarketContracts(manifest, c.salt)
   const issuer = address(issuerOf(c.issuer))
   const escrow = address(p.recoveryEscrow)
+  // Version 2: RecoveryEscrow.initialize(caller, underlying, sy_wrapper, pt_token, yt_token, principal_manager, market_pool).
+  const escrowInit: ContractInvocation[] =
+    protocolAbi(manifest) === 2
+      ? [
+          {
+            contractId: p.recoveryEscrow,
+            functionName: "initialize",
+            args: [issuer, address(c.params.underlying), address(p.sy), address(p.pt), address(p.yt), address(p.manager), address(p.pool)],
+          },
+        ]
+      : []
   return [
     { contractId: p.pool, functionName: "initialize", args: [issuer, address(p.manager), u32(c.params.timeStretchYears)] },
+    ...escrowInit,
     { contractId: p.sy, functionName: "set_recovery_escrow", args: [issuer, escrow] },
     { contractId: p.pt, functionName: "set_recovery_escrow", args: [issuer, escrow] },
     { contractId: p.yt, functionName: "set_recovery_escrow", args: [issuer, escrow] },
     { contractId: p.pool, functionName: "set_recovery_escrow", args: [issuer, escrow] },
   ]
+}
+
+/**
+ * Whether the app offers the market wizard on this network. Every `create_*` call is signed by the
+ * asset's issuer (R5-10): on Testnet and a local network that can be the person using the app; the
+ * issuer keys of the Mainnet assets belong to the protocol team, which lists Mainnet markets itself.
+ */
+export function wizardAvailable(m: { network: Network }): boolean {
+  return m.network !== "mainnet"
 }
 
 /** The maturity the form starts from: the first 00:00 UTC at least 90 days after `ledgerTime` (deploy.sh's testnet term). */

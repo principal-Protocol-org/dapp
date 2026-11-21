@@ -5,6 +5,7 @@ vi.mock("server-only", () => ({}))
 
 const mocks = vi.hoisted(() => ({
   indexEvents: vi.fn(),
+  createRpcServer: vi.fn<(url: string) => object>(() => ({ rpc: "fake" })),
   verify: vi.fn(),
   sql: vi.fn(),
   manifestError: null as Error | null,
@@ -30,7 +31,7 @@ vi.mock("@/lib/protocol/manifest-source", async () => {
     },
   }
 })
-vi.mock("@/lib/protocol/stellar", () => ({ createRpcServer: () => ({ rpc: "fake" }) }))
+vi.mock("@/lib/protocol/stellar", () => ({ createRpcServer: mocks.createRpcServer }))
 
 import { GET, maxDuration, POST } from "../route"
 
@@ -51,6 +52,7 @@ describe("/api/cron/index", () => {
     process.env.QSTASH_CURRENT_SIGNING_KEY = "current"
     process.env.QSTASH_NEXT_SIGNING_KEY = "next"
     process.env.VERCEL = "1"
+    mocks.createRpcServer.mockReset().mockImplementation(() => ({ rpc: "fake" }))
     mocks.indexEvents.mockReset()
     mocks.indexEvents.mockResolvedValue(RESULT)
     mocks.verify.mockReset()
@@ -92,6 +94,18 @@ describe("/api/cron/index", () => {
     expect(opts.deadline).toBeLessThanOrEqual(Date.now() + 50_000)
     // The list came from the registry: every group runs, and nothing is skipped.
     expect(opts.groups).toEqual(["escrow", "oracle", "permissioning", "risk", "market"])
+  })
+
+  it("reads through SERVER_RPC_URL when it is set, and never answers it", async () => {
+    const sentinel = "https://server-rpc.invalid/secret-sentinel"
+    process.env.SERVER_RPC_URL = sentinel
+    try {
+      const res = await call(auth)
+      expect(mocks.createRpcServer).toHaveBeenCalledWith(sentinel)
+      expect(await res.text()).not.toContain("sentinel")
+    } finally {
+      delete process.env.SERVER_RPC_URL
+    }
   })
 
   it("a registry that cannot be read (the seeds alone): the market and escrow groups wait, and the answer says why (I-1)", async () => {

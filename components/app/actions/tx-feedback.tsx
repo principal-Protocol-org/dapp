@@ -34,8 +34,16 @@ export function TxNoticeView({ notice }: { notice: TxNotice }) {
   )
 }
 
-/** Toasts a result; a success stays briefly, anything else until dismissed. */
-export function showTxToast(notice: TxNotice): void {
+/** The id of the toast that says a send's result is not known yet: it is closed once the send settles (M-21). */
+export const pendingToastId = (hash: string) => `pending-${hash}`
+
+/** Closes the result-not-known toast of the send with this hash, if it is still up. */
+export function dismissPendingToast(hash: string): void {
+  toast.dismiss(pendingToastId(hash))
+}
+
+/** Toasts a result; a success stays briefly, anything else until dismissed. `id` names it, to close it later. */
+export function showTxToast(notice: TxNotice, id?: string): void {
   const description = (
     <span className="grid gap-1">
       {notice.detail ? <span>{notice.detail}</span> : null}
@@ -43,5 +51,5 @@ export function showTxToast(notice: TxNotice): void {
     </span>
   )
   const show = notice.tone === "success" ? toast.success : notice.tone === "warning" ? toast.warning : toast.error
-  show(notice.title, { description, duration: notice.tone === "success" ? 8_000 : Infinity })
+  show(notice.title, { description, duration: notice.tone === "success" ? 8_000 : Infinity, ...(id ? { id } : {}) })
 }

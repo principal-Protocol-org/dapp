@@ -87,6 +87,8 @@ export type EventListProps = {
   group?: IndexGroup
   /** One market's events (its pool id). */
   pool?: string
+  /** One contract's events (its id): one oracle's history. */
+  contract?: string
   /** Only these topics, filtered by the API so pages stay full. */
   topics?: readonly string[]
   /** What a row says; by default the topic's words (`eventWords`) and the account it is about. */
@@ -104,10 +106,10 @@ export type EventListProps = {
  * every 60 s (D-6). It fits 375 px: below 720 px the close time folds under the event, below 520 px
  * the ledger and the transaction too.
  */
-export function EventList({ label, group, pool, topics, describe = defaultDescribe, empty, pageSize = 20 }: EventListProps) {
+export function EventList({ label, group, pool, contract, topics, describe = defaultDescribe, empty, pageSize = 20 }: EventListProps) {
   const m = useManifest()
   const { ledgerTime } = useLedgerClock()
-  const q = useEventPages({ group, pool, topics }, pageSize)
+  const q = useEventPages({ group, pool, contract, topics }, pageSize)
   // A failed page of older events keeps the rows shown; a failed refresh does not.
   const failed = q.isError && !q.isFetchNextPageError
   const pages = failed ? undefined : q.data?.pages

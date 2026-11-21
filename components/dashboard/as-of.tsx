@@ -3,6 +3,7 @@
 import { cn } from "cn"
 import { formatDuration } from "@/components/app/live"
 import { useNow } from "@/hooks/use-dashboard"
+import { hostOf } from "@/lib/protocol/dashboard/verify"
 import type { Live, ReadSource } from "@/lib/protocol/types"
 
 /** Every read behind some figures, composite or single, in order; figures not read yet or unavailable add none. */
@@ -10,16 +11,8 @@ export function readsOf(lives: readonly (Live<unknown> | undefined)[]): ReadSour
   return lives.flatMap((l) => (l && l.status === "live" ? (l.sources ?? (l.source ? [l.source] : [])) : []))
 }
 
-/** An endpoint's host, for "via fallback <host>"; the URL itself when it does not parse. */
-const hostOf = (url: string) => {
-  try {
-    return new URL(url).host
-  } catch {
-    return url
-  }
-}
-
-const cadenceText = (ms: number) => (ms % 60_000 === 0 && ms >= 60_000 ? `${ms / 60_000} min` : `${Math.round(ms / 1000)} s`)
+/** A cadence in words: "15 s", "1 min". */
+export const cadenceText = (ms: number) => (ms % 60_000 === 0 && ms >= 60_000 ? `${ms / 60_000} min` : `${Math.round(ms / 1000)} s`)
 
 /**
  * "Ledger N · read Xs ago · Refreshes every 15 s" (D-6), for a page or a panel:

@@ -1,5 +1,6 @@
 import { Address, Contract, type xdr } from "@stellar/stellar-sdk"
 import { bytesToHex } from "./bytes"
+import { limitRpc } from "./rpc-limiter"
 
 /**
  * Which code a contract runs (spec 0002 §1): the Wasm hash in its instance ledger entry. Pure: the
@@ -54,9 +55,12 @@ export async function contractWasmHash(rpc: LedgerEntriesRpc, contractId: string
  * The Wasm hashes of several contracts from ONE `getLedgerEntries` call, one atomic ledger snapshot
  * (a phase landing between separate reads could otherwise look half deployed). Results are in the
  * order of `ids`: a hash, or the `WasmReadError` that contract's entry gave. An RPC failure throws.
+ * Every code read goes through here, and the call takes a slot of the read cap (`limitRpc`, spec
+ * 0005 M-20): the registry's checks start one per contract beside their contract reads.
  */
 export async function contractWasmHashesSettled(rpc: LedgerEntriesRpc, ids: string[]): Promise<(string | WasmReadError)[]> {
-  const { entries } = await rpc.getLedgerEntries(...ids.map((id) => new Contract(id).getFootprint()))
+  const keys = ids.map((id) => new Contract(id).getFootprint())
+  const { entries } = await limitRpc(() => rpc.getLedgerEntries(...keys))
   return ids.map((id) => {
     const data = entries.map((entry) => entry.val).find((val) => val.type === "contractData" && Address.fromScAddress(val.contractData.contract).toString() === id)
     try {

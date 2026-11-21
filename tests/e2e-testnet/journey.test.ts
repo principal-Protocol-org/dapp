@@ -43,7 +43,7 @@ import { fetchAccountHistory, type HistoryKind } from "@/lib/protocol/events"
 import { evaluateGates, type Blocker } from "@/lib/protocol/gates"
 import { openGuards, type ActionOutput } from "@/lib/protocol/guards"
 import { createHorizon } from "@/lib/protocol/horizon"
-import { validateManifest } from "@/lib/protocol/manifest"
+import { protocolAbi, validateManifest } from "@/lib/protocol/manifest"
 import { fetchMarketState, type MarketState } from "@/lib/protocol/market-state"
 import { BPS } from "@/lib/protocol/math"
 import { addTrustline } from "@/lib/protocol/onboarding"
@@ -290,9 +290,12 @@ describe("Suite A: the live journey on the official Testnet deployment (plan 000
       wallet: { status: "connected", publicKey: account, networkPassphrase: manifest.networkPassphrase },
       market: ms,
       account: acc,
-      compliance: evaluateAccountCompliance(acc, kind),
+      compliance: evaluateAccountCompliance(acc, kind, undefined, manifest.network),
       ledgerTime: clock.now(),
       managerId: market.contracts.manager,
+      network: manifest.network,
+      protocolAbi: protocolAbi(manifest),
+      underlying: market.underlying.code,
       simulation,
     })
     return { blockers, simulation }
@@ -388,7 +391,7 @@ describe("Suite A: the live journey on the official Testnet deployment (plan 000
   })
 
   it("Mint PT + YT: Split USDY into PT and YT, one each (quick action)", async () => {
-    const req: RouteRequest = { kind: "split", marketId: market.marketId, source: trader.publicKey, amount: SPLIT, pay: "underlying", receive: "sy", matured: false }
+    const req: RouteRequest = { kind: "split", marketId: market.marketId, source: trader.publicKey, amount: SPLIT, pay: "underlying", receive: "sy", matured: false, underlying: market.underlying.code }
     const plans = planRoute(req, { routerFunctions: manifest.routerFunctions ?? [] })
     if (!Array.isArray(plans)) throw new Error(plans.disabled)
     expect(plans.map((p) => p.action)).toEqual(["mint"])

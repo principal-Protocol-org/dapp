@@ -10,7 +10,7 @@ and Podman (an existing machine) or Docker.
 
 ```bash
 scripts/dev-stack/up.sh                                   # network, Postgres + dev-only keys (see below)
-MATURITY_SECONDS=3600 scripts/dev-stack/deploy.sh         # build, deploy one market, seed, write outputs
+scripts/dev-stack/deploy.sh                               # build, deploy two markets, seed, write outputs
 NEXT_PUBLIC_PRINCIPAL_NETWORK=local pnpm dev              # or pnpm build
 scripts/dev-stack/oracle-tick.sh                          # run this every 30 minutes (grows ~5 %/year)
 ```
@@ -23,40 +23,76 @@ scripts/dev-stack/oracle-tick.sh                          # run this every 30 mi
   `principal-localdev-treasury`. The names are deliberately unlike any real key: the admin's secret is
   written to `.env.local`, so a real identity must never share them.
 - `deploy.sh` reads `PRINCIPAL_REPO` (default `../principal`), `PRINCIPAL_REF` (default
-  `origin/feat/tranche-1-mvp`, which is `665bb67` today) and `MATURITY_SECONDS` (default `3600`). It extracts the sources with
+  `3af938853e5818aa8d56bd35670b9a19cfa55a78`, the Mainnet deployment's commit, `sourceCommit` in
+  `config/manifests/mainnet.json`) and `MATURITY_SECONDS` (default `86400`, one day). It extracts the sources with
   `git archive` into `$TMPDIR/principal-dev-stack/<commit>` (read-only for the repository, cached per
   commit), builds the WASM, issues `USDY` (`ASSET_CODE`, default `USDY`, shown as "USDY (test)"; AUTH_REQUIRED, AUTH_REVOCABLE, AUTH_CLAWBACK_ENABLED) from
   `principal-localdev-admin`, deploys its SAC, and runs steps 1-11 of the repository's
   `docs/DEPLOYMENT.md`. It then deposits 200,000 USDY, mints PT/YT from 100,000 SY, and seeds the
-  pool with all the PT and 95 % of its value in SY. It also deploys the stateless `MarketFactory` (its address is `shared.factory`, the wasm hashes of the seven market contracts are recorded) and runs `scripts/db-migrate.mjs` when that file exists (migrations 0001 to 0003; 0003 adds `market_salts`). Every run deploys a new market and overwrites `config/manifests/local.json`.
-  Allow for the run: a deploy takes a few minutes, so do not set `MATURITY_SECONDS` below about 600.
+  pool with all the PT and 95 % of its value in SY. It also deploys the stateless `MarketFactory` (its address is `shared.factory`, the wasm hashes of the seven market contracts are recorded) and runs `scripts/db-migrate.mjs` when that file exists (migrations 0001 to 0003; 0003 adds `market_salts`). Every run deploys new markets and overwrites `config/manifests/local.json`.
+  Allow for the run: a one-market deploy takes a few minutes, so do not set `MATURITY_SECONDS` below about
+  600. A two-market local deploy (the default) needs about 90 s more, or set `SECOND_MARKET=0`. The
+  one-day default leaves the integration suites room: the routes suite fails on a market an hour from
+  maturity, though its own floor is 30 minutes.
+- A second market, on the local network only. Mainnet has several markets, each on its own asset with
+  its own oracle, so the local stack has two. After the first market, `deploy.sh` issues a second asset,
+  `GILT` (`ASSET_CODE_2`, shown as "GILT (test)"), from the same key, with its own SAC and trustlines
+  (the issuer's flags are already set). It deploys a second OracleAdapter for it, set up like the first, with its own primary source
+  (the hash of `principal-oracle-source:local:GILT:app-team:keeper`) and the genesis value `14000000`
+  (1.4). Then it deploys the second market's own SY, PT, YT, config, manager, pool and escrow on that
+  oracle, with the same maturity. They use the same Permissioning, RiskControl and Router as the first
+  market (`add_consumer`, `register_market`), and get the same grants and seeding. Its id is
+  `local-gilt-<maturity>`. The manifest lists both markets; `testAsset` and `shared.oracle` stay the
+  first market's, and `wasmHashes` is unchanged (same code). The faucet still pays the test asset only:
+  onboard on the second market with the issuer's own steps (`onboardWithIssuer` in
+  `tests/integration/local-stack.ts`). `SECOND_MARKET=0` deploys one market. On Testnet there is always one.
+- Two contract versions. By default the stack runs Mainnet's contracts (`3af9388`, interface version 2).
+  For the older interface of the official Testnet market (`665bb67`, version 1), deploy with
+  `PRINCIPAL_REF=665bb6760372d30307a1a035da24e51776f727e8 scripts/dev-stack/deploy.sh`. The script reads the
+  version from the Router it built (2 when `wrap_and_mint` takes `sy_in`, else 1) and writes it as the
+  manifest's `protocolAbi`. A Router with no `wrap_and_mint` at all stops the deploy before anything is
+  signed: its version cannot be told. At version 2 the OracleAdapter and Permissioning `initialize` need their admin's
+  signature (the oracle key and the issuer key sign them, at both versions), and `RecoveryEscrow.initialize`
+  takes a `caller`, the SAC admin (`--caller` is passed at version 2 only).
 - The OracleAdapter is v2, which the dApp requires (R4-9). `deploy.sh` initializes it with
   `max_stale_seconds = 3600` and `max_deviation_bps = 1000`, sets one primary source and no
   fallback (`set_sources`, signed by the oracle admin), and pushes the genesis value `10000000`
-  (1.0). The primary source id is `sha256("principal-oracle-source:<network>:<ASSET_CODE>:app-team:keeper")`
-  in hex; on the local stack, the hash of `principal-oracle-source:local:USDY:app-team:keeper`.
-- `oracle-tick.sh [--apy <percent>] [rate]` sets the oracle to `rate` (7 decimals, `10000000` = 1.0) or, by default,
-  to current x (1 + apy/100)^(elapsed/year) with `--apy` defaulting to 5 and elapsed counted from the last reference
-  timestamp (rounded down, never decreasing); an explicit rate wins. The value is stamped with the latest ledger close time
-  and sent under the oracle's primary source (`get_primary_source()`). The oracle is stale after
-  one hour; the ticks keep minting, swaps and quotes working. Rates cannot go down.
-  A v2 oracle may refuse a value: `set_reference_value` then returns `false` in a successful
-  transaction, and the script fails with the oracle's `last_rejection()`. It also fails on an oracle
-  with no primary source (a v1 oracle, or one never given `set_sources`). `ORACLE_TICK_MANIFEST=<path>`
-  (local only) ticks the oracle of another local deployment's manifest instead of `local.json`'s.
+  (1.0). The primary source id is `sha256("principal-oracle-source:<network>:<asset code>:app-team:keeper")`
+  in hex; on the local stack, the hash of `principal-oracle-source:local:USDY:app-team:keeper` (and of
+  `principal-oracle-source:local:GILT:app-team:keeper` for the second market's oracle).
+- `oracle-tick.sh [--apy <percent>] [rate]` ticks every oracle of the manifest: each distinct
+  `markets[].contracts.oracle`, in manifest order (both oracles on the local stack). It sets each one to
+  current x (1 + apy/100)^(elapsed/year), with `--apy` defaulting to 5 and elapsed counted from that
+  oracle's own last reference timestamp (rounded down, never decreasing). Each oracle's current value
+  and primary source (`get_primary_source()`) are read on their own. The value is stamped with the latest
+  ledger close time. With one oracle it prints the line it always printed; with several, one line per
+  oracle, naming it. `ORACLE_TICK_ORACLE=<contract id>` ticks that oracle only, and the script stops if
+  the manifest does not name it. An explicit `rate` (7 decimals, `10000000` = 1.0) wins over `--apy`. It is
+  one oracle's value, so with several oracles it needs `ORACLE_TICK_ORACLE`, or the script stops before it
+  signs anything. An oracle is stale after one hour; the ticks keep minting, swaps and quotes working.
+  Rates cannot go down. A v2 oracle may refuse a value: `set_reference_value` then returns `false` in a
+  successful transaction, and the script fails with the oracle's `last_rejection()`. It also fails on an
+  oracle with no primary source (a v1 oracle, or one never given `set_sources`). The first failure stops
+  the run. `ORACLE_TICK_MANIFEST=<path>` (local only) ticks the oracles of another local deployment's
+  manifest instead of `local.json`'s.
 
 - `feed-oracle.sh` (local only; it refuses any other network) proves the keeper's feed mode
   (spec 0004 D-21, D-22) without touching the market. It builds the SEP-40 mock feed in
   `tests/fixtures/sep40-mock` (`MockSep40Feed` of principal 24d980d `oracle_adapter/src/test.rs`,
   copied verbatim, with its two SEP-40 types; `set_price` and `clear_price` take no authorization) and
-  the OracleAdapter of `PRINCIPAL_REF` (default `24d980d`, extracted with `git archive` like
-  `deploy.sh`; its wasm hash is `cf58bbd8…`). It deploys both as `principal-localdev-admin`,
-  initializes the feed with `FEED_DECIMALS` (default 8) and the oracle with `max_stale_seconds = 3600`
-  and `max_deviation_bps = 1000`, calls `set_feed_source(admin, feed, {"Other":"USDY"})`, and prints
-  `{"oracle": "C…", "feed": "C…"}` on stdout. Then:
+  the OracleAdapter of `PRINCIPAL_REF` (default `3af938853e5818aa8d56bd35670b9a19cfa55a78`, the
+  Mainnet contracts, extracted with `git archive` like `deploy.sh`; its wasm hash is `56786ca6…`, and
+  `cf58bbd8…` at `24d980d`). It deploys both as `principal-localdev-admin`, initializes the feed with
+  `FEED_DECIMALS` (default 8) and the oracle with `max_stale_seconds = 3600` and
+  `max_deviation_bps = 1000`, calls `set_feed_source(admin, feed, {"Other":"USDY"})` and
+  `set_feed_min_interval(admin, FEED_MIN_INTERVAL)`, and prints `{"oracle": "C…", "feed": "C…"}` on
+  stdout. `FEED_MIN_INTERVAL` defaults to 0, which turns the feed throttle off (the contract throttles
+  to 300 s when it is never set); with 300, a second new price inside 300 s of the first accepted one is
+  answered `throttle`. `FEED_INITIALIZED=0` leaves the mock feed uninitialized: its `decimals()` fails,
+  and the oracle answers `feed_err`. Then:
 
   ```bash
-  ORACLE_KEEPER_MODE=feed ORACLE_KEEPER_SECRET=<a funded key with no role> ORACLE_KEEPER_ORACLE_ID=<oracle> \
+  ORACLE_KEEPER_MODE=feed ORACLE_KEEPER_SECRET=<a funded key with no role> ORACLE_KEEPER_ORACLE_ID=<oracle>[,<oracle>…] \
     NEXT_PUBLIC_PRINCIPAL_NETWORK=local pnpm dev
   stellar contract invoke --id <feed> --source principal-localdev-admin --network local -- \
     set_price --asset '{"Other":"USDY"}' --price 100000000 --timestamp <a ledger close time>
@@ -71,13 +107,14 @@ scripts/dev-stack/oracle-tick.sh                          # run this every 30 mi
 - `drill.sh` gives the public dashboard real history (spec 0004 D-31): one compliance recovery (a
   throwaway account onboarded, given 10 USDY of SY and PT and YT minted from 5 SY, deauthorized on the
   SAC by the SAC admin, then `seize_all_positions`), one oracle value over the deviation cap (simulated
-  first, it must answer `false`; it lands as `ref_rej` `deviate`), one `oracle-tick.sh`, and a
+  first, it must answer `false`; it lands as `ref_rej` `deviate`), one `oracle-tick.sh` on that same oracle
+  (`shared.oracle`, through `ORACLE_TICK_ORACLE`), and a
   RiskControl pause of `DRILL_PAUSE_SECONDS` (default 15, at most 30) then unpause. Locally it signs
   with `principal-localdev-admin` and onboards with the issuer's own steps; the throwaway key
   (`drill-<network>-<time>-<pid>`) is removed from the keystore at the end, and an exit trap unpauses
   RiskControl on any failure or interruption (INT, TERM, QUIT; the cleanup ignores further ones). The
-  mint is skipped, and said, when the market has matured (the dev stack's market usually has) or the
-  oracle is stale: the record then holds SY only. `DRILL_MANIFEST=<path>` (local only) runs it on
+  mint is skipped, and said, when the market has matured (the dev stack's markets do a day after their
+  deploy) or the oracle is stale: the record then holds SY only. `DRILL_MANIFEST=<path>` (local only) runs it on
   another local deployment, e.g. a fresh one written with `MANIFEST_OUT`, and passes it on to
   `oracle-tick.sh` as `ORACLE_TICK_MANIFEST`. Every hash goes to stderr, and a JSON summary to stdout.
   `DRILL_STEPS=recovery,oracle,pause` picks steps. On Testnet it is the developer's run only (the main
@@ -92,7 +129,7 @@ scripts/dev-stack/oracle-tick.sh                          # run this every 30 mi
 
 Outputs (both git-ignored; never commit them):
 
-- `config/manifests/local.json`: a v2 manifest (shared contracts, factory, `wasmHashes`, `routerFunctions` (every Router function the wasm exposes except the `quote_*` views), `testAsset`, one market, and `deployLedger`).
+- `config/manifests/local.json`: a v2 manifest (shared contracts, factory, `wasmHashes`, `routerFunctions` (every Router function the wasm exposes except the `quote_*` views), `protocolAbi` (1 or 2, see above), `testAsset`, two markets (one with `SECOND_MARKET=0`), and `deployLedger`).
 - `.env.local`: `NEXT_PUBLIC_PRINCIPAL_NETWORK=local`, `FAUCET_ISSUER_SECRET` (the
   `principal-localdev-admin` secret, valid on this throwaway network only) and `DATABASE_URL` for `principal-pg`.
 
@@ -111,6 +148,8 @@ and the roles are split so the server never holds the protocol admin:
 | `principal-testnet-issuer` | Classic issuer of the test asset and Permissioning admin: the faucet's key | Server: `FAUCET_ISSUER_SECRET` |
 | `principal-testnet-oracle` | OracleAdapter admin: pushes the value, and can also change the oracle's window, deviation cap, sources and value bounds | Server: `ORACLE_ADMIN_SECRET` |
 
+- The official Testnet market runs `665bb67`. A Testnet deploy builds `PRINCIPAL_REF` like a local one, so
+  it deploys `3af9388` unless `PRINCIPAL_REF=665bb6760372d30307a1a035da24e51776f727e8` is set.
 - `MATURITY_SECONDS` defaults to 90 days on testnet. The market id is `testnet-usdy-<maturity>`.
 - It writes `config/manifests/testnet.json` (committed: public addresses and hashes only), no env
   file and no database migration. Apply migration 0003 to the Testnet database yourself
@@ -146,10 +185,11 @@ EPHEMERAL=1 MANIFEST_OUT="$(mktemp -d)/manifest.json" PRINCIPAL_NETWORK=testnet 
 for r in admin treasury issuer oracle; do stellar keys rm "e2e-$RUNID-$r" --force; done
 ```
 
-## Keep the oracle fresh
+## Keep the oracles fresh
 
-The oracle goes stale after about 1 h. A stale oracle refuses most writes and the app shows
-"Unavailable". Run `scripts/dev-stack/oracle-tick.sh` again (every 30 minutes is enough).
+Each oracle goes stale after about 1 h. A stale oracle refuses most writes on its market and the app
+shows "Unavailable". Run `scripts/dev-stack/oracle-tick.sh` again (every 30 minutes is enough): it ticks
+both oracles of the local stack.
 
 ## Postgres: `principal-pg`
 
@@ -160,17 +200,18 @@ runs it for you). Call `GET /api/cron/record` with `Authorization: Bearer $CRON_
 
 ## Integration suites
 
-`pnpm test:integration` (from the repository root) runs against the market in
+`pnpm test:integration` (from the repository root) runs against the markets in
 `config/manifests/local.json`:
 
 | Suite | What it proves |
 |---|---|
 | `routes.test.ts` | Every trade route, Quick actions, and interruption and unwind, signed on the local network. |
+| `local-stack.test.ts` | The two-market stack: two markets on two oracles and two underlyings, `oracle-tick.sh` ticking both (and only the one `ORACLE_TICK_ORACLE` names), and `onboardWithIssuer` onboarding a fresh account on the second market. It fails on a one-market `local.json`. |
 | `curve.test.ts` | The off-chain curve port equals the pool's quote views. |
 | `registry.test.ts` | Market discovery and validation against the real contracts and `principal-pg`. |
 | `history.test.ts` | The history queries, and the recorder writing one snapshot of the live market to `principal-pg` (the row is deleted afterwards). |
 | `oracle.test.ts` | The OracleAdapter v2 policy read through the app's reader (the primary source id above, no fallback, no rejection, 3,600 s, 1,000 bps), and one keeper tick (`tickOracle`, behind `/api/cron/oracle`) that reports `updated`. |
-| `oracle-feed.test.ts` | The keeper's feed mode (D-21) through `/api/cron/oracle`, with a fresh key that holds no role, against `feed-oracle.sh`'s mock feed and standalone oracle: `synced` (the price rescaled from 8 to 7 decimals), `skipped` `stale_ts`, a +15 % `deviate` submitted once then not again (both answered 200), `bad_price` never submitted, `skipped` `no_data`, `not_configured` on the market's own oracle (no `feed_source`), the indexed `ref_set` and `ref_rej`, and the alert check's `oracle_rejection` and `feed_broken`. It needs `principal-pg` migrated, deletes its rows afterwards and puts the oracle index cursor back. |
+| `oracle-feed.test.ts` | The keeper's feed mode (D-21) through `/api/cron/oracle`, with a fresh key that holds no role, against `feed-oracle.sh`'s mock feed and standalone oracle: `synced` (the price rescaled from 8 to 7 decimals), `skipped` `stale_ts`, a +15 % `deviate` kept off-chain by default, then with `ORACLE_KEEPER_RECORD_REJECTIONS=1` submitted once and not again (all answered 200), `bad_price` never submitted, `skipped` `no_data`, `skipped` `no_feed` on both of the local markets' oracles in one run, the indexed `ref_set` and `ref_rej`, the alert check's `oracle_rejection` and `feed_broken`, then two more oracles synced in one run with consecutive sequence numbers, `skipped` `throttle` (`FEED_MIN_INTERVAL=300`), and `rejected` `feed_err` on an uninitialized feed (`FEED_INITIALIZED=0`), which opens `feed_broken` for that oracle alone (the alert check judges each market's oracle). It needs `principal-pg` migrated, deletes its rows afterwards and puts the oracle index cursor back. |
 | `drill.test.ts` | `drill.sh` on the local market: it exits 0, its key is gone, RiskControl is not paused and the oracle is fresh; the index then holds, for the drill's own transactions, one `recovery`, one `ref_rej` `deviate`, the tick's `ref_set` and two RiskControl `paused` rows. A second run stopped (SIGTERM) while paused is unpaused by its trap. Its rows stay in `principal-pg`. |
 | `lifecycle.test.ts` | The full lifecycle proof of plan 0001. Skipped unless `LIFECYCLE_REDEPLOY=1`. |
 | `wizard.test.ts` | The market-creation wizard's seven steps signed on the local network, then a fresh account trading the new market. Skipped unless `WIZARD_LIVE=1`. |

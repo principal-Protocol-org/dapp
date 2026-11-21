@@ -1,10 +1,10 @@
 // @vitest-environment node
-import { Address, nativeToScVal, xdr } from "@stellar/stellar-sdk"
+import { Address, StrKey, nativeToScVal, xdr } from "@stellar/stellar-sdk"
 import { describe, expect, it } from "vitest"
 import { allLive, liveValue, readLive, unavailable } from "../../reader"
 import type { Live, ReadSource } from "../../types"
 import testnetJson from "@/config/manifests/testnet.json"
-import { parseManifest } from "../../manifest"
+import { parseManifest, verifyRpcUrlOf } from "../../manifest"
 import {
   ARG_NAMES,
   NULL_ACCOUNT,
@@ -13,6 +13,7 @@ import {
   decodedValue,
   evidenceRows,
   figureEvidence,
+  hostOf,
   nameArgs,
   verifyCommand,
   type VerifiableFigure,
@@ -78,17 +79,46 @@ describe("verifyCommand", () => {
   })
 
   it("Mainnet names its RPC and passphrase: the CLI's built-in mainnet has no RPC", () => {
-    expect(verifyCommand("mainnet", { ...source("max_stale_seconds"), rpcUrl: "https://rpc.example" })).toBe(
+    expect(verifyCommand("mainnet", source("max_stale_seconds"), "https://rpc.example")).toBe(
       `stellar contract invoke --rpc-url https://rpc.example --network-passphrase 'Public Global Stellar Network ; September 2015' --id ${ORACLE} --source-account ${NULL_ACCOUNT} --send=no -- max_stale_seconds`,
     )
+  })
+
+  it("Mainnet names the manifest's verifyRpcUrl, never the keyed rpcUrl a read used", () => {
+    const m = { rpcUrl: "https://rpc.example/stellar/SECRET-PATH", verifyRpcUrl: "https://open.example", rpcFallbackUrls: ["https://fb.example/KEY"] }
+    const read = { ...source("max_stale_seconds"), rpcUrl: m.rpcUrl }
+    const cmd = verifyCommand("mainnet", read, verifyRpcUrlOf(m))
+    expect(cmd).toContain("--rpc-url https://open.example ")
+    expect(cmd).not.toContain("SECRET-PATH")
+    expect(verifyCommand("mainnet", { ...read, rpcUrl: "https://fb.example/KEY", viaFallback: true }, verifyRpcUrlOf(m))).not.toContain("KEY")
+    // Without a verifyRpcUrl, rpcUrl is the default.
+    expect(verifyRpcUrlOf({ rpcUrl: "https://a.example" })).toBe("https://a.example")
+    // The evidence table's coverage is a host, not a URL.
+    expect(hostOf("https://rpc.example/stellar/SECRET-PATH")).toBe("rpc.example")
   })
 
   it("refuses a function whose argument names it does not know", () => {
     expect(() => verifyCommand("testnet", source("mystery", [{ type: "u32", value: 1 }]))).toThrow(/mystery/)
   })
 
+  it("a SEP-40 lastprice takes its asset enum in the CLI's JSON form, quoted for the shell", () => {
+    const FEED = StrKey.encodeContract(Buffer.alloc(32, 7))
+    const stellar = { type: "enum", variant: "Stellar", value: { type: "address", value: SAC } }
+    expect(verifyCommand("testnet", source("lastprice", [stellar], FEED))).toBe(
+      `stellar contract invoke --network testnet --id ${FEED} --source-account ${NULL_ACCOUNT} --send=no -- lastprice --asset '{"Stellar":"${SAC}"}'`,
+    )
+    const other = { type: "enum", variant: "Other", value: { type: "symbol", value: "USDY" } }
+    expect(verifyCommand("testnet", source("lastprice", [other], FEED)).endsWith(`-- lastprice --asset '{"Other":"USDY"}'`)).toBe(true)
+  })
+
+  it("an enum's unit variant is its name; a nested enum nests its JSON", () => {
+    expect(verifyCommand("testnet", source("lastprice", [{ type: "enum", variant: "Native" }])).endsWith("-- lastprice --asset Native")).toBe(true)
+    const nested = { type: "enum", variant: "Wrap", value: { type: "enum", variant: "Other", value: { type: "symbol", value: "USDY" } } }
+    expect(verifyCommand("testnet", source("lastprice", [nested])).endsWith(`-- lastprice --asset '{"Wrap":{"Other":"USDY"}}'`)).toBe(true)
+  })
+
   it("the map covers every view with arguments the dashboard reads", () => {
-    for (const fn of ["get_record", "balance", "pending_claim", "last_claimed_index", "is_consumer", "get_asset_limit", "get_asset_volume", "swap_fee_rate", "balance_of", "market"]) {
+    for (const fn of ["get_record", "balance", "pending_claim", "last_claimed_index", "is_consumer", "get_asset_limit", "get_asset_volume", "swap_fee_rate", "balance_of", "market", "lastprice"]) {
       expect(ARG_NAMES[fn], fn).toBeDefined()
     }
   })
@@ -127,7 +157,24 @@ describe("evidenceRows", () => {
     // Ledger is right-aligned.
     expect(sep).toBe("|---|---|---|---|---|---:|---|---|---|")
     // Raw value is the decoded return (u64 3600), as `stellar contract invoke` prints it, not the XDR.
-    expect(row).toBe(`| Max stale | ${ORACLE} | max_stale_seconds() | 3600 | 1 h | 5719947 | https://soroban-testnet.stellar.org | Live | |`)
+    expect(row).toBe(`| Max stale | ${ORACLE} | max_stale_seconds() | 3600 | 1 h | 5719947 | soroban-testnet.stellar.org | Live | |`)
+  })
+
+  it("an unread input adds its contract, its attempted call and why, after the reads the figure has", () => {
+    const OTHER = "CBTW7CU46PMCPKZQ3VX6OBELOEC7HHQXJSAX535VW3EK34MVS7UWPFR7"
+    const f = {
+      label: "Oracle freshness",
+      display: "Unavailable · 1 of 2 fresh",
+      live: live("is_available"),
+      unread: [{ name: "USTRY", error: "rpc down", source: { contractId: OTHER, fn: "is_available", args: [], rpcUrl: "https://soroban-testnet.stellar.org" } }],
+    }
+    const e = figureEvidence(f, { manifest: testnet })
+    expect(e.contract).toBe(`${ORACLE}, ${OTHER}`)
+    expect(e.call).toBe(`is_available(); CBTW7C….is_available() (not read)`)
+    expect(e.status).toBe("Live · Not read: USTRY: rpc down")
+    // Without a call recorded, it is still named.
+    expect(figureEvidence({ ...f, unread: [{ name: "USTRY", error: "rpc down" }] }).status).toBe("Live · Not read: USTRY: rpc down")
+    expect(figureEvidence({ ...f, unread: [] })).toEqual(figureEvidence({ label: f.label, display: f.display, live: f.live }))
   })
 
   it("keeps the base64 XDR for the drawer, out of the table", () => {

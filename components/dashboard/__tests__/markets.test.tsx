@@ -271,6 +271,16 @@ describe("/dashboard/markets/[marketId]", () => {
     })
   })
 
+  it("notes what the asset is: the Testnet test asset, or a Mainnet mock asset and the asset it follows (plan 0009)", async () => {
+    const { unmount } = wrap(<MarketPanel marketId={market.marketId} />)
+    expect(await screen.findByText("Test token issued by Principal for Stellar Testnet, not Ondo's USDY")).toBeTruthy()
+    unmount()
+    mocks.manifest = { ...base, network: "mainnet", testAsset: undefined, markets: [{ ...market, underlying: { ...market.underlying, tracks: "GILTS" } }] }
+    wrap(<MarketPanel marketId={market.marketId} />)
+    expect(await screen.findByText("Mock asset issued by Principal for testing. It follows the price of GILTS and is not GILTS.")).toBeTruthy()
+    expect(screen.queryByText(/Test token issued by Principal/)).toBeNull()
+  })
+
   it("fee recipients are shortened addresses linking to stellar.expert (an account, or a contract for C…)", async () => {
     mocks.table = { ...mocks.table, [`${c.config}.protocol_admin`]: c.router }
     wrap(<MarketPanel marketId={market.marketId} />)

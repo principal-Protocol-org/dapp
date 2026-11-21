@@ -5,17 +5,19 @@ import { CopyIcon, ExternalLink } from "lucide-react"
 import { useManifest } from "@/components/app/manifest-provider"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog"
 import { useNow } from "@/hooks/use-dashboard"
-import { contractLabel, figureEvidence, verifyCommand, type VerifiableFigure } from "@/lib/protocol/dashboard/verify"
+import { contractLabel, figureEvidence, hostOf, verifyCommand, type UnreadInput, type VerifiableFigure } from "@/lib/protocol/dashboard/verify"
 import { explorerUrl } from "@/lib/protocol/explorer"
+import { verifyRpcUrlOf } from "@/lib/protocol/manifest"
 import type { Live, Manifest, Network, ReadSource } from "@/lib/protocol/types"
 import { copyText } from "./copy-evidence"
 
 type AnySource = ReadSource | Omit<ReadSource, "rawXdr" | "ledger">
 
-/** The reads to repeat: every input of a live figure, or the call a failed read attempted. */
-function readsFor(live: Live<unknown>): AnySource[] {
-  if (live.status === "live") return live.sources ?? (live.source ? [live.source] : [])
-  return live.source ? [live.source] : []
+/** The reads to repeat: every input of a live figure, or the call a failed read attempted, then each unread input's attempted call. */
+function readsFor(live: Live<unknown>, unread: UnreadInput[] = []): AnySource[] {
+  const attempted = unread.flatMap((u) => (u.source ? [u.source] : []))
+  if (live.status === "live") return [...(live.sources ?? (live.source ? [live.source] : [])), ...attempted]
+  return [...(live.source ? [live.source] : []), ...attempted]
 }
 
 function Item({ label, children }: { label: string; children: ReactNode }) {
@@ -44,7 +46,7 @@ function Command({ manifest, source, copyLabel }: { manifest: Manifest; source: 
   const title = <p className="font-mono text-xs/5 font-semibold text-ink">{`${contractLabel(manifest, source.contractId)} · ${source.fn}`}</p>
   let command: string
   try {
-    command = verifyCommand(manifest.network, source)
+    command = verifyCommand(manifest.network, source, verifyRpcUrlOf(manifest))
   } catch (error) {
     return (
       <div className="grid gap-1">
@@ -82,12 +84,13 @@ function DrawerBody({ figure, scale }: { figure: VerifiableFigure; scale?: strin
   const m = useManifest()
   const now = useNow()
   const e = figureEvidence(figure, { manifest: m, now: now ?? undefined })
-  const reads = readsFor(figure.live)
+  const unread = figure.unread ?? []
+  const reads = readsFor(figure.live, unread)
   const contracts = [...new Set(reads.map((r) => r.contractId))]
   const fallbacks = m.rpcFallbackUrls ?? []
   const fnCounts = new Map<string, number>()
   for (const r of reads) fnCounts.set(r.fn, (fnCounts.get(r.fn) ?? 0) + 1)
-  const warn = figure.live.status === "unavailable" || e.status.startsWith("Stale")
+  const warn = figure.live.status === "unavailable" || e.status.startsWith("Stale") || unread.length > 0
   return (
     <>
       <DialogHeader className="pr-8">
@@ -108,11 +111,12 @@ function DrawerBody({ figure, scale }: { figure: VerifiableFigure; scale?: strin
         <Item label="Ledger">{e.ledger}</Item>
         <Item label="RPC endpoint">
           <span className="block">{e.coverage}</span>
-          <span className="block text-ink-muted">{fallbacks.length > 0 ? `Fallback: ${fallbacks.join(", ")}` : "No fallback RPC configured"}</span>
+          <span className="block text-ink-muted">{fallbacks.length > 0 ? `Fallback: ${fallbacks.map(hostOf).join(", ")}` : "No fallback RPC configured"}</span>
         </Item>
         <Item label="Status">
           <span className={warn ? "text-negative" : undefined}>{e.status}</span>
         </Item>
+
       </dl>
       <section aria-labelledby="verify-commands" className="grid gap-2">
         <h3 id="verify-commands" className="label">

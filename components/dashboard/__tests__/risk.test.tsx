@@ -65,7 +65,7 @@ function riskView(over: Record<string, unknown> = {}) {
     effectiveWrapAndMint: { status: "live", value: 40_000_000_000_000n, ledger: 5_720_087, sources: [src("get_cb_limit"), src("get_cb_volume"), src("is_consumer")] },
     doubleReporting: [MARKET],
     consumers: {},
-    window: { start: live(5_707_351, "get_window_start"), length: live(17_280, "get_window_ledgers"), lapsed: live(false) },
+    window: { kind: "fixed", start: live(5_707_351, "get_window_start"), length: live(17_280, "get_window_ledgers"), lapsed: live(false) },
     assetLimits: [
       {
         asset: "CSAC",
@@ -180,6 +180,18 @@ function expectValidLists(name: string) {
 }
 
 describe("the risk page (/dashboard/risk)", () => {
+  it.each([
+    ["testnet", "15 s"],
+    ["mainnet", "1 min"],
+  ] as const)("%s: the live panels say they refresh every %s", async (network, every) => {
+    mocks.manifest = { ...baseManifest(), network }
+    render(wrap(<RiskPanel />))
+    await region("Circuit breaker").findByText("10,000,000.00 USDY")
+    expect(screen.getByText(/protocol-wide · refreshes every/).textContent).toMatch(new RegExp(`, protocol-wide · refreshes every ${every}$`))
+    expect(screen.getByText(/manager and pool · refreshes every/).textContent).toBe(`RiskControl, and each market's SY wrapper, manager and pool · refreshes every ${every}`)
+    expect(screen.getAllByTestId("as-of")[0].textContent).toContain(`Refreshes every ${every}`)
+  })
+
   it("shows the limit, the volume, the raw remaining capacity and the wrap-and-mint capacity with its explanation (D-10)", async () => {
     const user = userEvent.setup()
     render(wrap(<RiskPanel />))
@@ -230,9 +242,48 @@ describe("the risk page (/dashboard/risk)", () => {
   })
 
   it("a lapsed window says the next counted deposit opens a new one", async () => {
-    mocks.fetchRiskView.mockResolvedValue(riskView({ window: { start: live(5_707_351), length: live(17_280), lapsed: live(true) } }))
+    mocks.fetchRiskView.mockResolvedValue(riskView({ window: { kind: "fixed", start: live(5_707_351), length: live(17_280), lapsed: live(true) } }))
     render(wrap(<RiskPanel />))
     expect(await region("Window").findByText("Lapsed: the next counted deposit opens a new window")).toBeTruthy()
+  })
+
+  it("a fixed window (version 1) keeps its wording: the volume in this window, and the window panel says when it lapses", async () => {
+    render(wrap(<RiskPanel />))
+    const breaker = region("Circuit breaker")
+    expect(await breaker.findByText("2,000,000.00 USDY")).toBeTruthy()
+    expect(breaker.getByText("Volume in this window")).toBeTruthy()
+    expect(breaker.queryByText("Volume counted now")).toBeNull()
+    expect(
+      region("Window").getByText(
+        "The stored start does not reset by itself: once ledger − start reaches the length, the next counted deposit opens a new window, and the contract reports a volume of 0 until then.",
+      ),
+    ).toBeTruthy()
+  })
+
+  it("a sliding window (version 2): its length and how the volume decays; no open-through or lapsed text; the volume counted now", async () => {
+    mocks.manifest = { ...baseManifest(), protocolAbi: 2 }
+    mocks.fetchRiskView.mockResolvedValue(
+      riskView({ window: { kind: "sliding", start: live(5_707_351, "get_window_start"), length: live(17_280, "get_window_ledgers") } }),
+    )
+    const user = userEvent.setup()
+    render(wrap(<RiskPanel />))
+    const win = region("Window")
+    expect(await win.findByText("Sliding window of 17,280 ledgers: used volume decays as older deposits leave it")).toBeTruthy()
+    expect(win.getByText("Ledger 5707351")).toBeTruthy()
+    expect(win.queryByText(/Open through ledger/)).toBeNull()
+    expect(win.queryByText(/Lapsed/)).toBeNull()
+    expect(win.queryByText(/reports a volume of 0/)).toBeNull()
+    expect(win.queryByText(/opens a new window/)).toBeNull()
+    expect(win.getByText("The counted volume decays as older deposits leave the window, so room frees up gradually. The window never lapses or resets.")).toBeTruthy()
+    const breaker = region("Circuit breaker")
+    expect(breaker.getByText("Volume counted now")).toBeTruthy()
+    expect(breaker.queryByText("Volume in this window")).toBeNull()
+    expect(breaker.getByRole("button", { name: "How to verify Volume counted now" })).toBeTruthy()
+    // The state is the window length read, with its drawer.
+    await user.click(win.getByRole("button", { name: "How to verify Window state" }))
+    const drawer = await screen.findByRole("dialog")
+    const command = within(drawer).queryAllByText((_, el) => el?.tagName === "CODE" && (el.textContent ?? "").endsWith(" --send=no -- get_window_ledgers"))
+    expect(command.length).toBeGreaterThan(0)
   })
 
   it("without a ledger clock nothing waits forever: the breaker figures and the per-asset limits are Unavailable, with the reason", async () => {

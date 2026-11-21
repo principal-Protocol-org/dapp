@@ -1,8 +1,8 @@
 /**
  * The keeper telemetry's SQL on the local Postgres (spec 0004 D-19): `recordTick` writes every kind
  * of run into `oracle_ticks` (the table's checks accept them), `listTicks` reads them back newest
- * first with exact values, and `keeperHealth` counts only the last 24 h and only successes for
- * health. The fakes in `lib/server/__tests__/oracle-ticks.test.ts` pin the queries' shape; this pins
+ * first with exact values, and `keeperHealth` counts only the last 24 h and measures health from the
+ * last run that did not fail (spec 0005 M-15), against `keeperIntervalSeconds(process.env)`. The fakes in `lib/server/__tests__/oracle-ticks.test.ts` pin the queries' shape; this pins
  * what Postgres does with them.
  *
  * Needs `principal-pg` migrated (`pnpm db:migrate`) and `DATABASE_URL` on this machine (a shared
@@ -15,7 +15,7 @@ import { afterAll, describe, expect, it, vi } from "vitest"
 vi.mock("server-only", () => ({}))
 
 import { sql } from "@/lib/server/db"
-import { keeperHealth, listTicks, ORACLE_TICK_INTERVAL_SECONDS, recordTick } from "@/lib/server/oracle-ticks"
+import { keeperHealth, keeperIntervalSeconds, listTicks, recordTick } from "@/lib/server/oracle-ticks"
 import { loadDatabaseUrl } from "./local-stack"
 
 async function reason(): Promise<string | null> {
@@ -50,11 +50,13 @@ describe.skipIf(skip !== null)("oracle_ticks on the local Postgres", () => {
   afterAll(async () => {
     await sql`delete from oracle_ticks where oracle = ${ORACLE}`
   })
+  const health = () => keeperHealth(sql, "local", keeperIntervalSeconds(process.env), { oracle: ORACLE })
 
   it("no run recorded for this oracle: no last tick, no success, zero counts", async () => {
-    expect(await keeperHealth(sql, "local", ORACLE_TICK_INTERVAL_SECONDS, { oracle: ORACLE })).toEqual({
+    expect(await health()).toEqual({
       healthy: false,
       lastSuccessAt: null,
+      lastOkAt: null,
       lastTickAt: null,
       rejected24h: 0,
       failures24h: 0,
@@ -69,22 +71,31 @@ describe.skipIf(skip !== null)("oracle_ticks on the local Postgres", () => {
       values (now() - interval '25 hours', 'local', ${ORACLE}, 'push', 'rejected', 1, 'deviate', ${HASH}, ${SIGNER})`
     await recordTick(sql, "local", ORACLE, { status: "failed", mode: "push", signer: SIGNER, name: "TypeError" })
     await recordTick(sql, "local", ORACLE, { status: "not_configured", mode: "push", signer: null, message: "ORACLE_ADMIN_SECRET is not set." })
-    await recordTick(sql, "local", ORACLE, { status: "rejected", mode: "push", signer: SIGNER, value: "12000000", timestamp: 1, hash: HASH, reason: "deviate" })
 
-    // Errors and rejections only: not healthy, no success yet.
-    const before = await keeperHealth(sql, "local", ORACLE_TICK_INTERVAL_SECONDS, { oracle: ORACLE })
-    expect(before).toMatchObject({ healthy: false, lastSuccessAt: null, rejected24h: 1, failures24h: 2 })
-    expect(before.lastTickAt).not.toBeNull()
+    // Only errors since the run 25 h ago: not healthy (M-15), no success; the last ok run is that old one.
+    const errorsOnly = await health()
+    expect(errorsOnly).toMatchObject({ healthy: false, lastSuccessAt: null, rejected24h: 0, failures24h: 2 })
+    expect(Date.parse(errorsOnly.lastOkAt ?? "")).toBeLessThan(Date.now() - 24 * 3_600_000)
+    expect(Date.parse(errorsOnly.lastTickAt ?? "")).toBeGreaterThan(Date.now() - 3_600_000)
+
+    await recordTick(sql, "local", ORACLE, { status: "rejected", mode: "push", signer: SIGNER, value: "12000000", timestamp: 1, hash: HASH, reason: "deviate" })
+    // A rejected run finished: the keeper works, so healthy (M-15), still no success.
+    const before = await health()
+    expect(before).toMatchObject({ healthy: true, lastSuccessAt: null, rejected24h: 1, failures24h: 2 })
+    expect(before.lastOkAt).toBe(before.lastTickAt)
 
     await recordTick(sql, "local", ORACLE, { status: "unchanged", mode: "push", signer: SIGNER, value: "10000919", timestamp: 1 })
-    // A skipped run is no success.
-    expect((await keeperHealth(sql, "local", ORACLE_TICK_INTERVAL_SECONDS, { oracle: ORACLE })).lastSuccessAt).toBeNull()
+    // A skipped run is no success, and an ok run.
+    const skipped = await health()
+    expect(skipped).toMatchObject({ healthy: true, lastSuccessAt: null })
+    expect(skipped.lastOkAt).toBe(skipped.lastTickAt)
 
     // 34 digits: numeric keeps an i128-sized value exactly.
     await recordTick(sql, "local", ORACLE, { status: "updated", mode: "push", signer: SIGNER, value: "1234567890123456789012345678901234", timestamp: 1, hash: HASH })
-    const after = await keeperHealth(sql, "local", ORACLE_TICK_INTERVAL_SECONDS, { oracle: ORACLE })
+    const after = await health()
     expect(after).toMatchObject({ healthy: true, rejected24h: 1, failures24h: 2 })
     expect(after.lastSuccessAt).toBe(after.lastTickAt)
+    expect(after.lastOkAt).toBe(after.lastTickAt)
 
     const ticks = await listTicks(sql, { network: "local", oracle: ORACLE, limit: 10 })
     expect(ticks.map((t) => t.decision)).toEqual(["pushed", "skipped", "rejected", "error", "error", "rejected"])

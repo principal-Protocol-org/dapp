@@ -5,10 +5,11 @@ import Link from "next/link"
 import { ChevronDownIcon } from "lucide-react"
 import { useLedgerClock } from "@/hooks/use-ledger-clock"
 import { useMarketHistory, useSparks, type Spark } from "@/hooks/use-market-history"
-import { useMarketStates } from "@/hooks/use-market-state"
+import { MARKET_LIST_REFETCH_MS, useMarketStates } from "@/hooks/use-market-state"
 import { useManifest } from "@/components/app/manifest-provider"
 import { aprToApy } from "@/lib/protocol/math"
 import { formatAmount, formatPercent } from "@/lib/protocol/format"
+import { assetNote } from "@/lib/protocol/onboarding"
 import { leverage, tvlOf } from "@/lib/protocol/rates"
 import type { MarketState } from "@/lib/protocol/market-state"
 import type { Manifest, Market } from "@/lib/protocol/types"
@@ -24,7 +25,6 @@ import { StatusBadge, type MarketStatus } from "@/components/app/markets/status-
 export type { MarketStatus }
 
 const SPARK_WINDOW_SECONDS = 30 * 86_400
-const TEST_NOTE = "Test token issued by Principal for Stellar Testnet, not Ondo's USDY"
 /** One grid for the asset row and the maturity rows, so their columns line up from `md` up. */
 const COLUMNS =
   "md:grid md:grid-cols-[minmax(0,2fr)_minmax(0,1.3fr)_minmax(0,1.2fr)_minmax(0,1.4fr)_minmax(0,1fr)_minmax(0,1fr)_2.75rem] md:items-center md:gap-4"
@@ -332,7 +332,7 @@ function groupMarkets(manifest: Manifest): Group[] {
     let g = groups.get(key)
     if (!g) {
       const test = manifest.testAsset && (manifest.testAsset.sac === u.sac || (manifest.testAsset.code === u.code && manifest.testAsset.issuer === u.issuer))
-      g = { key, name: test ? manifest.testAsset!.displayName : u.code, note: test ? TEST_NOTE : null, decimals: u.decimals, code: u.code, markets: [] }
+      g = { key, name: test ? manifest.testAsset!.displayName : u.code, note: assetNote(manifest, market), decimals: u.decimals, code: u.code, markets: [] }
       groups.set(key, g)
     }
     g.markets.push(market)
@@ -462,7 +462,7 @@ export function MarketGroups() {
   const manifest = useManifest()
   const { ledgerTime, isError: clockFailed } = useLedgerClock()
   const clockLoading = ledgerTime === null && !clockFailed
-  const slots = useMarketStates(manifest.markets.map((m) => m.marketId))
+  const slots = useMarketStates(manifest.markets.map((m) => m.marketId), MARKET_LIST_REFETCH_MS)
   const sparks = useSparks(manifest.markets.map((m) => m.contracts.pool))
   const groups = groupMarkets(manifest)
   const slotOf = new Map(manifest.markets.map((m, i) => [m.marketId, slots[i]]))

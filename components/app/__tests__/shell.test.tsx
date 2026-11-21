@@ -20,7 +20,7 @@ const mocks = vi.hoisted(() => ({
   getLedgerClock: vi.fn(),
 }))
 
-vi.mock("@/lib/protocol/manifest-source", () => ({ activeManifest: () => mocks.manifest, activeNetwork: () => mocks.manifest.network })) // TestnetBanner (a server component)
+vi.mock("@/lib/protocol/manifest-source", () => ({ activeManifest: () => mocks.manifest, activeNetwork: () => mocks.manifest.network })) // NetworkBanner (a server component)
 vi.mock("@/components/app/manifest-provider", () => ({ useManifest: () => mocks.manifest }))
 vi.mock("@/lib/protocol/wallet", () => ({ freighterAdapter: mocks.adapter }))
 vi.mock("@/lib/protocol/stellar", () => ({
@@ -31,7 +31,7 @@ vi.mock("next/navigation", () => ({ usePathname: () => "/app" }))
 
 import { AppHeader } from "../shell/app-header"
 import { SettingsPopover } from "../shell/settings-popover"
-import { TestnetBanner } from "../shell/testnet-banner"
+import { NetworkBanner } from "../shell/network-banner"
 import { WalletButton } from "../shell/wallet-button"
 import { Providers } from "../providers"
 import { useLedgerClock } from "@/hooks/use-ledger-clock"
@@ -73,21 +73,22 @@ afterEach(() => {
   watcher = undefined
 })
 
-describe("testnet banner", () => {
-  it("shows the testnet banner when network is testnet", () => {
-    render(<TestnetBanner />)
-    expect(screen.getByRole("status").textContent).toContain("Stellar Testnet")
-    expect(screen.getByRole("status").textContent).toContain("no real value")
+describe("network banner", () => {
+  it("on Testnet reads as before, word for word", () => {
+    render(<NetworkBanner />)
+    expect(screen.getByRole("status").textContent).toBe("Stellar Testnet — test assets only, no real value.")
   })
 
-  it("also shows for a local network and hides for mainnet", () => {
+  it("on a local network reads as before", () => {
     mocks.manifest.network = "local"
-    const { unmount } = render(<TestnetBanner />)
-    expect(screen.getByRole("status").textContent).toContain("test assets only")
-    unmount()
+    render(<NetworkBanner />)
+    expect(screen.getByRole("status").textContent).toBe("Local network — test assets only, no real value.")
+  })
+
+  it("on Mainnet says the markets use mock assets issued by Principal (plan 0009)", () => {
     mocks.manifest.network = "mainnet"
-    render(<TestnetBanner />)
-    expect(screen.queryByRole("status")).toBeNull()
+    render(<NetworkBanner />)
+    expect(screen.getByRole("status").textContent).toBe("Stellar Mainnet · These markets use mock assets issued by Principal for testing.")
   })
 })
 

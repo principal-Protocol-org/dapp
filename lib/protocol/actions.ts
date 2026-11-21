@@ -1,4 +1,5 @@
-import { getMarket } from "./manifest"
+import { getMarket, protocolAbi } from "./manifest"
+import { previewDeposit, previewMint } from "./previews"
 import type { ContractInvocation, ScArg } from "./stellar"
 import type { Manifest } from "./types"
 
@@ -50,7 +51,9 @@ export type ActionInput = {
   amount: bigint
   /**
    * The second amount a call takes: SY in (`add_liquidity`, `add_liquidity_underlying`, the flash
-   * `sy_in`), SY to mint (Keep YT), or the YT leg of a redemption.
+   * `sy_in`), SY to mint (Keep YT), or the YT leg of a redemption. On a version-2 Router
+   * (`protocolAbi` 2) also the literal `mint` and `buy_pt_underlying` sign as `sy_in`, and `buy_yt`
+   * as `pt_in` (`abiSecondaryAmount`): never something the user gives or gets.
    */
   secondaryAmount?: bigint
   /** One-step Keep YT only (R5-7): the PT and SY the pool is offered, signed as literals. */
@@ -115,6 +118,45 @@ function floor(value: bigint | undefined): ScArg {
   return i128(value)
 }
 
+/**
+ * What a call refuses to be built from on a version-2 Router: one of the three actions below without
+ * its literal, i.e. a plan stored before the upgrade (plan 0009, Review Focus 1). Never sent with the
+ * old argument count.
+ */
+export const STALE_PLAN = "This trade was prepared for an older version of the contracts. Start it again."
+
+/**
+ * The actions whose Router call gained a literal in principal 3af9388 (audit H-1): the amount the
+ * second leg spends is the caller's, not the first leg's return value.
+ */
+const ABI2_LITERAL: ReadonlySet<ActionId> = new Set<ActionId>(["mint", "buy_pt_underlying", "buy_yt"])
+
+/** Whether `action`'s call on this deployment signs `abiSecondaryAmount`'s literal: version 2 only. */
+export function signsAbiSecondary(m: Pick<Manifest, "protocolAbi">, action: ActionId): boolean {
+  return protocolAbi(m) === 2 && ABI2_LITERAL.has(action)
+}
+
+/**
+ * The literal a version-2 Router call signs in `secondaryAmount`, from the reads the preview uses
+ * (plan 0009, M-5); `undefined` on version 1 and for every other action.
+ * - `mint` (`wrap_and_mint`) and `buy_pt_underlying` (`swap_underlying_for_pt`): `sy_in`, the SY the
+ *   deposit of `amount` gives, `amount * RATE_SCALE / exchange_rate()` floored (`previewDeposit`), as
+ *   the Router's own comment specifies. For today's wrappers the rate is 1, so it equals `amount`.
+ * - `buy_yt` (`swap_sy_for_yt`, `amount` is `sy_in`): `pt_in`, the PT minting `sy_in` yields after the
+ *   tokenization fee (`previewMint`, rounded as `PrincipalManager.mint` rounds). The oracle value never
+ *   decreases, so it never exceeds what the mint gives; if the oracle moves up before inclusion, the
+ *   few PT more stay in the wallet (the Router sweeps nothing).
+ */
+export function abiSecondaryAmount(
+  m: Manifest,
+  action: ActionId,
+  amount: bigint,
+  r: { exchangeRate: bigint; oracleRate: bigint; tokenizationFeeBps: bigint },
+): bigint | undefined {
+  if (!signsAbiSecondary(m, action)) return undefined
+  return action === "buy_yt" ? previewMint(amount, r.oracleRate, r.tokenizationFeeBps).pt : previewDeposit(amount, r.exchangeRate)
+}
+
 export function invocationFor(m: Manifest, input: ActionInput): ContractInvocation {
   const market = getMarket(m, input.marketId)
   if (!market) throw new Error(`Unknown market "${input.marketId}".`)
@@ -129,6 +171,15 @@ export function invocationFor(m: Manifest, input: ActionInput): ContractInvocati
     functionName,
     args,
   })
+  /**
+   * Version 2's literal (`sy_in`, Buy YT's `pt_in`), between the amount and the floors; nothing on
+   * version 1, where `secondaryAmount` is not signed for these actions.
+   */
+  const literal = (): ScArg[] => {
+    if (!signsAbiSecondary(m, input.action)) return []
+    if (input.secondaryAmount === undefined) throw new Error(STALE_PLAN)
+    return [i128(input.secondaryAmount)]
+  }
 
   switch (input.action) {
     case "deposit":
@@ -136,15 +187,17 @@ export function invocationFor(m: Manifest, input: ActionInput): ContractInvocati
     case "withdraw":
       return viaRouter("unwrap", [from, pool, amount, floor(g.minOut), deadline])
     case "mint":
-      return viaRouter("wrap_and_mint", [from, pool, amount, floor(g.minOut), deadline])
+      // wrap_and_mint(from, pool, amount, [sy_in,] min_pt_out, deadline)
+      return viaRouter("wrap_and_mint", [from, pool, amount, ...literal(), floor(g.minOut), deadline])
     case "buy_pt":
       return viaRouter("swap_sy_for_pt", [from, pool, amount, floor(g.minOut), deadline])
     case "sell_pt":
       return viaRouter("swap_pt_for_sy", [from, pool, amount, floor(g.minOut), deadline])
     case "buy_yt":
+      // swap_sy_for_yt(from, pool, sy_in, [pt_in,] min_yt_out, max_net_cost, deadline).
       // max_net_cost bounds the PT-for-SY leg funding the YT purchase; Router derives
       // min_sy_back = sy_in - max_net_cost, so it must be a real quote-derived bound.
-      return viaRouter("swap_sy_for_yt", [from, pool, amount, floor(g.minOut), floor(g.maxNetCost), deadline])
+      return viaRouter("swap_sy_for_yt", [from, pool, amount, ...literal(), floor(g.minOut), floor(g.maxNetCost), deadline])
     case "sell_yt":
       return viaRouter("swap_yt_for_sy", [from, pool, amount, floor(g.minOut), deadline])
     case "add_liquidity": {
@@ -163,8 +216,8 @@ export function invocationFor(m: Manifest, input: ActionInput): ContractInvocati
       // redeem_at_maturity(from, pool, pt_amount, yt_amount): settlement rate is frozen, no floor.
       return viaRouter("redeem_at_maturity", [from, pool, amount, i128(input.secondaryAmount ?? 0n)])
     case "buy_pt_underlying":
-      // swap_underlying_for_pt(from, pool, underlying_amount, min_pt_out, deadline)
-      return viaRouter("swap_underlying_for_pt", [from, pool, amount, floor(g.minOut), deadline])
+      // swap_underlying_for_pt(from, pool, underlying_amount, [sy_in,] min_pt_out, deadline)
+      return viaRouter("swap_underlying_for_pt", [from, pool, amount, ...literal(), floor(g.minOut), deadline])
     case "sell_pt_underlying":
       // swap_pt_for_underlying(from, pool, pt_in, min_underlying_out, deadline)
       return viaRouter("swap_pt_for_underlying", [from, pool, amount, floor(g.minOut), deadline])

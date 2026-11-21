@@ -1,9 +1,12 @@
+import { readFileSync } from "node:fs"
+import { join } from "node:path"
 import { Keypair } from "@stellar/stellar-sdk"
 import { describe, expect, it } from "vitest"
 import { parseRecoveryRecord } from "./admin"
 import { assertRunKey, ephemeralDeployEnv, isDeployStep, keyNamesFor, runIdFrom } from "./ephemeral"
 
-const COMMIT = "665bb6760372d30307a1a035da24e51776f727e8"
+// Mainnet's commit (`config/manifests/mainnet.json`), the one Suite B builds.
+const COMMIT = "3af938853e5818aa8d56bd35670b9a19cfa55a78"
 
 describe("run-unique key names (S1)", () => {
   it("takes the CI run and attempt when there is one, then the process id", () => {
@@ -89,6 +92,37 @@ describe("the ephemeral deploy's environment", () => {
     expect(isDeployStep("==> 9. RecoveryEscrow (+ set_recovery_escrow on SY, PT, YT, pool)")).toBe(true)
     expect(isDeployStep("error: the testnet RPC is not answering")).toBe(true)
     expect(isDeployStep("ℹ️ Simulating install transaction…")).toBe(false)
+  })
+})
+
+/**
+ * Plan 0009, Task 4: Suite B's throwaway Testnet market runs Mainnet's contracts. The suite and the
+ * workflow that builds them for it read the commit from `config/manifests/mainnet.json`; Testnet's
+ * manifest gives the suite only its RPC.
+ */
+describe("Suite B builds the Mainnet deployment's commit", () => {
+  const read = (...path: string[]) => readFileSync(join(process.cwd(), ...path), "utf8")
+  const suite = read("tests", "e2e-testnet", "lifecycle.test.ts")
+  const workflow = read(".github", "workflows", "e2e-testnet.yml")
+  const lifecycleJob = workflow.slice(workflow.indexOf("\n  lifecycle:"))
+
+  it("the suite takes sourceCommit from mainnet.json, not from the Testnet manifest", () => {
+    expect(suite).toMatch(/readFileSync\(join\(DAPP, "config", "manifests", "mainnet\.json"\), "utf8"\)/)
+    expect(suite).not.toContain("official.manifest.sourceCommit")
+    // Testnet still answers for the run: its reachability is still checked.
+    expect(suite).toContain('liveContext({ network: "testnet" })')
+  })
+
+  it("the workflow's source-commit step and wasm comparison read mainnet.json", () => {
+    expect(lifecycleJob).toContain("jq -er '.sourceCommit' config/manifests/mainnet.json")
+    expect(lifecycleJob).toContain("jq -r '.wasmHashes[]' config/manifests/mainnet.json")
+    expect(lifecycleJob).not.toContain("config/manifests/testnet.json")
+  })
+
+  it("the comparison stays informational and says why a difference is expected", () => {
+    expect(lifecycleJob).toMatch(/- name: Compare the wasm with the Mainnet deployment's \(informational\)/)
+    expect(lifecycleJob).toContain("rustc 1.94.1")
+    expect(lifecycleJob).toContain("RUST_VERSION: 1.95.0")
   })
 })
 

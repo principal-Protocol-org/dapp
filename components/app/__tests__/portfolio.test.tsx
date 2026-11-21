@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react"
+import { cleanup, render, screen, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import type { AccountState } from "@/lib/protocol/account-state"
@@ -10,6 +10,8 @@ import { indexFor } from "@/lib/protocol/yield"
 
 const MARKET = { marketId: "m1", displayName: "STA · test", underlying: { code: "STA", decimals: 7 } }
 const mocks = vi.hoisted(() => ({
+  /** Mainnet's shape (plan 0009): the underlying names the asset it tracks. */
+  tracks: undefined as string | undefined,
   ms: undefined as unknown,
   msStale: false,
   account: undefined as AccountState | undefined,
@@ -19,9 +21,17 @@ const mocks = vi.hoisted(() => ({
 }))
 
 vi.mock("@/components/app/manifest-provider", () => {
-  // One object, as the provider gives: hooks depend on its identity.
-  let manifest: unknown
-  return { useManifest: () => (manifest ??= { network: "testnet", markets: [MARKET] }) }
+  // One object per shape, as the provider gives: hooks depend on its identity.
+  const cache = new Map<string, unknown>()
+  const make = (tracks: string | undefined) =>
+    tracks ? { network: "mainnet", markets: [{ ...MARKET, underlying: { ...MARKET.underlying, tracks } }] } : { network: "testnet", markets: [MARKET] }
+  return {
+    useManifest: () => {
+      const key = mocks.tracks ?? ""
+      if (!cache.has(key)) cache.set(key, make(mocks.tracks))
+      return cache.get(key)
+    },
+  }
 })
 vi.mock("@/hooks/use-market-state", () => ({ useMarketState: () => ({ data: mocks.ms, isPending: false, stale: mocks.msStale }) }))
 vi.mock("@/hooks/use-account-state", () => ({ useAccountState: () => ({ data: mocks.account, isPending: false, stale: mocks.accountStale }) }))
@@ -55,6 +65,7 @@ const E7 = 10_000_000n
 vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} })
 
 beforeEach(() => {
+  mocks.tracks = undefined
   mocks.ms = marketState()
   mocks.msStale = false
   mocks.account = accountState({ pt: live(100n * E7), yt: live(50n * E7), ytLastClaimedIndex: live(indexFor(10_000_000n)) })
@@ -138,6 +149,18 @@ describe("portfolio", () => {
     // 100 PT / oracle 1.05 at exchange rate 1.0 = 95.2380952 STA, indicative before settlement
     expect(within(card).getByText("95.2380952 STA")).toBeTruthy()
     expect(within(card).getByText(/indicative until settlement/)).toBeTruthy()
+  })
+
+  it("labels the face value in USD on Testnet, and at the oracle's price on a market whose asset tracks a real one", () => {
+    wrap()
+    const face = () => within(screen.getByRole("region", { name: "STA · test" })).getByText(/^Face value at maturity/).textContent
+    expect(face()).toBe("Face value at maturity (USD)")
+    cleanup()
+    mocks.tracks = "USDY"
+    wrap()
+    expect(face()).toBe("Face value at maturity (USD, at the oracle's price)")
+    // The figure itself is the same: 100 PT.
+    expect(within(screen.getByRole("region", { name: "STA · test" })).getByText("$100.00")).toBeTruthy()
   })
 
   it("shows a negative APY above par truthfully", () => {

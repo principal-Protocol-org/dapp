@@ -15,12 +15,9 @@ const mocks = vi.hoisted(() => ({
   fetchPausers: vi.fn(),
   fetchEscrowRecords: vi.fn(),
   fetchAssetCompliance: vi.fn(),
-}))
-
-vi.mock("@/components/app/manifest-provider", () => {
-  // One object, as the provider gives: hooks depend on its identity.
-  const manifest = {
-    network: "testnet",
+  // One object, as the provider gives: hooks depend on its identity. Its network is set per test.
+  manifest: {
+    network: "testnet" as "local" | "testnet" | "mainnet",
     rpcUrl: "https://rpc.test",
     horizonUrl: "https://horizon.test",
     markets: [
@@ -28,9 +25,10 @@ vi.mock("@/components/app/manifest-provider", () => {
       { marketId: "m2", contracts: { recoveryEscrow: "CESCROW" } },
     ],
     shared: { riskControl: "CRISK" },
-  }
-  return { useManifest: () => manifest }
-})
+  },
+}))
+
+vi.mock("@/components/app/manifest-provider", () => ({ useManifest: () => mocks.manifest }))
 vi.mock("@/lib/protocol/reader", () => ({ createRpcReader: () => ({}) }))
 vi.mock("@/hooks/use-ledger-clock", () => ({ useLedgerClock: () => mocks.clock }))
 vi.mock("@/lib/protocol/dashboard/protocol-state", () => ({
@@ -52,7 +50,10 @@ import {
   ALERTS_NOT_AVAILABLE,
   DASHBOARD_AGGREGATE_MS,
   DASHBOARD_LIVE_MS,
+  dashboardLiveMs,
+  MAINNET_DASHBOARD_LIVE_MS,
   MAX_EVENT_PAGES,
+  parseOracleTicks,
   secondsToBlockNow,
   useAllEvents,
   useAssetCompliance,
@@ -66,6 +67,7 @@ import {
   useOpenAlerts,
   useOracleTicks,
   useOracleView,
+  useOracleViews,
   usePauses,
   usePendingClaim,
   useProtocolState,
@@ -105,6 +107,7 @@ const row = (id: string, ledger: number, group: string, topic: string) => ({
 
 beforeEach(() => {
   client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  mocks.manifest.network = "testnet"
   mocks.clock = { ledgerTime: 1_000_000, sequence: 5_720_000, isError: false }
   mocks.fetchProtocolState.mockReset().mockResolvedValue({ markets: {}, totals: {} })
   mocks.fetchMarketDashboard.mockReset().mockResolvedValue({ marketId: "m1" })
@@ -122,6 +125,52 @@ describe("refresh cadence (D-6)", () => {
     expect(DASHBOARD_AGGREGATE_MS).toBe(60_000)
     const { MARKET_REFETCH_MS } = await vi.importActual<typeof import("@/hooks/use-market-state")>("@/hooks/use-market-state")
     expect(MARKET_REFETCH_MS).toBe(6000)
+  })
+
+  it("is 60 s for live widgets on Mainnet; Testnet and a local network keep 15 s (plan 0009 final review, I-2)", () => {
+    expect(MAINNET_DASHBOARD_LIVE_MS).toBe(60_000)
+    expect(dashboardLiveMs("mainnet")).toBe(60_000)
+    expect(dashboardLiveMs("testnet")).toBe(15_000)
+    expect(dashboardLiveMs("local")).toBe(15_000)
+  })
+})
+
+describe("refresh cadence on Mainnet (plan 0009 final review, I-2)", () => {
+  const ACCOUNT = "GBLPAJ2GVSFUWCUIFMEV4EOV2XIOEWMJRIQ3LOM2Z42TNIY3J6ACB7UA"
+  const A = "GBZXN7PIRZGNMHGA7MUUUF4GWPY5AYPV6LY4UV2GL6VJGIQRXFDNMADI"
+
+  it.each([
+    ["mainnet", 60_000],
+    ["testnet", 15_000],
+    ["local", 15_000],
+  ] as const)("%s: every live query refetches every %i ms; aggregates keep 60 s", async (network, liveMs) => {
+    mocks.manifest.network = network
+    const added = { ...row("0000000000000000009-0000000000", 9, "risk", "add_psr"), contractId: "CRISK", data: { caller: "GADMIN", pauser: A } }
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json(indexAnswer({ rows: [added] }))))
+    mocks.fetchPausers.mockResolvedValue({ admin: { status: "live", value: "GADMIN", ledger: 1 }, adminIsPauser: { status: "live", value: true, ledger: 1 }, pausers: [] })
+    const ms = { ytFrozen: { status: "live", value: false, ledger: 1 } } as never
+    const { result } = renderHook(
+      () => ({
+        market: useMarketDashboard("m1"),
+        pending: usePendingClaim("m1", ACCOUNT, ms),
+        oracle: useOracleView("CORACLE1"),
+        oracles: useOracleViews(["CORACLE2"]),
+        risk: useRiskView(),
+        pauses: usePauses(),
+        pausers: usePausers(),
+        protocol: useProtocolState(),
+      }),
+      { wrapper },
+    )
+    await waitFor(() => expect(result.current.pausers.live.data).toBeDefined())
+    expect(interval(["dashboard", "market", network, "m1"])).toBe(liveMs)
+    expect(interval(["dashboard", "pending", network, "m1", ACCOUNT])).toBe(liveMs)
+    expect(interval(["dashboard", "oracle", network, "CORACLE1"])).toBe(liveMs)
+    expect(interval(["dashboard", "oracle", network, "CORACLE2"])).toBe(liveMs)
+    expect(interval(["dashboard", "risk", network])).toBe(liveMs)
+    expect(interval(["dashboard", "pauses", network, "m1,m2"])).toBe(liveMs)
+    expect(interval(["dashboard", "pausers", network, A])).toBe(liveMs)
+    expect(interval(["dashboard", "protocol", network, "m1,m2"])).toBe(60_000)
   })
 })
 
@@ -180,17 +229,62 @@ describe("usePendingClaim", () => {
 })
 
 describe("useOracleView", () => {
-  it("passes the ledger time and returns it with the view, every 15 s", async () => {
-    const { result } = renderHook(() => useOracleView(), { wrapper })
+  it("reads the oracle it is given at the ledger time and returns that time with the view, every 15 s", async () => {
+    const { result } = renderHook(() => useOracleView("CORACLE1"), { wrapper })
     await waitFor(() => expect(result.current.data).toBeDefined())
-    expect(mocks.fetchOracleView).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ network: "testnet" }), 1_000_000)
+    expect(mocks.fetchOracleView).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ network: "testnet" }), "CORACLE1", 1_000_000)
     expect(result.current.data).toEqual({ view: { contractId: "ORACLE" }, ledgerTime: 1_000_000 })
-    expect(interval(["dashboard", "oracle", "testnet"])).toBe(DASHBOARD_LIVE_MS)
+    expect(interval(["dashboard", "oracle", "testnet", "CORACLE1"])).toBe(DASHBOARD_LIVE_MS)
+  })
+
+  it("keys each oracle apart: two oracles are two reads", async () => {
+    const a = renderHook(() => useOracleView("CORACLE1"), { wrapper })
+    const b = renderHook(() => useOracleView("CORACLE2"), { wrapper })
+    await waitFor(() => expect(a.result.current.data).toBeDefined())
+    await waitFor(() => expect(b.result.current.data).toBeDefined())
+    expect(mocks.fetchOracleView.mock.calls.map((c) => c[2]).sort()).toEqual(["CORACLE1", "CORACLE2"])
   })
 
   it("waits for the ledger clock instead of reading with no time", () => {
     mocks.clock = { ledgerTime: null, sequence: null, isError: false }
-    renderHook(() => useOracleView(), { wrapper })
+    renderHook(() => useOracleView("CORACLE1"), { wrapper })
+    expect(mocks.fetchOracleView).not.toHaveBeenCalled()
+  })
+})
+
+describe("useOracleViews", () => {
+  it("reads every oracle it is given, one query each, under useOracleView's key and cadence", async () => {
+    const { result } = renderHook(() => useOracleViews(["CORACLE1", "CORACLE2", "CORACLE3"]), { wrapper })
+    await waitFor(() => expect(result.current.every((q) => q.data !== undefined)).toBe(true))
+    expect(result.current).toHaveLength(3)
+    expect(mocks.fetchOracleView.mock.calls.map((c) => c[2])).toEqual(["CORACLE1", "CORACLE2", "CORACLE3"])
+    expect(result.current[1].data).toEqual({ view: { contractId: "ORACLE" }, ledgerTime: 1_000_000 })
+    expect(result.current[0].stale).toBe(false)
+    for (const id of ["CORACLE1", "CORACLE2", "CORACLE3"]) expect(interval(["dashboard", "oracle", "testnet", id])).toBe(DASHBOARD_LIVE_MS)
+  })
+
+  it("shares its queries with useOracleView: the same oracle, asked by both at once, is read once", async () => {
+    const { result } = renderHook(() => ({ many: useOracleViews(["CORACLE1", "CORACLE2"]), one: useOracleView("CORACLE2") }), { wrapper })
+    await waitFor(() => expect(result.current.many.every((q) => q.data !== undefined)).toBe(true))
+    expect(result.current.one.data).toBe(result.current.many[1].data)
+    expect(mocks.fetchOracleView).toHaveBeenCalledTimes(2)
+  })
+
+  it("a failed refresh flags that oracle stale, not the others", async () => {
+    const { result } = renderHook(() => useOracleViews(["CORACLE1", "CORACLE2"]), { wrapper })
+    await waitFor(() => expect(result.current.every((q) => q.data !== undefined)).toBe(true))
+    mocks.fetchOracleView.mockImplementation(async (_r: unknown, _m: unknown, oracle: string) => {
+      if (oracle === "CORACLE2") throw new Error("rpc down")
+      return { contractId: "ORACLE" }
+    })
+    await act(() => client.refetchQueries({ queryKey: ["dashboard", "oracle"] }))
+    await waitFor(() => expect(result.current[1].stale).toBe(true))
+    expect(result.current[0].stale).toBe(false)
+  })
+
+  it("waits for the ledger clock instead of reading with no time", () => {
+    mocks.clock = { ledgerTime: null, sequence: null, isError: false }
+    renderHook(() => useOracleViews(["CORACLE1"]), { wrapper })
     expect(mocks.fetchOracleView).not.toHaveBeenCalled()
   })
 })
@@ -381,7 +475,16 @@ describe("useEventPages (EventList)", () => {
     expect(fetchMock).toHaveBeenLastCalledWith("/api/dashboard/events?group=risk&pool=CPOOL&topic=cb_limit%2Ccb_window&limit=2&before=0000000000000000002-0000000000")
     // A short page is the last.
     expect(result.current.hasNextPage).toBe(false)
-    expect(interval(["dashboard", "events", "testnet", "risk", "CPOOL", "cb_limit,cb_window", 2])).toBe(DASHBOARD_AGGREGATE_MS)
+    expect(interval(["dashboard", "events", "testnet", "risk", "CPOOL", "cb_limit,cb_window", "all", 2])).toBe(DASHBOARD_AGGREGATE_MS)
+  })
+
+  it("asks one contract's events (an oracle's history), keyed apart from the group's", async () => {
+    const fetchMock = vi.fn(async () => Response.json(indexAnswer()))
+    vi.stubGlobal("fetch", fetchMock)
+    const { result } = renderHook(() => useEventPages({ group: "oracle", contract: "CORACLE", topics: ["ref_set"] }, 20), { wrapper })
+    await waitFor(() => expect(result.current.data).toBeDefined())
+    expect(fetchMock).toHaveBeenCalledWith("/api/dashboard/events?group=oracle&contract=CORACLE&topic=ref_set&limit=20")
+    expect(interval(["dashboard", "events", "testnet", "oracle", "all", "ref_set", "CORACLE", 20])).toBe(DASHBOARD_AGGREGATE_MS)
   })
 
   it("every group when none is named", async () => {
@@ -483,28 +586,52 @@ describe("useEscrowRecords and useAssetCompliance", () => {
 })
 
 describe("useOracleTicks (spec 0004 D-19)", () => {
-  const answer = {
+  const ORACLE = "CDYGBFGO7KD446CDTGJ7M4OWUXC7UPBGPVM5CUWP2NSNX2CKK2TYYIPS"
+  const entry = {
+    oracle: ORACLE,
+    asset: "USDY",
+    health: { healthy: true, lastSuccessAt: "2026-11-14T11:00:00.000Z", lastOkAt: "2026-11-14T12:00:00.000Z", lastTickAt: "2026-11-14T12:00:00.000Z", rejected24h: 0, failures24h: 0 },
     ticks: [
-      { id: "9", at: "2026-11-14T12:00:00.000Z", oracle: "CORACLE", mode: "push", decision: "pushed", value: "10000919", reason: null, txHash: "ab".repeat(32), signer: "GSIGNER" },
+      { id: "9", at: "2026-11-14T12:00:00.000Z", oracle: ORACLE, mode: "feed", decision: "skipped", value: "10000919", reason: "stale_ts", txHash: null, signer: "GSIGNER" },
     ],
-    health: { healthy: true, lastSuccessAt: "2026-11-14T12:00:00.000Z", lastTickAt: "2026-11-14T12:00:00.000Z", rejected24h: 0, failures24h: 0 },
-    intervalSeconds: 1_800,
   }
+  const answer = { intervalSeconds: 1_800, oracles: [entry] }
+  const withEntry = (over: Record<string, unknown>) => ({ ...answer, oracles: [{ ...entry, ...over }] })
 
-  it("reads the keeper's runs and health, every 60 s", async () => {
+  it("reads every oracle's keeper runs and health, every 60 s", async () => {
     const fetchMock = vi.fn(async () => Response.json(answer))
     vi.stubGlobal("fetch", fetchMock)
     const { result } = renderHook(() => useOracleTicks(), { wrapper })
     await waitFor(() => expect(result.current.data).toEqual(answer))
     expect(fetchMock).toHaveBeenCalledWith("/api/dashboard/oracle-ticks?limit=20")
-    expect(interval(["dashboard", "oracle-ticks", "testnet", 20])).toBe(DASHBOARD_AGGREGATE_MS)
+    expect(interval(["dashboard", "oracle-ticks", "testnet", null, 20])).toBe(DASHBOARD_AGGREGATE_MS)
+  })
+
+  it("one oracle: ?oracle= in the URL and in the query key", async () => {
+    const fetchMock = vi.fn(async () => Response.json(answer))
+    vi.stubGlobal("fetch", fetchMock)
+    const { result } = renderHook(() => useOracleTicks(ORACLE, 5), { wrapper })
+    await waitFor(() => expect(result.current.data).toEqual(answer))
+    expect(fetchMock).toHaveBeenCalledWith(`/api/dashboard/oracle-ticks?oracle=${ORACLE}&limit=5`)
+    expect(interval(["dashboard", "oracle-ticks", "testnet", ORACLE, 5])).toBe(DASHBOARD_AGGREGATE_MS)
+  })
+
+  it("parseOracleTicks reads the per-oracle shape, lastOkAt included", () => {
+    expect(parseOracleTicks(answer)).toEqual(answer)
+    expect(parseOracleTicks({ intervalSeconds: 300, oracles: [] })).toEqual({ intervalSeconds: 300, oracles: [] })
+    expect(parseOracleTicks(withEntry({ health: { ...entry.health, lastOkAt: null, lastSuccessAt: null } })).oracles[0].health.lastOkAt).toBeNull()
   })
 
   it.each([
-    ["no ticks list", { ...answer, ticks: undefined }],
-    ["a tick without its decision", { ...answer, ticks: [{ ...answer.ticks[0], decision: 3 }] }],
-    ["health without its flag", { ...answer, health: { ...answer.health, healthy: "yes" } }],
-    ["a count that is not a whole number", { ...answer, health: { ...answer.health, rejected24h: -1 } }],
+    ["the old one-oracle shape", { ticks: entry.ticks, health: entry.health, intervalSeconds: 1_800 }],
+    ["no oracles list", { ...answer, oracles: undefined }],
+    ["an entry without its oracle", withEntry({ oracle: undefined })],
+    ["an entry without its asset", withEntry({ asset: 3 })],
+    ["no ticks list", withEntry({ ticks: undefined })],
+    ["a tick without its decision", withEntry({ ticks: [{ ...entry.ticks[0], decision: 3 }] })],
+    ["health without its flag", withEntry({ health: { ...entry.health, healthy: "yes" } })],
+    ["health without lastOkAt", withEntry({ health: { ...entry.health, lastOkAt: undefined } })],
+    ["a count that is not a whole number", withEntry({ health: { ...entry.health, rejected24h: -1 } })],
     ["no interval", { ...answer, intervalSeconds: 0 }],
   ])("refuses an answer it cannot read (%s), without asking again, rather than show a healthy keeper", async (_, body) => {
     client = new QueryClient({ defaultOptions: { queries: { retry: 1, retryDelay: 0 } } })

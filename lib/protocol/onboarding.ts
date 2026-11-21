@@ -66,6 +66,22 @@ export function testAssetOf(m: Pick<Manifest, "markets" | "testAsset">): Market[
   return t ? { code: t.code, issuer: t.issuer, sac: t.sac, decimals: t.decimals } : sharedTestAsset(m)
 }
 
+/** The Testnet test asset's note, kept word for word (plan 0009). */
+const TEST_ASSET_NOTE = "Test token issued by Principal for Stellar Testnet, not Ondo's USDY"
+
+/**
+ * What one market's asset is, beside its name (plan 0009): a mock asset that tracks another
+ * (`underlying.tracks`, the Mainnet markets) says it is not that asset; the manifest's test asset
+ * keeps its Testnet note; any other asset has none. The market list, the market page header and the
+ * dashboard market detail show it.
+ */
+export function assetNote(m: Manifest, market: Market): string | null {
+  const u = market.underlying
+  if (u.tracks) return `Mock asset issued by Principal for testing. It follows the price of ${u.tracks} and is not ${u.tracks}.`
+  const t = m.testAsset
+  return t && (t.sac === u.sac || (t.code === u.code && t.issuer === u.issuer)) ? TEST_ASSET_NOTE : null
+}
+
 /** Whether the account may hold one market's PT and YT (`Permissioning.is_allowed_for_asset`). */
 export type MarketPermission = { marketId: string; permPt: Live<boolean>; permYt: Live<boolean> }
 

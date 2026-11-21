@@ -52,12 +52,12 @@ import { fetchAccountState, type ComplianceKind } from "@/lib/protocol/account-s
 import type { ActionInput } from "@/lib/protocol/actions"
 import { curveStateFrom } from "@/lib/protocol/curve"
 import { fetchAccountHistory } from "@/lib/protocol/events"
-import { type ActionOutput } from "@/lib/protocol/guards"
+import { minAfterSlippage, type ActionOutput } from "@/lib/protocol/guards"
 import { createHorizon } from "@/lib/protocol/horizon"
-import { validateManifest } from "@/lib/protocol/manifest"
+import { protocolAbi, validateManifest } from "@/lib/protocol/manifest"
 import { fetchMarketState, type MarketState, type PoolStateView } from "@/lib/protocol/market-state"
 import { BPS, ceilDiv, SCALE } from "@/lib/protocol/math"
-import { previewDeposit, previewWithdraw } from "@/lib/protocol/previews"
+import { previewDeposit, previewMint, previewWithdraw } from "@/lib/protocol/previews"
 import { createRpcReader, readLive, toBigint } from "@/lib/protocol/reader"
 import { describeHoldings, planRoute, routeHoldings, unwindFrom, type Holdings, type RouteRequest, type StepPlan } from "@/lib/protocol/routes"
 import { currentContractsAdapter, toRouteRequest, type PlanContext, type TradeRequest } from "@/lib/protocol/trade-adapter"
@@ -448,7 +448,16 @@ describe.skipIf(skip !== null)("every route on the local USDY market (Task 24; 0
       const action = pay === "sy" ? "buy_yt_flash" : "buy_yt_flash_underlying"
       const name = `buy_yt exact budget (${pay})`
       const plans: StepPlan[] = [{ action, amount: { from: "input" }, secondaryAmount: { from: "value", value: syIn }, gives: pay === "sy" ? "SY" : "USDY", takes: "YT" }]
-      const request = (amount: bigint): RouteRequest => ({ kind: "buy_yt", marketId: market.marketId, source: r.account, amount, pay, receive: "underlying", matured: false })
+      const request = (amount: bigint): RouteRequest => ({
+        kind: "buy_yt",
+        marketId: market.marketId,
+        source: r.account,
+        amount,
+        pay,
+        receive: "underlying",
+        matured: false,
+        underlying: market.underlying.code,
+      })
       // A budget of sy_in itself always covers the cost while the PT is below par.
       const probe = await r.preStart(request(syIn), plans)
       expect(probe.blockers, `${name}: refusals before the start`).toEqual([])
@@ -633,24 +642,43 @@ describe.skipIf(skip !== null)("every route on the local USDY market (Task 24; 0
   // --- Quick actions, LP withdraw, interruption ---
 
   it("Quick actions: split USDY into PT + YT, recombine to SY (the dialog) and to USDY (the route)", async () => {
-    const routeFor = (kind: "split" | "recombine", amount: bigint, receive: "sy" | "underlying"): { req: RouteRequest; plans: StepPlan[] } => {
-      const req: RouteRequest = { kind, marketId: market.marketId, source: r.account, amount, pay: "underlying", receive, matured: false }
-      const plans = planRoute(req, { routerFunctions: manifest.routerFunctions ?? [] })
+    // The manifest's contract version decides the argument lists (plan 0009): a version-2 split signs
+    // the SY its deposit gives (`sy_in`), sized from the exchange rate the panel reads.
+    const routeFor = (kind: "split" | "recombine", amount: bigint, receive: "sy" | "underlying", s: Snapshot): { req: RouteRequest; plans: StepPlan[] } => {
+      const req: RouteRequest = { kind, marketId: market.marketId, source: r.account, amount, pay: "underlying", receive, matured: false, underlying: market.underlying.code }
+      const plans = planRoute(req, { routerFunctions: manifest.routerFunctions ?? [], protocolAbi: protocolAbi(manifest), exchangeRate: live(s.ms.exchangeRate, "SY exchange rate") })
       if (!Array.isArray(plans)) throw new Error(plans.disabled)
       return { req, plans }
     }
-    const b0 = balancesOf((await r.snapshot()).acc)
-    const split = routeFor("split", 100n * U, "sy")
+    const SPLIT = 1_000n * U
+    const s0 = await r.snapshot()
+    const b0 = balancesOf(s0.acc)
+    const split = routeFor("split", SPLIT, "sy", s0)
     expect(split.plans.map((p) => p.action)).toEqual(["mint"])
+    const xr = live(s0.ms.exchangeRate, "SY exchange rate")
+    const syIn = previewDeposit(SPLIT, xr)
+    if (protocolAbi(manifest) === 2) expect(split.plans[0].secondaryAmount).toEqual({ from: "value", value: syIn })
+    else expect(split.plans[0].secondaryAmount).toBeUndefined()
+    // The preview the split panel shows for this amount, and its floor at the slippage setting.
+    const previewed = previewMint(syIn, live(s0.ms.oracleRate, "oracle rate"), live(s0.ms.fees.tokenizationBps, "tokenization fee")).pt
     const [mint] = (await r.runRoute(split.req, split.plans, { name: "split" })).steps
     if (mint.decoded.kind !== "mint") throw new Error("not a mint output")
     expect(mint.decoded.pt_minted).toBe(mint.decoded.yt_minted)
     const b1 = balancesOf((await r.snapshot()).acc)
-    expect(b1.underlying - b0.underlying).toBe(-100n * U)
+    expect(b1.underlying - b0.underlying).toBe(-SPLIT)
     expect(b1.pt - b0.pt).toBe(mint.decoded.pt_minted)
     expect(b1.yt - b0.yt).toBe(mint.decoded.yt_minted)
+    // To-verify 4 (spec 0005): the sy_in signed never takes SY the account held before, and the PT
+    // minted is at least the floor previewed, both the signed one and the panel's at today's rate.
+    expect(b1.sy - b0.sy >= 0n, `split: SY moved by ${b1.sy - b0.sy}`).toBe(true)
+    expect(mint.decoded.pt_minted >= mint.guards.minOut!, `split: pt_minted ${mint.decoded.pt_minted} vs signed floor ${mint.guards.minOut}`).toBe(true)
+    expect(mint.decoded.pt_minted >= minAfterSlippage(previewed, SLIPPAGE_BPS), `split: pt_minted ${mint.decoded.pt_minted} vs previewed ${previewed}`).toBe(true)
+    log(
+      `split ${units(SPLIT)} USDY (protocolAbi ${protocolAbi(manifest)}, sy_in ${mint.secondaryAmount ?? "not signed"}): ` +
+        `pt_minted ${mint.decoded.pt_minted} (previewed ${previewed}, signed floor ${mint.guards.minOut}); SY ${b0.sy} -> ${b1.sy}`,
+    )
 
-    const toSy = routeFor("recombine", 50n * U, "sy")
+    const toSy = routeFor("recombine", 50n * U, "sy", await r.snapshot())
     expect(toSy.plans.map((p) => p.action)).toEqual(["recombine"])
     const [rec] = (await r.runRoute(toSy.req, toSy.plans, { name: "recombine (quick action, to SY)" })).steps
     const b2 = balancesOf((await r.snapshot()).acc)
@@ -658,7 +686,7 @@ describe.skipIf(skip !== null)("every route on the local USDY market (Task 24; 0
     expect(b2.yt - b1.yt).toBe(-50n * U)
     expect(b2.sy - b1.sy).toBe(value(rec.decoded))
 
-    const toUsdy = routeFor("recombine", 40n * U, "underlying")
+    const toUsdy = routeFor("recombine", 40n * U, "underlying", await r.snapshot())
     expect(toUsdy.plans.map((p) => p.action)).toEqual(["recombine", "withdraw"])
     const steps = (await r.runRoute(toUsdy.req, toUsdy.plans, { name: "recombine (to USDY)" })).steps
     const b3 = balancesOf((await r.snapshot()).acc)
@@ -712,7 +740,7 @@ describe.skipIf(skip !== null)("every route on the local USDY market (Task 24; 0
     // The route's holdings are what its deposit gave, not the SY the wallet already held.
     expect(holdings).toEqual({ sy: deposited })
     log(`interrupted lp_only after step 1: "${describeHoldings(holdings!, market.underlying)}" (the wallet holds ${units(b0.sy + deposited)} SY)`)
-    const u = unwindFrom(holdings)
+    const u = unwindFrom(holdings, market.underlying.code)
     if (!u.available) throw new Error(u.reason)
     expect(u.amount).toBe(deposited)
     // As useRoute.unwind: the confirmed steps stay, the rest is replaced by the single call back.

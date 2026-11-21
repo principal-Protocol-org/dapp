@@ -20,14 +20,14 @@ export function TokenPicker({
   value,
   onChange,
   options,
-  code = "USDY",
+  code,
   label = "Token",
 }: {
   value: PayToken
   onChange: (value: PayToken) => void
   options: readonly PayToken[]
-  /** The underlying's asset code. */
-  code?: string
+  /** The market's asset code ("USDY", "MOCKGILTS"). */
+  code: string
   /** The group's accessible name, e.g. "Pay with" on a "You pay" field. */
   label?: string
 }) {
