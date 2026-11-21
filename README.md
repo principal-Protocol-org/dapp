@@ -885,18 +885,21 @@ deploys with that pull request on `testnet.principalmarket.fi`, while Mainnet is
 2. **Load the history, before any `cron/index` run.** `pnpm indexer:capture --network mainnet`
    (Mainnet is only read; the rows go to this machine's database), then
    `pnpm indexer:import --network mainnet --in var/indexer-capture/mainnet-<YYYYMMDD>.jsonl --env-file .env.mainnet`.
-   `var/indexer-capture/mainnet-20261120.jsonl` is on the developer's machine, through ledger
-   65577228, but it predates the v2 redeploy of 2026-11-20/21: it holds the events of the abandoned
-   v1 contracts of MOCKUSTRY, MOCKGILTS, MOCKCETES and MOCKXAUM, and none of the v2 ones. Do not
-   import it as the history: capture again against the current manifest. The public gateway refused
-   that capture on 2026-11-20 (HTTP 429 from the market checks on, right after the smoke check), so
-   it needs the keyed or second RPC of step 4, or a quiet gateway. A fresh capture reads MOCKUSDY and
-   the shared contracts from `deployLedger`, and each v2 contract from its `createdLedgers` entry.
-   The RPC keeps about 7 days (120,960 ledgers): the v2 markets' history (created 2026-11-20/21)
-   leaves the window around 2026-11-27/28, MOCKUSDY's and the shared contracts' (from 2026-11-17)
-   around 2026-11-24. A file whose cursors have left it makes the first scheduled run record a gap.
-   Run the capture again just before the import in any case: it resumes from the local cursors and
-   rewrites the day's file.
+   `var/indexer-capture/mainnet-v2-20261121.jsonl` is on the developer's machine: 235 events and the
+   five cursors, through ledger 65586642, from the dRPC `rpcUrl` of step 4 and the current manifest
+   (the five markets, v2 contracts for MOCKUSTRY, MOCKGILTS, MOCKCETES and MOCKXAUM), with no gap.
+   It holds 180 rows of the shared contracts and 11 per market (the first of MOCKUSDY at ledger
+   65531529; the v2 markets' first events at 65584567, 65584825, 65584974 and 65585100, after their
+   `createdLedgers`). For MOCKUSDY's contracts and the shared ones, up to ledger 65577228, it holds
+   the same 109 events as the older `mainnet-20261120.jsonl`. That older file (taken from the public
+   gateway before the v2 redeploy) also holds 40 events of the abandoned v1 contracts of MOCKUSTRY,
+   MOCKGILTS, MOCKCETES and MOCKXAUM and none of the v2 ones: do not import it as the history.
+   The RPC keeps about 7 days (120,960 ledgers): MOCKUSDY's and the shared contracts' history (from
+   2026-11-17) leaves the window around 2026-11-24, the v2 markets' (created 2026-11-20/21) around
+   2026-11-27/28. The file keeps what it holds, but a file whose cursors have left the window makes
+   the first scheduled run record a gap, and events after the capture are only in the RPC. Run the
+   capture again just before the import in any case: it resumes from the local cursors and rewrites
+   the day's file.
 3. **Production variables** in Vercel, scoped to Production only:
    - `NEXT_PUBLIC_PRINCIPAL_NETWORK=mainnet`;
    - `DATABASE_URL` (pooled) and `DATABASE_URL_UNPOOLED` of the Mainnet branch;
@@ -912,30 +915,33 @@ deploys with that pull request on `testnet.principalmarket.fi`, while Mainnet is
    `ORACLE_ADMIN_SECRET` stay unset there, as do `ORACLE_KEEPER_ORACLE_ID` and
    `ORACLE_KEEPER_RECORD_REJECTIONS` (a rejection is then recorded from the simulation, at no fee). A
    variable applies only to deployments made after it is set, so this comes before step 5.
-4. **Choose the read path.** The public gateway that `mainnet.json` names as `rpcUrl`
-   (`https://soroban-rpc.mainnet.stellar.gateway.fm`) answered HTTP 429 after about 96 reads in one
-   measurement (2026-11-20, 6 at a time), and one `/dashboard` tab reads about 70 oracle values per
-   refresh, so the public pages alone can use up its allowance. The developer picks a keyed or second
-   RPC provider and sets it in `config/manifests/mainnet.json`, by a commit on the app line before
-   step 5:
-   - **in `rpcFallbackUrls`** (the smaller change): the gateway is still asked first. A read it
-     refuses (HTTP 429 or 5xx, a timeout, a network error) is asked again of the fallback, and the
-     gateway is then asked last for 30 s (see the manifest's `rpcFallbackUrls` above). Only contract
-     reads (`createRpcReader`, which is most of the dashboard's load) and the alert check's ledger
-     clock fall back. Trade simulations, the ledger clock, event pages (history and the indexer),
-     preparing and sending a transaction, transaction lookups and the keeper stay on `rpcUrl`. The
-     manifest test removes this field before it compares the file with the contracts team's, as it
-     removes our other additions;
-   - **or as `rpcUrl`**: every read goes to the new provider first. Keep the gateway in
-     `rpcFallbackUrls`. `rpcUrl` is a field of the contracts team's file, so the comparison in
-     `lib/protocol/__tests__/mainnet-manifest.test.ts` must then put the gateway's URL back before it
-     compares.
+4. **Choose the read path.** Decided: a keyed dRPC endpoint (`lb.drpc.live`) is `rpcUrl` in
+   `config/manifests/mainnet.json`, and the public gateway
+   (`https://soroban-rpc.mainnet.stellar.gateway.fm`, which answered HTTP 429 after about 96 reads in
+   one measurement on 2026-11-20, 6 at a time) is its `rpcFallbackUrls` entry. One `/dashboard` tab
+   reads about 70 oracle values per refresh, so the public pages alone can use up a public allowance.
+   Every read goes to dRPC first; a contract read it refuses (HTTP 429 or 5xx, a timeout, a network
+   error) is asked again of the gateway, which is then asked last for 30 s (see the manifest's
+   `rpcFallbackUrls` above). Only contract reads (`createRpcReader`, most of the dashboard's load) and
+   the alert check's ledger clock fall back; trade simulations, event pages (history and the
+   indexer), preparing and sending a transaction, transaction lookups and the keeper stay on `rpcUrl`.
+   `rpcUrl` is a field of the contracts team's file, so
+   `lib/protocol/__tests__/mainnet-manifest.test.ts` asserts that the handover's `rpcUrl` is among our
+   `rpcFallbackUrls` and puts it back before it compares: any other difference is still caught.
+
+   dRPC has no `getHealth` (HTTP 400, JSON-RPC -32601) and refuses a request without `params`. The
+   RPC's ledger window is therefore read with `getHealth` first and, only when that method is
+   unsupported, with `getLedgers` (`oldestLedger`, `latestLedger`; asked a few ledgers behind the
+   latest, since a load balancer's backend may not hold the newest one): `lib/protocol/rpc-window.ts`,
+   used by the indexer, the registry and the in-app history, and a copy in `scripts/indexer.mjs`. dRPC
+   also refuses an event start older than its events state ("First available state is N"), which the
+   pruned-start retries read. Any other failure behaves as before.
 
    The manifest is public (this repository, and every browser that loads the app), so a key in its
-   URL is public too, and it is not a server secret. Pick a key that may be public, with a usage cap
-   you accept. The server jobs (keeper, alert check, indexer) read through the same URLs, so a key
-   that only answers requests from the site's origin can refuse them. On Mainnet the dashboard's live
-   widgets already refresh every 60 s instead of 15 s (see "Cadence" under "Dashboard").
+   URL is public too, and it is not a server secret. The key has a usage cap the developer accepts. The
+   server jobs (keeper, alert check, indexer) read through the same URL, so a key that only answers
+   requests from the site's origin can refuse them. On Mainnet the dashboard's live widgets already
+   refresh every 60 s instead of 15 s (see "Cadence" under "Dashboard").
 5. **Move `main` to the app.** `main` has three commits the app line (`testnet`) lacks: `0d2754c`
    (a period in the landing's compliance title), `f280f7d` (the `/docs` rewrite, which the app line
    has too) and `f6bf73c` (the E2E workflow, which the app line has in a newer form). So `main`
