@@ -423,6 +423,15 @@ describe("the overview (/dashboard)", () => {
     expect(screen.getByText("No fallback RPC configured")).toBeTruthy()
   })
 
+  it("shows the RPC's host, never its URL: a keyed provider URL is not advertised", async () => {
+    mocks.manifest = { ...baseManifest(), rpcUrl: "https://rpc.test/stellar/SECRET-PATH", rpcFallbackUrls: ["https://fb.test/KEY-PATH"] }
+    const { container } = render(wrap(<Overview />))
+    await screen.findByText("223,011.30 USDY")
+    expect(screen.getByText("RPC rpc.test")).toBeTruthy()
+    expect(screen.getByText("Fallback fb.test")).toBeTruthy()
+    expect(container.textContent).not.toMatch(/SECRET-PATH|KEY-PATH/)
+  })
+
   it("keeps a 375 px page from scrolling sideways: the page column may shrink below its content", () => {
     render(wrap(<Overview />))
     const section = screen.getByRole("heading", { level: 1, name: "Protocol overview" }).closest("section")

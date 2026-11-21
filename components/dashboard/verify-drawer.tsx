@@ -5,8 +5,9 @@ import { CopyIcon, ExternalLink } from "lucide-react"
 import { useManifest } from "@/components/app/manifest-provider"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog"
 import { useNow } from "@/hooks/use-dashboard"
-import { contractLabel, figureEvidence, verifyCommand, type UnreadInput, type VerifiableFigure } from "@/lib/protocol/dashboard/verify"
+import { contractLabel, figureEvidence, hostOf, verifyCommand, type UnreadInput, type VerifiableFigure } from "@/lib/protocol/dashboard/verify"
 import { explorerUrl } from "@/lib/protocol/explorer"
+import { verifyRpcUrlOf } from "@/lib/protocol/manifest"
 import type { Live, Manifest, Network, ReadSource } from "@/lib/protocol/types"
 import { copyText } from "./copy-evidence"
 
@@ -45,7 +46,7 @@ function Command({ manifest, source, copyLabel }: { manifest: Manifest; source: 
   const title = <p className="font-mono text-xs/5 font-semibold text-ink">{`${contractLabel(manifest, source.contractId)} · ${source.fn}`}</p>
   let command: string
   try {
-    command = verifyCommand(manifest.network, source)
+    command = verifyCommand(manifest.network, source, verifyRpcUrlOf(manifest))
   } catch (error) {
     return (
       <div className="grid gap-1">
@@ -110,7 +111,7 @@ function DrawerBody({ figure, scale }: { figure: VerifiableFigure; scale?: strin
         <Item label="Ledger">{e.ledger}</Item>
         <Item label="RPC endpoint">
           <span className="block">{e.coverage}</span>
-          <span className="block text-ink-muted">{fallbacks.length > 0 ? `Fallback: ${fallbacks.join(", ")}` : "No fallback RPC configured"}</span>
+          <span className="block text-ink-muted">{fallbacks.length > 0 ? `Fallback: ${fallbacks.map(hostOf).join(", ")}` : "No fallback RPC configured"}</span>
         </Item>
         <Item label="Status">
           <span className={warn ? "text-negative" : undefined}>{e.status}</span>

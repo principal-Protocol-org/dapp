@@ -106,7 +106,7 @@ describe("the How to verify drawer (D-7)", () => {
     expect(d.getByRole("link", { name: new RegExp(SAC) }).getAttribute("href")).toBe(`https://stellar.expert/explorer/testnet/contract/${SAC}`)
     expect(d.getByText(`SY CA62AR….total_underlying(); USDY SAC CAZIZB….balance(id=${ESCROW})`)).toBeTruthy()
     expect(d.getByText("5720086–5720087")).toBeTruthy()
-    expect(d.getByText(RPC)).toBeTruthy()
+    expect(d.getByText("rpc.test")).toBeTruthy()
     expect(d.getByText("No fallback RPC configured")).toBeTruthy()
     expect(d.getByText("Read across ledgers 5720086–5720087")).toBeTruthy()
     expect(d.getByText(commandMatcher(verifyCommand("testnet", totalUnderlying)))).toBeTruthy()
@@ -166,7 +166,7 @@ describe("the How to verify drawer (D-7)", () => {
     const user = setup()
     render(<Figure label="TVL" live={tvl} format={usdy} />)
     await user.click(screen.getByRole("button", { name: "How to verify TVL" }))
-    expect(within(screen.getByRole("dialog")).getByText("Fallback: https://rpc-b.test")).toBeTruthy()
+    expect(within(screen.getByRole("dialog")).getByText("Fallback: rpc-b.test")).toBeTruthy()
   })
 
   it("on a local network the contract is plain text (no explorer)", async () => {

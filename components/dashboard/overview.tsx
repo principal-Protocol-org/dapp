@@ -24,7 +24,7 @@ import { BLOCKED_WHEN_STALE, type Freshness } from "@/lib/protocol/dashboard/ora
 import { FRESHNESS_BADGE, FRESHNESS_RANK, FRESHNESS_WORD, oracleEntries, oracleNow, type OracleNow } from "@/lib/protocol/dashboard/oracle-state"
 import { TVL_LABEL } from "@/lib/protocol/dashboard/protocol-state"
 import type { Remaining } from "@/lib/protocol/dashboard/risk"
-import type { UnreadInput, VerifiableFigure } from "@/lib/protocol/dashboard/verify"
+import { hostOf, type UnreadInput, type VerifiableFigure } from "@/lib/protocol/dashboard/verify"
 import { formatAmountFixed } from "@/lib/protocol/format"
 import { allLive, unavailable } from "@/lib/protocol/reader"
 import type { Live, Network } from "@/lib/protocol/types"
@@ -342,9 +342,9 @@ export function Overview() {
         </div>
         <AsOf sources={readsOf(lives)} updatedAt={newestUpdate || null} cadenceMs={liveMs} />
         <p className="flex flex-wrap gap-x-2 font-mono text-xs/5 text-ink-muted">
-          <span className="wrap-anywhere">RPC {m.rpcUrl}</span>
+          <span className="wrap-anywhere">RPC {hostOf(m.rpcUrl)}</span>
           <span aria-hidden="true">·</span>
-          <span>{fallbacks.length > 0 ? `Fallback ${fallbacks.join(", ")}` : "No fallback RPC configured"}</span>
+          <span>{fallbacks.length > 0 ? `Fallback ${fallbacks.map(hostOf).join(", ")}` : "No fallback RPC configured"}</span>
         </p>
       </div>
 

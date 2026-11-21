@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest"
 import { allLive, liveValue, readLive, unavailable } from "../../reader"
 import type { Live, ReadSource } from "../../types"
 import testnetJson from "@/config/manifests/testnet.json"
-import { parseManifest } from "../../manifest"
+import { parseManifest, verifyRpcUrlOf } from "../../manifest"
 import {
   ARG_NAMES,
   NULL_ACCOUNT,
@@ -13,6 +13,7 @@ import {
   decodedValue,
   evidenceRows,
   figureEvidence,
+  hostOf,
   nameArgs,
   verifyCommand,
   type VerifiableFigure,
@@ -78,9 +79,22 @@ describe("verifyCommand", () => {
   })
 
   it("Mainnet names its RPC and passphrase: the CLI's built-in mainnet has no RPC", () => {
-    expect(verifyCommand("mainnet", { ...source("max_stale_seconds"), rpcUrl: "https://rpc.example" })).toBe(
+    expect(verifyCommand("mainnet", source("max_stale_seconds"), "https://rpc.example")).toBe(
       `stellar contract invoke --rpc-url https://rpc.example --network-passphrase 'Public Global Stellar Network ; September 2015' --id ${ORACLE} --source-account ${NULL_ACCOUNT} --send=no -- max_stale_seconds`,
     )
+  })
+
+  it("Mainnet names the manifest's verifyRpcUrl, never the keyed rpcUrl a read used", () => {
+    const m = { rpcUrl: "https://rpc.example/stellar/SECRET-PATH", verifyRpcUrl: "https://open.example", rpcFallbackUrls: ["https://fb.example/KEY"] }
+    const read = { ...source("max_stale_seconds"), rpcUrl: m.rpcUrl }
+    const cmd = verifyCommand("mainnet", read, verifyRpcUrlOf(m))
+    expect(cmd).toContain("--rpc-url https://open.example ")
+    expect(cmd).not.toContain("SECRET-PATH")
+    expect(verifyCommand("mainnet", { ...read, rpcUrl: "https://fb.example/KEY", viaFallback: true }, verifyRpcUrlOf(m))).not.toContain("KEY")
+    // Without a verifyRpcUrl, rpcUrl is the default.
+    expect(verifyRpcUrlOf({ rpcUrl: "https://a.example" })).toBe("https://a.example")
+    // The evidence table's coverage is a host, not a URL.
+    expect(hostOf("https://rpc.example/stellar/SECRET-PATH")).toBe("rpc.example")
   })
 
   it("refuses a function whose argument names it does not know", () => {
@@ -143,7 +157,7 @@ describe("evidenceRows", () => {
     // Ledger is right-aligned.
     expect(sep).toBe("|---|---|---|---|---|---:|---|---|---|")
     // Raw value is the decoded return (u64 3600), as `stellar contract invoke` prints it, not the XDR.
-    expect(row).toBe(`| Max stale | ${ORACLE} | max_stale_seconds() | 3600 | 1 h | 5719947 | https://soroban-testnet.stellar.org | Live | |`)
+    expect(row).toBe(`| Max stale | ${ORACLE} | max_stale_seconds() | 3600 | 1 h | 5719947 | soroban-testnet.stellar.org | Live | |`)
   })
 
   it("an unread input adds its contract, its attempted call and why, after the reads the figure has", () => {

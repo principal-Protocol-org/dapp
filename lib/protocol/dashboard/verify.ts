@@ -98,6 +98,15 @@ function argValue(arg: RecordedArg): string {
   return JSON.stringify(v, (_k, x) => (typeof x === "bigint" ? x.toString() : x))
 }
 
+/** An endpoint's host, for display: a full RPC URL may carry a key. The URL itself when it does not parse. */
+export function hostOf(url: string): string {
+  try {
+    return new URL(url).host
+  } catch {
+    return url
+  }
+}
+
 /** Quotes a shell word unless it is plainly safe (addresses, numbers, hex, URLs). */
 function shellWord(word: string): string {
   return /^[A-Za-z0-9_.:/=+-]+$/.test(word) ? word : `'${word.replace(/'/g, `'\\''`)}'`
@@ -111,7 +120,7 @@ const MAINNET_PASSPHRASE = "Public Global Stellar Network ; September 2015"
  * built-in `mainnet` has no RPC ("Bring Your Own"), and `--rpc-url` cannot be added to `--network`
  * (the CLI then asks for the passphrase), so a Mainnet command names the RPC and passphrase instead.
  */
-function networkFlags(network: Network, rpcUrl: string): string {
+function networkFlags(network: Network, rpcUrl: string | undefined): string {
   if (network === "mainnet" && rpcUrl) return `--rpc-url ${shellWord(rpcUrl)} --network-passphrase ${shellWord(MAINNET_PASSPHRASE)}`
   return `--network ${network}`
 }
@@ -129,14 +138,15 @@ function argNames(source: Pick<ReadSource, "fn" | "args">): string[] {
 /**
  * The command that re-reads a figure as a simulation (nothing is signed or sent):
  * `stellar contract invoke --network <net> --id <C…> --source-account <null account> --send=no -- <fn> --<arg> <value>…`.
+ * On Mainnet `rpcUrl` is the manifest's `verifyRpcUrlOf` (never a read's own endpoint, which may carry a key).
  * Throws when an argument's name is unknown: a command with a guessed flag would fail or mislead.
  */
-export function verifyCommand(network: Network, source: ReadSource | Omit<ReadSource, "rawXdr" | "ledger">): string {
+export function verifyCommand(network: Network, source: ReadSource | Omit<ReadSource, "rawXdr" | "ledger">, rpcUrl?: string): string {
   const names = argNames(source)
   const args = source.args.map((raw, i) => `--${names[i]} ${shellWord(argValue(asRecorded(raw)))}`)
   return [
     "stellar contract invoke",
-    networkFlags(network, source.rpcUrl),
+    networkFlags(network, rpcUrl),
     `--id ${source.contractId}`,
     `--source-account ${NULL_ACCOUNT}`,
     "--send=no",
@@ -365,7 +375,7 @@ function readEvidence(f: VerifiableFigure, ctx: EvidenceContext): FigureEvidence
       raw: NONE,
       display: f.display,
       ledger: NONE,
-      coverage: s?.rpcUrl || NONE,
+      coverage: s?.rpcUrl ? hostOf(s.rpcUrl) : NONE,
       status: `Unavailable: ${live.error}`,
       verified: "",
       rawXdr: [],
@@ -384,7 +394,7 @@ function readEvidence(f: VerifiableFigure, ctx: EvidenceContext): FigureEvidence
     raw: reads.length > 0 ? rawValues(reads, ctx.manifest) : NONE,
     display: f.display,
     ledger: spread ? `${spread.min}–${spread.max}` : String(live.ledger),
-    coverage: orNone(unique(reads.map((s) => s.rpcUrl)), ", "),
+    coverage: orNone(unique(reads.map((s) => hostOf(s.rpcUrl))), ", "),
     status: liveStatus(f, spread, ctx.now),
     verified: "",
     rawXdr: reads.map((s) => s.rawXdr),

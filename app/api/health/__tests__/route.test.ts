@@ -69,6 +69,12 @@ describe("GET /api/health", () => {
     vi.restoreAllMocks()
   })
 
+  it("never carries the manifest's RPC URL, whatever its path or key", async () => {
+    mocks.manifest.mockReturnValue({ ...MANIFEST, rpcUrl: "https://rpc.example/stellar/SECRET-PATH", rpcFallbackUrls: ["https://fb.example/KEY-PATH"] })
+    const body = await (await GET()).text()
+    expect(body).not.toMatch(/SECRET-PATH|KEY-PATH|rpc\.example|fb\.example/)
+  })
+
   it("is public and cached 15 s: network, ledger, indexer, keeper and open alerts", async () => {
     const res = await GET()
     expect(res.status).toBe(200)

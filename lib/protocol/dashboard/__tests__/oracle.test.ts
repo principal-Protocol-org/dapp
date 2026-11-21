@@ -230,7 +230,7 @@ describe("fetchOracleView: the feed side (3af9388 feed_source, feed_min_interval
     expect(commands[3]).toMatch(new RegExp(`--id ${FEED} .* -- lastprice --asset '\\{"Stellar":"${SAC}"\\}'$`))
     expect(() => JSON.stringify(sources)).not.toThrow()
     // Mainnet's form too (RPC and passphrase named).
-    for (const s of sources) expect(verifyCommand("mainnet", { ...s, rpcUrl: "https://rpc.example" })).toContain("--rpc-url https://rpc.example")
+    for (const s of sources) expect(verifyCommand("mainnet", s, "https://rpc.example")).toContain("--rpc-url https://rpc.example")
   })
 
   it("no feed set (feed_source None): feedPrice is null and nothing is read on any feed", async () => {
