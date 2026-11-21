@@ -267,8 +267,16 @@ What we found when we rebuilt it, on 21 November 2026 (the source from `git arch
 
 Our two rebuilds also differ from each other: Permissioning, which embeds no path, came out `93afc34f…` on macOS and
 `c563cb99…` in the container. So the same source and the same rustc give different bytes in different build
-environments, and the published instructions do not yet let a reviewer rebuild the deployed bytes. Why was not
-established. This is open with the contracts team ([§10](#10-open-items), item 3).
+environments, and the published instructions do not yet let a reviewer rebuild the deployed bytes. This is open with
+the contracts team ([§10](#10-open-items), item 3).
+
+Where the bytes differ, for Permissioning (11,308 bytes on chain, SHA-256 `4437468d…`, fetched with `stellar contract
+fetch`; our macOS rebuild `93afc34f…`, the same with or without `--locked`): both files carry the same contract meta
+(`rsver` 1.94.1, `rssdkver` 26.0.1#f52b6aad…), and `cmp -l` finds 12 differing bytes, all `call` operands that read 222
+in one file and 223 in the other. Two functions sit in the opposite order in the module; the code is otherwise the
+same byte for byte. Function order is set by the build, not by the source, so this points at a difference in the build
+environment (for example the build directory, which can change the hashes that order the functions), not at different
+contract source. We did not confirm which setting causes it.
 
 ### 3.3 The deployment manifests
 
@@ -457,7 +465,7 @@ the keeper runs. At 20:24 UTC the stored values were 8h 48m (MOCKUSDY, MOCKUSTRY
 
 Only the oracle admin, the contracts team, can widen the window, with
 [`set_safety_params(caller, max_stale_seconds, max_deviation_bps)`](https://github.com/principal-Protocol-org/principal/blob/3af938853e5818aa8d56bd35670b9a19cfa55a78/contracts/oracle_adapter/src/lib.rs#L292).
-The app team asked them to on 21 November 2026 ([§10](#10-open-items), item 1).
+This is open with them ([§10](#10-open-items), item 1).
 
 ## 7. A stale oracle blocks operations
 
@@ -547,7 +555,7 @@ history**. The Mainnet dashboard runs the same code on the same views.
 
 | # | Item | Owner | Reason |
 |---|---|---|---|
-| 1 | **The oracle staleness window.** With `max_stale_seconds` 3600 and RedStone ticking every few hours or less often, each oracle is fresh only in the hour after a tick, so mint, trades, single-sided liquidity and redemption are blocked most of the time on each market ([§6.3](#63-freshness-and-why-most-oracles-are-stale)). | contracts team | Only the oracle admin can call `set_safety_params` on the five OracleAdapters (for example to 86,400 s). Asked on 21 November 2026. |
+| 1 | **The oracle staleness window.** With `max_stale_seconds` 3600 and RedStone ticking every few hours or less often, each oracle is fresh only in the hour after a tick, so mint, trades, single-sided liquidity and redemption are blocked most of the time on each market ([§6.3](#63-freshness-and-why-most-oracles-are-stale)). | contracts team | Only the oracle admin can call `set_safety_params` on the five OracleAdapters (for example to 86,400 s). |
 | 2 | **The dApp's own signed smoke test on Mainnet**: a small deposit and mint through principalmarket.fi, with their two hashes. | developer, after the contracts team | Needs a test wallet granted on the markets (only the contracts team's Permissioning admin can) and a fresh oracle (item 1). It is signed by the developer, never by an agent or a test. The contracts team's command-line deposits and mints are in [§3.1](#31-deposit-and-mint-on-every-market). |
 | 3 | **Reproducing the build.** Our rebuilds of `3af9388` with rustc 1.94.1 match 0 of 12 deployed hashes ([§3.2](#32-the-reproducible-build)). | contracts team | The instructions and hashes are published, and the chain matches them, but no rebuild outside the original machine has given the same bytes, and our rebuilds differ from each other. Why is not established; the manifests record `git_tree_dirty: true` and no toolchain file is pinned. |
 | 4 | **Contract lifetimes.** The Mainnet contract instances live until about 17 to 21 March 2027 ([§2.4](#24-how-long-the-contracts-live)). | contracts team, operations | Someone must extend them (and the code entries) before mid-March 2027. |

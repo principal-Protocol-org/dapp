@@ -224,7 +224,9 @@ test. Its two hashes will be added to the evidence file.
 **Status: Open (contracts team).** The build instructions and the checksums are **published in the contracts
 repository** ([§8](https://github.com/principal-Protocol-org/principal/blob/94050d03d3bce806e1df73c20b5f753c555270af/docs/MAINNET_DEPLOYMENT_EVIDENCE.md#8-reproducible-build-evidence)),
 and the chain holds exactly those artifacts. But a rebuild from the published source does not yet give the same bytes,
-so a reviewer cannot yet confirm the on-chain code from source. Why is not established. The deployment manifests
+so a reviewer cannot yet confirm the on-chain code from source. In the one file we compared byte by byte, the
+only difference is two functions in the opposite order, which points at the build environment rather than the source
+([evidence §3.2](TRANCHE_3_EVIDENCE.md#32-the-reproducible-build)). The deployment manifests
 record `git_tree_dirty: true` (the working tree had uncommitted changes when the deploy script ran), and the repository
 pins no toolchain file. A rebuild recipe that reproduces the deployed bytes is the contracts team's next step.
 
@@ -383,7 +385,7 @@ finalization display is shown on Testnet, with the same code.
 feed tick's own time, and RedStone publishes each price on Stellar only every few hours (the feed's `resolution()` is
 43,200 s). With `max_stale_seconds` 3,600, each oracle is fresh only during the hour after a RedStone tick, whatever
 the keeper does: at 20:24 UTC four of the five were stale, 8 h 48 m to 10 h 26 m old. Only the oracle admin, the
-contracts team, can widen the window (`set_safety_params`); we asked them on 21 November 2026
+contracts team, can widen the window (`set_safety_params`); this is open item 1
 ([evidence §6.3](TRANCHE_3_EVIDENCE.md#63-freshness-and-why-most-oracles-are-stale)). Until then the markets work only
 in that hour.
 
@@ -516,7 +518,7 @@ The same list, with the evidence, is in [evidence §10](TRANCHE_3_EVIDENCE.md#10
 
 | # | Item | Owner | Reason |
 |---|---|---|---|
-| 1 | The oracle staleness window: each oracle is fresh only in the hour after a RedStone tick | contracts team | Only the oracle admin can widen `max_stale_seconds` (`set_safety_params`, for example to 86,400 s) on the five oracles. Asked on 21 November 2026. |
+| 1 | The oracle staleness window: each oracle is fresh only in the hour after a RedStone tick | contracts team | Only the oracle admin can widen `max_stale_seconds` (`set_safety_params`, for example to 86,400 s) on the five oracles. |
 | 2 | The dApp's own signed smoke test on Mainnet: a small deposit and mint through principalmarket.fi | developer, after the contracts team | Needs a test wallet granted by the contracts team and a fresh oracle. Signed by the developer, never by an agent or a test. |
 | 3 | Reproducing the build: our rebuilds match 0 of 12 deployed hashes | contracts team | The instructions and checksums are published and match the chain, but a rebuild does not give the same bytes. Why is not established; the manifests record `git_tree_dirty: true`, and no toolchain file is pinned. |
 | 4 | Contract lifetimes: the Mainnet contract instances live until about 17 to 21 March 2027 | contracts team, operations | Someone must extend them before mid-March 2027. |
