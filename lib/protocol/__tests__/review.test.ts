@@ -38,7 +38,7 @@ import {
 import { evaluateManagerGates } from "../manager-gates"
 import type { Role } from "../roles"
 import { parseManifest } from "../manifest"
-import { AMOUNTS_MOVED_REASON, SubmissionRejectedError, createRpcServer, scArgToVal, transactionEnvelopeHash, type ContractInvocation } from "../stellar"
+import { AMOUNTS_MOVED_REASON, INCLUSION_FEE_STROOPS, SubmissionRejectedError, createRpcServer, scArgToVal, transactionEnvelopeHash, type ContractInvocation } from "../stellar"
 import {
   MAX_TX_FEE_STROOPS,
   RESOURCE_FEE_HEADROOM_BPS,
@@ -71,7 +71,7 @@ const FEE_HEADROOM = 3_704n
  * `assembleTransaction` keeps the 100-stroop inclusion fee and adds the resource fee; the review
  * declares the resource fee with its headroom (refunded when unused).
  */
-const PREPARED_FEE = (BigInt(BASE_FEE) + RESOURCE_FEE + FEE_HEADROOM).toString()
+const PREPARED_FEE = (BigInt(INCLUSION_FEE_STROOPS) + RESOURCE_FEE + FEE_HEADROOM).toString()
 const DEADLINE = 1_900_000_000n
 /** The hash the fake RPC claims for every submission; the pipeline must report the real one. */
 const HASH = "abc123"
@@ -409,8 +409,8 @@ describe("prepareReview", () => {
       const signed = new Transaction(r.unsignedXdr, passphrase)
       const fromRpc = assemble(server.calls.prepared[0])
       expect(sorobanOf(signed).resourceFee).toBe(RESOURCE_FEE + FEE_HEADROOM)
-      expect(r.fee).toBe((BigInt(BASE_FEE) + RESOURCE_FEE + FEE_HEADROOM).toString())
-      expect(r.summary.fees[0]).toBe("Network fee: up to 0.0016149 XLM")
+      expect(r.fee).toBe((BigInt(INCLUSION_FEE_STROOPS) + RESOURCE_FEE + FEE_HEADROOM).toString())
+      expect(r.summary.fees[0]).toBe("Network fee: up to 0.0026049 XLM")
       // The same call, authorization, footprint, resources, sequence and time bounds as RPC prepared.
       expect(sorobanOf(signed).rest).toBe(sorobanOf(fromRpc).rest)
       const op = signed.operations[0]
@@ -422,9 +422,9 @@ describe("prepareReview", () => {
     })
 
     it("cuts the headroom to what fits under the 10 XLM cap, and adds none at the cap", async () => {
-      const near = await review("mint", {}, fakeRpc({ prepareTransaction: async (tx) => assemble(tx, { resourceFee: MAX_TX_FEE_STROOPS - BigInt(BASE_FEE) - 1_000n }) }))
+      const near = await review("mint", {}, fakeRpc({ prepareTransaction: async (tx) => assemble(tx, { resourceFee: MAX_TX_FEE_STROOPS - BigInt(INCLUSION_FEE_STROOPS) - 1_000n }) }))
       expect(near.fee).toBe(MAX_TX_FEE_STROOPS.toString())
-      const at = await review("mint", {}, fakeRpc({ prepareTransaction: async (tx) => assemble(tx, { resourceFee: MAX_TX_FEE_STROOPS - BigInt(BASE_FEE) }) }))
+      const at = await review("mint", {}, fakeRpc({ prepareTransaction: async (tx) => assemble(tx, { resourceFee: MAX_TX_FEE_STROOPS - BigInt(INCLUSION_FEE_STROOPS) }) }))
       expect(at.fee).toBe(MAX_TX_FEE_STROOPS.toString())
     })
   })
@@ -441,19 +441,19 @@ describe("prepareReview", () => {
     it("refuses a fee above the 10 XLM cap", async () => {
       expect(MAX_TX_FEE_STROOPS).toBe(100_000_000n)
       await expect(preparedBy((tx) => assemble(tx, { resourceFee: MAX_TX_FEE_STROOPS }))).rejects.toThrow(
-        "asks for a network fee of 10.00001 XLM, above the 10 XLM this app signs",
+        "asks for a network fee of 10.001 XLM, above the 10 XLM this app signs",
       )
     })
 
     it("accepts a fee at the cap and shows it exactly", async () => {
-      const r = await preparedBy((tx) => assemble(tx, { resourceFee: MAX_TX_FEE_STROOPS - BigInt(BASE_FEE) }))
+      const r = await preparedBy((tx) => assemble(tx, { resourceFee: MAX_TX_FEE_STROOPS - BigInt(INCLUSION_FEE_STROOPS) }))
       expect(r.fee).toBe(MAX_TX_FEE_STROOPS.toString())
       expect(r.summary.fees[0]).toBe("Network fee: up to 10 XLM")
     })
 
     it("refuses a fee the resource fee does not explain", async () => {
-      // Same call and resource fee, but the inclusion fee was raised from 100 to 5000 stroops.
-      await expect(preparedBy((tx) => assemble(TransactionBuilder.cloneFrom(tx, { fee: "5000" }).build()))).rejects.toThrow(
+      // Same call and resource fee, but the inclusion fee was raised from the app's bid to five times it.
+      await expect(preparedBy((tx) => assemble(TransactionBuilder.cloneFrom(tx, { fee: (BigInt(INCLUSION_FEE_STROOPS) * 5n).toString() }).build()))).rejects.toThrow(
         "is more than the base fee plus the resource fee it declares",
       )
     })
@@ -492,7 +492,7 @@ describe("prepareReview", () => {
       // 7 decimals: the exact floor being signed, not a rounded one.
       expect(r.summary.getAtLeast).toEqual(["9.4525001 PT"])
       expect(r.summary.give).toEqual(["10 SY"])
-      expect(r.summary.fees[0]).toBe("Network fee: up to 0.0016149 XLM")
+      expect(r.summary.fees[0]).toBe("Network fee: up to 0.0026049 XLM")
       expect(r.summary.deadline).toBe(Number(DEADLINE))
     })
 
@@ -651,7 +651,7 @@ describe("prepareReview", () => {
       const ptOnly = (await review("redeem", { guards: {}, secondaryAmount: 0n })).summary
       expect(ptOnly.give).toEqual(["10 PT"])
       expect(ptOnly.getAtLeast).toHaveLength(2)
-      expect(ptOnly.fees).toEqual(["Network fee: up to 0.0016149 XLM"])
+      expect(ptOnly.fees).toEqual(["Network fee: up to 0.0026049 XLM"])
       // A YT-only redeem lists no "0 PT" (M4).
       const ytOnly = (await review("redeem", { guards: {}, amount: 0n, secondaryAmount: 2_0000000n })).summary
       expect(ytOnly.give).toEqual(["2 YT"])
@@ -660,7 +660,7 @@ describe("prepareReview", () => {
 
     it("lists the protocol fee the action pays, after the network fee", async () => {
       const fees = async (action: ActionId) => (await review(action, { guards: { minOut: 1n, minOut2: 1n, maxNetCost: 1n } })).summary.fees
-      expect(await fees("deposit")).toEqual(["Network fee: up to 0.0016149 XLM"])
+      expect(await fees("deposit")).toEqual(["Network fee: up to 0.0026049 XLM"])
       expect((await fees("mint"))[1]).toMatch(/^Tokenization fee:/)
       expect((await fees("buy_pt"))[1]).toMatch(/^Swap fee:/)
       expect(await fees("buy_yt")).toHaveLength(3)
@@ -1121,7 +1121,7 @@ describe("prepareRestore", () => {
     expect(tx.operations[0].type).toBe("restoreFootprint")
     expect(tx.source).toBe(SOURCE)
     expect(tx.sequence).toBe("42")
-    const fee = (BigInt(BASE_FEE) + RESTORE_FEE).toString()
+    const fee = (BigInt(INCLUSION_FEE_STROOPS) + RESTORE_FEE).toString()
     expect(tx.fee).toBe(fee)
     // R29: the fee is returned so it is shown before signing, and the restore expires like a review.
     expect(restore.fee).toBe(fee)
@@ -1153,7 +1153,7 @@ describe("prepareRestore", () => {
 
     it("refuses a restore fee above the 10 XLM cap", async () => {
       await expect(restoreWith(restoreSimulation({}, MAX_TX_FEE_STROOPS))).rejects.toThrow(
-        "The restore asks for a network fee of 10.00001 XLM, above the 10 XLM this app signs",
+        "The restore asks for a network fee of 10.001 XLM, above the 10 XLM this app signs",
       )
       await expect(restoreWith(restoreSimulation({}, "-1"))).rejects.toThrow("no valid restore fee")
     })
@@ -1429,7 +1429,7 @@ describe("manager reviews (0002 §5): the same review → sign pipeline as an ac
       expect(r.summary).toEqual({
         give: [],
         getAtLeast: [],
-        fees: ["Network fee: up to 0.0016149 XLM"],
+        fees: ["Network fee: up to 0.0026049 XLM"],
         validUntil: Number(prepared.timeBounds?.maxTime),
       })
       expect(r.expiresAtMs - r.preparedAtMs).toBe(REVIEW_TTL_MS)
@@ -1516,9 +1516,9 @@ describe("manager reviews (0002 §5): the same review → sign pipeline as an ac
           preparedBy((tx) => assemble(TransactionBuilder.cloneFrom(tx, { timebounds: { minTime: 0, maxTime: 4_102_444_800 } }).build())),
         ).rejects.toThrow("RPC changed the time bounds")
         await expect(preparedBy((tx) => assemble(tx, { resourceFee: MAX_TX_FEE_STROOPS }))).rejects.toThrow(
-          "asks for a network fee of 10.00001 XLM, above the 10 XLM this app signs",
+          "asks for a network fee of 10.001 XLM, above the 10 XLM this app signs",
         )
-        await expect(preparedBy((tx) => assemble(TransactionBuilder.cloneFrom(tx, { fee: "5000" }).build()))).rejects.toThrow(
+        await expect(preparedBy((tx) => assemble(TransactionBuilder.cloneFrom(tx, { fee: (BigInt(INCLUSION_FEE_STROOPS) * 5n).toString() }).build()))).rejects.toThrow(
           "is more than the base fee plus the resource fee it declares",
         )
       })
@@ -1782,7 +1782,7 @@ describe("manager reviews (0002 §5): the same review → sign pipeline as an ac
       const tx = new Transaction(unsignedXdr, passphrase)
       const { minTime, maxTime } = tx.timeBounds!
       const built = new TransactionBuilder(new Account(tx.source, (BigInt(tx.sequence) - 1n).toString()), {
-        fee: BASE_FEE,
+        fee: INCLUSION_FEE_STROOPS,
         networkPassphrase: passphrase,
         timebounds: { minTime, maxTime },
       })
