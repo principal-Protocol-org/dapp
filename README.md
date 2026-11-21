@@ -101,7 +101,8 @@ market.
   - `protocolAbi` (1 or 2, above);
   - `accessContact` (`{ label, url }`, an `https:` or `mailto:` URL): where a person without access
     can ask for it, named in a market's access block. Without it the block says "Ask the protocol
-    team." `mainnet.json` has none until the contracts team names one;
+    team." `mainnet.json` names `hello@principalmarket.fi` (a `mailto:` link with the subject "Mainnet
+    access request"); requests sent there are forwarded to the contracts team, who grant access;
   - `markets[].underlying.tracks` (1 to 12 characters): the asset a mock follows. It adds the note
     "Mock asset issued by Principal for testing. It follows the price of USDY and is not USDY." to the
     asset's rows, the market page and the dashboard's market detail;

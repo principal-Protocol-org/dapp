@@ -76,6 +76,10 @@
     "add_liquidity_single_underlying"
   ],
   "protocolAbi": 2,
+  "accessContact": {
+    "label": "hello@principalmarket.fi",
+    "url": "mailto:hello@principalmarket.fi?subject=Mainnet%20access%20request"
+  },
   "markets": [
     {
       "marketId": "mainnet-CDQYZU-CCY5P6CC",

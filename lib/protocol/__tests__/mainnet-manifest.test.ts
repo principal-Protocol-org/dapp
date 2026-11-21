@@ -99,8 +99,11 @@ describe("config/manifests/mainnet.json", () => {
     for (const x of v2) expect(m.createdLedgers?.[x.contracts.oracle]).toBeLessThanOrEqual(m.createdLedgers?.[x.contracts.sy] as number)
   })
 
-  it("has no access contact yet", () => {
-    expect(parseManifest(mainnetJson).accessContact).toBeUndefined()
+  it("names the access contact: the support address, as a mailto link", () => {
+    expect(parseManifest(mainnetJson).accessContact).toEqual({
+      label: "hello@principalmarket.fi",
+      url: "mailto:hello@principalmarket.fi?subject=Mainnet%20access%20request",
+    })
   })
 
   it("the old pending stub is now refused like any incomplete manifest", () => {
