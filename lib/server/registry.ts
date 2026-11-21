@@ -34,7 +34,7 @@ import { fetchTopology } from "@/lib/protocol/market-state"
 import { isContractError, readLive, toBool, type ContractReader } from "@/lib/protocol/reader"
 import type { Manifest, Market, MarketContractName } from "@/lib/protocol/types"
 import { contractWasmHash, contractWasmHashesSettled, WasmReadError, type LedgerEntriesRpc } from "@/lib/protocol/wasm"
-import { readRpcWindow } from "@/lib/protocol/rpc-window"
+import { prunedOldestOf, readRpcWindow } from "@/lib/protocol/rpc-window"
 import { DatabaseConfigError, type Sql } from "./db"
 import { createRollingLimiter, redact } from "./request"
 
@@ -794,8 +794,9 @@ export async function discover(deps: RegistryDeps, opts: { deadline?: number } =
     } catch (error) {
       // The oldest ledger moves on a busy node: a start just behind it is refused once; start after it.
       if (request.startLedger === undefined || page > 0) throw error
-      const now = await readRpcWindow(rpc)
-      request = { startLedger: now.oldestLedger + 1, filters, limit: EVENTS_PAGE }
+      // dRPC names its first available state in the refusal; the window it reports can be a few ledgers older.
+      const start = prunedOldestOf(error) ?? (await readRpcWindow(rpc)).oldestLedger + 1
+      request = { startLedger: start, filters, limit: EVENTS_PAGE }
       res = await rpc.getEvents(request)
     }
 

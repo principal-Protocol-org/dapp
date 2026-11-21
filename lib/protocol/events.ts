@@ -1,9 +1,8 @@
 import { scValToNative, type xdr } from "@stellar/stellar-sdk"
-import { errorMessage } from "./errors"
 import { formatAmount, shorten } from "./format"
 import { getMarket } from "./manifest"
 import { limitRpc } from "./rpc-limiter"
-import { readRpcWindow } from "./rpc-window"
+import { prunedOldestOf, readRpcWindow } from "./rpc-window"
 import { createRpcServer } from "./stellar"
 import type { Manifest, Market } from "./types"
 
@@ -239,15 +238,8 @@ export function cursorLedger(cursor: string): number {
 
 type Scan = { maxPages: number; windowLedgers: number }
 
-/** The RPC's refusal of a range that starts before its oldest ledger, which it names. */
-const PRUNED_RANGE = /startLedger must be within the ledger range:\s*(\d+)\s*-\s*(\d+)/
-
 /** The oldest ledger a pruned-range refusal names, or undefined for any other failure. */
-function prunedOldest(error: unknown): number | undefined {
-  const message = errorMessage(error)
-  const match = PRUNED_RANGE.exec(message)
-  return match ? Number(match[1]) : undefined
-}
+const prunedOldest = prunedOldestOf
 
 async function fetchGroup(
   server: EventsRpcServer,

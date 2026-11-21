@@ -46,7 +46,7 @@ import { cursorLedger, decodeEvent, idOf, type RawEvent, type Role } from "@/lib
 import { manifestOracles } from "@/lib/protocol/manifest"
 import { createRpcReader, type ContractReader } from "@/lib/protocol/reader"
 import type { Manifest, Market, Network } from "@/lib/protocol/types"
-import { readRpcWindow, type RpcWindowSource } from "@/lib/protocol/rpc-window"
+import { prunedOldestOf, readRpcWindow, type RpcWindowSource } from "@/lib/protocol/rpc-window"
 import { DatabaseConfigError, type Sql } from "./db"
 
 // ---------------------------------------------------------------- groups
@@ -370,9 +370,10 @@ async function indexGroup(
         // ago may be refused. Every chunk not yet started starts again at the new oldest ledger,
         // which widens the gap.
         if (attempt === START_ATTEMPTS) throw error
-        const now = await readRpcWindow(rpc as RpcWindowSource)
-        if (now.oldestLedger <= from) throw error
-        oldest = now.oldestLedger
+        // dRPC names its first available state in the refusal; the window it reports can be a few ledgers older.
+        const newOldest = prunedOldestOf(error) ?? (await readRpcWindow(rpc as RpcWindowSource)).oldestLedger
+        if (newOldest <= from) throw error
+        oldest = newOldest
         for (const c of chunks) {
           if (c.cursor !== null || c.start >= oldest) continue
           c.start = oldest

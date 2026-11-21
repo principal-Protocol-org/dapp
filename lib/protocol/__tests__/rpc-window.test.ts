@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it, vi } from "vitest"
-import { isMethodUnsupported, readRpcWindow } from "../rpc-window"
+import { isMethodUnsupported, prunedOldestOf, readRpcWindow } from "../rpc-window"
 
 const WINDOW = { oldestLedger: 100, latestLedger: 900 }
 
@@ -49,5 +49,21 @@ describe("readRpcWindow", () => {
   it("isMethodUnsupported is false for non-errors", () => {
     expect(isMethodUnsupported(undefined)).toBe(false)
     expect(isMethodUnsupported("x")).toBe(false)
+  })
+})
+
+describe("prunedOldestOf", () => {
+  it("reads Stellar's range refusal", () => {
+    expect(prunedOldestOf(new Error("startLedger must be within the ledger range: 500 - 900"))).toBe(500)
+  })
+  it("reads dRPC's refusal from the JSON-RPC error of an HTTP 400", () => {
+    const error = Object.assign(new Error("Request failed with status code 400"), {
+      response: { status: 400, data: { error: { code: 27, message: "Unknown state. First available state is 65465671" } } },
+    })
+    expect(prunedOldestOf(error)).toBe(65465671)
+  })
+  it("is undefined for any other failure", () => {
+    expect(prunedOldestOf(new Error("boom"))).toBeUndefined()
+    expect(prunedOldestOf(undefined)).toBeUndefined()
   })
 })

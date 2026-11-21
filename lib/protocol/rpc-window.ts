@@ -46,3 +46,24 @@ export async function readRpcWindow(rpc: RpcWindowSource): Promise<RpcWindow> {
     return windowOf(await rpc.getLedgers({ startLedger: Math.max(1, sequence - LEDGERS_BEHIND), pagination: { limit: 1 } }))
   }
 }
+
+/** The refusal of a start before the oldest ledger: Stellar's, which names the range, and dRPC's, which names the first available state. */
+const PRUNED_RANGE = /startLedger must be within the ledger range:\s*(\d+)\s*-\s*(\d+)/
+const FIRST_STATE = /First available state is (\d+)/
+
+/**
+ * The oldest ledger a refusal of a too-old start names, or undefined for any other failure. The text
+ * is searched in the error's message and in the JSON-RPC error the HTTP answer carries (a 400 from
+ * dRPC says only "Request failed with status code 400" in its message).
+ */
+export function prunedOldestOf(error: unknown): number | undefined {
+  const e = error as { message?: unknown; response?: { data?: { error?: { message?: unknown } } } } | null
+  const texts = [typeof error === "string" ? error : e?.message, e?.response?.data?.error?.message].filter((t): t is string => typeof t === "string")
+  for (const text of texts) {
+    const range = PRUNED_RANGE.exec(text)
+    if (range) return Number(range[1])
+    const state = FIRST_STATE.exec(text)
+    if (state) return Number(state[1])
+  }
+  return undefined
+}

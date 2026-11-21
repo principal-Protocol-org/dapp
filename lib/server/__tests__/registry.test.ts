@@ -757,6 +757,32 @@ describe("discover and resolvedMarkets", () => {
     expect(restart.startLedger).toBeGreaterThanOrEqual(5_000)
   })
 
+  it("a first scan refused with dRPC's first available state starts again there, and a window read through getLedgers works", async () => {
+    const c = chain.deploy(20)
+    chain.events = [reg(c.pool, 300)]
+    // The window says 100 (a few ledgers older than the events state); getEvents refuses below 110 and names it.
+    const getEvents = chain.rpc.getEvents
+    chain.rpc.getEvents = async (req) => {
+      if (req.startLedger !== undefined && req.startLedger < 110) {
+        throw Object.assign(new Error("Request failed with status code 400"), {
+          response: { status: 400, data: { error: { code: 27, message: "Unknown state. First available state is 110" } } },
+        })
+      }
+      return getEvents(req)
+    }
+    const noHealth = {
+      ...chain.rpc,
+      getHealth: async () => {
+        throw Object.assign(new Error("Request failed with status code 400"), { response: { status: 400 } })
+      },
+      getLatestLedger: async () => ({ sequence: 1_000 }),
+      getLedgers: async () => ({ oldestLedger: 100, latestLedger: 1_000 }),
+    }
+    const result = await discover({ ...depsFor(manifestWith([])), rpc: noHealth })
+    expect(result.checked).toEqual([c.pool])
+    expect(chain.getEventsCalls.map((r) => (r as { startLedger?: number }).startLedger)).toEqual([100, 110])
+  })
+
   it("a scan past its deadline stops between pools, saves its place, and the next run resumes there", async () => {
     const a = chain.deploy(20)
     const b = chain.deploy(30)
