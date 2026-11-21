@@ -296,7 +296,7 @@ async function check(network) {
   const manifest = parseManifest(JSON.parse(readFileSync(path, "utf8")))
   if (manifest.network !== network) throw new UsageError(`config/manifests/${network}.json is for "${manifest.network}"`)
   const findings = validateManifest(manifest).filter((f) => f.severity === "error")
-  if (findings.length > 0) return { manifest, clock: null, rows: null, findings: findings.map((f) => `FAIL: manifest: ${f.message}`), retries: null }
+  if (findings.length > 0) return { manifest, rpcHost: new URL(serverRpcUrlOf(manifest)).host, clock: null, rows: null, findings: findings.map((f) => `FAIL: manifest: ${f.message}`), retries: null }
 
   const reason = (error) => userErrorMessage(error).split("\n")[0].slice(0, 200)
   const deadline = Date.now() + RUN_BUDGET_MS
@@ -435,7 +435,7 @@ async function check(network) {
     code: codeOf(null),
     unread: [...sharedUnread, ...failed(risk, pauses)],
   })
-  return { manifest, clock, rows, findings: [], retries }
+  return { manifest, rpcHost: new URL(serverRpcUrlOf(manifest)).host, clock, rows, findings: [], retries }
 }
 
 // ---------------------------------------------------------------- main
@@ -457,7 +457,7 @@ function parseArgs(argv) {
 
 async function main(argv) {
   const { network, json } = parseArgs(argv)
-  const { manifest, clock, rows, findings, retries } = await check(network)
+  const { manifest, rpcHost, clock, rows, findings, retries } = await check(network)
   const lines = rows === null ? [...findings, "FAIL: the manifest has errors; nothing was read"] : summarize(rows)
   const code = rows === null ? 1 : exitCode(rows)
   if (retries && retries.waits > 0) {
@@ -465,10 +465,10 @@ async function main(argv) {
   }
   const ledger = clock ? { sequence: clock.sequence, closeTime: new Date(clock.closeTime * 1000).toISOString() } : null
   if (json) {
-    console.log(JSON.stringify({ network, rpcUrl: manifest.rpcUrl, sourceCommit: manifest.sourceCommit, ledger, rows, lines, exitCode: code, retries }, null, 2))
+    console.log(JSON.stringify({ network, rpcHost, sourceCommit: manifest.sourceCommit, ledger, rows, lines, exitCode: code, retries }, null, 2))
   } else {
     const at = ledger ? `ledger ${ledger.sequence} (${ledger.closeTime})` : "ledger unread"
-    console.log(`Principal deployment check: ${network}, ${at}, RPC ${new URL(serverRpcUrlOf(manifest)).host}, contracts at ${manifest.sourceCommit.slice(0, 7)}`)
+    console.log(`Principal deployment check: ${network}, ${at}, RPC ${rpcHost}, contracts at ${manifest.sourceCommit.slice(0, 7)}`)
     console.log("")
     if (rows !== null) for (const line of table(rows)) console.log(line)
     console.log("")
