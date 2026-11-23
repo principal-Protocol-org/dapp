@@ -57,3 +57,6 @@ next-env.d.ts
 
 # superpowers workspaces (SDD ledgers, brainstorm mock-ups)
 .superpowers/
+
+# local Claude Code workspace block (rness hooks and skills); each clone keeps its own
+/.claude/
