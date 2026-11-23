@@ -323,27 +323,26 @@ what it would be paid by claiming its YT yield now, net of the YT fee.
 
 ### 5.3 One "How to verify" command, run as copied
 
-On `/dashboard/oracle?oracle=CD22HNREJHKTATZMFKALCTHJVKC35MHO2SAUSTG4M6PWLJZPS724J6X7`, the drawer of **Time until
-operations block · MOCKGILTS** showed, on 21 November 2026 at 20:31 UTC (the window was then 1 hour): value 39m 2s; raw value `get_reference_timestamp=1795291830;
-max_stale_seconds=3600; is_available=true`; ledger 65601404; RPC endpoint `lb.drpc.live`, fallback
-`soroban-rpc.mainnet.stellar.gateway.fm`; and three commands. We copied them and ran them at 20:31:38 UTC with the
-Stellar CLI 30.0.1:
+On `/dashboard/oracle` at 375 px, the drawer of **Time until operations block · MOCKUSDY**
+([`10-oracle-how-to-verify-375px.png`](tranche-3/10-oracle-how-to-verify-375px.png)) showed, on 23 November 2026 at
+01:48 UTC: value 21h 49m 2s; raw value `get_reference_timestamp=1795390620; max_stale_seconds=86400;
+is_available=true`; ledger 65622486; RPC endpoint `lb.drpc.live`, fallback `soroban-rpc.mainnet.stellar.gateway.fm`;
+and three commands. We ran them as copied right after, with the Stellar CLI 30.0.1:
 
 ```bash
-stellar contract invoke --rpc-url https://soroban-rpc.mainnet.stellar.gateway.fm --network-passphrase 'Public Global Stellar Network ; September 2015' --id CD22HNREJHKTATZMFKALCTHJVKC35MHO2SAUSTG4M6PWLJZPS724J6X7 --source-account GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF --send=no -- get_reference_timestamp
-# 1795291830   (= 2026-11-21 20:10:30 UTC)
-stellar contract invoke --rpc-url https://soroban-rpc.mainnet.stellar.gateway.fm --network-passphrase 'Public Global Stellar Network ; September 2015' --id CD22HNREJHKTATZMFKALCTHJVKC35MHO2SAUSTG4M6PWLJZPS724J6X7 --source-account GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF --send=no -- max_stale_seconds
-# 3600
-stellar contract invoke --rpc-url https://soroban-rpc.mainnet.stellar.gateway.fm --network-passphrase 'Public Global Stellar Network ; September 2015' --id CD22HNREJHKTATZMFKALCTHJVKC35MHO2SAUSTG4M6PWLJZPS724J6X7 --source-account GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF --send=no -- is_available
+stellar contract invoke --rpc-url https://soroban-rpc.mainnet.stellar.gateway.fm --network-passphrase 'Public Global Stellar Network ; September 2015' --id CCKXG4HSVH57AQTYJDNNXHQBCGNH6KRFNMCMATTMYFUX2TDQ7GD5K7IT --source-account GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF --send=no -- get_reference_timestamp
+# 1795390620   (= 2026-11-22 23:37:00 UTC)
+stellar contract invoke --rpc-url https://soroban-rpc.mainnet.stellar.gateway.fm --network-passphrase 'Public Global Stellar Network ; September 2015' --id CCKXG4HSVH57AQTYJDNNXHQBCGNH6KRFNMCMATTMYFUX2TDQ7GD5K7IT --source-account GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF --send=no -- max_stale_seconds
+# 86400
+stellar contract invoke --rpc-url https://soroban-rpc.mainnet.stellar.gateway.fm --network-passphrase 'Public Global Stellar Network ; September 2015' --id CCKXG4HSVH57AQTYJDNNXHQBCGNH6KRFNMCMATTMYFUX2TDQ7GD5K7IT --source-account GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF --send=no -- is_available
 # true
 ```
 
-The chain gave the drawer's values. 1795291830 + 3600 − ledger time = the countdown the page showed. Today
-`max_stale_seconds` answers `86400`.
+The chain gave the drawer's values. 1795390620 + 86400 − ledger time = the countdown the page showed.
 
 ### 5.4 Screenshots
 
-In [tranche-3/](tranche-3/), taken on 21 November 2026 between 20:16 and 20:18 UTC on <https://principalmarket.fi> by
+In [tranche-3/](tranche-3/), taken on 23 November 2026 at 01:47 and 01:48 UTC on <https://principalmarket.fi> by
 `pnpm dashboard:layout --base https://principalmarket.fi --theme light|dark --shots <dir>`:
 
 | File | What |
@@ -357,10 +356,9 @@ In [tranche-3/](tranche-3/), taken on 21 November 2026 between 20:16 and 20:18 U
 | `07-activity.png` | the activity page |
 | `08-overview-dark.png` | the overview, dark theme |
 | `09-oracle-375px.png` | the oracle page at 375 px wide |
-| `10-oracle-how-to-verify-375px.png` | a "How to verify" drawer at 375 px (Time until operations block · MOCKUSDY: `is_available=false`) |
+| `10-oracle-how-to-verify-375px.png` | a "How to verify" drawer at 375 px (Time until operations block · MOCKUSDY, [§5.3](#53-one-how-to-verify-command-run-as-copied)) |
 
-They show the state of that moment: the oracles' window was then 1 hour, so four oracles read stale and four critical
-alerts were open. The live pages show today's values.
+The same run checks the layout at 375 px (page width, tables, drawers): 24 of 24 checks passed.
 
 ## 6. The oracle keeper
 

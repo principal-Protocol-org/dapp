@@ -287,10 +287,9 @@ step ([open item 3](#open-items)).
 1. Open <https://principalmarket.fi/dashboard>, with no wallet. The banner reads "Stellar Mainnet · These markets use
    mock assets issued by Principal for testing." The tabs are **Overview**, **Markets**, **Oracle**, **Risk**,
    **Compliance** and **Activity**. Each view says its ledger, the age of its reads, and "Refreshes every 1 min".
-2. Compare with the screenshots of the live site in [tranche-3/](tranche-3/), taken on 21 November 2026, the go-live
-   day (the oracles' window was then 1 hour, so most oracles read stale): `01-overview.png` to `07-activity.png`
-   (desktop, light), `08-overview-dark.png`, and `09-oracle-375px.png` and `10-oracle-how-to-verify-375px.png` at phone
-   width
+2. Compare with the screenshots of the live site in [tranche-3/](tranche-3/), taken on 23 November 2026:
+   `01-overview.png` to `07-activity.png` (desktop, light), `08-overview-dark.png`, and `09-oracle-375px.png` and
+   `10-oracle-how-to-verify-375px.png` at phone width
    ([evidence §5.4](TRANCHE_3_EVIDENCE.md#54-screenshots)).
 3. The monitoring also has public JSON: <https://principalmarket.fi/api/health> (ledger, event index, keeper, open
    alerts) and <https://principalmarket.fi/api/dashboard/alerts>.
