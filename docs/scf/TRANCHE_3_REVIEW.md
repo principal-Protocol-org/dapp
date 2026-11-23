@@ -411,7 +411,8 @@ with one missed heartbeat to spare ([evidence §6.3](TRANCHE_3_EVIDENCE.md#63-fr
 ### 3.2 Current price and freshness status are visible on the dashboard
 
 1. Open <https://principalmarket.fi/dashboard/oracle>. The list shows each oracle's asset, **State** (FRESH or STALE),
-   **Blocks in** (a countdown, or "Stale") and **Update path** (Feed).
+   **Blocks in** (a countdown, or "Stale") and **Update path**: Feed, or Push when the contracts team's admin set the
+   value itself, for example to restart the window while the feed price sits below the stored value.
 2. Pick an oracle. **Reference value** shows the **Value**, its **Timestamp**, **Freshness** (the value's age
    against the window) and **Time until operations block**, with "Operations blocked when stale: mint, trades,
    single-sided liquidity, redemption". **Feed** shows the feed contract, the asset key, the **Feed price**, its tick
