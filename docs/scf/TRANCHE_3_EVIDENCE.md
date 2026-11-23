@@ -1,96 +1,45 @@
 # Tranche 3 (Mainnet): evidence
 
-The facts behind [TRANCHE_3_REVIEW.md](TRANCHE_3_REVIEW.md): deployed addresses, wasm hashes, transaction hashes, live
-reads, CI runs and screenshots. Each section says where its data comes from and when it was read. The dApp went live on
-Stellar Mainnet on 21 November 2026. All times are UTC.
+The addresses, hashes, transactions and live reads behind [TRANCHE_3_REVIEW.md](TRANCHE_3_REVIEW.md), as of
+23 November 2026. All times are UTC. Every address is public; no key and no keyed RPC URL appears here.
 
-Every address here is public. No secret key, no name of a key in a keystore and no RPC key appears in this file. The
-Mainnet RPC is named by its host only.
+The five markets use mock assets issued by Principal for testing (MOCKUSDY, MOCKUSTRY, MOCKGILTS, MOCKCETES, MOCKXAUM).
+Each market's OracleAdapter reads the real asset's price from RedStone's SEP-40 feed on Mainnet.
 
-**The five Mainnet markets use mock assets.** MOCKUSDY, MOCKUSTRY, MOCKGILTS, MOCKCETES and MOCKXAUM are classic
-Stellar assets issued by Principal for testing. They are not USDY or the other real assets. Each market's
-OracleAdapter reads the price of the real asset it tracks (USDY, USTRY, GILTS, CETES, XAUM) from RedStone's SEP-40
-price feed on Mainnet. The contracts are the production contracts. Principal cannot create a market on the real USDY,
-because market creation must be signed by the asset's own issuer authority (the contracts repository's
-[MAINNET_DEPLOYMENT_EVIDENCE.md §1](https://github.com/principal-Protocol-org/principal/blob/15b1ec5354a722b227085d1211e7120a14ae20e3/docs/MAINNET_DEPLOYMENT_EVIDENCE.md#1-why-mock-assets)).
-
-Links:
-- transactions, contracts and accounts on stellar.expert: `https://stellar.expert/explorer/public/tx/<hash>`,
-  `…/contract/<address>`, `…/account/<address>`; the same transactions on Horizon, as JSON:
-  `https://horizon.stellar.org/transactions/<hash>`;
-- the dApp's app code at
-  [`783d51c`](https://github.com/principal-Protocol-org/dapp/tree/783d51c51003376884ccec1d9eab6d44d27d59fd) (later
-  commits on `main` change only documentation);
-- the contracts repository at branch `mainnet`,
-  [`15b1ec5`](https://github.com/principal-Protocol-org/principal/tree/15b1ec5354a722b227085d1211e7120a14ae20e3)
-  (the contracts team's Mainnet documents and manifests), and at the deployed source,
-  [`3af9388`](https://github.com/principal-Protocol-org/principal/tree/3af938853e5818aa8d56bd35670b9a19cfa55a78).
-
-## 1. Production
-
-### 1.1 The site and its deployment
+## 1. The site
 
 | Item | Value |
 |---|---|
-| Site | <https://principalmarket.fi>: the app at `/app`, the dashboard at `/dashboard`, the docs at `/docs`. The Testnet app stays at <https://testnet.principalmarket.fi>. |
-| What it reads | [config/manifests/mainnet.json](https://github.com/principal-Protocol-org/dapp/blob/783d51c51003376884ccec1d9eab6d44d27d59fd/config/manifests/mainnet.json) ([§2.1](#21-the-manifest)). `/app` shows the banner "Stellar Mainnet · These markets use mock assets issued by Principal for testing." and lists the five markets, each with "Mock asset issued by Principal for testing. It follows the price of USDY and is not USDY." (or USTRY, GILTS, CETES, XAUM). |
+| Site | <https://principalmarket.fi>: the app at `/app`, the dashboard at `/dashboard`, the docs at `/docs` |
 | Go-live | 21 November 2026, 12:39 UTC |
-| App code | [`783d51c`](https://github.com/principal-Protocol-org/dapp/tree/783d51c51003376884ccec1d9eab6d44d27d59fd) (the tree of `3cffbdd`); later commits on `main` change only documentation |
-| CI on that code (pull request [#9](https://github.com/principal-Protocol-org/dapp/pull/9), head `3cffbdd`) | [CI run 44919042817](https://github.com/principal-Protocol-org/dapp/actions/runs/44919042817): green (lint, typecheck, unit tests, builds). [E2E Testnet run 44919042837](https://github.com/principal-Protocol-org/dapp/actions/runs/44919042837): Suite A 13 of 13 tests, Suite B 10 of 10. |
+| App code | [`783d51c`](https://github.com/principal-Protocol-org/dapp/tree/783d51c51003376884ccec1d9eab6d44d27d59fd); later commits on `main` change only documentation |
+| CI on that code | [CI run 44919042817](https://github.com/principal-Protocol-org/dapp/actions/runs/44919042817): green. [E2E run 44919042837](https://github.com/principal-Protocol-org/dapp/actions/runs/44919042837): Suite A 13 of 13, Suite B 10 of 10, on Stellar Testnet (Suite B deploys the Mainnet source commit `3af9388` there) |
+| Scheduled jobs | `/api/cron/index` (the event index), `/api/cron/oracle` (the keeper) and `/api/cron/alerts` every 5 minutes, `/api/cron/record` (rates) every 15; <https://principalmarket.fi/api/health> shows them running |
 
-The end-to-end suites run on **Stellar Testnet**, never on Mainnet: Suite A is the live journey on the official Testnet
-market (contracts `665bb67`); Suite B deploys a throwaway market on Testnet built from the **Mainnet source commit**
-`3af9388`, so the Mainnet contract interfaces are exercised end to end without signing anything on Mainnet.
+## 2. Contracts
 
-### 1.2 Scheduled jobs
+Source: the app's manifest, [config/manifests/mainnet.json](https://github.com/principal-Protocol-org/dapp/blob/783d51c51003376884ccec1d9eab6d44d27d59fd/config/manifests/mainnet.json), source commit
+[`3af9388`](https://github.com/principal-Protocol-org/principal/tree/3af938853e5818aa8d56bd35670b9a19cfa55a78). Its
+addresses and hashes equal the contracts team's
+[deployments/mainnet-dapp-manifest.json](https://github.com/principal-Protocol-org/principal/blob/15b1ec5354a722b227085d1211e7120a14ae20e3/deployments/mainnet-dapp-manifest.json). The contracts team's
+deployment record is one manifest per market, with every address, wasm SHA-256 and transaction:
+[MOCKUSDY](https://github.com/principal-Protocol-org/principal/blob/15b1ec5354a722b227085d1211e7120a14ae20e3/deployments/mainnet-mockusdy/deployment-manifest.json),
+[MOCKUSTRY](https://github.com/principal-Protocol-org/principal/blob/15b1ec5354a722b227085d1211e7120a14ae20e3/deployments/mainnet-ustry/deployment-manifest.json),
+[MOCKGILTS](https://github.com/principal-Protocol-org/principal/blob/15b1ec5354a722b227085d1211e7120a14ae20e3/deployments/mainnet-gilts/deployment-manifest.json),
+[MOCKCETES](https://github.com/principal-Protocol-org/principal/blob/15b1ec5354a722b227085d1211e7120a14ae20e3/deployments/mainnet-cetes/deployment-manifest.json),
+[MOCKXAUM](https://github.com/principal-Protocol-org/principal/blob/15b1ec5354a722b227085d1211e7120a14ae20e3/deployments/mainnet-xaum/deployment-manifest.json). All five say `git_tree_dirty: true`, and MOCKUSDY's
+`transactions[]` lists two hashes under wrong steps; its per-contract `deploy_tx` and `init_tx` fields are right.
 
-Upstash QStash calls four routes of the Production deployment. Each refuses any other caller (a plain request to
-`https://principalmarket.fi/api/cron/alerts` answers 401).
+### 2.1 Addresses
 
-| Route | Schedule | What it does |
-|---|---|---|
-| `/api/cron/record` | every 15 minutes | stores each market's rates (the app's charts; `/api/markets/<pool>/history`) |
-| `/api/cron/index` | every 5 minutes | indexes the contracts' events into the database |
-| `/api/cron/oracle` | minutes 2 to 57, every 5 | the oracle keeper ([§6](#6-the-oracle-keeper)) |
-| `/api/cron/alerts` | every 5 minutes | the alert check ([§8](#8-alerts)) |
+Shared contracts:
 
-<https://principalmarket.fi/api/health> shows that they run: the event index's lag and gaps, each oracle's keeper
-health and last run, and the open alerts.
-
-## 2. The Mainnet deployment
-
-### 2.1 The manifest
-
-Source: [config/manifests/mainnet.json](https://github.com/principal-Protocol-org/dapp/blob/783d51c51003376884ccec1d9eab6d44d27d59fd/config/manifests/mainnet.json).
-It is the contracts team's
-[deployments/mainnet-dapp-manifest.json](https://github.com/principal-Protocol-org/principal/blob/15b1ec5354a722b227085d1211e7120a14ae20e3/deployments/mainnet-dapp-manifest.json)
-with the dApp's own fields added. The shared contracts, every market's contracts, the maturities, the wasm hashes and
-the source commit are equal in both files (checked against `15b1ec5`).
-
-| Field | Value |
+| Contract | Address |
 |---|---|
-| Network | Stellar Mainnet, `Public Global Stellar Network ; September 2015`; Horizon `https://horizon.stellar.org` |
-| RPC | primary host `lb.drpc.live` (a keyed URL, not reproduced here); fallback and the dashboard's "How to verify" commands: `https://soroban-rpc.mainnet.stellar.gateway.fm` (`verifyRpcUrl`) |
-| `sourceCommit` | [`3af938853e5818aa8d56bd35670b9a19cfa55a78`](https://github.com/principal-Protocol-org/principal/commit/3af938853e5818aa8d56bd35670b9a19cfa55a78). The contract sources are identical at `4b5bc2b` (the commit the contracts team's build section names) and at `mainnet` `15b1ec5`: `git diff` shows no change under `contracts/`, nor in `Cargo.toml` or `Cargo.lock`. |
-| `protocolAbi` | `2` (the `3af9388` contract interfaces) |
-| `deployLedger` | `65525735`; `createdLedgers` gives the first ledger of the 20 contracts added later (the four markets deployed on 20 November) |
-| `generatedAt` | `2026-11-21T00:00:00Z` |
-| `accessContact` | `hello@principalmarket.fi`, the address the app shows for a Mainnet access request |
-| Markets | the five below, all 90-day markets |
-
-### 2.2 Contracts
-
-Source: the manifest. "On chain" is the read-only check of [§2.3](#23-the-read-only-deployment-check): each address's
-code hash, read from the chain, equals the manifest's `wasmHashes`, 44 of 44.
-
-Shared contracts (one instance each, used by every market):
-
-| Contract | Address | Wasm SHA-256 |
-|---|---|---|
-| Router | [CCM4QQ…7QF5](https://stellar.expert/explorer/public/contract/CCM4QQUKTD2CUTRSNNI6OO4JHYEF7MHKBMKSM5JYJNFLKSTAZBQD7QF5) | `2a0997317651edb0f7e2bd753570b03a88462aa6d216c14b06ebec246bb3c1c2` |
-| Permissioning | [CBCWU5…RTXJ](https://stellar.expert/explorer/public/contract/CBCWU57AILKFDOYQAESFRPH57Q6UK66E7RBYV4ICZHNNGWIWFAHVRTXJ) | `4437468dbbda6d86a115f188de877135b0b5a400b69ad7e9444cf269c54f969c` |
-| RiskControl | [CBHCRR…WQ5G](https://stellar.expert/explorer/public/contract/CBHCRRLWHS7KRQNAXYY3OMNDTSXDNJKCDK6KPUUJPFGDBSN76JEWWQ5G) | `ac75508d24c5457de7db1106bf8b5e9b62ea436f3dfd1a309fda5138110c2526` |
-| MarketFactory | [CDYH7U…S65T](https://stellar.expert/explorer/public/contract/CDYH7UV24XS7G7MDRTBJUS4PJNKKUXTLUUTL67MR5CYJAXSPPHNWS65T) | `6c21fc0e78f3064f67ae30924b8f9ca0223fbb61a20ac640cceca7b152456759` |
+| Router | [CCM4QQ…7QF5](https://stellar.expert/explorer/public/contract/CCM4QQUKTD2CUTRSNNI6OO4JHYEF7MHKBMKSM5JYJNFLKSTAZBQD7QF5) |
+| Permissioning | [CBCWU5…RTXJ](https://stellar.expert/explorer/public/contract/CBCWU57AILKFDOYQAESFRPH57Q6UK66E7RBYV4ICZHNNGWIWFAHVRTXJ) |
+| RiskControl | [CBHCRR…WQ5G](https://stellar.expert/explorer/public/contract/CBHCRRLWHS7KRQNAXYY3OMNDTSXDNJKCDK6KPUUJPFGDBSN76JEWWQ5G) |
+| MarketFactory | [CDYH7U…S65T](https://stellar.expert/explorer/public/contract/CDYH7UV24XS7G7MDRTBJUS4PJNKKUXTLUUTL67MR5CYJAXSPPHNWS65T) |
 
 The five markets (MOCKUSDY's OracleAdapter is also the manifest's `shared.oracle`):
 
@@ -110,22 +59,33 @@ The five markets (MOCKUSDY's OracleAdapter is also the manifest's `shared.oracle
 | MarketPool | [CAON3F…GW4I](https://stellar.expert/explorer/public/contract/CAON3FAQU5W6SGZFWOM22GONNKZEIN4AGVTKMCWCC6PI43QWB27MGW4I) | [CABAS7…7A5S](https://stellar.expert/explorer/public/contract/CABAS76ZTOAKMQEBNC6TJNF4XINX7H7AH4EFVXTR4ACZNJR7NHT27A5S) | [CD5ADN…QILK](https://stellar.expert/explorer/public/contract/CD5ADNE76FY2D722LMQJFD7AG74UU3OYQVXSNQNI33EYPSEEUZY4QILK) | [CARSHE…YNZG](https://stellar.expert/explorer/public/contract/CARSHEWMUGH4LINSO3ST4QFJSCDD47A7OCXV55QLLCHMEZULV6CUYNZG) | [CDXOBS…5RKL](https://stellar.expert/explorer/public/contract/CDXOBSBR6FX5M6OJQEPMQJTVJ2K7OZRWBVGYAMR2ZNUUSZX63OOS5RKL) |
 | RecoveryEscrow | [CBHHRT…67SJ](https://stellar.expert/explorer/public/contract/CBHHRTTRTXQM3OFDOBL6QORP6JS5RVIRXSF5B3C4TMOVSIQBDKKA67SJ) | [CCDGIH…J7U5](https://stellar.expert/explorer/public/contract/CCDGIH52RBTLF3REZGQVVOUL7Z3LZT7OKUE4YBBJWTHF5SGU4QVBJ7U5) | [CAI25Q…KL7N](https://stellar.expert/explorer/public/contract/CAI25QPLB7KYSRNXJHCXAZVHI36PAEZJET5PJJKC326KVDDGUURUKL7N) | [CBHVXY…OLIM](https://stellar.expert/explorer/public/contract/CBHVXY5WUDYATTB4GAT44U2BBBAPTYFL73HER7QI5PRQI4VUM3S7OLIM) | [CAC77K…XLOO](https://stellar.expert/explorer/public/contract/CAC77KCD7QG4CCOBOM3XXDD43256O2CIEN6L4EECPKT5RBAKDZJJXLOO) |
 
-Every market uses the same eight per-market wasm hashes, those of the contracts team's build ([§3.2](#32-the-reproducible-build)):
-OracleAdapter `8581bbba…0c1b0`, SYWrapper `be4b12cf…27c9a`, PTToken `db025340…578b2`, YTToken `c83a2a8d…02654`,
-MarketConfig `11b0cbdf…c79a8`, PrincipalManager `e2d04b45…86115`, MarketPool `52285a25…aa112`, RecoveryEscrow
-`dadea71f…441e8`. The full hashes are in the manifest's `wasmHashes`.
+The contract instances live until about 17 to 21 March 2027 (read on 21 November 2026, ledger 65601474).
 
-MOCKUSTRY, MOCKGILTS, MOCKCETES and MOCKXAUM were deployed on 20 November 2026. The contracts repository also keeps an
-earlier, abandoned set of these four markets (each `deployment-manifest-v1-broken.json`); nothing here refers to it.
+### 2.2 Code hashes
+
+The 12 contract codes, as built by the contracts team and pinned in the manifest's `wasmHashes`. Every market uses the
+same eight per-market codes.
+
+| Contract | `wasmHashes` key | SHA-256 |
+|---|---|---|
+| Router | `router` | `2a0997317651edb0f7e2bd753570b03a88462aa6d216c14b06ebec246bb3c1c2` |
+| Permissioning | `permissioning` | `4437468dbbda6d86a115f188de877135b0b5a400b69ad7e9444cf269c54f969c` |
+| RiskControl | `riskControl` | `ac75508d24c5457de7db1106bf8b5e9b62ea436f3dfd1a309fda5138110c2526` |
+| MarketFactory | `factory` | `6c21fc0e78f3064f67ae30924b8f9ca0223fbb61a20ac640cceca7b152456759` |
+| OracleAdapter | `oracle` | `8581bbba82bb57f5c5c9c00adf98b1691ad20821840e55a67ad8d7ecace0c1b0` |
+| SYWrapper | `sy` | `be4b12cf3c16461b7e71fa225ed2363aba62bdc42c1ea5c08c98d7ede6a27c9a` |
+| PTToken | `pt` | `db025340887ef9d92922e2444da24edab5fec125460e9adc373a5f77b26578b2` |
+| YTToken | `yt` | `c83a2a8d2a4a79ff5348675581a27d48e52a920d83dc887672840d4a79c02654` |
+| MarketConfig | `config` | `11b0cbdf10a8d204fcb568c54529801747feac05208c5bcbfaefd822ad0c79a8` |
+| PrincipalManager | `manager` | `e2d04b45b867d0dbc41660ac0d97d3e705005ddfb10350bb030d25b1aff86115` |
+| MarketPool | `pool` | `52285a25bbf372d0e5d22ba565b76af6a7e832422df83b6a4809de8adf3aa112` |
+| RecoveryEscrow | `recoveryEscrow` | `dadea71fcfb84adcfb4691f472551f490cf440c5aaae5c6b5e5d4bb6f61441e8` |
 
 ### 2.3 The read-only deployment check
 
-Source: [scripts/smoke.mjs](https://github.com/principal-Protocol-org/dapp/blob/783d51c51003376884ccec1d9eab6d44d27d59fd/scripts/smoke.mjs),
-run with `pnpm smoke:mainnet` from a checkout of the dApp at `3cffbdd` (the tree of `783d51c`), on 23 November 2026 at
-01:38 UTC. It needs no key and signs nothing. It reads, from the RPC the manifest names (it prints the host
-only): each market's topology against the manifest, each oracle's state and feed, the pauses, and the on-chain code
-hash of every manifest contract. It exits 1 on a topology or code mismatch or an unreadable contract; a stale oracle
-is reported and does not fail it.
+`pnpm smoke:mainnet` ([scripts/smoke.mjs](https://github.com/principal-Protocol-org/dapp/blob/783d51c51003376884ccec1d9eab6d44d27d59fd/scripts/smoke.mjs)), run on 23 November 2026 at 01:38 UTC. It needs no
+key and signs nothing. It reads each market's topology, each oracle and the pauses, and the code hash of every manifest
+contract, which it compares with `wasmHashes`.
 
 ```text
 Principal deployment check: mainnet, ledger 65622369 (2026-11-23T01:38:11.000Z), RPC lb.drpc.live, contracts at 3af9388
@@ -142,80 +102,22 @@ shared contracts                   -         -                   -              
 PASS: 5 of 5 topologies match, 44 of 44 code hashes match (12 pinned hashes), 0 failed reads; 5 oracles: 5 fresh; nothing paused
 ```
 
-The 44 code hashes are the 4 shared contracts and 8 contracts per market (its OracleAdapter and its seven market
-contracts). `pnpm smoke:mainnet --json` gives the same result with every contract's expected and actual hash.
-MOCKXAUM's stored value is above the feed's latest price: the adapter never lowers its value, so it waits for the feed
-to rise again ([TRANCHE_3_REVIEW.md, Known limits](TRANCHE_3_REVIEW.md#known-limits)).
-
-### 2.4 How long the contracts live
-
-Soroban contract instances expire unless their time to live is extended. Read with one `getLedgerEntries` call on the
-public gateway (`https://soroban-rpc.mainnet.stellar.gateway.fm`) on 21 November 2026 at 20:37 UTC, ledger 65601474, for the instance of all
-44 manifest contracts:
-
-| | Ledger | About (UTC, at 5.0 s per ledger) |
-|---|---|---|
-| Earliest `liveUntilLedgerSeq` (Permissioning, then MOCKUSDY's OracleAdapter and RiskControl) | 67599335 | 17 March 2027 |
-| Latest | 67658712 | 21 March 2027 |
-
-The markets mature on 15 and 18 February 2027. Someone must extend the instances before mid-March 2027
-([§10](#10-open-items), item 2). The contract code entries and the contracts' stored data have their own lifetimes,
-not read here.
-
-### 2.5 Roles
-
-Public addresses only. No Mainnet key of the contracts team is on the app's servers: the README's
-[Mainnet go-live](https://github.com/principal-Protocol-org/dapp/blob/783d51c51003376884ccec1d9eab6d44d27d59fd/README.md#mainnet-go-live)
-sets "never a faucet or admin secret" on Production. By that checklist, the app's server holds one Mainnet signing key,
-the keeper's.
+### 2.4 Roles
 
 | Role | Address | Source |
 |---|---|---|
-| Protocol admin (contracts team): admin of the five OracleAdapters, a pauser by RiskControl's rule, the protocol admin of the markets' fees | [GDZN5W…5NCB](https://stellar.expert/explorer/public/account/GDZN5WVOUBRTZKADUULRXJOGVGNK4WWXJPSALTVOORLSU5NFOZ2P5NCB) | `get_admin` on each OracleAdapter; the risk page; the market pages; [MAINNET_ADDRESSES.md](https://github.com/principal-Protocol-org/principal/blob/15b1ec5354a722b227085d1211e7120a14ae20e3/docs/MAINNET_ADDRESSES.md) |
-| Issuers (contracts team): one per mock asset, the SAC admin of its asset and the market's creator | [§2.2](#22-contracts) | the compliance page (`admin()` on each SAC); the market pages |
+| Protocol admin (contracts team): admin of the five OracleAdapters, a pauser by RiskControl's rule, the protocol admin of the markets' fees | [GDZN5W…5NCB](https://stellar.expert/explorer/public/account/GDZN5WVOUBRTZKADUULRXJOGVGNK4WWXJPSALTVOORLSU5NFOZ2P5NCB) | `get_admin` on each OracleAdapter; the risk page; the market pages |
+| Issuers (contracts team): one per mock asset, the SAC admin of its asset and the market's creator | [§2.1](#21-addresses) | the compliance page |
 | Treasury: receives the protocol's fee share | [GBUVAH…VSXW](https://stellar.expert/explorer/public/account/GBUVAHYJNCXZWUK3NIOVJ6EYQRSXMVT2XOUEASS3VAG4EWIXXWYSVSXW) | the market pages |
-| The contracts team's test account, which signed their deposits and mints ([§3.1](#31-deposit-and-mint-on-every-market)) | [GCOMBI…R5BM](https://stellar.expert/explorer/public/account/GCOMBIYWZ3HIMAS7FLFERQMVZIDVIMFZAAV7A2KMCDV3RAKP5NL5R5BM) | Horizon |
-| The developer's test wallet, which signed the app's smoke test ([§2.6](#26-the-apps-signed-smoke-test)); granted on all five markets by the contracts team | [GBQEUZ…7VNH](https://stellar.expert/explorer/public/account/GBQEUZZ6HRC7RFT23LWWQWWZ5RQMGCGE4GUCKYKKI2EXDABJA4NS7VNH) | Horizon; `is_allowed` and `is_allowed_for_asset` on Permissioning |
-| The app's oracle keeper: no role in any contract; it only pays the fees of `sync_from_feed`, which anyone may call | [GBLY3F…MZXS](https://stellar.expert/explorer/public/account/GBLY3FDTJFPYGI425TK6C7UUFBXYJ4DHWBXNHKWY7RMNZ43JLGUOMZXS) | the oracle page's keeper runs; Horizon ([§6](#6-the-oracle-keeper)) |
+| The contracts team's test account, which signed their deposits and mints ([§3.1](#31-on-every-market-by-the-contracts-team)) | [GCOMBI…R5BM](https://stellar.expert/explorer/public/account/GCOMBIYWZ3HIMAS7FLFERQMVZIDVIMFZAAV7A2KMCDV3RAKP5NL5R5BM) | Horizon |
+| The developer's test wallet, which signed the app's smoke test ([§3.2](#32-through-the-app)); granted on all five markets by the contracts team | [GBQEUZ…7VNH](https://stellar.expert/explorer/public/account/GBQEUZZ6HRC7RFT23LWWQWWZ5RQMGCGE4GUCKYKKI2EXDABJA4NS7VNH) | Horizon; `is_allowed` and `is_allowed_for_asset` on Permissioning |
+| The app's oracle keeper: no role in any contract; it only pays the fees of `sync_from_feed`, which anyone may call | [GBLY3F…MZXS](https://stellar.expert/explorer/public/account/GBLY3FDTJFPYGI425TK6C7UUFBXYJ4DHWBXNHKWY7RMNZ43JLGUOMZXS) | the oracle page's keeper runs; Horizon ([§7](#7-the-oracle-keeper-and-freshness)) |
 
-Only the Permissioning admin (the contracts team) can grant an account access to the markets. The app's Mainnet
-access flow therefore shows what is missing, offers the trustline, and points to `hello@principalmarket.fi`.
+## 3. Deposit and mint
 
-### 2.6 The app's signed smoke test
+### 3.1 On every market, by the contracts team
 
-The developer signed a deposit and a mint through principalmarket.fi on MOCKUSDY, with the test wallet GBQEUZ…7VNH
-(its trustline added in the app; the contracts team's grants are in
-[their evidence §15](https://github.com/principal-Protocol-org/principal/blob/15b1ec5354a722b227085d1211e7120a14ae20e3/docs/MAINNET_DEPLOYMENT_EVIDENCE.md#15-dapp-teams-smoke-test-wallet-granted-on-all-5-markets-2026-11-23)). Both are read on
-Horizon: successful, source GBQEUZ…7VNH, 1 MOCKUSDY sent each time to MOCKUSDY's SYWrapper `CCY5P6…GJ7Q`.
-
-| Step in the app | Call | Transaction |
-|---|---|---|
-| Quick actions → "Deposit MOCKUSDY → SY", 1 MOCKUSDY | `deposit` on MOCKUSDY's SYWrapper `CCY5P6…GJ7Q` | 23 Nov 2026 18:21:41 UTC, ledger 65634411, [5eb41384…4c67](https://stellar.expert/explorer/public/tx/5eb413846ea858d1ef014afab5c609823099585bb3709019b43f482a3b974c67) |
-| Quick actions → "Split MOCKUSDY → PT + YT", 1 MOCKUSDY | `wrap_and_mint` on the Router `CCM4QQ…7QF5`: deposit and mint in one transaction | 23 Nov 2026 18:32:51 UTC, ledger 65634545, [dba674d5…5ee6](https://stellar.expert/explorer/public/tx/dba674d509368d8eae9b00b3a74c7f016da05fd08de9e7ddebfd4a1db3045ee6) |
-
-Afterwards the wallet holds 1 SY (`balance_of` on the SYWrapper) and 1.1535997 PT and 1.1535997 YT (`balance` on
-MOCKUSDY's PT and YT), read by simulation.
-
-## 3. The contracts team's Mainnet evidence
-
-Source: the contracts repository, branch `mainnet` at `15b1ec5`:
-[docs/MAINNET_DEPLOYMENT_EVIDENCE.md](https://github.com/principal-Protocol-org/principal/blob/15b1ec5354a722b227085d1211e7120a14ae20e3/docs/MAINNET_DEPLOYMENT_EVIDENCE.md),
-[docs/MAINNET_ADDRESSES.md](https://github.com/principal-Protocol-org/principal/blob/15b1ec5354a722b227085d1211e7120a14ae20e3/docs/MAINNET_ADDRESSES.md),
-[docs/MAINNET_TRANSACTION_LEDGER.md](https://github.com/principal-Protocol-org/principal/blob/15b1ec5354a722b227085d1211e7120a14ae20e3/docs/MAINNET_TRANSACTION_LEDGER.md)
-(complete through 18 November 2026, as its header says) and the five market manifests
-[mainnet-mockusdy](https://github.com/principal-Protocol-org/principal/blob/15b1ec5354a722b227085d1211e7120a14ae20e3/deployments/mainnet-mockusdy/deployment-manifest.json),
-[mainnet-ustry](https://github.com/principal-Protocol-org/principal/blob/15b1ec5354a722b227085d1211e7120a14ae20e3/deployments/mainnet-ustry/deployment-manifest.json),
-[mainnet-gilts](https://github.com/principal-Protocol-org/principal/blob/15b1ec5354a722b227085d1211e7120a14ae20e3/deployments/mainnet-gilts/deployment-manifest.json),
-[mainnet-cetes](https://github.com/principal-Protocol-org/principal/blob/15b1ec5354a722b227085d1211e7120a14ae20e3/deployments/mainnet-cetes/deployment-manifest.json),
-[mainnet-xaum](https://github.com/principal-Protocol-org/principal/blob/15b1ec5354a722b227085d1211e7120a14ae20e3/deployments/mainnet-xaum/deployment-manifest.json).
-
-### 3.1 Deposit and mint on every market
-
-The contracts team deposited a mock asset and minted PT and YT on each of the five markets, from the command line,
-with their test account GCOMBI…R5BM. For MOCKUSDY the doc's §5 "Real transaction testing" lists them; for the four
-others, §12's table "Real testing proof on every v2 market". We read every hash below on Horizon on 21 November
-2026: each is successful, signed by GCOMBI…R5BM, and invokes the function named on the market's own contract from
-[§2.2](#22-contracts).
+From the command line, with their test account GCOMBI…R5BM. Each is successful on Horizon (read on 21 November 2026).
 
 | Market | Deposit (`deposit` on its SYWrapper) | Mint PT + YT (`mint` on its PrincipalManager) |
 |---|---|---|
@@ -225,89 +127,53 @@ others, §12's table "Real testing proof on every v2 market". We read every hash
 | MOCKCETES | 20 Nov 2026 21:49:14, ledger 65585062, [9f71d18b…36f3](https://stellar.expert/explorer/public/tx/9f71d18bcfbd21902c6f283128450401e0180780439bd2746981eb633a9236f3) | 20 Nov 2026 21:49:19, ledger 65585063, [4240d062…45be](https://stellar.expert/explorer/public/tx/4240d062f34ff6f10b39c7784006f8a5b9ad18d148483e578b912471ea0a45be) |
 | MOCKXAUM | 20 Nov 2026 21:59:24, ledger 65585184, [2c1d8e23…25f5](https://stellar.expert/explorer/public/tx/2c1d8e23e329e0208a7095c7842e0b6e616712cb572fb682d50a82b1678025f5) | 20 Nov 2026 21:59:34, ledger 65585186, [83b5529b…ebc1](https://stellar.expert/explorer/public/tx/83b5529b6203b39348c0568dbebb4531a6f4b7dbdc56c4db491ec2da1553ebc1) |
 
-The same doc records seed liquidity and a swap on each market. It also records, on a separate 30-minute MOCKUSDY market
-(`mainnet-CDQYZU-CA74VH`, matured, not listed by the app), a full lifecycle on Mainnet: deposit, mint, settlement and
-redemption at maturity.
+### 3.2 Through the app
 
-These are the contracts team's command-line runs. The app's own signed deposit and mint, through principalmarket.fi,
-are in [§2.6](#26-the-apps-signed-smoke-test).
+Signed in principalmarket.fi with the developer's test wallet GBQEUZ…7VNH, which the contracts team granted on all five
+markets. Both successful on Horizon.
 
-### 3.2 The reproducible build
+| Step in the app | Call | Transaction |
+|---|---|---|
+| Quick actions → "Deposit MOCKUSDY → SY", 1 MOCKUSDY | `deposit` on MOCKUSDY's SYWrapper `CCY5P6…GJ7Q` | 23 Nov 2026 18:21:41 UTC, ledger 65634411, [5eb41384…4c67](https://stellar.expert/explorer/public/tx/5eb413846ea858d1ef014afab5c609823099585bb3709019b43f482a3b974c67) |
+| Quick actions → "Split MOCKUSDY → PT + YT", 1 MOCKUSDY | `wrap_and_mint` on the Router `CCM4QQ…7QF5`: deposit and mint in one transaction | 23 Nov 2026 18:32:51 UTC, ledger 65634545, [dba674d5…5ee6](https://stellar.expert/explorer/public/tx/dba674d509368d8eae9b00b3a74c7f016da05fd08de9e7ddebfd4a1db3045ee6) |
 
-What the contracts repository publishes:
-- [MAINNET_DEPLOYMENT_EVIDENCE.md §8](https://github.com/principal-Protocol-org/principal/blob/15b1ec5354a722b227085d1211e7120a14ae20e3/docs/MAINNET_DEPLOYMENT_EVIDENCE.md#8-reproducible-build-evidence): the source commit `4b5bc2b` (the contract
-  sources are identical at `3af9388`, [§2.1](#21-the-manifest)), the build command
-  `cargo build --workspace --release --target wasm32v1-none`, the toolchain `rustc 1.94.1 (e408947bf 2026-03-25)`,
-  `cargo 1.94.1`, `stellar 26.0.0` (the manifests add `soroban-sdk 26.0.1`), and the size and SHA-256 of the 12 wasm
-  files. The 12 hashes equal the manifest's `wasmHashes`, and the code on chain matches them, 44 of 44
-  ([§2.3](#23-the-read-only-deployment-check)).
-- On branch `mainnet`: `rust-toolchain.toml` (rustc 1.94.1), `scripts/deploy/reproducible_build.sh` (the build with
-  `--remap-path-prefix` on the cargo and checkout paths; it refuses to run on a host other than
-  `x86_64-unknown-linux-gnu`; `REMAP_CARGO_HOME_TO` sets the cargo path written into the bytes) and the recipe
-  [deployments/mainnet/reproducible-build.md](https://github.com/principal-Protocol-org/principal/blob/15b1ec5354a722b227085d1211e7120a14ae20e3/deployments/mainnet/reproducible-build.md).
-  These files came after `3af9388`; at `15b1ec5` the contract sources, `Cargo.toml` and `Cargo.lock` equal
-  `3af9388`'s. §14 and §14.1 of the evidence file explain why the bytes depend on the build machine.
+## 4. The reproducible build
 
-What a rebuild gives (rustc 1.94.1):
+The contracts team's build: `cargo build --workspace --release --target wasm32v1-none` at `3af9388`, rustc 1.94.1
+(pinned by `rust-toolchain.toml`); its 12 SHA-256 are in [§2.2](#22-code-hashes). Their recipe:
+[deployments/mainnet/reproducible-build.md](https://github.com/principal-Protocol-org/principal/blob/15b1ec5354a722b227085d1211e7120a14ae20e3/deployments/mainnet/reproducible-build.md).
 
-| Build | Result |
+Ten of the twelve files contain the original build's cargo directory (`/home/<user>/.cargo/…`, masked here); Permissioning
+and RiskControl contain none. A rebuild matches only if it maps its own cargo directory to that path, as the command
+in the reviewer guide, 1.4, does.
+
+| Rebuild (rustc 1.94.1) | Result |
 |---|---|
-| The contracts team, Linux x86_64, `3af9388`, the script's flags with the cargo directory mapped to the path recorded in the bytes ([recipe](https://github.com/principal-Protocol-org/principal/blob/15b1ec5354a722b227085d1211e7120a14ae20e3/deployments/mainnet/reproducible-build.md), 23 November 2026) | 12 of 12 equal the on-chain hashes (their run; no public log yet) |
-| The contracts team's CI, [run 45141813086](https://github.com/principal-Protocol-org/principal/actions/runs/45141813086), job "wasm build (all contracts)", Linux x86_64, `8932e2f`, the script's default mapping | Permissioning (`4437468d…`) and RiskControl (`ac75508d…`) equal the on-chain hashes; the 10 others carry the default path and differ |
-| macOS arm64, and Linux arm64 (`rust:1.94.1-slim`), with the script's flags | 0 of 12, Permissioning included: the host system changes the bytes |
+| The contracts team, Linux x86_64, `3af9388`, cargo directory mapped to the recorded path (23 November 2026) | 12 of 12 equal the on-chain hashes; no public log yet |
+| The contracts team's CI, [run 45141813086](https://github.com/principal-Protocol-org/principal/actions/runs/45141813086), Linux x86_64, default mapping | Permissioning and RiskControl equal the on-chain hashes; the 10 others carry another path |
+| macOS arm64, Linux arm64 | 0 of 12: the host changes the bytes |
 
-Why the cargo path matters: in the 12 on-chain files the only absolute paths are under one cargo directory,
-`/home/<user>/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/soroban-sdk-26.0.1/src/…` (`<user>` is the original
-builder's home directory, masked here), in 10 of the files; the workspace's own sources appear as relative paths
-(`contracts/market_pool/src/lib.rs`). Permissioning and RiskControl contain no such path. A rebuild writes its own
-cargo directory unless it maps it to the recorded one, which is what `REMAP_CARGO_HOME_TO` does. The command, with the
-path read from the bytes, is in the reviewer guide, 1.4 step 5. A CI job that runs it would give a public log of the
-12 of 12 ([§10](#10-open-items), item 1); the contracts team explains why it does not exist yet in
-[reproducible-build.md](https://github.com/principal-Protocol-org/principal/blob/15b1ec5354a722b227085d1211e7120a14ae20e3/deployments/mainnet/reproducible-build.md#why-the-12-of-12-verification-isnt-a-public-ci-job).
+## 5. The configuration
 
-### 3.3 The deployment manifests
-
-Each `deployment-manifest.json` records the network, the source commit, the toolchain, every contract's address
-and wasm SHA-256, its admin, and a `transactions[]` list (deploys, inits, factory calls, wiring, grants and the test
-transactions). The shared contracts have `deploy_tx` and `init_tx`; the market contracts are created by the factory,
-whose `create_tokens`, `create_engine` and `create_pool_and_escrow` hashes are in `transactions[]`.
-
-Two caveats:
-- In the MOCKUSDY manifest, `transactions[]` repeats two hashes under steps they do not belong to, left by a first, interrupted run:
-  `d92625d1…` is listed as `init:permissioning`, `deploy:risk_control` and `init:risk_control`, and `48092ae3…` as
-  `risk_control:set_asset_limit`, `deploy:router` and `init:router`. The per-contract `deploy_tx` and `init_tx` fields
-  give other hashes for RiskControl and the Router; use those. (The dashboard's risk page indexes `48092a…f372` as the
-  MOCKUSDY asset limit.)
-- `git_tree_dirty: true` in all five ([§3.2](#32-the-reproducible-build)). Four record `source_commit` `3af9388`; MOCKUSTRY's
-  records `2c88915`, a later commit of the same branch with the same contract sources.
-
-The contracts team's own check, `scripts/deploy/verify-deployment.sh`, reports 78 of 79 checks passing per market, the
-failing one being `git_tree_dirty` (the doc's status paragraph).
-
-## 4. The configuration, read live
-
-Read on 21 and 22 November 2026 from the dashboard and with `stellar contract invoke … --send=no`. The dashboard pages
-give the current values.
+Read from the dashboard and with `stellar contract invoke … --send=no` on 21 to 23 November 2026. The dashboard gives
+the current values.
 
 | Setting | Value | Read from |
 |---|---|---|
 | RiskControl, protocol-wide limit | 5,000.00 in underlying units, per sliding window of 17,280 ledgers (about 24 hours); the page shows the volume counted now and the remaining capacity (a wrap-and-mint counts twice) | `/dashboard/risk` |
 | RiskControl, per-asset limits | MOCKUSDY 5,000.00 (set 17 Nov 2026 15:55:32, `48092a…f372`), MOCKUSTRY 5,000.00 (set 17 Nov 2026 20:52:32, `946d7e…2c14`); MOCKGILTS, MOCKCETES, MOCKXAUM: no limit | `/dashboard/risk` |
 | Pauses | RiskControl, and each market's SYWrapper, PrincipalManager and MarketPool: not paused. Pause history: none recorded. | `/dashboard/risk` |
-| Oracles | each market's own OracleAdapter; `max_stale_seconds` 86400, that is 24 hours, and 172800 (48 hours) on MOCKGILTS ([§6.3](#63-freshness)); `max_deviation_bps` 1000, that is 10%; admin GDZN5W…5NCB (all five); on MOCKGILTS's detail: value bounds none, fallback source none | `stellar contract invoke … --send=no`; `/dashboard/oracle` |
+| Oracles | each market's own OracleAdapter; `max_stale_seconds` 86400, that is 24 hours, and 172800 (48 hours) on MOCKGILTS ([§7](#7-the-oracle-keeper-and-freshness)); `max_deviation_bps` 1000, that is 10%; admin GDZN5W…5NCB (all five); on MOCKGILTS's detail: value bounds none, fallback source none | `stellar contract invoke … --send=no`; `/dashboard/oracle` |
 | Oracle feed source | all five: RedStone's SEP-40 feed [CBMGLK…WYRF](https://stellar.expert/explorer/public/contract/CBMGLKUQZVSAIL5CPDDAWSUY7MAKXISHMOZEVLMBUWBMFGHRJSR4WYRF) (`decimals()` 8, `resolution()` 43200), keyed by the real asset's contract: USDY [CB3YA6…GAGP](https://stellar.expert/explorer/public/contract/CB3YA656OYIHU57657I5KGSBRHE5I3OZU4VFC22PYAOANFZHEWNYGAGP), USTRY [CBLV4A…PNUR](https://stellar.expert/explorer/public/contract/CBLV4ATSIWU67CFSQU2NVRKINQIKUZ2ODSZBUJTJ43VJVRSBTZYOPNUR), GILTS [CCQNEB…6XCE](https://stellar.expert/explorer/public/contract/CCQNEBGX5RJQGNLQ25C67DZLOSNM4NFQBANUS3ASALF2X552BSIQ6XCE), CETES [CAL6ER…6VXV](https://stellar.expert/explorer/public/contract/CAL6ER2TI6CTRAY6BFXWNWA7WTYXUXTQCHUBCIBU5O6KM3HJFG6Z6VXV), XAUM [CC2RBG…VAGO](https://stellar.expert/explorer/public/contract/CC2RBGYNCFBCVENIDL5BFBWPH4OUZM2UA3OD2K2N54GLMWCC4KWPVAGO) | `feed_source()` on each OracleAdapter |
 | Maturities | 90-day markets: 15 February 2027 (MOCKUSDY), 18 February 2027 (the four others) | manifest; market pages |
 | Fees, MOCKUSDY market | tokenization fee 0.05%, YT fee 10.00%, swap fee tier 0.10%, protocol share 20.00% | `/dashboard/markets/mainnet-CDQYZU-CCY5P6CC` |
-| Compliance of the underlying | each mock asset's issuer is its SAC admin; issuer flags: authorization required **no**, revocable **yes**, clawback **yes**, the flags real USDY has (contracts doc §3) | `/dashboard/compliance` (Horizon flags, `admin()`) |
+| Compliance of the underlying | each mock asset's issuer is its SAC admin; issuer flags: authorization required **no**, revocable **yes**, clawback **yes**, the flags real USDY has | `/dashboard/compliance` (Horizon flags, `admin()`) |
 | Permissioning | account and asset grants and revokes, indexed, with their history | `/dashboard/compliance` |
 
-The protocol-wide limit counts underlying units of five different assets together (one MOCKXAUM follows about 3,558 USD,
-one MOCKCETES about 0.06 USD), so it caps volume per asset unit, not value. It was set by the contracts team for a
-testing deployment on mock assets.
+The protocol-wide limit adds units of five different assets, so it caps volume per unit, not value. The contracts team
+set it for a test deployment on mock assets.
 
-## 5. The dashboard
-
-### 5.1 Views
+## 6. The dashboard
 
 | View | URL |
 |---|---|
@@ -320,34 +186,11 @@ testing deployment on mock assets.
 | Public JSON | <https://principalmarket.fi/api/health>, <https://principalmarket.fi/api/dashboard/alerts>, <https://principalmarket.fi/api/dashboard/oracle-ticks?oracle=CD22HNREJHKTATZMFKALCTHJVKC35MHO2SAUSTG4M6PWLJZPS724J6X7&limit=100>, <https://principalmarket.fi/api/dashboard/events?group=oracle>, `https://principalmarket.fi/api/markets/<pool>/history` |
 | End-user docs | <https://principalmarket.fi/docs/using-the-app/dashboard> |
 
-No wallet is needed. Each view says its ledger and the age of its reads, and has **Copy evidence table**, which copies
-every figure on the page as a Markdown table (dashboard metric, contract, function and parameters, raw value, display
-value, ledger, RPC or indexer coverage, cache status, and a blank "Verified" column;
-[`evidenceRows`](https://github.com/principal-Protocol-org/dapp/blob/783d51c51003376884ccec1d9eab6d44d27d59fd/lib/protocol/dashboard/verify.ts#L241-L251)).
-Each figure
-has an info button, **How to verify**, that names the contract, the function and its arguments, the raw value, the
-ledger, the RPC host, and gives one `stellar contract invoke … --send=no` command per read
-([verifyCommand, lib/protocol/dashboard/verify.ts](https://github.com/principal-Protocol-org/dapp/blob/783d51c51003376884ccec1d9eab6d44d27d59fd/lib/protocol/dashboard/verify.ts#L144-L156)).
-On Mainnet the command names the public gateway and the passphrase, never the keyed RPC, and uses the null account
-`GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF` as source.
-
-### 5.2 What the views show
-
-The overview's protocol-wide **TVL** and **Pool liquidity** read "Unavailable", by design: the five markets hold
-different underlying assets, so their amounts do not add up
-([protocol-state.ts lines 125 to 128](https://github.com/principal-Protocol-org/dapp/blob/783d51c51003376884ccec1d9eab6d44d27d59fd/lib/protocol/dashboard/protocol-state.ts#L125-L128)).
-The overview gives **TVL in USD** instead (each market's TVL times its oracle value), and the markets pages give each
-market's PT and YT supply, pool reserves, pool liquidity, TVL and TVL in USD. Each market's page adds its settlement
-state, unclaimed fees, fee recipients and a **Pending yield** lookup: any account or contract address, answered with
-what it would be paid by claiming its YT yield now, net of the YT fee.
-
-### 5.3 One "How to verify" command, run as copied
-
-On `/dashboard/oracle` at 375 px, the drawer of **Time until operations block · MOCKUSDY**
-([`10-oracle-how-to-verify-375px.png`](tranche-3/10-oracle-how-to-verify-375px.png)) showed, on 23 November 2026 at
-01:48 UTC: value 21h 49m 2s; raw value `get_reference_timestamp=1795390620; max_stale_seconds=86400;
-is_available=true`; ledger 65622486; RPC endpoint `lb.drpc.live`, fallback `soroban-rpc.mainnet.stellar.gateway.fm`;
-and three commands. We ran them as copied right after, with the Stellar CLI 30.0.1:
+No wallet is needed. Each figure's info button, **How to verify**, gives the contract, the function, the ledger and a
+`--send=no` command on the public gateway with the null account as source. A recorded run: the drawer of **Time until
+operations block · MOCKUSDY** ([screenshot](tranche-3/10-oracle-how-to-verify-375px.png)) showed, on 23 November 2026
+at 01:48 UTC, `get_reference_timestamp=1795390620; max_stale_seconds=86400; is_available=true`. Its commands, run as
+copied:
 
 ```bash
 stellar contract invoke --rpc-url https://soroban-rpc.mainnet.stellar.gateway.fm --network-passphrase 'Public Global Stellar Network ; September 2015' --id CCKXG4HSVH57AQTYJDNNXHQBCGNH6KRFNMCMATTMYFUX2TDQ7GD5K7IT --source-account GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF --send=no -- get_reference_timestamp
@@ -358,131 +201,54 @@ stellar contract invoke --rpc-url https://soroban-rpc.mainnet.stellar.gateway.fm
 # true
 ```
 
-The chain gave the drawer's values. 1795390620 + 86400 − ledger time = the countdown the page showed.
+Screenshots of <https://principalmarket.fi>, 23 November 2026, in [tranche-3/](tranche-3/): `01-overview.png`,
+`02-markets.png`, `03-market-mockusdy.png`, `04-oracle.png`, `05-risk.png`, `06-compliance.png`, `07-activity.png`,
+`08-overview-dark.png`, `09-oracle-375px.png`, `10-oracle-how-to-verify-375px.png`.
 
-### 5.4 Screenshots
+## 7. The oracle keeper and freshness
 
-In [tranche-3/](tranche-3/), taken on 23 November 2026 at 01:47 and 01:48 UTC on <https://principalmarket.fi> by
-`pnpm dashboard:layout --base https://principalmarket.fi --theme light|dark --shots <dir>`:
+Every 5 minutes the keeper reads each OracleAdapter and its feed. When the feed has a newer price, it calls
+`sync_from_feed` from GBLY3F…MZXS (permissionless: the oracle reads its own feed); otherwise it sends nothing. Its runs
+are public (`/api/dashboard/oracle-ticks`, the oracle page's **Keeper** section); a sync, for example:
+[ce93f473…9508](https://stellar.expert/explorer/public/tx/ce93f473351cb9d024860f403e9e4f87a07a42dc7c0568e84ce36f7d28399508).
 
-| File | What |
-|---|---|
-| `01-overview.png` | the overview, desktop, light |
-| `02-markets.png` | the markets list |
-| `03-market-mockusdy.png` | the MOCKUSDY market |
-| `04-oracle.png` | the oracle page |
-| `05-risk.png` | the risk page |
-| `06-compliance.png` | the compliance page |
-| `07-activity.png` | the activity page |
-| `08-overview-dark.png` | the overview, dark theme |
-| `09-oracle-375px.png` | the oracle page at 375 px wide |
-| `10-oracle-how-to-verify-375px.png` | a "How to verify" drawer at 375 px (Time until operations block · MOCKUSDY, [§5.3](#53-one-how-to-verify-command-run-as-copied)) |
+An oracle is fresh while its feed price's timestamp is younger than its window. Each window is twice its feed's
+heartbeat ([RedStone's relayer config](https://github.com/redstone-finance/redstone-oracles-monorepo/blob/main/packages/relayer-remote-config/main/relayer-manifests-non-evm/stellarSep40.json)),
+set by the oracle admin with `set_safety_params`:
 
-The same run checks the layout at 375 px (page width, tables, drawers): 24 of 24 checks passed.
+| Oracle (asset) | Window | Set on (UTC), transaction | RedStone heartbeat, deviation threshold |
+|---|---|---|---|
+| CCKXG4…K7IT (MOCKUSDY) | 86,400 s | 22 Nov 2026 00:19:26, [73f87169…2c6c](https://stellar.expert/explorer/public/tx/73f87169f0a6adf4af3fe73695bce0ef087fbae2d7d168f1a90a381ebd202c6c) | 12 h, 0.5% |
+| CBTW7C…PFR7 (MOCKUSTRY) | 86,400 s | 22 Nov 2026 00:19:36, [96cf75a8…e199](https://stellar.expert/explorer/public/tx/96cf75a8cca49b8370131c41c7ecb983d96ee17ffb1144d0a2fc7b90c722e199) | 12 h, 0.1% |
+| CD22HN…J6X7 (MOCKGILTS) | 172,800 s | 23 Nov 2026 08:40:41, [efa8efbf…ee95](https://stellar.expert/explorer/public/tx/efa8efbffd1927443ee27a75e8ee237a6e26e9e2c34af3f5fed827e39963ee95) | 24 h, 0.1% |
+| CBK2GO…MUZK (MOCKCETES) | 86,400 s | 22 Nov 2026 00:19:56, [5028e019…830e](https://stellar.expert/explorer/public/tx/5028e019162bb022aa9ac5c0300c6f0f8d97b63e91f20a356ee26a16df9a830e) | 12 h, 0.1% |
+| CDFI7I…OPFD (MOCKXAUM) | 86,400 s | 22 Nov 2026 00:20:06, [9d59d0b4…7f52](https://stellar.expert/explorer/public/tx/9d59d0b4fb028f5f0ece56b155814af251bf6c72a7f68cc97eba0dcd24e67f52) | 12 h, 0.5% |
 
-## 6. The oracle keeper
+## 8. A stale oracle blocks operations
 
-### 6.1 How it runs
-
-`/api/cron/oracle` runs every 5 minutes (minutes 2 to 57). In each run it reads every OracleAdapter of the manifest and
-its feed. When the feed has a newer price than the oracle holds, it calls `sync_from_feed` from the keeper account
-GBLY3F…MZXS; otherwise it records "Skipped: the feed had nothing newer" and sends nothing. `sync_from_feed` is
-permissionless: the oracle reads its own configured feed, and the keeper only pays the fee. Its runs are public:
-`/api/dashboard/oracle-ticks` and the **Keeper** section of the oracle page.
-
-### 6.2 Its transactions
-
-They are on Horizon:
-<https://horizon.stellar.org/accounts/GBLY3FDTJFPYGI425TK6C7UUFBXYJ4DHWBXNHKWY7RMNZ43JLGUOMZXS/transactions?order=desc>.
-Each sync is one successful `sync_from_feed` call on one oracle, for example
-[ce93f473…9508](https://stellar.expert/explorer/public/tx/ce93f473351cb9d024860f403e9e4f87a07a42dc7c0568e84ce36f7d28399508)
-(MOCKGILTS, 21 November 2026 20:12:06 UTC, ledger 65601176, value 1.4068080). A sync costs about 0.0098 XLM on the four
-markets deployed on 20 November and about 0.0005 XLM on MOCKUSDY's oracle. The account holds XLM only, and the alert
-check opens `signer_low` when its balance runs low.
-
-### 6.3 Freshness
-
-`sync_from_feed` stores the feed price's own timestamp, not the ledger time
-([oracle_adapter/src/lib.rs line 501](https://github.com/principal-Protocol-org/principal/blob/3af938853e5818aa8d56bd35670b9a19cfa55a78/contracts/oracle_adapter/src/lib.rs#L501); a price no newer than the stored one is refused `stale_ts`,
-[line 572](https://github.com/principal-Protocol-org/principal/blob/3af938853e5818aa8d56bd35670b9a19cfa55a78/contracts/oracle_adapter/src/lib.rs#L572)). An oracle is fresh while that timestamp is less than `max_stale_seconds` old: 86,400 s (24 hours)
-on four, 172,800 s (48 hours) on MOCKGILTS. The oracle admin GDZN5W…5NCB set them with
-[`set_safety_params(caller, max_stale_seconds, 1000)`](https://github.com/principal-Protocol-org/principal/blob/3af938853e5818aa8d56bd35670b9a19cfa55a78/contracts/oracle_adapter/src/lib.rs#L292), recorded in the contracts team's
-[MAINNET_DEPLOYMENT_EVIDENCE.md](https://github.com/principal-Protocol-org/principal/blob/15b1ec5354a722b227085d1211e7120a14ae20e3/docs/MAINNET_DEPLOYMENT_EVIDENCE.md) §13 and §13.1:
-
-| UTC | Ledger | Oracle (asset) | Window | Transaction |
-|---|---|---|---|---|
-| 22 Nov 2026 00:19:26 | 65604144 | CCKXG4…K7IT (MOCKUSDY) | 86,400 s | [73f87169…2c6c](https://stellar.expert/explorer/public/tx/73f87169f0a6adf4af3fe73695bce0ef087fbae2d7d168f1a90a381ebd202c6c) |
-| 22 Nov 2026 00:19:36 | 65604146 | CBTW7C…PFR7 (MOCKUSTRY) | 86,400 s | [96cf75a8…e199](https://stellar.expert/explorer/public/tx/96cf75a8cca49b8370131c41c7ecb983d96ee17ffb1144d0a2fc7b90c722e199) |
-| 23 Nov 2026 08:40:41 | 65627439 | CD22HN…J6X7 (MOCKGILTS) | 172,800 s | [efa8efbf…ee95](https://stellar.expert/explorer/public/tx/efa8efbffd1927443ee27a75e8ee237a6e26e9e2c34af3f5fed827e39963ee95) |
-| 22 Nov 2026 00:19:56 | 65604150 | CBK2GO…MUZK (MOCKCETES) | 86,400 s | [5028e019…830e](https://stellar.expert/explorer/public/tx/5028e019162bb022aa9ac5c0300c6f0f8d97b63e91f20a356ee26a16df9a830e) |
-| 22 Nov 2026 00:20:06 | 65604152 | CDFI7I…OPFD (MOCKXAUM) | 86,400 s | [9d59d0b4…7f52](https://stellar.expert/explorer/public/tx/9d59d0b4fb028f5f0ece56b155814af251bf6c72a7f68cc97eba0dcd24e67f52) |
-
-RedStone's relayer writes a price to the feed when it has moved by the asset's deviation threshold, or when the
-asset's heartbeat has run out since the last write
-([RedStone's relayer config for this feed](https://github.com/redstone-finance/redstone-oracles-monorepo/blob/main/packages/relayer-remote-config/main/relayer-manifests-non-evm/stellarSep40.json), adapter `CBMGLK…WYRF`, read on 22 November 2026):
-
-| Asset | Deviation threshold | Heartbeat |
-|---|---|---|
-| USDY | 0.5% | 12 h |
-| USTRY | 0.1% | 12 h |
-| GILTS | 0.1% | 24 h |
-| CETES | 0.1% | 12 h |
-| XAUM | 0.5% | 12 h |
-
-Each window is twice its feed's heartbeat, so a feed that sends only its heartbeat keeps its oracle fresh, with one
-missed heartbeat to spare. The read-only check of [§2.3](#23-the-read-only-deployment-check) found all five fresh.
-
-## 7. A stale oracle blocks operations
-
-Two simulations of the same call, `mint(from, sy_shares = 1)` on a market's PrincipalManager, on 21 November 2026 at
-20:30:21 UTC (ledger 65601398), when the oracles' window was 1 hour and MOCKUSDY's oracle was stale, through the public
-gateway, with `--send=no`: nothing was signed or sent. The source
-and `from` account is the oracle admin's public address, GDZN5W…5NCB; any funded public account gives the same
-result.
+`mint(from, sy_shares = 1)` simulated on two PrincipalManagers on 21 November 2026 at 20:30:21 UTC (ledger 65601398),
+while the window was 1 hour and MOCKUSDY's oracle was stale; `--send=no`, nothing signed:
 
 | Market | Its oracle's `is_available()` | `mint` simulation |
 |---|---|---|
 | MOCKUSDY (manager CBBKUZ…UKCC) | `false` | `HostError: Error(Contract, #7)` |
 | MOCKGILTS (manager CCDSON…7GBS) | `true` | `HostError: Error(Contract, #11)` |
 
-Repeated with `-v`, MOCKUSDY's at 20:30:58 UTC and MOCKGILTS's at 20:48:35 UTC, they gave the same two errors.
-
-The diagnostic events (`stellar contract invoke -v …`, or the RPC's `simulateTransaction`) show who raised each error:
-- MOCKUSDY: the manager calls `is_available` on CCKXG4…K7IT, which returns `false`; the manager then fails with its own
-  error 7.
-- MOCKGILTS: the manager calls `is_available` on CD22HN…J6X7, which returns `true`; it then calls `authorized` on the
-  MOCKGILTS asset contract, which fails ("trustline entry is missing for account"); the manager then fails with its
-  own error 11.
-
-In PrincipalManager at `3af9388`, error 7 is
+In PrincipalManager, error 7 is
 [`OracleStale`](https://github.com/principal-Protocol-org/principal/blob/3af938853e5818aa8d56bd35670b9a19cfa55a78/contracts/principal_manager/src/lib.rs#L221)
 and error 11 is
-[`NotAuthorizedOnSac`](https://github.com/principal-Protocol-org/principal/blob/3af938853e5818aa8d56bd35670b9a19cfa55a78/contracts/principal_manager/src/lib.rs#L224).
+[`NotAuthorizedOnSac`](https://github.com/principal-Protocol-org/principal/blob/3af938853e5818aa8d56bd35670b9a19cfa55a78/contracts/principal_manager/src/lib.rs#L224);
 [`mint`](https://github.com/principal-Protocol-org/principal/blob/3af938853e5818aa8d56bd35670b9a19cfa55a78/contracts/principal_manager/src/lib.rs#L362-L374)
-checks the oracle
-([`assert_oracle_fresh`](https://github.com/principal-Protocol-org/principal/blob/3af938853e5818aa8d56bd35670b9a19cfa55a78/contracts/principal_manager/src/lib.rs#L914-L923))
-before the compliance checks
-([`assert_sac_authorized`](https://github.com/principal-Protocol-org/principal/blob/3af938853e5818aa8d56bd35670b9a19cfa55a78/contracts/principal_manager/src/lib.rs#L945-L950)).
-So error 7 is the stale oracle blocking the mint; error 11 means the oracle check passed and the compliance check
-refused an account that holds no trustline to the asset.
-
-The other contracts check the same way: MarketPool
-([line 1457](https://github.com/principal-Protocol-org/principal/blob/3af938853e5818aa8d56bd35670b9a19cfa55a78/contracts/market_pool/src/lib.rs#L1457),
-error 13 `OracleStale`) and YTToken
+checks the oracle before compliance. The `-v` events show the manager's `is_available` call and the oracle's answer.
+MarketPool ([line 1457](https://github.com/principal-Protocol-org/principal/blob/3af938853e5818aa8d56bd35670b9a19cfa55a78/contracts/market_pool/src/lib.rs#L1457), trades and single-sided liquidity) and YTToken
 ([lines 248](https://github.com/principal-Protocol-org/principal/blob/3af938853e5818aa8d56bd35670b9a19cfa55a78/contracts/yt_token/src/lib.rs#L248)
-and [679](https://github.com/principal-Protocol-org/principal/blob/3af938853e5818aa8d56bd35670b9a19cfa55a78/contracts/yt_token/src/lib.rs#L679),
-error 10 `OracleStale`). The OracleAdapter's own `assert_available()` raises error 8, `OracleUnavailable`.
+and [679](https://github.com/principal-Protocol-org/principal/blob/3af938853e5818aa8d56bd35670b9a19cfa55a78/contracts/yt_token/src/lib.rs#L679), yield) raise their own `OracleStale`. The same day, on
+<https://principalmarket.fi/app/markets/mainnet-CDQYZU-CCY5P6CC>, the app's **Signing is off** box read "The oracle price
+is stale: it has not been updated in the last 1 hour. Wait for the next oracle update, then try again."
 
-The app refuses the same actions before asking for a signature. On <https://principalmarket.fi/app/markets/mainnet-CDQYZU-CCY5P6CC>, with no wallet, at 20:51 UTC that day, the trade panel's
-**Signing is off** box listed "The oracle price is stale: it has not been updated in the last 1 hour. Wait for the
-next oracle update, then try again."
+## 9. Alerts
 
-Freshness moves with RedStone's prices: read `is_available()` first; it tells which of the two results to expect. With
-windows of twice the feed's heartbeat a stale oracle is rare, so a run today most likely gives error 11 on every market.
-
-## 8. Alerts
-
-Source: <https://principalmarket.fi/api/dashboard/alerts> (public, read-only), read on 21 November 2026, and
+Source: <https://principalmarket.fi/api/dashboard/alerts>, read on 21 November 2026, and
 [app/api/cron/alerts/route.ts](https://github.com/principal-Protocol-org/dapp/blob/783d51c51003376884ccec1d9eab6d44d27d59fd/app/api/cron/alerts/route.ts#L4-L14).
 
 | Item | Value |
@@ -493,12 +259,10 @@ Source: <https://principalmarket.fi/api/dashboard/alerts> (public, read-only), r
 | Other kinds checked every 5 minutes | per oracle: `oracle_warning`, `oracle_unavailable`, `oracle_rejection`, `feed_broken`, `keeper_unhealthy`; also `seed_invalid`, `risk_warning`, `risk_exhausted`, `indexer_gap` and `signer_low` (the keeper's XLM) ([README "Alerts"](https://github.com/principal-Protocol-org/dapp/blob/783d51c51003376884ccec1d9eab6d44d27d59fd/README.md#alerts)) |
 | The scheduler sees red | the scheduled route `/api/cron/alerts` answers HTTP 500 while any critical alert is open, by design, so the scheduler's own failure alert fires too ([line 69](https://github.com/principal-Protocol-org/dapp/blob/783d51c51003376884ccec1d9eab6d44d27d59fd/app/api/cron/alerts/route.ts#L69)). The public read endpoint above answers 200. |
 
-## 9. RecoveryEscrow and the safety feeds, exercised on Testnet
+## 10. On Testnet: a seizure, a rejected update and a pause
 
-On Mainnet no seizure has happened: all five RecoveryEscrows read `record_count` 0, and the index holds 0 records
-(`/dashboard/compliance`). To show that the dashboard surfaces a seizure, a rejected oracle update and a pause, a drill
-ran on **Stellar Testnet**, on the official Testnet market `testnet-usdy-1802336344` (contracts `665bb67`), on
-21 November 2026. Its events, from <https://testnet.principalmarket.fi/api/dashboard/events>:
+No seizure and no deviation rejection have happened on Mainnet. To show that the dashboard surfaces them, a drill ran
+on **Stellar Testnet**, on the official Testnet market (contracts `665bb67`), on 21 November 2026. Its events:
 
 | UTC | Ledger | Contract | Event | Transaction (Testnet) |
 |---|---|---|---|---|
@@ -509,16 +273,6 @@ ran on **Stellar Testnet**, on the official Testnet market `testnet-usdy-1802336
 | 01:47:51 | 5840406 | RiskControl CCRZ55…MHJC | `paused` true | [17fa81b3…0eed](https://stellar.expert/explorer/testnet/tx/17fa81b3175c0c12a6e613d8f1be0892d539e9b3c665f5aaccbb6cbe6fa80eed) |
 | 01:48:11 | 5840410 | RiskControl CCRZ55…MHJC | `paused` false | [5250db2c…99bd](https://stellar.expert/explorer/testnet/tx/5250db2cd2d60b89e623afdd7823600f70c9a3b45818c1ac1998d51baa6999bd) |
 
-Seen at 20:58 UTC on 21 November 2026: <https://testnet.principalmarket.fi/dashboard/compliance> shows "record_count 1,
-indexed 1: they match", record 0 (5.00 SY, 5.00 PT, 5.00 YT held, seized at ledger 5840401) and the seizure in
-**Seizure history**; `/dashboard/oracle` shows **Last rejection** "Moved more than the cap · value 1.1511459 … reason
-deviate" and the same row in **Rejection history**; `/dashboard/risk` shows the pause and the unpause in **Pause
-history**. The Mainnet dashboard runs the same code on the same views.
-
-## 10. Open items
-
-| # | Item | Owner | Reason |
-|---|---|---|---|
-| 1 | **A public log of the 12-of-12 rebuild** ([§3.2](#32-the-reproducible-build)). | contracts team | Their rebuild of `3af9388` on Linux x86_64 with the recorded cargo path gave 12 of 12; their CI shows only the two contracts without a machine path. A CI job that runs the rebuild with the recorded path would show all 12. Written into a public CI config, that path would publish the builder's home directory; the contracts team plans a job that reads it from a deployed wasm at run time, not built yet. |
-| 2 | **Contract lifetimes.** The Mainnet contract instances live until about 17 to 21 March 2027 ([§2.4](#24-how-long-the-contracts-live)). | contracts team, operations | Someone must extend them (and the code entries) before mid-March 2027; the contracts team tracks it in their evidence file, §10 item 6. |
-| 3 | **The contracts team's manifest caveats:** duplicate hashes in MOCKUSDY's `transactions[]` and `git_tree_dirty: true` ([§3.3](#33-the-deployment-manifests)). | contracts team | Stated so that no hash is cited under the wrong step. |
+<https://testnet.principalmarket.fi/dashboard/compliance> shows the seizure (record 0, "record_count 1, indexed 1: they
+match"); `/dashboard/oracle` shows the `deviate` rejection; `/dashboard/risk` the pause and the unpause. The Mainnet
+dashboard runs the same code.
