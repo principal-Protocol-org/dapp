@@ -52,6 +52,60 @@ need() {
   command -v "$1" >/dev/null 2>&1 || die "'$1' is required but not installed. $2"
 }
 
+# The build cache of the principal sources: a private directory of your own, never a predictable path in a
+# shared /tmp. Cargo runs a workspace's build scripts on the host even for a wasm target, so a cache that
+# another account can write would let that account run code as you. PRINCIPAL_DEV_STACK_CACHE sets the
+# place (CI does); the default is ${XDG_CACHE_HOME:-$HOME/.cache}/principal-dev-stack.
+#
+# dev_stack_cache_dir: creates the cache if needed and refuses it unless it is an absolute path to a
+# directory you own (not a symlink) that no other account can write, and every parent of its physical path
+# is owned by you or root and, if others can write it, sticky (as /tmp). Sets the cache to mode 700 and
+# prints its physical path, which the callers then use, so no symlink on the way can be retargeted later.
+dev_stack_cache_dir() {
+  local root="${PRINCIPAL_DEV_STACK_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/principal-dev-stack}" uid dir
+  case "$root" in
+    /*) ;;
+    *) die "the build cache must be an absolute path, got '$root'" ;;
+  esac
+  [ ! -L "$root" ] || die "the build cache $root is a symlink: refusing it"
+  (umask 077 && mkdir -p "$root") || die "cannot create the build cache $root"
+  { [ -d "$root" ] && [ ! -L "$root" ] && [ -O "$root" ]; } ||
+    die "the build cache $root is not a directory you own: refusing it"
+  # One that others could write may already hold their files: refused, not repaired.
+  [ -n "$(find "$root" -maxdepth 0 ! -perm -0020 ! -perm -0002)" ] ||
+    die "other accounts can write the build cache $root: remove it, or choose another PRINCIPAL_DEV_STACK_CACHE"
+  chmod 700 "$root"
+  root="$(cd -P "$root" && pwd)"
+  uid="$(id -u)"
+  dir="$root"
+  while [ "$dir" != / ]; do
+    dir="$(dirname "$dir")"
+    [ -n "$(find "$dir" -maxdepth 0 \( -user 0 -o -user "$uid" \) \( -perm -1000 -o ! \( -perm -0020 -o -perm -0002 \) \))" ] ||
+      die "other accounts can change $dir, a parent of the build cache: set PRINCIPAL_DEV_STACK_CACHE to a directory whose parents only you or root can change"
+  done
+  printf '%s\n' "$root"
+}
+
+# dev_stack_sources <commit>: prints the directory that holds the sources of <commit> in the build cache.
+# They are extracted read-only with `git archive` (never a worktree, never a checkout in the principal
+# repository) into a fresh directory, renamed into place once complete: the cache only ever holds whole
+# commits, and a directory found there is one this function wrote. Progress goes to stderr.
+dev_stack_sources() {
+  local commit="$1" root dir tmp
+  root="$(dev_stack_cache_dir)" || exit 1
+  dir="$root/$commit"
+  if [ ! -d "$dir" ]; then
+    echo "==> Extracting $commit to $dir" >&2
+    tmp="$(mktemp -d "$root/.extract.XXXXXX")" || die "cannot create a directory in $root"
+    if ! git -C "$PRINCIPAL_REPO" archive "$commit" | tar -x -C "$tmp"; then
+      rm -rf "$tmp"
+      die "cannot extract $commit from $PRINCIPAL_REPO"
+    fi
+    if [ -d "$dir" ]; then rm -rf "$tmp"; else mv "$tmp" "$dir" || die "cannot move the sources into $dir"; fi
+  fi
+  printf '%s\n' "$dir"
+}
+
 # POST a JSON-RPC call to the Soroban RPC; prints the response body.
 rpc_call() {
   local method="$1" params="${2:-null}"
