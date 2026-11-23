@@ -8,8 +8,9 @@
 # 1. Builds the mock feed (tests/fixtures/sep40-mock, its Cargo.lock) and the OracleAdapter of
 #    PRINCIPAL_REF, both for wasm32v1-none. The default is 3af938853e5818aa8d56bd35670b9a19cfa55a78, the
 #    Mainnet contracts and the local stack's default (sync_from_feed with its throttle and feed_err).
-#    The principal sources are extracted read-only with `git archive` into a cache keyed by the commit,
-#    as deploy.sh does: never a worktree, never a checkout in the principal repository.
+#    The principal sources are extracted read-only with `git archive` into the private build cache, keyed
+#    by the commit, as deploy.sh does (common.sh, dev_stack_sources): never a worktree, never a checkout in
+#    the principal repository.
 # 2. Deploys both as the dev stack's local admin (principal-localdev-admin), then:
 #    - feed.initialize(FEED_DECIMALS): 8 by default (RedStone's scale), so a sync really rescales to 7.
 #      FEED_INITIALIZED=0 skips it: the feed's decimals() then fails, and the oracle answers feed_err;
@@ -94,15 +95,9 @@ FEED_WASM="$MOCK_DIR/target/wasm32v1-none/release/sep40_mock.wasm"
 
 COMMIT="$(git -C "$PRINCIPAL_REPO" rev-parse --verify "${PRINCIPAL_REF}^{commit}")" ||
   die "cannot resolve PRINCIPAL_REF '$PRINCIPAL_REF' in $PRINCIPAL_REPO"
-SRC_DIR="${TMPDIR:-/tmp}/principal-dev-stack/${COMMIT}"
+SRC_DIR="$(dev_stack_sources "$COMMIT")"
 ORACLE_WASM="$SRC_DIR/target/wasm32v1-none/release/principal_oracle_adapter.wasm"
 if [ ! -f "$ORACLE_WASM" ]; then
-  if [ ! -f "$SRC_DIR/Cargo.toml" ]; then
-    log "Extracting $PRINCIPAL_REF ($COMMIT) to $SRC_DIR"
-    rm -rf "$SRC_DIR"
-    mkdir -p "$SRC_DIR"
-    git -C "$PRINCIPAL_REPO" archive "$COMMIT" | tar -x -C "$SRC_DIR"
-  fi
   # The whole workspace, as deploy.sh builds it: the same wasm, byte for byte, as a full deploy of this commit.
   log "Building the contracts of $COMMIT (cargo build --workspace --release --target wasm32v1-none)"
   (cd "$SRC_DIR" && cargo build --workspace --release --target wasm32v1-none >&2) ||

@@ -156,18 +156,15 @@ log() { echo "==> $*"; }
 
 # ---------------------------------------------------------------------------------------------
 # Build. Sources are extracted read-only with `git archive` (never a worktree, never a checkout in
-# the principal repository) into a cache directory keyed by the commit.
+# the principal repository) into the private build cache, keyed by the commit (common.sh,
+# dev_stack_sources).
 # ---------------------------------------------------------------------------------------------
 COMMIT="$(git -C "$PRINCIPAL_REPO" rev-parse --verify "${PRINCIPAL_REF}^{commit}")" ||
   die "cannot resolve PRINCIPAL_REF '$PRINCIPAL_REF' in $PRINCIPAL_REPO"
-SRC_DIR="${TMPDIR:-/tmp}/principal-dev-stack/${COMMIT}"
+SRC_DIR="$(dev_stack_sources "$COMMIT")"
 WASM_DIR="$SRC_DIR/target/wasm32v1-none/release"
 if [ ! -f "$WASM_DIR/principal_router.wasm" ] || [ ! -f "$WASM_DIR/principal_market_factory.wasm" ]; then
-  log "Extracting $PRINCIPAL_REF ($COMMIT) to $SRC_DIR"
-  rm -rf "$SRC_DIR"
-  mkdir -p "$SRC_DIR"
-  git -C "$PRINCIPAL_REPO" archive "$COMMIT" | tar -x -C "$SRC_DIR"
-  log "Building contracts (cargo build --workspace --release --target wasm32v1-none)"
+  log "Building contracts of $PRINCIPAL_REF ($COMMIT) in $SRC_DIR (cargo build --workspace --release --target wasm32v1-none)"
   (cd "$SRC_DIR" && cargo build --workspace --release --target wasm32v1-none) ||
     die "cargo build failed. Is the target installed? rustup target add wasm32v1-none"
 else

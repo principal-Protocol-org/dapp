@@ -25,8 +25,10 @@ scripts/dev-stack/oracle-tick.sh                          # run this every 30 mi
 - `deploy.sh` reads `PRINCIPAL_REPO` (default `../principal`), `PRINCIPAL_REF` (default
   `3af938853e5818aa8d56bd35670b9a19cfa55a78`, the Mainnet deployment's commit, `sourceCommit` in
   `config/manifests/mainnet.json`) and `MATURITY_SECONDS` (default `86400`, one day). It extracts the sources with
-  `git archive` into `$TMPDIR/principal-dev-stack/<commit>` (read-only for the repository, cached per
-  commit), builds the WASM, issues `USDY` (`ASSET_CODE`, default `USDY`, shown as "USDY (test)"; AUTH_REQUIRED, AUTH_REVOCABLE, AUTH_CLAWBACK_ENABLED) from
+  `git archive` into `<cache>/<commit>` (read-only for the repository, cached per commit; `<cache>` is
+  `PRINCIPAL_DEV_STACK_CACHE`, default `${XDG_CACHE_HOME:-$HOME/.cache}/principal-dev-stack`, a directory of
+  your own with mode 700: the scripts refuse one that another account could change, since cargo runs the
+  sources' build scripts as you), builds the WASM, issues `USDY` (`ASSET_CODE`, default `USDY`, shown as "USDY (test)"; AUTH_REQUIRED, AUTH_REVOCABLE, AUTH_CLAWBACK_ENABLED) from
   `principal-localdev-admin`, deploys its SAC, and runs steps 1-11 of the repository's
   `docs/DEPLOYMENT.md`. It then deposits 200,000 USDY, mints PT/YT from 100,000 SY, and seeds the
   pool with all the PT and 95 % of its value in SY. It also deploys the stateless `MarketFactory` (its address is `shared.factory`, the wasm hashes of the seven market contracts are recorded) and runs `scripts/db-migrate.mjs` when that file exists (migrations 0001 to 0003; 0003 adds `market_salts`). Every run deploys new markets and overwrites `config/manifests/local.json`.

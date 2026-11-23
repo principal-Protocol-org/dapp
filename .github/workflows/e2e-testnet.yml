@@ -73,9 +73,9 @@ jobs:
     env:
       # The local layout: dapp/ and principal/ side by side.
       PRINCIPAL_REPO: ${{ github.workspace }}/principal
-      # deploy.sh builds into ${TMPDIR:-/tmp}/principal-dev-stack/<commit> and reuses a build found there.
-      # Pinned so the cache steps below and deploy.sh name the same directory.
-      TMPDIR: /tmp
+      # deploy.sh builds into $PRINCIPAL_DEV_STACK_CACHE/<commit> and reuses a build found there. Set so the
+      # cache steps below and deploy.sh name the same directory; /tmp is fine on a single-use runner.
+      PRINCIPAL_DEV_STACK_CACHE: /tmp/principal-dev-stack
       # The Stellar CLI that deployed the official market. The release publishes no checksum file: this is
       # the sha256 digest GitHub lists for stellar-cli-28.1.0-x86_64-unknown-linux-gnu.tar.gz.
       STELLAR_CLI_VERSION: 28.1.0
@@ -105,7 +105,7 @@ jobs:
           fi
           echo "principal at $commit"
           echo "commit=$commit" >>"$GITHUB_OUTPUT"
-          echo "build-dir=$TMPDIR/principal-dev-stack/$commit" >>"$GITHUB_OUTPUT"
+          echo "build-dir=$PRINCIPAL_DEV_STACK_CACHE/$commit" >>"$GITHUB_OUTPUT"
       - name: Check out principal at that commit
         uses: actions/checkout@v4
         with:
