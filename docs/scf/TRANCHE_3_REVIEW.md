@@ -34,7 +34,7 @@ NET='Public Global Stellar Network ; September 2015'
 | 1 | All contracts are live on Stellar Mainnet with verified addresses | Met ([1.1](#11-all-contracts-are-live-on-stellar-mainnet-with-verified-addresses)) |
 | 1 | the initial market configuration is active | Met ([1.2](#12-the-initial-market-configuration-is-active)) |
 | 1 | a smoke-test deposit and mint succeed | Met, on all five markets and through the app ([1.3](#13-a-smoke-test-deposit-and-mint-succeed)) |
-| 1 | the build is reproducible from source | Met in the contracts repository: 12 of 12 on Linux x86_64. **Open:** a public log of that rebuild ([1.4](#14-the-build-is-reproducible-from-source)) |
+| 1 | the build is reproducible from source | Met: 12 of 12 rebuilt from source in public CI ([1.4](#14-the-build-is-reproducible-from-source)) |
 | 2 | Dashboard and monitoring views are live on the Mainnet dApp | Met ([2.1](#21-dashboard-and-monitoring-views-are-live-on-the-mainnet-dapp)) |
 | 2 | reflect real on-chain state | Met ([2.2](#22-they-reflect-real-on-chain-state)) |
 | 2 | correctly surface RiskControl, oracle, market, and RecoveryEscrow status | Met; no seizure yet on Mainnet, the seizure view is shown on Testnet ([2.3](#23-they-correctly-surface-riskcontrol-oracle-market-and-recoveryescrow-status)) |
@@ -145,11 +145,11 @@ Every value is read live by the dashboard; each figure's info button gives the c
    sha256sum target/wasm32v1-none/release/*.wasm   # compare with evidence §2.2
    ```
 
-3. The result: the contracts team's rebuild gives 12 of 12. Their public CI shows the two files without a cargo path
-   (Permissioning, RiskControl) matching; a public log of the full 12 of 12 is still to come. On macOS or Linux arm64
-   the bytes differ.
+3. Read the public log: our CI job [reproducible-build.yml](https://github.com/principal-Protocol-org/dapp/blob/main/.github/workflows/reproducible-build.yml) runs exactly this on Linux x86_64 and compares
+   each rebuilt file with the code fetched from Mainnet. [Run 45291768952](https://github.com/principal-Protocol-org/dapp/actions/runs/45291768952): **12 of 12 match** (the table is in
+   the run's summary). The contracts team's own rebuild gives the same. On macOS or Linux arm64 the bytes differ.
 
-**Status: Met in the contracts repository.** Open: the public log ([Open items](#open-items), 1).
+**Status: Met.**
 
 ## Deliverable 2: dApp Dashboard + Protocol Monitoring
 
@@ -261,6 +261,5 @@ The compliance history comes from an event index updated every 5 minutes (**Even
 
 | # | Item | Owner |
 |---|---|---|
-| 1 | A public log of the 12-of-12 rebuild. A CI job that reads the cargo path from a deployed file is planned, not built. | contracts team |
-| 2 | The contract instances live until about 17 to 21 March 2027; they must be extended before mid-March 2027. | contracts team |
-| 3 | In the contracts team's manifests: `git_tree_dirty: true`, and two hashes listed under wrong steps in MOCKUSDY's `transactions[]` ([evidence §2](TRANCHE_3_EVIDENCE.md#2-contracts)). | contracts team |
+| 1 | The contract instances live until about 17 to 21 March 2027; they must be extended before mid-March 2027. | contracts team |
+| 2 | In the contracts team's manifests: `git_tree_dirty: true`, and two hashes listed under wrong steps in MOCKUSDY's `transactions[]` ([evidence §2](TRANCHE_3_EVIDENCE.md#2-contracts)). | contracts team |
