@@ -47,9 +47,9 @@ must be signed by the asset's own issuer authority
 | The dApp on Testnet (Tranche 2, unchanged) | <https://testnet.principalmarket.fi> |
 | dApp repository, app code at `783d51c` (later commits on `main` change only documentation) | <https://github.com/principal-Protocol-org/dapp/tree/783d51c51003376884ccec1d9eab6d44d27d59fd> |
 | The Mainnet manifest the app reads | [config/manifests/mainnet.json](https://github.com/principal-Protocol-org/dapp/blob/783d51c51003376884ccec1d9eab6d44d27d59fd/config/manifests/mainnet.json) |
-| Contracts repository, branch `mainnet` at `8932e2f` (the contracts team's Mainnet evidence) | <https://github.com/principal-Protocol-org/principal/tree/8932e2fd53fbc914d5bfd33ce6d5e7dea4dae998> |
+| Contracts repository, branch `mainnet` at `fe673a7` (the contracts team's Mainnet evidence) | <https://github.com/principal-Protocol-org/principal/tree/fe673a7fb16ddab357cf013305b4a64bd51f2a68> |
 | The deployed contract source, `3af9388` | <https://github.com/principal-Protocol-org/principal/tree/3af938853e5818aa8d56bd35670b9a19cfa55a78> |
-| The contracts team's deployment record | [docs/MAINNET_DEPLOYMENT_EVIDENCE.md](https://github.com/principal-Protocol-org/principal/blob/8932e2fd53fbc914d5bfd33ce6d5e7dea4dae998/docs/MAINNET_DEPLOYMENT_EVIDENCE.md), [docs/MAINNET_ADDRESSES.md](https://github.com/principal-Protocol-org/principal/blob/8932e2fd53fbc914d5bfd33ce6d5e7dea4dae998/docs/MAINNET_ADDRESSES.md) |
+| The contracts team's deployment record | [docs/MAINNET_DEPLOYMENT_EVIDENCE.md](https://github.com/principal-Protocol-org/principal/blob/fe673a7fb16ddab357cf013305b4a64bd51f2a68/docs/MAINNET_DEPLOYMENT_EVIDENCE.md), [docs/MAINNET_ADDRESSES.md](https://github.com/principal-Protocol-org/principal/blob/fe673a7fb16ddab357cf013305b4a64bd51f2a68/docs/MAINNET_ADDRESSES.md) |
 | Block explorer | <https://stellar.expert/explorer/public> |
 
 ## Summary
@@ -111,7 +111,7 @@ The tranche's objective, as submitted:
    - `wasmHashes` for the 12 contract codes, and `sourceCommit` `3af9388`.
 
    Its addresses and hashes equal those of the contracts team's
-   [deployments/mainnet-dapp-manifest.json](https://github.com/principal-Protocol-org/principal/blob/8932e2fd53fbc914d5bfd33ce6d5e7dea4dae998/deployments/mainnet-dapp-manifest.json).
+   [deployments/mainnet-dapp-manifest.json](https://github.com/principal-Protocol-org/principal/blob/fe673a7fb16ddab357cf013305b4a64bd51f2a68/deployments/mainnet-dapp-manifest.json).
 2. Open any address on stellar.expert. All 44 are linked in [evidence §2.2](TRANCHE_3_EVIDENCE.md#22-contracts). For
    example MOCKUSDY's PrincipalManager:
    <https://stellar.expert/explorer/public/contract/CBBKUZJWZDA7YLA6GHSXVLV62QJ6DLKCO4GXUWF43FXLPN5S3XVNUKCC>.
@@ -181,7 +181,7 @@ Every value below is read live by the dashboard. Each figure's info button gives
    <https://stellar.expert/explorer/public/tx/ddbdd13683ffd9b93509d9c223556aaa04d57c2d0870195db304580b8e2b4906>: it is
    successful and calls `mint` on MOCKUSDY's PrincipalManager, `CBBKUZ…UKCC`.
 2. The same transactions are recorded by the contracts team in
-   [MAINNET_DEPLOYMENT_EVIDENCE.md](https://github.com/principal-Protocol-org/principal/blob/8932e2fd53fbc914d5bfd33ce6d5e7dea4dae998/docs/MAINNET_DEPLOYMENT_EVIDENCE.md):
+   [MAINNET_DEPLOYMENT_EVIDENCE.md](https://github.com/principal-Protocol-org/principal/blob/fe673a7fb16ddab357cf013305b4a64bd51f2a68/docs/MAINNET_DEPLOYMENT_EVIDENCE.md):
    §5, "Real transaction testing (both markets) 2026-11-17/18", for MOCKUSDY, and §12, the table "Real testing proof
    on every v2 market", for the four others.
 3. The app side: the read-only check of [1.1](#11-all-contracts-are-live-on-stellar-mainnet-with-verified-addresses)
@@ -189,21 +189,21 @@ Every value below is read live by the dashboard. Each figure's info button gives
    (below).
 
 **Status: Met in the contracts repository**
-([MAINNET_DEPLOYMENT_EVIDENCE.md](https://github.com/principal-Protocol-org/principal/blob/8932e2fd53fbc914d5bfd33ce6d5e7dea4dae998/docs/MAINNET_DEPLOYMENT_EVIDENCE.md)
+([MAINNET_DEPLOYMENT_EVIDENCE.md](https://github.com/principal-Protocol-org/principal/blob/fe673a7fb16ddab357cf013305b4a64bd51f2a68/docs/MAINNET_DEPLOYMENT_EVIDENCE.md)
 §5 and §12): deposit and mint succeeded on all five Mainnet markets, from the command line.
-**Open (developer, after the contracts team):** the dApp's own signed smoke test, a small deposit and mint through
-principalmarket.fi. It needs a test wallet that the contracts team grants on the markets (only their Permissioning
-admin can). It will be signed by the developer, never by an automated
-test. Its two hashes will be added to the evidence file.
+**Open (developer):** the dApp's own signed smoke test, a small deposit and mint through principalmarket.fi. The
+contracts team has granted the developer's test wallet on all five markets
+([MAINNET_DEPLOYMENT_EVIDENCE.md §15](https://github.com/principal-Protocol-org/principal/blob/fe673a7fb16ddab357cf013305b4a64bd51f2a68/docs/MAINNET_DEPLOYMENT_EVIDENCE.md#15-dapp-teams-smoke-test-wallet-granted-on-all-5-markets-2026-11-23)).
+The test is signed by the developer, never by an automated test. Its two hashes will be added to the evidence file.
 
 ### 1.4 The build is reproducible from source
 
 1. Read the contracts team's build section,
-   [MAINNET_DEPLOYMENT_EVIDENCE.md §8](https://github.com/principal-Protocol-org/principal/blob/8932e2fd53fbc914d5bfd33ce6d5e7dea4dae998/docs/MAINNET_DEPLOYMENT_EVIDENCE.md#8-reproducible-build-evidence):
+   [MAINNET_DEPLOYMENT_EVIDENCE.md §8](https://github.com/principal-Protocol-org/principal/blob/fe673a7fb16ddab357cf013305b4a64bd51f2a68/docs/MAINNET_DEPLOYMENT_EVIDENCE.md#8-reproducible-build-evidence):
    the build command `cargo build --workspace --release --target wasm32v1-none`, the toolchain (`rustc 1.94.1`,
    `stellar 26.0.0`), and the size and SHA-256 of the 12 wasm files. The repository also pins the
    toolchain (`rust-toolchain.toml`) and has a recipe,
-   [deployments/mainnet/reproducible-build.md](https://github.com/principal-Protocol-org/principal/blob/8932e2fd53fbc914d5bfd33ce6d5e7dea4dae998/deployments/mainnet/reproducible-build.md),
+   [deployments/mainnet/reproducible-build.md](https://github.com/principal-Protocol-org/principal/blob/fe673a7fb16ddab357cf013305b4a64bd51f2a68/deployments/mainnet/reproducible-build.md),
    with `scripts/deploy/reproducible_build.sh`.
 2. Check that the chain holds those files: the hashes in §8 are the manifest's `wasmHashes`, and the on-chain code
    matches them, 44 of 44 ([1.1](#11-all-contracts-are-live-on-stellar-mainnet-with-verified-addresses) step 3).
@@ -241,12 +241,12 @@ test. Its two hashes will be added to the evidence file.
    These are the flags of the contracts team's `scripts/deploy/reproducible_build.sh` (added after `3af9388`) with
    `REMAP_CARGO_HOME_TO` set to the recorded path. With them, the contracts team rebuilt `3af9388` and got the 12
    on-chain hashes
-   ([reproducible-build.md](https://github.com/principal-Protocol-org/principal/blob/8932e2fd53fbc914d5bfd33ce6d5e7dea4dae998/deployments/mainnet/reproducible-build.md)).
+   ([reproducible-build.md](https://github.com/principal-Protocol-org/principal/blob/fe673a7fb16ddab357cf013305b4a64bd51f2a68/deployments/mainnet/reproducible-build.md)).
    The host matters: on macOS arm64 and on Linux arm64 the bytes differ, even for Permissioning, and the script
    refuses to run there ([evidence §3.2](TRANCHE_3_EVIDENCE.md#32-the-reproducible-build)).
 
 **Status: Met in the contracts repository.** The build instructions and the checksums are published
-([§8](https://github.com/principal-Protocol-org/principal/blob/8932e2fd53fbc914d5bfd33ce6d5e7dea4dae998/docs/MAINNET_DEPLOYMENT_EVIDENCE.md#8-reproducible-build-evidence)),
+([§8](https://github.com/principal-Protocol-org/principal/blob/fe673a7fb16ddab357cf013305b4a64bd51f2a68/docs/MAINNET_DEPLOYMENT_EVIDENCE.md#8-reproducible-build-evidence)),
 and the chain holds exactly those artifacts. The contracts team rebuilt `3af9388` on Linux x86_64 with the recorded
 cargo path and got 12 of 12 (§14.1 of their evidence file). Their public CI shows the two contracts without a machine
 path matching on its own runner. A public log of the full 12 of 12 is still to come ([open item 2](#open-items)).
@@ -531,7 +531,10 @@ warning and does not fail it.
   windows of twice the feed's heartbeat this is rare.
 - An OracleAdapter never lowers its stored value. When the feed's price falls below it, the update is refused
   (`decrease`) and the value ages until the feed rises again; if the price stays lower for longer than the window,
-  the oracle turns stale. The keeper's runs show each refusal, and the alert check opens `oracle_rejection`.
+  the oracle turns stale. The keeper's runs show each refusal, and the alert check opens `oracle_rejection`, then
+  `oracle_warning` once three quarters of the window has passed. Before the window ends, the contracts team's admin
+  can resubmit the stored value with a current timestamp: the value does not fall, so the contract accepts it, and the
+  window restarts. The dashboard's update path then reads Push until the feed takes over.
 - The overview's protocol-wide TVL and pool liquidity in asset units read "Unavailable" by design: the markets hold
   different assets. Per-market figures and the TVL in USD are given instead.
 - The dashboard refreshes every minute on Mainnet, to stay within the RPC's limits.
@@ -542,7 +545,7 @@ The same list, with the evidence, is in [evidence §10](TRANCHE_3_EVIDENCE.md#10
 
 | # | Item | Owner | Reason |
 |---|---|---|---|
-| 1 | The dApp's own signed smoke test on Mainnet: a small deposit and mint through principalmarket.fi | developer, after the contracts team | Needs a test wallet granted by the contracts team, who grant it on request. Signed by the developer, never by an agent or a test. |
+| 1 | The dApp's own signed smoke test on Mainnet: a small deposit and mint through principalmarket.fi | developer | The contracts team has granted the developer's test wallet on all five markets. Signed by the developer, never by an agent or a test. |
 | 2 | A public log of the 12-of-12 rebuild | contracts team | Their rebuild of `3af9388` on Linux x86_64 with the recorded cargo path gave 12 of 12; a CI job that prints it lets anyone see the result without a Linux x86_64 machine. |
 | 3 | Contract lifetimes: the Mainnet contract instances live until about 17 to 21 March 2027 | contracts team, operations | Someone must extend them before mid-March 2027; the contracts team tracks it. |
 | 4 | The contracts team's manifests: duplicate hashes in MOCKUSDY's `transactions[]`, `git_tree_dirty: true` | contracts team | Stated so that no hash is cited under the wrong step. |

@@ -12,7 +12,7 @@ Stellar assets issued by Principal for testing. They are not USDY or the other r
 OracleAdapter reads the price of the real asset it tracks (USDY, USTRY, GILTS, CETES, XAUM) from RedStone's SEP-40
 price feed on Mainnet. The contracts are the production contracts. Principal cannot create a market on the real USDY,
 because market creation must be signed by the asset's own issuer authority (the contracts repository's
-[MAINNET_DEPLOYMENT_EVIDENCE.md §1](https://github.com/principal-Protocol-org/principal/blob/8932e2fd53fbc914d5bfd33ce6d5e7dea4dae998/docs/MAINNET_DEPLOYMENT_EVIDENCE.md#1-why-mock-assets)).
+[MAINNET_DEPLOYMENT_EVIDENCE.md §1](https://github.com/principal-Protocol-org/principal/blob/fe673a7fb16ddab357cf013305b4a64bd51f2a68/docs/MAINNET_DEPLOYMENT_EVIDENCE.md#1-why-mock-assets)).
 
 Links:
 - transactions, contracts and accounts on stellar.expert: `https://stellar.expert/explorer/public/tx/<hash>`,
@@ -22,7 +22,7 @@ Links:
   [`783d51c`](https://github.com/principal-Protocol-org/dapp/tree/783d51c51003376884ccec1d9eab6d44d27d59fd) (later
   commits on `main` change only documentation);
 - the contracts repository at branch `mainnet`,
-  [`8932e2f`](https://github.com/principal-Protocol-org/principal/tree/8932e2fd53fbc914d5bfd33ce6d5e7dea4dae998)
+  [`fe673a7`](https://github.com/principal-Protocol-org/principal/tree/fe673a7fb16ddab357cf013305b4a64bd51f2a68)
   (the contracts team's Mainnet documents and manifests), and at the deployed source,
   [`3af9388`](https://github.com/principal-Protocol-org/principal/tree/3af938853e5818aa8d56bd35670b9a19cfa55a78).
 
@@ -63,15 +63,15 @@ health and last run, and the open alerts.
 
 Source: [config/manifests/mainnet.json](https://github.com/principal-Protocol-org/dapp/blob/783d51c51003376884ccec1d9eab6d44d27d59fd/config/manifests/mainnet.json).
 It is the contracts team's
-[deployments/mainnet-dapp-manifest.json](https://github.com/principal-Protocol-org/principal/blob/8932e2fd53fbc914d5bfd33ce6d5e7dea4dae998/deployments/mainnet-dapp-manifest.json)
+[deployments/mainnet-dapp-manifest.json](https://github.com/principal-Protocol-org/principal/blob/fe673a7fb16ddab357cf013305b4a64bd51f2a68/deployments/mainnet-dapp-manifest.json)
 with the dApp's own fields added. The shared contracts, every market's contracts, the maturities, the wasm hashes and
-the source commit are equal in both files (checked against `8932e2f`).
+the source commit are equal in both files (checked against `fe673a7`).
 
 | Field | Value |
 |---|---|
 | Network | Stellar Mainnet, `Public Global Stellar Network ; September 2015`; Horizon `https://horizon.stellar.org` |
 | RPC | primary host `lb.drpc.live` (a keyed URL, not reproduced here); fallback and the dashboard's "How to verify" commands: `https://soroban-rpc.mainnet.stellar.gateway.fm` (`verifyRpcUrl`) |
-| `sourceCommit` | [`3af938853e5818aa8d56bd35670b9a19cfa55a78`](https://github.com/principal-Protocol-org/principal/commit/3af938853e5818aa8d56bd35670b9a19cfa55a78). The contract sources are identical at `4b5bc2b` (the commit the contracts team's build section names) and at `mainnet` `8932e2f`: `git diff` shows no change under `contracts/`, nor in `Cargo.toml` or `Cargo.lock`. |
+| `sourceCommit` | [`3af938853e5818aa8d56bd35670b9a19cfa55a78`](https://github.com/principal-Protocol-org/principal/commit/3af938853e5818aa8d56bd35670b9a19cfa55a78). The contract sources are identical at `4b5bc2b` (the commit the contracts team's build section names) and at `mainnet` `fe673a7`: `git diff` shows no change under `contracts/`, nor in `Cargo.toml` or `Cargo.lock`. |
 | `protocolAbi` | `2` (the `3af9388` contract interfaces) |
 | `deployLedger` | `65525735`; `createdLedgers` gives the first ledger of the 20 contracts added later (the four markets deployed on 20 November) |
 | `generatedAt` | `2026-11-21T00:00:00Z` |
@@ -171,7 +171,7 @@ the keeper's.
 
 | Role | Address | Source |
 |---|---|---|
-| Protocol admin (contracts team): admin of the five OracleAdapters, a pauser by RiskControl's rule, the protocol admin of the markets' fees | [GDZN5W…5NCB](https://stellar.expert/explorer/public/account/GDZN5WVOUBRTZKADUULRXJOGVGNK4WWXJPSALTVOORLSU5NFOZ2P5NCB) | `get_admin` on each OracleAdapter; the risk page; the market pages; [MAINNET_ADDRESSES.md](https://github.com/principal-Protocol-org/principal/blob/8932e2fd53fbc914d5bfd33ce6d5e7dea4dae998/docs/MAINNET_ADDRESSES.md) |
+| Protocol admin (contracts team): admin of the five OracleAdapters, a pauser by RiskControl's rule, the protocol admin of the markets' fees | [GDZN5W…5NCB](https://stellar.expert/explorer/public/account/GDZN5WVOUBRTZKADUULRXJOGVGNK4WWXJPSALTVOORLSU5NFOZ2P5NCB) | `get_admin` on each OracleAdapter; the risk page; the market pages; [MAINNET_ADDRESSES.md](https://github.com/principal-Protocol-org/principal/blob/fe673a7fb16ddab357cf013305b4a64bd51f2a68/docs/MAINNET_ADDRESSES.md) |
 | Issuers (contracts team): one per mock asset, the SAC admin of its asset and the market's creator | [§2.2](#22-contracts) | the compliance page (`admin()` on each SAC); the market pages |
 | Treasury: receives the protocol's fee share | [GBUVAH…VSXW](https://stellar.expert/explorer/public/account/GBUVAHYJNCXZWUK3NIOVJ6EYQRSXMVT2XOUEASS3VAG4EWIXXWYSVSXW) | the market pages |
 | The contracts team's test account, which signed their deposits and mints ([§3.1](#31-deposit-and-mint-on-every-market)) | [GCOMBI…R5BM](https://stellar.expert/explorer/public/account/GCOMBIYWZ3HIMAS7FLFERQMVZIDVIMFZAAV7A2KMCDV3RAKP5NL5R5BM) | Horizon |
@@ -182,16 +182,16 @@ access flow therefore shows what is missing, offers the trustline, and points to
 
 ## 3. The contracts team's Mainnet evidence
 
-Source: the contracts repository, branch `mainnet` at `8932e2f`:
-[docs/MAINNET_DEPLOYMENT_EVIDENCE.md](https://github.com/principal-Protocol-org/principal/blob/8932e2fd53fbc914d5bfd33ce6d5e7dea4dae998/docs/MAINNET_DEPLOYMENT_EVIDENCE.md),
-[docs/MAINNET_ADDRESSES.md](https://github.com/principal-Protocol-org/principal/blob/8932e2fd53fbc914d5bfd33ce6d5e7dea4dae998/docs/MAINNET_ADDRESSES.md),
-[docs/MAINNET_TRANSACTION_LEDGER.md](https://github.com/principal-Protocol-org/principal/blob/8932e2fd53fbc914d5bfd33ce6d5e7dea4dae998/docs/MAINNET_TRANSACTION_LEDGER.md)
+Source: the contracts repository, branch `mainnet` at `fe673a7`:
+[docs/MAINNET_DEPLOYMENT_EVIDENCE.md](https://github.com/principal-Protocol-org/principal/blob/fe673a7fb16ddab357cf013305b4a64bd51f2a68/docs/MAINNET_DEPLOYMENT_EVIDENCE.md),
+[docs/MAINNET_ADDRESSES.md](https://github.com/principal-Protocol-org/principal/blob/fe673a7fb16ddab357cf013305b4a64bd51f2a68/docs/MAINNET_ADDRESSES.md),
+[docs/MAINNET_TRANSACTION_LEDGER.md](https://github.com/principal-Protocol-org/principal/blob/fe673a7fb16ddab357cf013305b4a64bd51f2a68/docs/MAINNET_TRANSACTION_LEDGER.md)
 (complete through 18 November 2026, as its header says) and the five market manifests
-[mainnet-mockusdy](https://github.com/principal-Protocol-org/principal/blob/8932e2fd53fbc914d5bfd33ce6d5e7dea4dae998/deployments/mainnet-mockusdy/deployment-manifest.json),
-[mainnet-ustry](https://github.com/principal-Protocol-org/principal/blob/8932e2fd53fbc914d5bfd33ce6d5e7dea4dae998/deployments/mainnet-ustry/deployment-manifest.json),
-[mainnet-gilts](https://github.com/principal-Protocol-org/principal/blob/8932e2fd53fbc914d5bfd33ce6d5e7dea4dae998/deployments/mainnet-gilts/deployment-manifest.json),
-[mainnet-cetes](https://github.com/principal-Protocol-org/principal/blob/8932e2fd53fbc914d5bfd33ce6d5e7dea4dae998/deployments/mainnet-cetes/deployment-manifest.json),
-[mainnet-xaum](https://github.com/principal-Protocol-org/principal/blob/8932e2fd53fbc914d5bfd33ce6d5e7dea4dae998/deployments/mainnet-xaum/deployment-manifest.json).
+[mainnet-mockusdy](https://github.com/principal-Protocol-org/principal/blob/fe673a7fb16ddab357cf013305b4a64bd51f2a68/deployments/mainnet-mockusdy/deployment-manifest.json),
+[mainnet-ustry](https://github.com/principal-Protocol-org/principal/blob/fe673a7fb16ddab357cf013305b4a64bd51f2a68/deployments/mainnet-ustry/deployment-manifest.json),
+[mainnet-gilts](https://github.com/principal-Protocol-org/principal/blob/fe673a7fb16ddab357cf013305b4a64bd51f2a68/deployments/mainnet-gilts/deployment-manifest.json),
+[mainnet-cetes](https://github.com/principal-Protocol-org/principal/blob/fe673a7fb16ddab357cf013305b4a64bd51f2a68/deployments/mainnet-cetes/deployment-manifest.json),
+[mainnet-xaum](https://github.com/principal-Protocol-org/principal/blob/fe673a7fb16ddab357cf013305b4a64bd51f2a68/deployments/mainnet-xaum/deployment-manifest.json).
 
 ### 3.1 Deposit and mint on every market
 
@@ -214,12 +214,12 @@ The same doc records seed liquidity and a swap on each market. It also records, 
 redemption at maturity.
 
 These are the contracts team's command-line runs. The dApp's own signed smoke test, a small deposit and mint through
-principalmarket.fi, has not been run yet ([§10](#10-open-items), item 1).
+principalmarket.fi, has not been run yet ([§10](#10-open-items), item 1); the developer's test wallet is granted.
 
 ### 3.2 The reproducible build
 
 What the contracts repository publishes:
-- [MAINNET_DEPLOYMENT_EVIDENCE.md §8](https://github.com/principal-Protocol-org/principal/blob/8932e2fd53fbc914d5bfd33ce6d5e7dea4dae998/docs/MAINNET_DEPLOYMENT_EVIDENCE.md#8-reproducible-build-evidence): the source commit `4b5bc2b` (the contract
+- [MAINNET_DEPLOYMENT_EVIDENCE.md §8](https://github.com/principal-Protocol-org/principal/blob/fe673a7fb16ddab357cf013305b4a64bd51f2a68/docs/MAINNET_DEPLOYMENT_EVIDENCE.md#8-reproducible-build-evidence): the source commit `4b5bc2b` (the contract
   sources are identical at `3af9388`, [§2.1](#21-the-manifest)), the build command
   `cargo build --workspace --release --target wasm32v1-none`, the toolchain `rustc 1.94.1 (e408947bf 2026-03-25)`,
   `cargo 1.94.1`, `stellar 26.0.0` (the manifests add `soroban-sdk 26.0.1`), and the size and SHA-256 of the 12 wasm
@@ -228,15 +228,15 @@ What the contracts repository publishes:
 - On branch `mainnet`: `rust-toolchain.toml` (rustc 1.94.1), `scripts/deploy/reproducible_build.sh` (the build with
   `--remap-path-prefix` on the cargo and checkout paths; it refuses to run on a host other than
   `x86_64-unknown-linux-gnu`; `REMAP_CARGO_HOME_TO` sets the cargo path written into the bytes) and the recipe
-  [deployments/mainnet/reproducible-build.md](https://github.com/principal-Protocol-org/principal/blob/8932e2fd53fbc914d5bfd33ce6d5e7dea4dae998/deployments/mainnet/reproducible-build.md).
-  These files came after `3af9388`; at `8932e2f` the contract sources, `Cargo.toml` and `Cargo.lock` equal
+  [deployments/mainnet/reproducible-build.md](https://github.com/principal-Protocol-org/principal/blob/fe673a7fb16ddab357cf013305b4a64bd51f2a68/deployments/mainnet/reproducible-build.md).
+  These files came after `3af9388`; at `fe673a7` the contract sources, `Cargo.toml` and `Cargo.lock` equal
   `3af9388`'s. §14 and §14.1 of the evidence file explain why the bytes depend on the build machine.
 
 What a rebuild gives (rustc 1.94.1):
 
 | Build | Result |
 |---|---|
-| The contracts team, Linux x86_64, `3af9388`, the script's flags with the cargo directory mapped to the path recorded in the bytes ([recipe](https://github.com/principal-Protocol-org/principal/blob/8932e2fd53fbc914d5bfd33ce6d5e7dea4dae998/deployments/mainnet/reproducible-build.md), 23 November 2026) | 12 of 12 equal the on-chain hashes (their run; no public log yet) |
+| The contracts team, Linux x86_64, `3af9388`, the script's flags with the cargo directory mapped to the path recorded in the bytes ([recipe](https://github.com/principal-Protocol-org/principal/blob/fe673a7fb16ddab357cf013305b4a64bd51f2a68/deployments/mainnet/reproducible-build.md), 23 November 2026) | 12 of 12 equal the on-chain hashes (their run; no public log yet) |
 | The contracts team's CI, [run 45141813086](https://github.com/principal-Protocol-org/principal/actions/runs/45141813086), job "wasm build (all contracts)", Linux x86_64, `8932e2f`, the script's default mapping | Permissioning (`4437468d…`) and RiskControl (`ac75508d…`) equal the on-chain hashes; the 10 others carry the default path and differ |
 | macOS arm64, and Linux arm64 (`rust:1.94.1-slim`), with the script's flags | 0 of 12, Permissioning included: the host system changes the bytes |
 
@@ -390,7 +390,7 @@ check opens `signer_low` when its balance runs low.
 [line 572](https://github.com/principal-Protocol-org/principal/blob/3af938853e5818aa8d56bd35670b9a19cfa55a78/contracts/oracle_adapter/src/lib.rs#L572)). An oracle is fresh while that timestamp is less than `max_stale_seconds` old: 86,400 s (24 hours)
 on four, 172,800 s (48 hours) on MOCKGILTS. The oracle admin GDZN5W…5NCB set them with
 [`set_safety_params(caller, max_stale_seconds, 1000)`](https://github.com/principal-Protocol-org/principal/blob/3af938853e5818aa8d56bd35670b9a19cfa55a78/contracts/oracle_adapter/src/lib.rs#L292), recorded in the contracts team's
-[MAINNET_DEPLOYMENT_EVIDENCE.md](https://github.com/principal-Protocol-org/principal/blob/8932e2fd53fbc914d5bfd33ce6d5e7dea4dae998/docs/MAINNET_DEPLOYMENT_EVIDENCE.md) §13 and §13.1:
+[MAINNET_DEPLOYMENT_EVIDENCE.md](https://github.com/principal-Protocol-org/principal/blob/fe673a7fb16ddab357cf013305b4a64bd51f2a68/docs/MAINNET_DEPLOYMENT_EVIDENCE.md) §13 and §13.1:
 
 | UTC | Ledger | Oracle (asset) | Window | Transaction |
 |---|---|---|---|---|
@@ -502,7 +502,7 @@ history**. The Mainnet dashboard runs the same code on the same views.
 
 | # | Item | Owner | Reason |
 |---|---|---|---|
-| 1 | **The dApp's own signed smoke test on Mainnet**: a small deposit and mint through principalmarket.fi, with their two hashes. | developer, after the contracts team | Needs a test wallet granted on the markets (only the contracts team's Permissioning admin can; they grant it on request). It is signed by the developer, never by an agent or a test. The contracts team's command-line deposits and mints are in [§3.1](#31-deposit-and-mint-on-every-market). |
+| 1 | **The dApp's own signed smoke test on Mainnet**: a small deposit and mint through principalmarket.fi, with their two hashes. | developer | The contracts team has granted the developer's test wallet on all five markets ([their evidence §15](https://github.com/principal-Protocol-org/principal/blob/fe673a7fb16ddab357cf013305b4a64bd51f2a68/docs/MAINNET_DEPLOYMENT_EVIDENCE.md#15-dapp-teams-smoke-test-wallet-granted-on-all-5-markets-2026-11-23)). It is signed by the developer, never by an agent or a test. The contracts team's command-line deposits and mints are in [§3.1](#31-deposit-and-mint-on-every-market). |
 | 2 | **A public log of the 12-of-12 rebuild** ([§3.2](#32-the-reproducible-build)). | contracts team | Their rebuild of `3af9388` on Linux x86_64 with the recorded cargo path gave 12 of 12; their CI shows only the two contracts without a machine path. A CI job that runs the rebuild with the recorded path would show all 12. |
 | 3 | **Contract lifetimes.** The Mainnet contract instances live until about 17 to 21 March 2027 ([§2.4](#24-how-long-the-contracts-live)). | contracts team, operations | Someone must extend them (and the code entries) before mid-March 2027; the contracts team tracks it in their evidence file, §10 item 6. |
 | 4 | **The contracts team's manifest caveats:** duplicate hashes in MOCKUSDY's `transactions[]` and `git_tree_dirty: true` ([§3.3](#33-the-deployment-manifests)). | contracts team | Stated so that no hash is cited under the wrong step. |
