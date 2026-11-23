@@ -58,7 +58,7 @@ must be signed by the asset's own issuer authority
 |---|---|---|
 | 1 | All contracts are live on Stellar Mainnet with verified addresses | Met ([1.1](#11-all-contracts-are-live-on-stellar-mainnet-with-verified-addresses)) |
 | 1 | the initial market configuration is active | Met ([1.2](#12-the-initial-market-configuration-is-active)) |
-| 1 | a smoke-test deposit and mint succeed | **Met in the contracts repository**: deposit and mint on all five markets ([1.3](#13-a-smoke-test-deposit-and-mint-succeed)). **Open** (developer, after a grant by the contracts team): the dApp's own signed run through principalmarket.fi |
+| 1 | a smoke-test deposit and mint succeed | Met: deposit and mint on all five markets from the command line, and the developer's signed deposit and mint through principalmarket.fi on MOCKUSDY ([1.3](#13-a-smoke-test-deposit-and-mint-succeed)) |
 | 1 | the build is reproducible from source | **Met in the contracts repository**: the instructions and checksums are published and match the chain; on Linux x86_64, with the cargo path that the original build recorded in the bytes, a rebuild gives 12 of 12 (the contracts team's run). **Open** (contracts team): a public log of that run ([1.4](#14-the-build-is-reproducible-from-source)) |
 | 2 | Dashboard and monitoring views are live on the Mainnet dApp | Met ([2.1](#21-dashboard-and-monitoring-views-are-live-on-the-mainnet-dapp)) |
 | 2 | reflect real on-chain state | Met ([2.2](#22-they-reflect-real-on-chain-state)) |
@@ -185,16 +185,17 @@ Every value below is read live by the dashboard. Each figure's info button gives
    §5, "Real transaction testing (both markets) 2026-11-17/18", for MOCKUSDY, and §12, the table "Real testing proof
    on every v2 market", for the four others.
 3. The app side: the read-only check of [1.1](#11-all-contracts-are-live-on-stellar-mainnet-with-verified-addresses)
-   step 3 shows that the app reads every market's contracts on Mainnet. The signed run through the app is not done yet
-   (below).
+   step 3 shows that the app reads every market's contracts on Mainnet.
+4. The app's own signed run: open [evidence §2.6](TRANCHE_3_EVIDENCE.md#26-the-apps-signed-smoke-test), a deposit and
+   a mint of 1 MOCKUSDY each through principalmarket.fi, signed by the developer's test wallet. Open the mint,
+   <https://stellar.expert/explorer/public/tx/dba674d509368d8eae9b00b3a74c7f016da05fd08de9e7ddebfd4a1db3045ee6>: it is successful, its
+   source is `GBQEUZ…7VNH`, and it calls `wrap_and_mint` on the Router, `CCM4QQ…7QF5` (deposit and mint in one
+   transaction).
 
-**Status: Met in the contracts repository**
+**Status: Met.** Deposit and mint succeeded on all five Mainnet markets from the command line
 ([MAINNET_DEPLOYMENT_EVIDENCE.md](https://github.com/principal-Protocol-org/principal/blob/fe673a7fb16ddab357cf013305b4a64bd51f2a68/docs/MAINNET_DEPLOYMENT_EVIDENCE.md)
-§5 and §12): deposit and mint succeeded on all five Mainnet markets, from the command line.
-**Open (developer):** the dApp's own signed smoke test, a small deposit and mint through principalmarket.fi. The
-contracts team has granted the developer's test wallet on all five markets
-([MAINNET_DEPLOYMENT_EVIDENCE.md §15](https://github.com/principal-Protocol-org/principal/blob/fe673a7fb16ddab357cf013305b4a64bd51f2a68/docs/MAINNET_DEPLOYMENT_EVIDENCE.md#15-dapp-teams-smoke-test-wallet-granted-on-all-5-markets-2026-11-23)).
-The test is signed by the developer, never by an automated test. Its two hashes will be added to the evidence file.
+§5 and §12), and through principalmarket.fi on MOCKUSDY, signed by the developer's test wallet, which the contracts
+team granted on all five markets ([MAINNET_DEPLOYMENT_EVIDENCE.md §15](https://github.com/principal-Protocol-org/principal/blob/fe673a7fb16ddab357cf013305b4a64bd51f2a68/docs/MAINNET_DEPLOYMENT_EVIDENCE.md#15-dapp-teams-smoke-test-wallet-granted-on-all-5-markets-2026-11-23)).
 
 ### 1.4 The build is reproducible from source
 
@@ -249,7 +250,7 @@ The test is signed by the developer, never by an automated test. Its two hashes 
 ([§8](https://github.com/principal-Protocol-org/principal/blob/fe673a7fb16ddab357cf013305b4a64bd51f2a68/docs/MAINNET_DEPLOYMENT_EVIDENCE.md#8-reproducible-build-evidence)),
 and the chain holds exactly those artifacts. The contracts team rebuilt `3af9388` on Linux x86_64 with the recorded
 cargo path and got 12 of 12 (§14.1 of their evidence file). Their public CI shows the two contracts without a machine
-path matching on its own runner. A public log of the full 12 of 12 is still to come ([open item 2](#open-items)).
+path matching on its own runner. A public log of the full 12 of 12 is still to come ([open item 1](#open-items)).
 
 ### 1.5 The description, item by item
 
@@ -264,7 +265,7 @@ path matching on its own runner. A public log of the full 12 of 12 is still to c
 | the compliance configuration inherited from the underlying Stellar Asset | each issuer is its SAC's admin, with revocable and clawback set ([1.2](#12-the-initial-market-configuration-is-active) step 4) | Done |
 | Publish reproducible build instructions … compare SHA-256 checksums against the on-chain hashes | Instructions, recipe and checksums published; the chain matches the checksums; on Linux x86_64 with the recorded cargo path a rebuild reproduces 12 of 12 ([1.4](#14-the-build-is-reproducible-from-source)) | Met in the contracts repository; the public log of the 12 of 12 is open |
 | Switch the dApp to point to Mainnet contracts | <https://principalmarket.fi/app> reads `config/manifests/mainnet.json` ([1.2](#12-the-initial-market-configuration-is-active) step 5) | Met |
-| run a smoke test using a small amount | Read-only check: passes. Signed deposit and mint: done by the contracts team on all five markets; through the app: not yet ([1.3](#13-a-smoke-test-deposit-and-mint-succeed)) | Met in the contracts repository; the app's signed run is Open |
+| run a smoke test using a small amount | Read-only check: passes. Signed deposit and mint: by the contracts team on all five markets, and through the app on MOCKUSDY by the developer ([1.3](#13-a-smoke-test-deposit-and-mint-succeed)) | Met |
 
 ---
 
@@ -545,7 +546,6 @@ The same list, with the evidence, is in [evidence §10](TRANCHE_3_EVIDENCE.md#10
 
 | # | Item | Owner | Reason |
 |---|---|---|---|
-| 1 | The dApp's own signed smoke test on Mainnet: a small deposit and mint through principalmarket.fi | developer | The contracts team has granted the developer's test wallet on all five markets. Signed by the developer, never by an agent or a test. |
-| 2 | A public log of the 12-of-12 rebuild | contracts team | Their rebuild of `3af9388` on Linux x86_64 with the recorded cargo path gave 12 of 12; a CI job that prints it lets anyone see the result without a Linux x86_64 machine. |
-| 3 | Contract lifetimes: the Mainnet contract instances live until about 17 to 21 March 2027 | contracts team, operations | Someone must extend them before mid-March 2027; the contracts team tracks it. |
-| 4 | The contracts team's manifests: duplicate hashes in MOCKUSDY's `transactions[]`, `git_tree_dirty: true` | contracts team | Stated so that no hash is cited under the wrong step. |
+| 1 | A public log of the 12-of-12 rebuild | contracts team | Their rebuild of `3af9388` on Linux x86_64 with the recorded cargo path gave 12 of 12; a CI job that prints it lets anyone see the result without a Linux x86_64 machine. |
+| 2 | Contract lifetimes: the Mainnet contract instances live until about 17 to 21 March 2027 | contracts team, operations | Someone must extend them before mid-March 2027; the contracts team tracks it. |
+| 3 | The contracts team's manifests: duplicate hashes in MOCKUSDY's `transactions[]`, `git_tree_dirty: true` | contracts team | Stated so that no hash is cited under the wrong step. |

@@ -159,7 +159,7 @@ public gateway (`https://soroban-rpc.mainnet.stellar.gateway.fm`) on 21 November
 | Latest | 67658712 | 21 March 2027 |
 
 The markets mature on 15 and 18 February 2027. Someone must extend the instances before mid-March 2027
-([§10](#10-open-items), item 3). The contract code entries and the contracts' stored data have their own lifetimes,
+([§10](#10-open-items), item 2). The contract code entries and the contracts' stored data have their own lifetimes,
 not read here.
 
 ### 2.5 Roles
@@ -175,10 +175,26 @@ the keeper's.
 | Issuers (contracts team): one per mock asset, the SAC admin of its asset and the market's creator | [§2.2](#22-contracts) | the compliance page (`admin()` on each SAC); the market pages |
 | Treasury: receives the protocol's fee share | [GBUVAH…VSXW](https://stellar.expert/explorer/public/account/GBUVAHYJNCXZWUK3NIOVJ6EYQRSXMVT2XOUEASS3VAG4EWIXXWYSVSXW) | the market pages |
 | The contracts team's test account, which signed their deposits and mints ([§3.1](#31-deposit-and-mint-on-every-market)) | [GCOMBI…R5BM](https://stellar.expert/explorer/public/account/GCOMBIYWZ3HIMAS7FLFERQMVZIDVIMFZAAV7A2KMCDV3RAKP5NL5R5BM) | Horizon |
+| The developer's test wallet, which signed the app's smoke test ([§2.6](#26-the-apps-signed-smoke-test)); granted on all five markets by the contracts team | [GBQEUZ…7VNH](https://stellar.expert/explorer/public/account/GBQEUZZ6HRC7RFT23LWWQWWZ5RQMGCGE4GUCKYKKI2EXDABJA4NS7VNH) | Horizon; `is_allowed` and `is_allowed_for_asset` on Permissioning |
 | The app's oracle keeper: no role in any contract; it only pays the fees of `sync_from_feed`, which anyone may call | [GBLY3F…MZXS](https://stellar.expert/explorer/public/account/GBLY3FDTJFPYGI425TK6C7UUFBXYJ4DHWBXNHKWY7RMNZ43JLGUOMZXS) | the oracle page's keeper runs; Horizon ([§6](#6-the-oracle-keeper)) |
 
 Only the Permissioning admin (the contracts team) can grant an account access to the markets. The app's Mainnet
 access flow therefore shows what is missing, offers the trustline, and points to `hello@principalmarket.fi`.
+
+### 2.6 The app's signed smoke test
+
+The developer signed a deposit and a mint through principalmarket.fi on MOCKUSDY, with the test wallet GBQEUZ…7VNH
+(its trustline added in the app; the contracts team's grants are in
+[their evidence §15](https://github.com/principal-Protocol-org/principal/blob/fe673a7fb16ddab357cf013305b4a64bd51f2a68/docs/MAINNET_DEPLOYMENT_EVIDENCE.md#15-dapp-teams-smoke-test-wallet-granted-on-all-5-markets-2026-11-23)). Both are read on
+Horizon: successful, source GBQEUZ…7VNH, 1 MOCKUSDY sent each time to MOCKUSDY's SYWrapper `CCY5P6…GJ7Q`.
+
+| Step in the app | Call | Transaction |
+|---|---|---|
+| Quick actions → "Deposit MOCKUSDY → SY", 1 MOCKUSDY | `deposit` on MOCKUSDY's SYWrapper `CCY5P6…GJ7Q` | 23 Nov 2026 18:21:41 UTC, ledger 65634411, [5eb41384…4c67](https://stellar.expert/explorer/public/tx/5eb413846ea858d1ef014afab5c609823099585bb3709019b43f482a3b974c67) |
+| Quick actions → "Split MOCKUSDY → PT + YT", 1 MOCKUSDY | `wrap_and_mint` on the Router `CCM4QQ…7QF5`: deposit and mint in one transaction | 23 Nov 2026 18:32:51 UTC, ledger 65634545, [dba674d5…5ee6](https://stellar.expert/explorer/public/tx/dba674d509368d8eae9b00b3a74c7f016da05fd08de9e7ddebfd4a1db3045ee6) |
+
+Afterwards the wallet holds 1 SY (`balance_of` on the SYWrapper) and 1.1535997 PT and 1.1535997 YT (`balance` on
+MOCKUSDY's PT and YT), read by simulation.
 
 ## 3. The contracts team's Mainnet evidence
 
@@ -213,8 +229,8 @@ The same doc records seed liquidity and a swap on each market. It also records, 
 (`mainnet-CDQYZU-CA74VH`, matured, not listed by the app), a full lifecycle on Mainnet: deposit, mint, settlement and
 redemption at maturity.
 
-These are the contracts team's command-line runs. The dApp's own signed smoke test, a small deposit and mint through
-principalmarket.fi, has not been run yet ([§10](#10-open-items), item 1); the developer's test wallet is granted.
+These are the contracts team's command-line runs. The app's own signed deposit and mint, through principalmarket.fi,
+are in [§2.6](#26-the-apps-signed-smoke-test).
 
 ### 3.2 The reproducible build
 
@@ -246,7 +262,7 @@ builder's home directory, masked here), in 10 of the files; the workspace's own 
 (`contracts/market_pool/src/lib.rs`). Permissioning and RiskControl contain no such path. A rebuild writes its own
 cargo directory unless it maps it to the recorded one, which is what `REMAP_CARGO_HOME_TO` does. The command, with the
 path read from the bytes, is in the reviewer guide, 1.4 step 5. A CI job that runs it would give a public log of the
-12 of 12 ([§10](#10-open-items), item 2).
+12 of 12 ([§10](#10-open-items), item 1).
 
 ### 3.3 The deployment manifests
 
@@ -502,7 +518,6 @@ history**. The Mainnet dashboard runs the same code on the same views.
 
 | # | Item | Owner | Reason |
 |---|---|---|---|
-| 1 | **The dApp's own signed smoke test on Mainnet**: a small deposit and mint through principalmarket.fi, with their two hashes. | developer | The contracts team has granted the developer's test wallet on all five markets ([their evidence §15](https://github.com/principal-Protocol-org/principal/blob/fe673a7fb16ddab357cf013305b4a64bd51f2a68/docs/MAINNET_DEPLOYMENT_EVIDENCE.md#15-dapp-teams-smoke-test-wallet-granted-on-all-5-markets-2026-11-23)). It is signed by the developer, never by an agent or a test. The contracts team's command-line deposits and mints are in [§3.1](#31-deposit-and-mint-on-every-market). |
-| 2 | **A public log of the 12-of-12 rebuild** ([§3.2](#32-the-reproducible-build)). | contracts team | Their rebuild of `3af9388` on Linux x86_64 with the recorded cargo path gave 12 of 12; their CI shows only the two contracts without a machine path. A CI job that runs the rebuild with the recorded path would show all 12. |
-| 3 | **Contract lifetimes.** The Mainnet contract instances live until about 17 to 21 March 2027 ([§2.4](#24-how-long-the-contracts-live)). | contracts team, operations | Someone must extend them (and the code entries) before mid-March 2027; the contracts team tracks it in their evidence file, §10 item 6. |
-| 4 | **The contracts team's manifest caveats:** duplicate hashes in MOCKUSDY's `transactions[]` and `git_tree_dirty: true` ([§3.3](#33-the-deployment-manifests)). | contracts team | Stated so that no hash is cited under the wrong step. |
+| 1 | **A public log of the 12-of-12 rebuild** ([§3.2](#32-the-reproducible-build)). | contracts team | Their rebuild of `3af9388` on Linux x86_64 with the recorded cargo path gave 12 of 12; their CI shows only the two contracts without a machine path. A CI job that runs the rebuild with the recorded path would show all 12. |
+| 2 | **Contract lifetimes.** The Mainnet contract instances live until about 17 to 21 March 2027 ([§2.4](#24-how-long-the-contracts-live)). | contracts team, operations | Someone must extend them (and the code entries) before mid-March 2027; the contracts team tracks it in their evidence file, §10 item 6. |
+| 3 | **The contracts team's manifest caveats:** duplicate hashes in MOCKUSDY's `transactions[]` and `git_tree_dirty: true` ([§3.3](#33-the-deployment-manifests)). | contracts team | Stated so that no hash is cited under the wrong step. |
