@@ -47,9 +47,9 @@ must be signed by the asset's own issuer authority
 | The dApp on Testnet (Tranche 2, unchanged) | <https://testnet.principalmarket.fi> |
 | dApp repository, app code at `783d51c` (later commits on `main` change only documentation) | <https://github.com/principal-Protocol-org/dapp/tree/783d51c51003376884ccec1d9eab6d44d27d59fd> |
 | The Mainnet manifest the app reads | [config/manifests/mainnet.json](https://github.com/principal-Protocol-org/dapp/blob/783d51c51003376884ccec1d9eab6d44d27d59fd/config/manifests/mainnet.json) |
-| Contracts repository, branch `mainnet` at `ae6ccd9` (the contracts team's Mainnet evidence) | <https://github.com/principal-Protocol-org/principal/tree/ae6ccd96e5929ff8cbb36f889afd89875647fec2> |
+| Contracts repository, branch `mainnet` at `8932e2f` (the contracts team's Mainnet evidence) | <https://github.com/principal-Protocol-org/principal/tree/8932e2fd53fbc914d5bfd33ce6d5e7dea4dae998> |
 | The deployed contract source, `3af9388` | <https://github.com/principal-Protocol-org/principal/tree/3af938853e5818aa8d56bd35670b9a19cfa55a78> |
-| The contracts team's deployment record | [docs/MAINNET_DEPLOYMENT_EVIDENCE.md](https://github.com/principal-Protocol-org/principal/blob/ae6ccd96e5929ff8cbb36f889afd89875647fec2/docs/MAINNET_DEPLOYMENT_EVIDENCE.md), [docs/MAINNET_ADDRESSES.md](https://github.com/principal-Protocol-org/principal/blob/ae6ccd96e5929ff8cbb36f889afd89875647fec2/docs/MAINNET_ADDRESSES.md) |
+| The contracts team's deployment record | [docs/MAINNET_DEPLOYMENT_EVIDENCE.md](https://github.com/principal-Protocol-org/principal/blob/8932e2fd53fbc914d5bfd33ce6d5e7dea4dae998/docs/MAINNET_DEPLOYMENT_EVIDENCE.md), [docs/MAINNET_ADDRESSES.md](https://github.com/principal-Protocol-org/principal/blob/8932e2fd53fbc914d5bfd33ce6d5e7dea4dae998/docs/MAINNET_ADDRESSES.md) |
 | Block explorer | <https://stellar.expert/explorer/public> |
 
 ## Summary
@@ -59,11 +59,11 @@ must be signed by the asset's own issuer authority
 | 1 | All contracts are live on Stellar Mainnet with verified addresses | Met ([1.1](#11-all-contracts-are-live-on-stellar-mainnet-with-verified-addresses)) |
 | 1 | the initial market configuration is active | Met ([1.2](#12-the-initial-market-configuration-is-active)) |
 | 1 | a smoke-test deposit and mint succeed | **Met in the contracts repository**: deposit and mint on all five markets ([1.3](#13-a-smoke-test-deposit-and-mint-succeed)). **Open** (developer, after a grant by the contracts team): the dApp's own signed run through principalmarket.fi |
-| 1 | the build is reproducible from source | **Open** (contracts team): the instructions and checksums are published and match the chain; on Linux x86_64 a rebuild gives the deployed bytes for the 2 contracts that embed no machine path; the 10 others need a rebuild with the original cargo path ([1.4](#14-the-build-is-reproducible-from-source)) |
+| 1 | the build is reproducible from source | **Met in the contracts repository**: the instructions and checksums are published and match the chain; on Linux x86_64, with the cargo path that the original build recorded in the bytes, a rebuild gives 12 of 12 (the contracts team's run). **Open** (contracts team): a public log of that run ([1.4](#14-the-build-is-reproducible-from-source)) |
 | 2 | Dashboard and monitoring views are live on the Mainnet dApp | Met ([2.1](#21-dashboard-and-monitoring-views-are-live-on-the-mainnet-dapp)) |
 | 2 | reflect real on-chain state | Met ([2.2](#22-they-reflect-real-on-chain-state)) |
 | 2 | correctly surface RiskControl, oracle, market, and RecoveryEscrow status | Met ([2.3](#23-they-correctly-surface-riskcontrol-oracle-market-and-recoveryescrow-status)); no seizure has happened on Mainnet, the seizure view is shown on Testnet |
-| 3 | The production oracle source is integrated through OracleAdapter | Met ([3.1](#31-the-production-oracle-source-is-integrated-through-oracleadapter)). The staleness window is 24 hours; MOCKGILTS can turn stale for a few minutes on a day GILTS does not move ([open item 1](#open-items)) |
+| 3 | The production oracle source is integrated through OracleAdapter | Met ([3.1](#31-the-production-oracle-source-is-integrated-through-oracleadapter)). Each staleness window is twice its feed's heartbeat: 24 hours, and 48 hours on MOCKGILTS |
 | 3 | current price and freshness status are visible on the dashboard | Met ([3.2](#32-current-price-and-freshness-status-are-visible-on-the-dashboard)) |
 | 3 | stale or unavailable prices block affected protocol operations as designed | Met ([3.3](#33-stale-or-unavailable-prices-block-affected-protocol-operations-as-designed)) |
 | 3 | automated alerting is active | Met ([3.4](#34-automated-alerting-is-active)) |
@@ -111,7 +111,7 @@ The tranche's objective, as submitted:
    - `wasmHashes` for the 12 contract codes, and `sourceCommit` `3af9388`.
 
    Its addresses and hashes equal those of the contracts team's
-   [deployments/mainnet-dapp-manifest.json](https://github.com/principal-Protocol-org/principal/blob/ae6ccd96e5929ff8cbb36f889afd89875647fec2/deployments/mainnet-dapp-manifest.json).
+   [deployments/mainnet-dapp-manifest.json](https://github.com/principal-Protocol-org/principal/blob/8932e2fd53fbc914d5bfd33ce6d5e7dea4dae998/deployments/mainnet-dapp-manifest.json).
 2. Open any address on stellar.expert. All 44 are linked in [evidence §2.2](TRANCHE_3_EVIDENCE.md#22-contracts). For
    example MOCKUSDY's PrincipalManager:
    <https://stellar.expert/explorer/public/contract/CBBKUZJWZDA7YLA6GHSXVLV62QJ6DLKCO4GXUWF43FXLPN5S3XVNUKCC>.
@@ -141,7 +141,7 @@ Every value below is read live by the dashboard. Each figure's info button gives
    (about 24 hours). Under **Per-asset limits**: 5,000.00 for MOCKUSDY and MOCKUSTRY, "No limit (disabled)" for the
    three others. Under **Pauses**: RiskControl and each market's SY wrapper, manager and pool, all "Not paused".
 2. **Oracles.** Open <https://principalmarket.fi/dashboard/oracle>: one OracleAdapter per market, each with **Max
-   stale** 86,400 s (24 hours), **Deviation cap** 10.00% per update, and a **Feed** section naming the RedStone feed
+   stale** 86,400 s (24 hours), 172,800 s (48 hours) on MOCKGILTS, **Deviation cap** 10.00% per update, and a **Feed** section naming the RedStone feed
    `CBMG…WYRF` and the real asset it reads. From the CLI, for MOCKUSDY's oracle:
 
    ```bash
@@ -181,7 +181,7 @@ Every value below is read live by the dashboard. Each figure's info button gives
    <https://stellar.expert/explorer/public/tx/ddbdd13683ffd9b93509d9c223556aaa04d57c2d0870195db304580b8e2b4906>: it is
    successful and calls `mint` on MOCKUSDY's PrincipalManager, `CBBKUZ…UKCC`.
 2. The same transactions are recorded by the contracts team in
-   [MAINNET_DEPLOYMENT_EVIDENCE.md](https://github.com/principal-Protocol-org/principal/blob/ae6ccd96e5929ff8cbb36f889afd89875647fec2/docs/MAINNET_DEPLOYMENT_EVIDENCE.md):
+   [MAINNET_DEPLOYMENT_EVIDENCE.md](https://github.com/principal-Protocol-org/principal/blob/8932e2fd53fbc914d5bfd33ce6d5e7dea4dae998/docs/MAINNET_DEPLOYMENT_EVIDENCE.md):
    §5, "Real transaction testing (both markets) 2026-11-17/18", for MOCKUSDY, and §12, the table "Real testing proof
    on every v2 market", for the four others.
 3. The app side: the read-only check of [1.1](#11-all-contracts-are-live-on-stellar-mainnet-with-verified-addresses)
@@ -189,7 +189,7 @@ Every value below is read live by the dashboard. Each figure's info button gives
    (below).
 
 **Status: Met in the contracts repository**
-([MAINNET_DEPLOYMENT_EVIDENCE.md](https://github.com/principal-Protocol-org/principal/blob/ae6ccd96e5929ff8cbb36f889afd89875647fec2/docs/MAINNET_DEPLOYMENT_EVIDENCE.md)
+([MAINNET_DEPLOYMENT_EVIDENCE.md](https://github.com/principal-Protocol-org/principal/blob/8932e2fd53fbc914d5bfd33ce6d5e7dea4dae998/docs/MAINNET_DEPLOYMENT_EVIDENCE.md)
 §5 and §12): deposit and mint succeeded on all five Mainnet markets, from the command line.
 **Open (developer, after the contracts team):** the dApp's own signed smoke test, a small deposit and mint through
 principalmarket.fi. It needs a test wallet that the contracts team grants on the markets (only their Permissioning
@@ -199,19 +199,20 @@ test. Its two hashes will be added to the evidence file.
 ### 1.4 The build is reproducible from source
 
 1. Read the contracts team's build section,
-   [MAINNET_DEPLOYMENT_EVIDENCE.md §8](https://github.com/principal-Protocol-org/principal/blob/ae6ccd96e5929ff8cbb36f889afd89875647fec2/docs/MAINNET_DEPLOYMENT_EVIDENCE.md#8-reproducible-build-evidence):
+   [MAINNET_DEPLOYMENT_EVIDENCE.md §8](https://github.com/principal-Protocol-org/principal/blob/8932e2fd53fbc914d5bfd33ce6d5e7dea4dae998/docs/MAINNET_DEPLOYMENT_EVIDENCE.md#8-reproducible-build-evidence):
    the build command `cargo build --workspace --release --target wasm32v1-none`, the toolchain (`rustc 1.94.1`,
    `stellar 26.0.0`), and the size and SHA-256 of the 12 wasm files. The repository also pins the
    toolchain (`rust-toolchain.toml`) and has a recipe,
-   [deployments/mainnet/reproducible-build.md](https://github.com/principal-Protocol-org/principal/blob/ae6ccd96e5929ff8cbb36f889afd89875647fec2/deployments/mainnet/reproducible-build.md),
+   [deployments/mainnet/reproducible-build.md](https://github.com/principal-Protocol-org/principal/blob/8932e2fd53fbc914d5bfd33ce6d5e7dea4dae998/deployments/mainnet/reproducible-build.md),
    with `scripts/deploy/reproducible_build.sh`.
 2. Check that the chain holds those files: the hashes in §8 are the manifest's `wasmHashes`, and the on-chain code
    matches them, 44 of 44 ([1.1](#11-all-contracts-are-live-on-stellar-mainnet-with-verified-addresses) step 3).
 3. Read a rebuild on another machine: the contracts team's
-   [CI run 44974232705](https://github.com/principal-Protocol-org/principal/actions/runs/44974232705), job "wasm build
-   (all contracts)" (Linux x86_64, rustc 1.94.1, the recipe's script). Its log prints `4437468d…` for
-   `principal_permissioning.wasm` and `ac75508d…` for `principal_risk_control.wasm`: the on-chain hashes. The 10 others
-   differ.
+   [CI run 45141813086](https://github.com/principal-Protocol-org/principal/actions/runs/45141813086), job "wasm build
+   (all contracts)" (Linux x86_64, rustc 1.94.1, the recipe's script, at `8932e2f`, whose contract sources,
+   `Cargo.toml` and `Cargo.lock` equal `3af9388`'s). Its log prints `4437468d…` for `principal_permissioning.wasm` and
+   `ac75508d…` for `principal_risk_control.wasm`: the on-chain hashes. The 10 others differ there, for the reason of
+   step 4.
 4. See why the 10 others differ. Fetch one and list its paths:
 
    ```bash
@@ -222,27 +223,33 @@ test. Its two hashes will be added to the evidence file.
    ```
 
    The original build wrote its cargo directory into these 10 files (we mask the user name here); a rebuild elsewhere
-   writes its own. Permissioning and RiskControl contain no such path.
-5. Rebuild yourself, if you like:
+   writes its own, unless it maps its cargo directory to the recorded one. Permissioning and RiskControl contain no
+   such path.
+5. Rebuild yourself, if you like, on Linux x86_64 (natively or in a `linux/amd64` container), next to `pool.wasm`
+   from step 4:
 
    ```bash
    git clone https://github.com/principal-Protocol-org/principal && cd principal
    git checkout 3af938853e5818aa8d56bd35670b9a19cfa55a78
-   rustup target add wasm32v1-none --toolchain 1.94.1
-   cargo +1.94.1 build --workspace --release --locked --target wasm32v1-none
-   shasum -a 256 target/wasm32v1-none/release/*.wasm
+   rustup toolchain install 1.94.1 --target wasm32v1-none
+   ORIG=$(grep -ao '/home/[^/]*/\.cargo' ../pool.wasm | head -1)   # the cargo directory recorded in the bytes
+   RUSTFLAGS="--remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=$ORIG --remap-path-prefix=$PWD=/build" \
+     cargo +1.94.1 build --workspace --release --locked --target wasm32v1-none
+   sha256sum target/wasm32v1-none/release/*.wasm
    ```
 
-   The host matters: on macOS arm64 and on Linux arm64 the bytes differ, even for Permissioning. Only Linux x86_64 has
-   reproduced the deployed bytes so far
-   ([evidence §3.2](TRANCHE_3_EVIDENCE.md#32-the-reproducible-build)).
+   These are the flags of the contracts team's `scripts/deploy/reproducible_build.sh` (added after `3af9388`) with
+   `REMAP_CARGO_HOME_TO` set to the recorded path. With them, the contracts team rebuilt `3af9388` and got the 12
+   on-chain hashes
+   ([reproducible-build.md](https://github.com/principal-Protocol-org/principal/blob/8932e2fd53fbc914d5bfd33ce6d5e7dea4dae998/deployments/mainnet/reproducible-build.md)).
+   The host matters: on macOS arm64 and on Linux arm64 the bytes differ, even for Permissioning, and the script
+   refuses to run there ([evidence §3.2](TRANCHE_3_EVIDENCE.md#32-the-reproducible-build)).
 
-**Status: Open (contracts team).** The build instructions and the checksums are **published in the contracts
-repository** ([§8](https://github.com/principal-Protocol-org/principal/blob/ae6ccd96e5929ff8cbb36f889afd89875647fec2/docs/MAINNET_DEPLOYMENT_EVIDENCE.md#8-reproducible-build-evidence)),
-and the chain holds exactly those artifacts. A rebuild on Linux x86_64 already gives the deployed bytes for the two
-contracts that embed no machine path. The ten others are expected to match when rebuilt on Linux x86_64 with the
-cargo directory at the original path that their bytes contain. That run, in the contracts repository's CI, is the next
-step ([open item 3](#open-items)).
+**Status: Met in the contracts repository.** The build instructions and the checksums are published
+([§8](https://github.com/principal-Protocol-org/principal/blob/8932e2fd53fbc914d5bfd33ce6d5e7dea4dae998/docs/MAINNET_DEPLOYMENT_EVIDENCE.md#8-reproducible-build-evidence)),
+and the chain holds exactly those artifacts. The contracts team rebuilt `3af9388` on Linux x86_64 with the recorded
+cargo path and got 12 of 12 (§14.1 of their evidence file). Their public CI shows the two contracts without a machine
+path matching on its own runner. A public log of the full 12 of 12 is still to come ([open item 2](#open-items)).
 
 ### 1.5 The description, item by item
 
@@ -252,10 +259,10 @@ step ([open item 3](#open-items)).
 | using the same scripted pipeline from Tranche 2, adapted for production | The contracts team's `scripts/deploy/deploy.sh` (with a new stop after the shared contracts) and factory scripts; their own check, `verify-deployment.sh`, passes 78 of 79 per market, the failing check being `git_tree_dirty` ([evidence §3.3](TRANCHE_3_EVIDENCE.md#33-the-deployment-manifests)) | Met in the contracts repository, with that caveat |
 | Publish mainnet-deployment-manifest.json (contract addresses, WASM hashes, deployment transaction IDs) | Under another name: one `deployments/mainnet-<asset>/deployment-manifest.json` per market, with addresses, wasm SHA-256, deploy and init transactions of the shared contracts and the factory calls that created each market; `deployments/mainnet-dapp-manifest.json` for the app. MOCKUSDY's `transactions[]` repeats two hashes under wrong steps; use the per-contract fields ([evidence §3.3](TRANCHE_3_EVIDENCE.md#33-the-deployment-manifests)) | Met in the contracts repository, with that caveat |
 | RiskControl circuit-breaker limits appropriate for production volume | 5,000 underlying units protocol-wide per sliding window of 17,280 ledgers; 5,000 per asset on MOCKUSDY and MOCKUSTRY. Set by the contracts team for this testing deployment on mock assets. The protocol-wide limit adds units of different assets ([evidence §4](TRANCHE_3_EVIDENCE.md#4-the-configuration-read-live)) | Done |
-| oracle configuration for the first RWA market | MOCKUSDY's OracleAdapter reads RedStone's USDY price (`feed_source`), 24-hour staleness window, 10% deviation cap; the four other markets the same with their asset ([1.2](#12-the-initial-market-configuration-is-active) step 2) | Done; MOCKGILTS's window is open item 1 |
+| oracle configuration for the first RWA market | MOCKUSDY's OracleAdapter reads RedStone's USDY price (`feed_source`), 24-hour staleness window, 10% deviation cap; the four other markets the same with their asset, with a 48-hour window on MOCKGILTS ([1.2](#12-the-initial-market-configuration-is-active) step 2) | Done |
 | market maturity and fee parameters | 90-day maturities; fees on each market's page ([1.2](#12-the-initial-market-configuration-is-active) step 3) | Done |
 | the compliance configuration inherited from the underlying Stellar Asset | each issuer is its SAC's admin, with revocable and clawback set ([1.2](#12-the-initial-market-configuration-is-active) step 4) | Done |
-| Publish reproducible build instructions … compare SHA-256 checksums against the on-chain hashes | Instructions, recipe and checksums published; the chain matches the checksums; a rebuild on Linux x86_64 reproduces 2 of 12, the two without a machine path ([1.4](#14-the-build-is-reproducible-from-source)) | Instructions: met in the contracts repository. Reproduction: Open |
+| Publish reproducible build instructions … compare SHA-256 checksums against the on-chain hashes | Instructions, recipe and checksums published; the chain matches the checksums; on Linux x86_64 with the recorded cargo path a rebuild reproduces 12 of 12 ([1.4](#14-the-build-is-reproducible-from-source)) | Met in the contracts repository; the public log of the 12 of 12 is open |
 | Switch the dApp to point to Mainnet contracts | <https://principalmarket.fi/app> reads `config/manifests/mainnet.json` ([1.2](#12-the-initial-market-configuration-is-active) step 5) | Met |
 | run a smoke test using a small amount | Read-only check: passes. Signed deposit and mint: done by the contracts team on all five markets; through the app: not yet ([1.3](#13-a-smoke-test-deposit-and-mint-succeed)) | Met in the contracts repository; the app's signed run is Open |
 
@@ -397,9 +404,9 @@ finalization display is shown on Testnet, with the same code.
 
 **Status: Met.** `sync_from_feed` stores the feed price's own time. RedStone writes a new price when it moves past the
 asset's threshold, and at least once per heartbeat: 12 hours for USDY, USTRY, CETES and XAUM, 24 hours for GILTS
-([RedStone's relayer config](https://github.com/redstone-finance/redstone-oracles-monorepo/blob/main/packages/relayer-remote-config/main/relayer-manifests-non-evm/stellarSep40.json)). With the 24-hour window the four 12-hour feeds stay fresh; MOCKGILTS can turn stale
-for a few minutes on a day GILTS does not move ([evidence §6.3](TRANCHE_3_EVIDENCE.md#63-freshness),
-[open item 1](#open-items)).
+([RedStone's relayer config](https://github.com/redstone-finance/redstone-oracles-monorepo/blob/main/packages/relayer-remote-config/main/relayer-manifests-non-evm/stellarSep40.json)). Each oracle's window is twice its feed's heartbeat: 86,400 s
+(24 hours) on four, 172,800 s (48 hours) on MOCKGILTS. A feed that sends only its heartbeat keeps its oracle fresh,
+with one missed heartbeat to spare ([evidence §6.3](TRANCHE_3_EVIDENCE.md#63-freshness)).
 
 ### 3.2 Current price and freshness status are visible on the dashboard
 
@@ -449,8 +456,8 @@ for a few minutes on a day GILTS does not move ([evidence §6.3](TRANCHE_3_EVIDE
      no trustline to the asset. With a fresh oracle the price does not block the mint.
 
    The events of the `-v` output show it: the manager's `is_available` call on its oracle, the oracle's answer, then
-   the manager's error. Step 1 tells you which of the two errors to expect. With the 24-hour window a stale oracle is
-   rare, so you will most likely get error 11. The recorded stale case: on 21 November 2026 at 20:30 UTC, when the
+   the manager's error. Step 1 tells you which of the two errors to expect. With windows of twice the feed's heartbeat a
+   stale oracle is rare, so you will most likely get error 11. The recorded stale case: on 21 November 2026 at 20:30 UTC, when the
    window was 1 hour, MOCKUSDY's oracle was stale and its mint gave error 7, while MOCKGILTS's gave error 11
    ([evidence §7](TRANCHE_3_EVIDENCE.md#7-a-stale-oracle-blocks-operations)).
 4. The other contracts check the oracle the same way: MarketPool (trades, single-sided liquidity) and YTToken (yield accrual)
@@ -487,7 +494,7 @@ was posted (the developer's record of the run: 5 posted, 0 failures).
 | Description item | What exists | Status |
 |---|---|---|
 | OracleAdapter … the exchange rate used for PT/YT accounting and settlement | one OracleAdapter per market; the manager, the pool and the YT token read it | Met |
-| Principal-specific freshness check | `max_stale_seconds` (86,400 s) and `is_available()`; the contracts refuse with `OracleStale` ([3.3](#33-stale-or-unavailable-prices-block-affected-protocol-operations-as-designed)) | Met; MOCKGILTS's window is open item 1 |
+| Principal-specific freshness check | `max_stale_seconds` (86,400 s; 172,800 s on MOCKGILTS) and `is_available()`; the contracts refuse with `OracleStale` ([3.3](#33-stale-or-unavailable-prices-block-affected-protocol-operations-as-designed)) | Met |
 | fallback check | the contract supports a fallback source (it may refresh the time, never move the value: Tranche 2, §1.5); none is configured on the Mainnet oracles, which read the feed | Done in the contracts; not configured |
 | deviation check | `max_deviation_bps` 1,000 (10%) on all five; no `deviate` rejection on Mainnet; one shown on Testnet ([evidence §9](TRANCHE_3_EVIDENCE.md#9-recoveryescrow-and-the-safety-feeds-exercised-on-testnet)) | Met |
 | For the initial USDY market, the primary source will integrate the RedStone USDY/USD SEP-40 feed | MOCKUSDY's oracle reads RedStone's USDY price; the four other markets read RedStone's USTRY, GILTS, CETES and XAUM prices | Met (on a mock asset that tracks USDY) |
@@ -520,7 +527,7 @@ warning and does not fail it.
   team; the app's access contact is `hello@principalmarket.fi` (the manifest's `accessContact`).
 - While an oracle is stale, its market refuses mint, trades, single-sided liquidity and redemption, and the app says so
   before signing ([3.3](#33-stale-or-unavailable-prices-block-affected-protocol-operations-as-designed) step 5). With
-  the 24-hour window this is rare (open item 1).
+  windows of twice the feed's heartbeat this is rare.
 - An OracleAdapter never lowers its stored value. When the feed's price falls below it, the update is refused
   (`decrease`) and the value ages until the feed rises again; if the price stays lower for longer than the window,
   the oracle turns stale. The keeper's runs show each refusal, and the alert check opens `oracle_rejection`.
@@ -534,8 +541,7 @@ The same list, with the evidence, is in [evidence §10](TRANCHE_3_EVIDENCE.md#10
 
 | # | Item | Owner | Reason |
 |---|---|---|---|
-| 1 | MOCKGILTS's staleness window: 86,400 s, equal to RedStone's GILTS heartbeat (24 hours). On a day GILTS does not move 0.1%, this oracle turns stale for a few minutes, until the next price and the keeper's sync | contracts team | Only the oracle admin can widen it (`set_safety_params`, for example to 172,800 s, twice the heartbeat); asked. The four other feeds have a 12-hour heartbeat. |
-| 2 | The dApp's own signed smoke test on Mainnet: a small deposit and mint through principalmarket.fi | developer, after the contracts team | Needs a test wallet granted by the contracts team. Signed by the developer, never by an agent or a test. |
-| 3 | Reproducing the build: on Linux x86_64 a rebuild gives the deployed bytes for 2 of 12; the 10 others embed the original builder's cargo path | contracts team | A rebuild of `3af9388` on Linux x86_64 with rustc 1.94.1 and that cargo path, in the contracts repository's CI, is expected to give 12 of 12; not run yet. Other hosts give other bytes, so the recipe must name the host. |
-| 4 | Contract lifetimes: the Mainnet contract instances live until about 17 to 21 March 2027 | contracts team, operations | Someone must extend them before mid-March 2027. |
-| 5 | The contracts team's manifests: duplicate hashes in MOCKUSDY's `transactions[]`, `git_tree_dirty: true` | contracts team | Stated so that no hash is cited under the wrong step. |
+| 1 | The dApp's own signed smoke test on Mainnet: a small deposit and mint through principalmarket.fi | developer, after the contracts team | Needs a test wallet granted by the contracts team, who grant it on request. Signed by the developer, never by an agent or a test. |
+| 2 | A public log of the 12-of-12 rebuild | contracts team | Their rebuild of `3af9388` on Linux x86_64 with the recorded cargo path gave 12 of 12; a CI job that prints it lets anyone see the result without a Linux x86_64 machine. |
+| 3 | Contract lifetimes: the Mainnet contract instances live until about 17 to 21 March 2027 | contracts team, operations | Someone must extend them before mid-March 2027; the contracts team tracks it. |
+| 4 | The contracts team's manifests: duplicate hashes in MOCKUSDY's `transactions[]`, `git_tree_dirty: true` | contracts team | Stated so that no hash is cited under the wrong step. |

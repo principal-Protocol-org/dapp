@@ -12,7 +12,7 @@ Stellar assets issued by Principal for testing. They are not USDY or the other r
 OracleAdapter reads the price of the real asset it tracks (USDY, USTRY, GILTS, CETES, XAUM) from RedStone's SEP-40
 price feed on Mainnet. The contracts are the production contracts. Principal cannot create a market on the real USDY,
 because market creation must be signed by the asset's own issuer authority (the contracts repository's
-[MAINNET_DEPLOYMENT_EVIDENCE.md §1](https://github.com/principal-Protocol-org/principal/blob/ae6ccd96e5929ff8cbb36f889afd89875647fec2/docs/MAINNET_DEPLOYMENT_EVIDENCE.md#1-why-mock-assets)).
+[MAINNET_DEPLOYMENT_EVIDENCE.md §1](https://github.com/principal-Protocol-org/principal/blob/8932e2fd53fbc914d5bfd33ce6d5e7dea4dae998/docs/MAINNET_DEPLOYMENT_EVIDENCE.md#1-why-mock-assets)).
 
 Links:
 - transactions, contracts and accounts on stellar.expert: `https://stellar.expert/explorer/public/tx/<hash>`,
@@ -22,7 +22,7 @@ Links:
   [`783d51c`](https://github.com/principal-Protocol-org/dapp/tree/783d51c51003376884ccec1d9eab6d44d27d59fd) (later
   commits on `main` change only documentation);
 - the contracts repository at branch `mainnet`,
-  [`ae6ccd9`](https://github.com/principal-Protocol-org/principal/tree/ae6ccd96e5929ff8cbb36f889afd89875647fec2)
+  [`8932e2f`](https://github.com/principal-Protocol-org/principal/tree/8932e2fd53fbc914d5bfd33ce6d5e7dea4dae998)
   (the contracts team's Mainnet documents and manifests), and at the deployed source,
   [`3af9388`](https://github.com/principal-Protocol-org/principal/tree/3af938853e5818aa8d56bd35670b9a19cfa55a78).
 
@@ -63,15 +63,15 @@ health and last run, and the open alerts.
 
 Source: [config/manifests/mainnet.json](https://github.com/principal-Protocol-org/dapp/blob/783d51c51003376884ccec1d9eab6d44d27d59fd/config/manifests/mainnet.json).
 It is the contracts team's
-[deployments/mainnet-dapp-manifest.json](https://github.com/principal-Protocol-org/principal/blob/ae6ccd96e5929ff8cbb36f889afd89875647fec2/deployments/mainnet-dapp-manifest.json)
+[deployments/mainnet-dapp-manifest.json](https://github.com/principal-Protocol-org/principal/blob/8932e2fd53fbc914d5bfd33ce6d5e7dea4dae998/deployments/mainnet-dapp-manifest.json)
 with the dApp's own fields added. The shared contracts, every market's contracts, the maturities, the wasm hashes and
-the source commit are equal in both files (checked against `ae6ccd9`).
+the source commit are equal in both files (checked against `8932e2f`).
 
 | Field | Value |
 |---|---|
 | Network | Stellar Mainnet, `Public Global Stellar Network ; September 2015`; Horizon `https://horizon.stellar.org` |
 | RPC | primary host `lb.drpc.live` (a keyed URL, not reproduced here); fallback and the dashboard's "How to verify" commands: `https://soroban-rpc.mainnet.stellar.gateway.fm` (`verifyRpcUrl`) |
-| `sourceCommit` | [`3af938853e5818aa8d56bd35670b9a19cfa55a78`](https://github.com/principal-Protocol-org/principal/commit/3af938853e5818aa8d56bd35670b9a19cfa55a78). The contract sources are identical at `4b5bc2b` (the commit the contracts team's build section names) and at `mainnet` `ae6ccd9`: `git diff` shows no change under `contracts/`, nor in `Cargo.toml` or `Cargo.lock`. |
+| `sourceCommit` | [`3af938853e5818aa8d56bd35670b9a19cfa55a78`](https://github.com/principal-Protocol-org/principal/commit/3af938853e5818aa8d56bd35670b9a19cfa55a78). The contract sources are identical at `4b5bc2b` (the commit the contracts team's build section names) and at `mainnet` `8932e2f`: `git diff` shows no change under `contracts/`, nor in `Cargo.toml` or `Cargo.lock`. |
 | `protocolAbi` | `2` (the `3af9388` contract interfaces) |
 | `deployLedger` | `65525735`; `createdLedgers` gives the first ledger of the 20 contracts added later (the four markets deployed on 20 November) |
 | `generatedAt` | `2026-11-21T00:00:00Z` |
@@ -159,7 +159,7 @@ public gateway (`https://soroban-rpc.mainnet.stellar.gateway.fm`) on 21 November
 | Latest | 67658712 | 21 March 2027 |
 
 The markets mature on 15 and 18 February 2027. Someone must extend the instances before mid-March 2027
-([§10](#10-open-items), item 4). The contract code entries and the contracts' stored data have their own lifetimes,
+([§10](#10-open-items), item 3). The contract code entries and the contracts' stored data have their own lifetimes,
 not read here.
 
 ### 2.5 Roles
@@ -171,7 +171,7 @@ the keeper's.
 
 | Role | Address | Source |
 |---|---|---|
-| Protocol admin (contracts team): admin of the five OracleAdapters, a pauser by RiskControl's rule, the protocol admin of the markets' fees | [GDZN5W…5NCB](https://stellar.expert/explorer/public/account/GDZN5WVOUBRTZKADUULRXJOGVGNK4WWXJPSALTVOORLSU5NFOZ2P5NCB) | `get_admin` on each OracleAdapter; the risk page; the market pages; [MAINNET_ADDRESSES.md](https://github.com/principal-Protocol-org/principal/blob/ae6ccd96e5929ff8cbb36f889afd89875647fec2/docs/MAINNET_ADDRESSES.md) |
+| Protocol admin (contracts team): admin of the five OracleAdapters, a pauser by RiskControl's rule, the protocol admin of the markets' fees | [GDZN5W…5NCB](https://stellar.expert/explorer/public/account/GDZN5WVOUBRTZKADUULRXJOGVGNK4WWXJPSALTVOORLSU5NFOZ2P5NCB) | `get_admin` on each OracleAdapter; the risk page; the market pages; [MAINNET_ADDRESSES.md](https://github.com/principal-Protocol-org/principal/blob/8932e2fd53fbc914d5bfd33ce6d5e7dea4dae998/docs/MAINNET_ADDRESSES.md) |
 | Issuers (contracts team): one per mock asset, the SAC admin of its asset and the market's creator | [§2.2](#22-contracts) | the compliance page (`admin()` on each SAC); the market pages |
 | Treasury: receives the protocol's fee share | [GBUVAH…VSXW](https://stellar.expert/explorer/public/account/GBUVAHYJNCXZWUK3NIOVJ6EYQRSXMVT2XOUEASS3VAG4EWIXXWYSVSXW) | the market pages |
 | The contracts team's test account, which signed their deposits and mints ([§3.1](#31-deposit-and-mint-on-every-market)) | [GCOMBI…R5BM](https://stellar.expert/explorer/public/account/GCOMBIYWZ3HIMAS7FLFERQMVZIDVIMFZAAV7A2KMCDV3RAKP5NL5R5BM) | Horizon |
@@ -182,16 +182,16 @@ access flow therefore shows what is missing, offers the trustline, and points to
 
 ## 3. The contracts team's Mainnet evidence
 
-Source: the contracts repository, branch `mainnet` at `ae6ccd9`:
-[docs/MAINNET_DEPLOYMENT_EVIDENCE.md](https://github.com/principal-Protocol-org/principal/blob/ae6ccd96e5929ff8cbb36f889afd89875647fec2/docs/MAINNET_DEPLOYMENT_EVIDENCE.md),
-[docs/MAINNET_ADDRESSES.md](https://github.com/principal-Protocol-org/principal/blob/ae6ccd96e5929ff8cbb36f889afd89875647fec2/docs/MAINNET_ADDRESSES.md),
-[docs/MAINNET_TRANSACTION_LEDGER.md](https://github.com/principal-Protocol-org/principal/blob/ae6ccd96e5929ff8cbb36f889afd89875647fec2/docs/MAINNET_TRANSACTION_LEDGER.md)
+Source: the contracts repository, branch `mainnet` at `8932e2f`:
+[docs/MAINNET_DEPLOYMENT_EVIDENCE.md](https://github.com/principal-Protocol-org/principal/blob/8932e2fd53fbc914d5bfd33ce6d5e7dea4dae998/docs/MAINNET_DEPLOYMENT_EVIDENCE.md),
+[docs/MAINNET_ADDRESSES.md](https://github.com/principal-Protocol-org/principal/blob/8932e2fd53fbc914d5bfd33ce6d5e7dea4dae998/docs/MAINNET_ADDRESSES.md),
+[docs/MAINNET_TRANSACTION_LEDGER.md](https://github.com/principal-Protocol-org/principal/blob/8932e2fd53fbc914d5bfd33ce6d5e7dea4dae998/docs/MAINNET_TRANSACTION_LEDGER.md)
 (complete through 18 November 2026, as its header says) and the five market manifests
-[mainnet-mockusdy](https://github.com/principal-Protocol-org/principal/blob/ae6ccd96e5929ff8cbb36f889afd89875647fec2/deployments/mainnet-mockusdy/deployment-manifest.json),
-[mainnet-ustry](https://github.com/principal-Protocol-org/principal/blob/ae6ccd96e5929ff8cbb36f889afd89875647fec2/deployments/mainnet-ustry/deployment-manifest.json),
-[mainnet-gilts](https://github.com/principal-Protocol-org/principal/blob/ae6ccd96e5929ff8cbb36f889afd89875647fec2/deployments/mainnet-gilts/deployment-manifest.json),
-[mainnet-cetes](https://github.com/principal-Protocol-org/principal/blob/ae6ccd96e5929ff8cbb36f889afd89875647fec2/deployments/mainnet-cetes/deployment-manifest.json),
-[mainnet-xaum](https://github.com/principal-Protocol-org/principal/blob/ae6ccd96e5929ff8cbb36f889afd89875647fec2/deployments/mainnet-xaum/deployment-manifest.json).
+[mainnet-mockusdy](https://github.com/principal-Protocol-org/principal/blob/8932e2fd53fbc914d5bfd33ce6d5e7dea4dae998/deployments/mainnet-mockusdy/deployment-manifest.json),
+[mainnet-ustry](https://github.com/principal-Protocol-org/principal/blob/8932e2fd53fbc914d5bfd33ce6d5e7dea4dae998/deployments/mainnet-ustry/deployment-manifest.json),
+[mainnet-gilts](https://github.com/principal-Protocol-org/principal/blob/8932e2fd53fbc914d5bfd33ce6d5e7dea4dae998/deployments/mainnet-gilts/deployment-manifest.json),
+[mainnet-cetes](https://github.com/principal-Protocol-org/principal/blob/8932e2fd53fbc914d5bfd33ce6d5e7dea4dae998/deployments/mainnet-cetes/deployment-manifest.json),
+[mainnet-xaum](https://github.com/principal-Protocol-org/principal/blob/8932e2fd53fbc914d5bfd33ce6d5e7dea4dae998/deployments/mainnet-xaum/deployment-manifest.json).
 
 ### 3.1 Deposit and mint on every market
 
@@ -214,36 +214,39 @@ The same doc records seed liquidity and a swap on each market. It also records, 
 redemption at maturity.
 
 These are the contracts team's command-line runs. The dApp's own signed smoke test, a small deposit and mint through
-principalmarket.fi, has not been run yet ([§10](#10-open-items), item 2).
+principalmarket.fi, has not been run yet ([§10](#10-open-items), item 1).
 
 ### 3.2 The reproducible build
 
 What the contracts repository publishes:
-- [MAINNET_DEPLOYMENT_EVIDENCE.md §8](https://github.com/principal-Protocol-org/principal/blob/ae6ccd96e5929ff8cbb36f889afd89875647fec2/docs/MAINNET_DEPLOYMENT_EVIDENCE.md#8-reproducible-build-evidence): the source commit `4b5bc2b` (the contract
+- [MAINNET_DEPLOYMENT_EVIDENCE.md §8](https://github.com/principal-Protocol-org/principal/blob/8932e2fd53fbc914d5bfd33ce6d5e7dea4dae998/docs/MAINNET_DEPLOYMENT_EVIDENCE.md#8-reproducible-build-evidence): the source commit `4b5bc2b` (the contract
   sources are identical at `3af9388`, [§2.1](#21-the-manifest)), the build command
   `cargo build --workspace --release --target wasm32v1-none`, the toolchain `rustc 1.94.1 (e408947bf 2026-03-25)`,
   `cargo 1.94.1`, `stellar 26.0.0` (the manifests add `soroban-sdk 26.0.1`), and the size and SHA-256 of the 12 wasm
   files. The 12 hashes equal the manifest's `wasmHashes`, and the code on chain matches them, 44 of 44
   ([§2.3](#23-the-read-only-deployment-check)).
 - On branch `mainnet`: `rust-toolchain.toml` (rustc 1.94.1), `scripts/deploy/reproducible_build.sh` (the build with
-  `--remap-path-prefix` on the cargo and checkout paths) and the recipe
-  [deployments/mainnet/reproducible-build.md](https://github.com/principal-Protocol-org/principal/blob/ae6ccd96e5929ff8cbb36f889afd89875647fec2/deployments/mainnet/reproducible-build.md).
-  §14 of the evidence file explains why the bytes depend on the build machine.
+  `--remap-path-prefix` on the cargo and checkout paths; it refuses to run on a host other than
+  `x86_64-unknown-linux-gnu`; `REMAP_CARGO_HOME_TO` sets the cargo path written into the bytes) and the recipe
+  [deployments/mainnet/reproducible-build.md](https://github.com/principal-Protocol-org/principal/blob/8932e2fd53fbc914d5bfd33ce6d5e7dea4dae998/deployments/mainnet/reproducible-build.md).
+  These files came after `3af9388`; at `8932e2f` the contract sources, `Cargo.toml` and `Cargo.lock` equal
+  `3af9388`'s. §14 and §14.1 of the evidence file explain why the bytes depend on the build machine.
 
-What a rebuild gives (`ae6ccd9`, whose contract sources, `Cargo.toml` and `Cargo.lock` equal `3af9388`'s; rustc 1.94.1
-and the script's flags):
+What a rebuild gives (rustc 1.94.1):
 
 | Build | Result |
 |---|---|
-| The contracts team's CI, [run 44974232705](https://github.com/principal-Protocol-org/principal/actions/runs/44974232705), job "wasm build (all contracts)", Linux x86_64 | Permissioning (`4437468d…`) and RiskControl (`ac75508d…`) equal the on-chain hashes; the 10 others differ |
-| macOS arm64, and Linux arm64 (`rust:1.94.1-slim`) | 0 of 12, Permissioning included: the host system changes the bytes |
+| The contracts team, Linux x86_64, `3af9388`, the script's flags with the cargo directory mapped to the path recorded in the bytes ([recipe](https://github.com/principal-Protocol-org/principal/blob/8932e2fd53fbc914d5bfd33ce6d5e7dea4dae998/deployments/mainnet/reproducible-build.md), 23 November 2026) | 12 of 12 equal the on-chain hashes (their run; no public log yet) |
+| The contracts team's CI, [run 45141813086](https://github.com/principal-Protocol-org/principal/actions/runs/45141813086), job "wasm build (all contracts)", Linux x86_64, `8932e2f`, the script's default mapping | Permissioning (`4437468d…`) and RiskControl (`ac75508d…`) equal the on-chain hashes; the 10 others carry the default path and differ |
+| macOS arm64, and Linux arm64 (`rust:1.94.1-slim`), with the script's flags | 0 of 12, Permissioning included: the host system changes the bytes |
 
-Why the ten others differ: they embed an absolute path. In the 12 on-chain files the only absolute paths are under one
-cargo directory, `/home/<user>/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/soroban-sdk-26.0.1/src/…`
-(`<user>` is the original builder's home directory, masked here), in those 10 files; the workspace's own sources appear
-as relative paths (`contracts/market_pool/src/lib.rs`). Permissioning and RiskControl contain no such path. A rebuild
-of `3af9388` on Linux x86_64 with rustc 1.94.1 and the cargo directory at that path is expected to give 12 of 12. That
-run belongs in the contracts repository's CI and has not been made yet ([§10](#10-open-items), item 3).
+Why the cargo path matters: in the 12 on-chain files the only absolute paths are under one cargo directory,
+`/home/<user>/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/soroban-sdk-26.0.1/src/…` (`<user>` is the original
+builder's home directory, masked here), in 10 of the files; the workspace's own sources appear as relative paths
+(`contracts/market_pool/src/lib.rs`). Permissioning and RiskControl contain no such path. A rebuild writes its own
+cargo directory unless it maps it to the recorded one, which is what `REMAP_CARGO_HOME_TO` does. The command, with the
+path read from the bytes, is in the reviewer guide, 1.4 step 5. A CI job that runs it would give a public log of the
+12 of 12 ([§10](#10-open-items), item 2).
 
 ### 3.3 The deployment manifests
 
@@ -274,7 +277,7 @@ give the current values.
 | RiskControl, protocol-wide limit | 5,000.00 in underlying units, per sliding window of 17,280 ledgers (about 24 hours); the page shows the volume counted now and the remaining capacity (a wrap-and-mint counts twice) | `/dashboard/risk` |
 | RiskControl, per-asset limits | MOCKUSDY 5,000.00 (set 17 Nov 2026 15:55:32, `48092a…f372`), MOCKUSTRY 5,000.00 (set 17 Nov 2026 20:52:32, `946d7e…2c14`); MOCKGILTS, MOCKCETES, MOCKXAUM: no limit | `/dashboard/risk` |
 | Pauses | RiskControl, and each market's SYWrapper, PrincipalManager and MarketPool: not paused. Pause history: none recorded. | `/dashboard/risk` |
-| Oracles | each market's own OracleAdapter; `max_stale_seconds` 86400, that is 24 hours ([§6.3](#63-freshness)); `max_deviation_bps` 1000, that is 10%; admin GDZN5W…5NCB (all five); on MOCKGILTS's detail: value bounds none, fallback source none | `stellar contract invoke … --send=no`; `/dashboard/oracle` |
+| Oracles | each market's own OracleAdapter; `max_stale_seconds` 86400, that is 24 hours, and 172800 (48 hours) on MOCKGILTS ([§6.3](#63-freshness)); `max_deviation_bps` 1000, that is 10%; admin GDZN5W…5NCB (all five); on MOCKGILTS's detail: value bounds none, fallback source none | `stellar contract invoke … --send=no`; `/dashboard/oracle` |
 | Oracle feed source | all five: RedStone's SEP-40 feed [CBMGLK…WYRF](https://stellar.expert/explorer/public/contract/CBMGLKUQZVSAIL5CPDDAWSUY7MAKXISHMOZEVLMBUWBMFGHRJSR4WYRF) (`decimals()` 8, `resolution()` 43200), keyed by the real asset's contract: USDY [CB3YA6…GAGP](https://stellar.expert/explorer/public/contract/CB3YA656OYIHU57657I5KGSBRHE5I3OZU4VFC22PYAOANFZHEWNYGAGP), USTRY [CBLV4A…PNUR](https://stellar.expert/explorer/public/contract/CBLV4ATSIWU67CFSQU2NVRKINQIKUZ2ODSZBUJTJ43VJVRSBTZYOPNUR), GILTS [CCQNEB…6XCE](https://stellar.expert/explorer/public/contract/CCQNEBGX5RJQGNLQ25C67DZLOSNM4NFQBANUS3ASALF2X552BSIQ6XCE), CETES [CAL6ER…6VXV](https://stellar.expert/explorer/public/contract/CAL6ER2TI6CTRAY6BFXWNWA7WTYXUXTQCHUBCIBU5O6KM3HJFG6Z6VXV), XAUM [CC2RBG…VAGO](https://stellar.expert/explorer/public/contract/CC2RBGYNCFBCVENIDL5BFBWPH4OUZM2UA3OD2K2N54GLMWCC4KWPVAGO) | `feed_source()` on each OracleAdapter |
 | Maturities | 90-day markets: 15 February 2027 (MOCKUSDY), 18 February 2027 (the four others) | manifest; market pages |
 | Fees, MOCKUSDY market | tokenization fee 0.05%, YT fee 10.00%, swap fee tier 0.10%, protocol share 20.00% | `/dashboard/markets/mainnet-CDQYZU-CCY5P6CC` |
@@ -385,17 +388,17 @@ check opens `signer_low` when its balance runs low.
 `sync_from_feed` stores the feed price's own timestamp, not the ledger time
 ([oracle_adapter/src/lib.rs line 501](https://github.com/principal-Protocol-org/principal/blob/3af938853e5818aa8d56bd35670b9a19cfa55a78/contracts/oracle_adapter/src/lib.rs#L501); a price no newer than the stored one is refused `stale_ts`,
 [line 572](https://github.com/principal-Protocol-org/principal/blob/3af938853e5818aa8d56bd35670b9a19cfa55a78/contracts/oracle_adapter/src/lib.rs#L572)). An oracle is fresh while that timestamp is less than `max_stale_seconds` old: 86,400 s (24 hours)
-on all five. The oracle admin GDZN5W…5NCB set it with
-[`set_safety_params(caller, 86400, 1000)`](https://github.com/principal-Protocol-org/principal/blob/3af938853e5818aa8d56bd35670b9a19cfa55a78/contracts/oracle_adapter/src/lib.rs#L292), recorded in the contracts team's
-[MAINNET_DEPLOYMENT_EVIDENCE.md](https://github.com/principal-Protocol-org/principal/blob/ae6ccd96e5929ff8cbb36f889afd89875647fec2/docs/MAINNET_DEPLOYMENT_EVIDENCE.md) §13:
+on four, 172,800 s (48 hours) on MOCKGILTS. The oracle admin GDZN5W…5NCB set them with
+[`set_safety_params(caller, max_stale_seconds, 1000)`](https://github.com/principal-Protocol-org/principal/blob/3af938853e5818aa8d56bd35670b9a19cfa55a78/contracts/oracle_adapter/src/lib.rs#L292), recorded in the contracts team's
+[MAINNET_DEPLOYMENT_EVIDENCE.md](https://github.com/principal-Protocol-org/principal/blob/8932e2fd53fbc914d5bfd33ce6d5e7dea4dae998/docs/MAINNET_DEPLOYMENT_EVIDENCE.md) §13 and §13.1:
 
-| UTC, 22 Nov 2026 | Ledger | Oracle (asset) | Transaction |
-|---|---|---|---|
-| 00:19:26 | 65604144 | CCKXG4…K7IT (MOCKUSDY) | [73f87169…2c6c](https://stellar.expert/explorer/public/tx/73f87169f0a6adf4af3fe73695bce0ef087fbae2d7d168f1a90a381ebd202c6c) |
-| 00:19:36 | 65604146 | CBTW7C…PFR7 (MOCKUSTRY) | [96cf75a8…e199](https://stellar.expert/explorer/public/tx/96cf75a8cca49b8370131c41c7ecb983d96ee17ffb1144d0a2fc7b90c722e199) |
-| 00:19:46 | 65604148 | CD22HN…J6X7 (MOCKGILTS) | [cf539412…d30a](https://stellar.expert/explorer/public/tx/cf5394127d52a399e81b69dbb24f180829c60f6d76f24881c7164ca39af5d30a) |
-| 00:19:56 | 65604150 | CBK2GO…MUZK (MOCKCETES) | [5028e019…830e](https://stellar.expert/explorer/public/tx/5028e019162bb022aa9ac5c0300c6f0f8d97b63e91f20a356ee26a16df9a830e) |
-| 00:20:06 | 65604152 | CDFI7I…OPFD (MOCKXAUM) | [9d59d0b4…7f52](https://stellar.expert/explorer/public/tx/9d59d0b4fb028f5f0ece56b155814af251bf6c72a7f68cc97eba0dcd24e67f52) |
+| UTC | Ledger | Oracle (asset) | Window | Transaction |
+|---|---|---|---|---|
+| 22 Nov 2026 00:19:26 | 65604144 | CCKXG4…K7IT (MOCKUSDY) | 86,400 s | [73f87169…2c6c](https://stellar.expert/explorer/public/tx/73f87169f0a6adf4af3fe73695bce0ef087fbae2d7d168f1a90a381ebd202c6c) |
+| 22 Nov 2026 00:19:36 | 65604146 | CBTW7C…PFR7 (MOCKUSTRY) | 86,400 s | [96cf75a8…e199](https://stellar.expert/explorer/public/tx/96cf75a8cca49b8370131c41c7ecb983d96ee17ffb1144d0a2fc7b90c722e199) |
+| 23 Nov 2026 08:40:41 | 65627439 | CD22HN…J6X7 (MOCKGILTS) | 172,800 s | [efa8efbf…ee95](https://stellar.expert/explorer/public/tx/efa8efbffd1927443ee27a75e8ee237a6e26e9e2c34af3f5fed827e39963ee95) |
+| 22 Nov 2026 00:19:56 | 65604150 | CBK2GO…MUZK (MOCKCETES) | 86,400 s | [5028e019…830e](https://stellar.expert/explorer/public/tx/5028e019162bb022aa9ac5c0300c6f0f8d97b63e91f20a356ee26a16df9a830e) |
+| 22 Nov 2026 00:20:06 | 65604152 | CDFI7I…OPFD (MOCKXAUM) | 86,400 s | [9d59d0b4…7f52](https://stellar.expert/explorer/public/tx/9d59d0b4fb028f5f0ece56b155814af251bf6c72a7f68cc97eba0dcd24e67f52) |
 
 RedStone's relayer writes a price to the feed when it has moved by the asset's deviation threshold, or when the
 asset's heartbeat has run out since the last write
@@ -409,10 +412,8 @@ asset's heartbeat has run out since the last write
 | CETES | 0.1% | 12 h |
 | XAUM | 0.5% | 12 h |
 
-With a 12-hour heartbeat, four oracles stay fresh with a full cycle to spare. GILTS's heartbeat equals the window: on
-a day GILTS does not move 0.1% (weekends, UK holidays), the MOCKGILTS oracle turns stale about 10 s before the
-heartbeat's price lands, and stays stale until the keeper's next sync, within 5 minutes ([§10](#10-open-items),
-item 1). The read-only check of [§2.3](#23-the-read-only-deployment-check) found all five fresh.
+Each window is twice its feed's heartbeat, so a feed that sends only its heartbeat keeps its oracle fresh, with one
+missed heartbeat to spare. The read-only check of [§2.3](#23-the-read-only-deployment-check) found all five fresh.
 
 ## 7. A stale oracle blocks operations
 
@@ -460,7 +461,7 @@ The app refuses the same actions before asking for a signature. On <https://prin
 next oracle update, then try again."
 
 Freshness moves with RedStone's prices: read `is_available()` first; it tells which of the two results to expect. With
-the 24-hour window a stale oracle is rare, so a run today most likely gives error 11 on every market.
+windows of twice the feed's heartbeat a stale oracle is rare, so a run today most likely gives error 11 on every market.
 
 ## 8. Alerts
 
@@ -501,8 +502,7 @@ history**. The Mainnet dashboard runs the same code on the same views.
 
 | # | Item | Owner | Reason |
 |---|---|---|---|
-| 1 | **MOCKGILTS's staleness window.** 86,400 s, equal to RedStone's GILTS heartbeat (24 hours). On a day GILTS does not move 0.1%, the MOCKGILTS oracle turns stale for a few minutes, until the next price and the keeper's sync ([§6.3](#63-freshness)). The four other feeds have a 12-hour heartbeat. | contracts team | Only the oracle admin can widen this oracle's window (`set_safety_params`, for example to 172,800 s, twice the heartbeat); asked. |
-| 2 | **The dApp's own signed smoke test on Mainnet**: a small deposit and mint through principalmarket.fi, with their two hashes. | developer, after the contracts team | Needs a test wallet granted on the markets (only the contracts team's Permissioning admin can). It is signed by the developer, never by an agent or a test. The contracts team's command-line deposits and mints are in [§3.1](#31-deposit-and-mint-on-every-market). |
-| 3 | **Reproducing the build.** On Linux x86_64 with rustc 1.94.1, a rebuild reproduces the two contracts that embed no machine path (Permissioning, RiskControl); the ten others embed the original builder's cargo path ([§3.2](#32-the-reproducible-build)). | contracts team | A rebuild of `3af9388` on Linux x86_64 with rustc 1.94.1 and that cargo path, in the contracts repository's CI, is expected to give 12 of 12; not run yet. On other hosts (macOS, Linux arm64) the bytes differ, so the recipe must name the host. |
-| 4 | **Contract lifetimes.** The Mainnet contract instances live until about 17 to 21 March 2027 ([§2.4](#24-how-long-the-contracts-live)). | contracts team, operations | Someone must extend them (and the code entries) before mid-March 2027. |
-| 5 | **The contracts team's manifest caveats:** duplicate hashes in MOCKUSDY's `transactions[]` and `git_tree_dirty: true` ([§3.3](#33-the-deployment-manifests)). | contracts team | Stated so that no hash is cited under the wrong step. |
+| 1 | **The dApp's own signed smoke test on Mainnet**: a small deposit and mint through principalmarket.fi, with their two hashes. | developer, after the contracts team | Needs a test wallet granted on the markets (only the contracts team's Permissioning admin can; they grant it on request). It is signed by the developer, never by an agent or a test. The contracts team's command-line deposits and mints are in [§3.1](#31-deposit-and-mint-on-every-market). |
+| 2 | **A public log of the 12-of-12 rebuild** ([§3.2](#32-the-reproducible-build)). | contracts team | Their rebuild of `3af9388` on Linux x86_64 with the recorded cargo path gave 12 of 12; their CI shows only the two contracts without a machine path. A CI job that runs the rebuild with the recorded path would show all 12. |
+| 3 | **Contract lifetimes.** The Mainnet contract instances live until about 17 to 21 March 2027 ([§2.4](#24-how-long-the-contracts-live)). | contracts team, operations | Someone must extend them (and the code entries) before mid-March 2027; the contracts team tracks it in their evidence file, §10 item 6. |
+| 4 | **The contracts team's manifest caveats:** duplicate hashes in MOCKUSDY's `transactions[]` and `git_tree_dirty: true` ([§3.3](#33-the-deployment-manifests)). | contracts team | Stated so that no hash is cited under the wrong step. |
