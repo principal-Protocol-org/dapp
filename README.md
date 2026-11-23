@@ -275,22 +275,40 @@ The route answers:
 
 ### Scheduler
 
-One Vercel project serves both networks. Each environment calls the recorder through its own Upstash
-QStash account, because Vercel Cron runs only on Production deployments.
+One Vercel project serves both networks, and one Upstash QStash account (its QStash user in region
+`eu-central-1`) calls the cron routes of both, because Vercel Cron runs only on Production
+deployments.
 
-| Branch | Vercel environment | Domain | QStash | Network |
-|---|---|---|---|---|
-| `testnet` | Preview, branch `testnet` | `testnet.principalmarket.fi`, public through a Deployment Protection exception | `principalmarket-testnet` | Testnet |
-| `main` | Production | `principalmarket.fi` | `principalmarket-mainnet` | Mainnet, from the go-live on (see "Mainnet go-live") |
+| Branch | Vercel environment | Domain | Network |
+|---|---|---|---|
+| `testnet` | Preview, branch `testnet` | `testnet.principalmarket.fi`, public through a Deployment Protection exception | Testnet |
+| `main` | Production | `principalmarket.fi` | Mainnet, from the go-live on (see "Mainnet go-live") |
+
+The account holds eight schedules, all with retries 0:
+
+| Job | Testnet cron | Mainnet cron | Messages a day (Testnet + Mainnet) |
+|---|---|---|---|
+| `record` | `*/15 * * * *` | `*/15 * * * *` | 96 + 96 |
+| `index` | `*/5 * * * *` | `*/5 * * * *` | 288 + 288 |
+| `alerts` | `*/5 * * * *` | `*/5 * * * *` | 288 + 288 |
+| `oracle` | `*/30 * * * *` | `2-57/5 * * * *` | 48 + 288 |
+
+That is about 1,680 messages a day, and every delivery counts, a retry included. The free plan's
+daily cap (1,000 messages in Upstash's pricing) is below that, so keep the account on
+pay-as-you-go. The quota is shared: on 2026-11-22, on the free plan, it ran out at 17:05 UTC, and
+QStash created no message for any of the eight schedules until 00:00 UTC. The keeper, the indexer,
+the recorder and the alert check stopped on both networks, and no alert was sent. To call QStash
+less, lower Testnet's cadences, not Mainnet's.
 
 For each environment:
 
-- Create a QStash schedule with cron `*/15 * * * *` that calls the exact URL
-  `https://<domain>/api/cron/record`, on the final host (no redirect). POST is QStash's default; the
-  route accepts GET and POST with the same checks.
-- Set `QSTASH_CURRENT_SIGNING_KEY` and `QSTASH_NEXT_SIGNING_KEY` from that QStash account. A
-  signature is bound to the URL it was sent to; the route checks it against the URL the request
-  came in on, so no URL variable is needed in any environment. That URL is trusted only where
+- Create its schedules (above), each to the exact URL `https://<domain>/api/cron/<job>`, on the
+  final host (no redirect). POST is QStash's default; the routes accept GET and POST with the same
+  checks.
+- Set `QSTASH_CURRENT_SIGNING_KEY` and `QSTASH_NEXT_SIGNING_KEY` from the QStash account: the same
+  two values in both environments. A signature is bound to the URL it was sent to; the route checks
+  it against the URL the request came in on, so a message sent to one environment is refused by the
+  other, and no URL variable is needed in any environment. That URL is trusted only where
   Vercel sets the host, so QStash calls are accepted only on Vercel (`VERCEL=1`, set when the
   project exposes system environment variables, the default); elsewhere use `CRON_SECRET`.
 - Keep the environment's secrets (faucet key, `DATABASE_URL`, QStash keys) in that environment only:
@@ -908,8 +926,8 @@ deploys with that pull request on `testnet.principalmarket.fi`, while Mainnet is
 3. **Production variables** in Vercel, scoped to Production only:
    - `NEXT_PUBLIC_PRINCIPAL_NETWORK=mainnet`;
    - `DATABASE_URL` (pooled) and `DATABASE_URL_UNPOOLED` of the Mainnet branch;
-   - `QSTASH_CURRENT_SIGNING_KEY` and `QSTASH_NEXT_SIGNING_KEY` of the `principalmarket-mainnet`
-     QStash account;
+   - `QSTASH_CURRENT_SIGNING_KEY` and `QSTASH_NEXT_SIGNING_KEY` of the QStash account, the one
+     Testnet uses too (see "Scheduler");
    - `ALERT_WEBHOOK_URL`, the alert channel's incoming webhook;
    - `SERVER_RPC_URL`, a second, secret dRPC key for the server jobs only (never `NEXT_PUBLIC_`, never
      the public key of the manifest). The keeper and the indexer depend on it: without it they read
@@ -980,9 +998,9 @@ deploys with that pull request on `testnet.principalmarket.fi`, while Mainnet is
    MOCKGILTS, under 0.01 % and 0.41 % apart for MOCKCETES and MOCKXAUM). The keeper refreshes all
    five. A feed value that moved past an oracle's deviation cap is refused (a significant rejection,
    which opens `oracle_rejection`), so read the table's "Value against feed" column again at go-live.
-7. **The schedules**, on the `principalmarket-mainnet` QStash account, each to the exact
-   `https://principalmarket.fi/api/cron/<job>` URL: `record` (`*/15 * * * *`) and `index`
-   (`*/5 * * * *`). Then wait until the index has caught up: `GET /api/health` shows
+7. **The schedules**, on the QStash account Testnet uses too (on pay-as-you-go, see "Scheduler"),
+   each to the exact `https://principalmarket.fi/api/cron/<job>` URL: `record` (`*/15 * * * *`) and
+   `index` (`*/5 * * * *`). Then wait until the index has caught up: `GET /api/health` shows
    `indexer.lagSeconds` under 3,600 and `indexer.gaps` empty (`[]`). `indexer.status` `ok` alone
    does not show it: it reads `ok` right after step 2's import, whose cursors are hours or days old.
    A gap there means the capture's cursors had left the RPC's window (see "Event indexer"). Only
