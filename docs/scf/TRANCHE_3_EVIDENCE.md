@@ -149,7 +149,8 @@ in the reviewer guide, 1.4, does.
 
 | Rebuild (rustc 1.94.1) | Result |
 |---|---|
-| The contracts team, Linux x86_64, `3af9388`, cargo directory mapped to the recorded path (23 November 2026) | 12 of 12 equal the on-chain hashes; no public log yet |
+| Our public CI, [run 45291768952](https://github.com/principal-Protocol-org/dapp/actions/runs/45291768952) of [reproducible-build.yml](https://github.com/principal-Protocol-org/dapp/blob/main/.github/workflows/reproducible-build.yml), Linux x86_64, `3af9388`, cargo directory read from the deployed pool (masked in the log) and mapped (23 November 2026) | 12 of 12 equal the code fetched from Mainnet and the manifest's `wasmHashes` |
+| The contracts team, Linux x86_64, `3af9388`, cargo directory mapped to the recorded path (23 November 2026) | 12 of 12 equal the on-chain hashes |
 | The contracts team's CI, [run 45141813086](https://github.com/principal-Protocol-org/principal/actions/runs/45141813086), Linux x86_64, default mapping | Permissioning and RiskControl equal the on-chain hashes; the 10 others carry another path |
 | macOS arm64, Linux arm64 | 0 of 12: the host changes the bytes |
 
